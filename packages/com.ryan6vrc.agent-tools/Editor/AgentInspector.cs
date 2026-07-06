@@ -236,22 +236,28 @@ namespace Ryan6Vrc.AgentTools.Editor
             w.Prop("type", comp.GetType().FullName);
             // Components are only ever reached through the scene hierarchy, never inside an asset,
             // so their fields dump at asset depth 0.
-            WriteFields(w, new SerializedObject(comp), st, 0);
+            WriteFields(w, comp, st, 0);
             w.EndObject();
         }
 
-        /// <summary>Emit a <c>fields</c> object from a SerializedObject's top-level visible properties
-        /// (WriteProperty recurses within each). Shared by WriteComponent and the SO-asset expansion in
-        /// WriteObjectRef so an expanded asset reads exactly like a component. The try/catch degrades a
-        /// throw on a corrupt/partially-imported object to a localized <c>fieldsError</c> on this one
-        /// ref rather than unwinding and leaving the JSON unbalanced.</summary>
-        private static void WriteFields(JsonWriter w, SerializedObject so, WalkState st, int assetDepth)
+        /// <summary>Emit a <c>fields</c> object from <paramref name="target"/>'s top-level visible
+        /// properties (WriteProperty recurses within each). Shared by WriteComponent and the SO-asset
+        /// expansion in WriteObjectRef so an expanded asset reads exactly like a component. The whole
+        /// body — including <c>new SerializedObject(target)</c> — is guarded: a throw on a corrupt or
+        /// partially-imported object degrades to a localized <c>fieldsError</c> on this one ref, with
+        /// balanced braces, instead of unwinding to the enclosing (uncaught) walk and aborting the whole
+        /// snapshot. If the throw lands mid-loop (the <c>fields</c> object already open), the catch
+        /// closes it first so the JSON stays parseable either way.</summary>
+        private static void WriteFields(JsonWriter w, UnityEngine.Object target, WalkState st, int assetDepth)
         {
+            bool fieldsOpened = false;
             try
             {
+                var so = new SerializedObject(target);
                 var it = so.GetIterator();
                 w.PropName("fields");
                 w.BeginObject();
+                fieldsOpened = true;
                 bool enterChildren = true;
                 while (it.NextVisible(enterChildren))
                 {
@@ -264,6 +270,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             catch (Exception e)
             {
+                if (fieldsOpened) w.EndObject(); // close the open fields object before the scoped error
                 w.Prop("fieldsError", e.Message);
             }
         }
@@ -354,11 +361,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (o is Component c) w.Prop("scenePath", GetHierarchyPath(c.transform));
             if (o is GameObject g) w.Prop("scenePath", GetHierarchyPath(g.transform));
 
-            // Identity fold-in — unconditional, sub-asset-safe. One call resolves both handles;
-            // built-in resources return an all-zero GUID → emit neither (and never expand).
-            // fileId (localId) distinguishes sub-assets that share one file GUID (AddObjectToAsset),
-            // so it is load-bearing for both dedup and edit-addressability.
+            // Identity fold-in — sub-asset-safe. One call resolves both handles; built-in resources
+            // return an all-zero GUID → emit neither (and never expand). Gated on a non-empty assetPath
+            // too, so guid/fileId mark real ASSETS only — a saved scene-object ref (Component/GameObject
+            // into a saved scene) also resolves a GUID, but has no assetPath and must not get an
+            // asset-shaped handle. fileId (localId) distinguishes sub-assets that share one file GUID
+            // (AddObjectToAsset), so it is load-bearing for both dedup and edit-addressability.
+            // TryGet first so guid/localId are definitely assigned before the gates (assetPath before
+            // guid is just ordering; the compiler needs the out-call unconditional).
             bool haveId = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(o, out string guid, out long localId)
+                          && !string.IsNullOrEmpty(assetPath)
                           && !string.IsNullOrEmpty(guid) && guid != "00000000000000000000000000000000";
             if (haveId)
             {
@@ -369,8 +381,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Bounded, cycle-safe SO-asset expansion — opt-in via followAssets. Filter: saved
             // ScriptableObject asset only (structurally excludes meshes/textures/materials/clips/
             // controllers → no overlap with ControllerReport/ClipReport, and scene objects → no
-            // double-walk with the GameObject recursion).
-            if (haveId && st.FollowAssets && o is ScriptableObject && !string.IsNullOrEmpty(assetPath))
+            // double-walk with the GameObject recursion). haveId already implies a non-empty assetPath.
+            if (haveId && st.FollowAssets && o is ScriptableObject)
             {
                 string key = guid + ":" + localId;
                 if (st.Dumped.Contains(key))
@@ -396,7 +408,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     //    inside WriteFields (a later revisit sees the key and stubs).
                     st.Dumped.Add(key);
                     st.Budget--;
-                    WriteFields(w, new SerializedObject(o), st, assetDepth + 1);
+                    WriteFields(w, o, st, assetDepth + 1);
                 }
             }
             w.EndObject();

@@ -111,9 +111,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var json = SnapshotJson("AgentAssetTestHolder");
                     Assert(Count(json, "\"alreadyDumped\"") == 1, "cycle: exactly one alreadyDumped stub (got " + Count(json, "\"alreadyDumped\"") + ")");
                     Assert(Count(json, "BLABEL_ONCE") == 1, "cycle: B expanded exactly once (got " + Count(json, "BLABEL_ONCE") + ")");
-                    Assert(json.Contains("\"assetPath\""), "cycle: expanded refs carry assetPath");
-                    Assert(json.Contains("\"guid\""), "cycle: expanded refs carry guid");
-                    Assert(json.Contains("\"fileId\""), "cycle: expanded refs carry fileId");
+                    // Prove the path+GUID naming on the FOLLOWED (expanded) stubs specifically — window
+                    // each from its name to its own "fields" opener. Scoping to the expansion (not a bare
+                    // json.Contains) means these fail if expansion regresses, rather than passing on the
+                    // unconditional fold-in alone. A's first occurrence is the expanded root (the revisit
+                    // stub, carrying alreadyDumped instead of fields, appears later and deeper).
+                    string aWin = Window(json, "\"name\": \"A\"", "\"fields\"");
+                    Assert(aWin.Contains("\"assetPath\"") && aWin.Contains("\"guid\"") && aWin.Contains("\"fileId\""),
+                        "cycle: expanded A is named by assetPath+guid+fileId");
+                    string bWin = Window(json, "\"name\": \"B\"", "\"fields\"");
+                    Assert(bWin.Contains("\"assetPath\"") && bWin.Contains("\"guid\"") && bWin.Contains("\"fileId\""),
+                        "cycle: expanded B is named by assetPath+guid+fileId");
                 }
 
                 // Case 2 — asset-hop depth cap. Linear chain of MaxAssetDepth+2 nodes via children[0];
@@ -128,14 +136,28 @@ namespace Ryan6Vrc.AgentTools.Editor
                     Assert(json.Contains("\"assetDepthCapped\""), "depth: chain cut with assetDepthCapped at MaxAssetDepth");
                 }
 
-                // Case 3 — walk-wide budget signal. One root fanning out to MaxExpandedAssets+1 distinct
-                // leaves: both the inline budgetSkipped marker and the top-level assetsTruncated count.
+                // Case 3 — walk-wide budget signal. Distinct expandable assets exceed MaxExpandedAssets,
+                // but the graph is a shallow TREE (root -> groups -> leaves) so no single children array
+                // approaches WriteArray's element cap. This isolates the signal to BUDGET exhaustion:
+                // a flat array of MaxExpandedAssets+1 leaves would also hit the array cap, so it couldn't
+                // distinguish which bound fired (and would break silently if the two constants ever
+                // diverged). leavesPerGroup is kept well below the array cap so no array truncates.
                 {
-                    int n = AgentInspector.MaxExpandedAssets + 1;
+                    int leafCount = AgentInspector.MaxExpandedAssets + 1; // more leaves than the budget alone holds
+                    const int leavesPerGroup = 8;                          // « WriteArray's element cap; no array truncates
+                    int groupCount = (leafCount + leavesPerGroup - 1) / leavesPerGroup;
                     var root = MakeNode("fanRoot", "FANROOT");
-                    var leaves = new AgentTestNode[n];
-                    for (int i = 0; i < n; i++) leaves[i] = MakeNode("leaf" + i, "LEAF" + i);
-                    root.children = leaves;
+                    var groups = new AgentTestNode[groupCount];
+                    int made = 0;
+                    for (int g = 0; g < groupCount; g++)
+                    {
+                        groups[g] = MakeNode("group" + g, "GROUP" + g);
+                        int take = Math.Min(leavesPerGroup, leafCount - made);
+                        var leaves = new AgentTestNode[take];
+                        for (int i = 0; i < take; i++) { leaves[i] = MakeNode("leaf" + made, "LEAF" + made); made++; }
+                        groups[g].children = leaves;
+                    }
+                    root.children = groups;
                     holder.root = root;
                     var json = SnapshotJson("AgentAssetTestHolder");
                     Assert(json.Contains("\"budgetSkipped\""), "budget: inline budgetSkipped marker present");
@@ -183,6 +205,17 @@ namespace Ryan6Vrc.AgentTools.Editor
             int c = 0, i = 0;
             while ((i = haystack.IndexOf(needle, i, StringComparison.Ordinal)) >= 0) { c++; i += needle.Length; }
             return c;
+        }
+
+        // Substring from the first occurrence of `start` up to (and including) the first `end` after it.
+        // Used to scope an assertion to one ref stub's own fields — e.g. name -> its "fields" opener.
+        private static string Window(string s, string start, string end)
+        {
+            int a = s.IndexOf(start, StringComparison.Ordinal);
+            if (a < 0) return "";
+            int b = s.IndexOf(end, a, StringComparison.Ordinal);
+            if (b < 0) return "";
+            return s.Substring(a, b - a + end.Length);
         }
 
         private static void Assert(bool cond, string msg)
