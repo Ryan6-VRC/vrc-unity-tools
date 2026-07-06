@@ -472,7 +472,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // Full scene-root-absolute hierarchy path (copied verbatim from AgentInspector.GetHierarchyPath).
-        private static string GetHierarchyPath(Transform t)
+        // internal (not private): PlayGateCore reuses this one path grammar rather than authoring a second.
+        internal static string GetHierarchyPath(Transform t)
         {
             var sb = new StringBuilder(t.name);
             while (t.parent != null) { t = t.parent; sb.Insert(0, t.name + "/"); }
