@@ -26,8 +26,22 @@ namespace Ryan6Vrc.AgentTools.Editor
     public static class AgentInspector
     {
         private const string SnapshotDir = RunLogFormat.SnapshotDir;
-        private const int MaxDepth = 6;        // recursion guard for nested serialized data
+        private const int MaxDepth = 6;        // recursion guard for nested serialized data (property nesting + child-GameObject recursion)
         private const int MaxArrayElements = 64; // truncation guard for large arrays
+
+        // Asset-expansion bounds — a THIRD axis alongside MaxDepth. internal so AgentSelfTest sizes its
+        // fixtures from these constants rather than copying magic numbers that would drift.
+        internal const int MaxAssetDepth = 8;      // asset-hop depth: how many asset boundaries the walk has crossed
+        internal const int MaxExpandedAssets = 64; // walk-wide expansion budget (one shared counter per Snapshot call)
+
+        /// <summary>Mutable state carried by reference through the private walk. One per entry-point call.</summary>
+        private sealed class WalkState
+        {
+            public bool FollowAssets;
+            public readonly HashSet<string> Dumped = new HashSet<string>(); // "guid:localId" keys already inlined
+            public int Budget;           // remaining expansions; starts at MaxExpandedAssets
+            public int SkippedForBudget; // ref *sites* left unexpanded due to Budget==0 (walk-wide, signaled at top level)
+        }
 
         // ----- Selection-driven entry points (read the Editor Selection; SnapshotSelection also used by AgentSelfTest) -----
 
@@ -48,8 +62,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             w.Prop("activeScene", SceneManager.GetActiveScene().name);
             w.PropName("objects");
             w.BeginArray();
+            var st = new WalkState { FollowAssets = false, Budget = MaxExpandedAssets };
             foreach (var go in objs)
-                WriteGameObject(w, go, includeChildren: false);
+                WriteGameObject(w, go, includeChildren: false, st);
             w.EndArray();
             w.EndObject();
 
@@ -73,8 +88,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             w.Prop("timestampUtc", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
             w.PropName("objects");
             w.BeginArray();
+            var st = new WalkState { FollowAssets = false, Budget = MaxExpandedAssets };
             foreach (var go in objs)
-                WriteGameObject(w, go, includeChildren: true);
+                WriteGameObject(w, go, includeChildren: true, st);
             w.EndArray();
             w.EndObject();
 
@@ -94,8 +110,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             w.Prop("scenePath", scene.path);
             w.PropName("roots");
             w.BeginArray();
+            var st = new WalkState { FollowAssets = false, Budget = MaxExpandedAssets };
             foreach (var go in scene.GetRootGameObjects())
-                WriteGameObject(w, go, includeChildren: true);
+                WriteGameObject(w, go, includeChildren: true, st);
             w.EndArray();
             w.EndObject();
 
@@ -109,8 +126,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// (e.g. "Avatar/Armature/Hips"). Duplicate-named siblings resolve to the first match,
         /// like Unity's own path lookups. Returns a one-line summary ending with the snapshot
         /// path in-band (<c>… => OK | log=&lt;path&gt;</c>).
+        ///
+        /// <paramref name="followAssets"/> is the agent door: when on, any objectReference resolving
+        /// to a saved ScriptableObject asset gets a generic <c>SerializedObject</c> dump inlined as a
+        /// <c>fields</c> object under the ref stub, recursively — bounded (asset-hop depth + walk-wide
+        /// budget) and cut-signaled, each followed asset named by path + GUID. Off (default) leaves the
+        /// walk structure unchanged. The <c>guid</c>/<c>fileId</c> identity fold-in on asset refs is
+        /// unconditional either way.
         /// </summary>
-        public static string Snapshot(string hierarchyPath, bool includeChildren = true)
+        public static string Snapshot(string hierarchyPath, bool includeChildren = true, bool followAssets = false)
         {
             var go = FindByHierarchyPath(hierarchyPath);
             if (go == null)
@@ -120,6 +144,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return err;
             }
 
+            var st = new WalkState { FollowAssets = followAssets, Budget = MaxExpandedAssets };
             var w = new JsonWriter();
             w.BeginObject();
             w.Prop("kind", includeChildren ? "selection-snapshot-deep" : "selection-snapshot");
@@ -128,8 +153,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             w.Prop("activeScene", SceneManager.GetActiveScene().name);
             w.PropName("objects");
             w.BeginArray();
-            WriteGameObject(w, go, includeChildren);
+            WriteGameObject(w, go, includeChildren, st);
             w.EndArray();
+            // Walk-wide budget cut — cannot be signaled inline, so surface the site count here.
+            if (st.SkippedForBudget > 0) w.Prop("assetsTruncated", st.SkippedForBudget);
             w.EndObject();
 
             string prefix = includeChildren ? "selectiondeep_" : "selection_";
@@ -161,7 +188,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Serialization -----------------------------------------------------------------
 
-        private static void WriteGameObject(JsonWriter w, GameObject go, bool includeChildren, int depth = 0)
+        private static void WriteGameObject(JsonWriter w, GameObject go, bool includeChildren, WalkState st, int depth = 0)
         {
             w.BeginObject();
             w.Prop("name", go.name);
@@ -177,7 +204,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             w.PropName("components");
             w.BeginArray();
             foreach (var comp in go.GetComponents<Component>())
-                WriteComponent(w, comp);
+                WriteComponent(w, comp, st);
             w.EndArray();
 
             if (includeChildren && depth < MaxDepth)
@@ -185,7 +212,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 w.PropName("children");
                 w.BeginArray();
                 foreach (Transform child in go.transform)
-                    WriteGameObject(w, child.gameObject, true, depth + 1);
+                    WriteGameObject(w, child.gameObject, true, st, depth + 1);
                 w.EndArray();
             }
             else if (includeChildren && go.transform.childCount > 0)
@@ -196,7 +223,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             w.EndObject();
         }
 
-        private static void WriteComponent(JsonWriter w, Component comp)
+        private static void WriteComponent(JsonWriter w, Component comp, WalkState st)
         {
             w.BeginObject();
             if (comp == null)
@@ -207,9 +234,21 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             w.Prop("type", comp.GetType().FullName);
+            // Components are only ever reached through the scene hierarchy, never inside an asset,
+            // so their fields dump at asset depth 0.
+            WriteFields(w, new SerializedObject(comp), st, 0);
+            w.EndObject();
+        }
+
+        /// <summary>Emit a <c>fields</c> object from a SerializedObject's top-level visible properties
+        /// (WriteProperty recurses within each). Shared by WriteComponent and the SO-asset expansion in
+        /// WriteObjectRef so an expanded asset reads exactly like a component. The try/catch degrades a
+        /// throw on a corrupt/partially-imported object to a localized <c>fieldsError</c> on this one
+        /// ref rather than unwinding and leaving the JSON unbalanced.</summary>
+        private static void WriteFields(JsonWriter w, SerializedObject so, WalkState st, int assetDepth)
+        {
             try
             {
-                var so = new SerializedObject(comp);
                 var it = so.GetIterator();
                 w.PropName("fields");
                 w.BeginObject();
@@ -219,7 +258,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     enterChildren = false; // top-level only; WriteProperty recurses itself
                     if (it.name == "m_Script") continue;
                     w.PropName(it.name);
-                    WriteProperty(w, it.Copy(), 0);
+                    WriteProperty(w, it.Copy(), 0, st, assetDepth);
                 }
                 w.EndObject();
             }
@@ -227,10 +266,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 w.Prop("fieldsError", e.Message);
             }
-            w.EndObject();
         }
 
-        private static void WriteProperty(JsonWriter w, SerializedProperty p, int depth)
+        private static void WriteProperty(JsonWriter w, SerializedProperty p, int depth, WalkState st, int assetDepth)
         {
             if (depth > MaxDepth) { w.Value("<max-depth>"); return; }
 
@@ -250,19 +288,19 @@ namespace Ryan6Vrc.AgentTools.Editor
                 case SerializedPropertyType.Quaternion:   w.Value(p.quaternionValue.eulerAngles.ToString("F2") + " (euler)"); break;
                 case SerializedPropertyType.Color:        w.Value("#" + ColorUtility.ToHtmlStringRGBA(p.colorValue)); break;
                 case SerializedPropertyType.LayerMask:    w.Value(p.intValue); break;
-                case SerializedPropertyType.ObjectReference: WriteObjectRef(w, p.objectReferenceValue); break;
-                case SerializedPropertyType.ExposedReference: WriteObjectRef(w, p.exposedReferenceValue); break;
+                case SerializedPropertyType.ObjectReference: WriteObjectRef(w, p.objectReferenceValue, st, assetDepth); break;
+                case SerializedPropertyType.ExposedReference: WriteObjectRef(w, p.exposedReferenceValue, st, assetDepth); break;
                 case SerializedPropertyType.AnimationCurve:
                     w.Value(p.animationCurveValue != null ? p.animationCurveValue.length + " keys" : "null"); break;
                 case SerializedPropertyType.Bounds:       w.Value(p.boundsValue.ToString()); break;
                 default:
                     if (p.isArray && p.propertyType != SerializedPropertyType.String)
                     {
-                        WriteArray(w, p, depth);
+                        WriteArray(w, p, depth, st, assetDepth);
                     }
                     else if (p.hasVisibleChildren)
                     {
-                        WriteStruct(w, p, depth);
+                        WriteStruct(w, p, depth, st, assetDepth);
                     }
                     else
                     {
@@ -272,7 +310,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        private static void WriteArray(JsonWriter w, SerializedProperty p, int depth)
+        private static void WriteArray(JsonWriter w, SerializedProperty p, int depth, WalkState st, int assetDepth)
         {
             w.BeginObject();
             w.Prop("arraySize", p.arraySize);
@@ -282,7 +320,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             for (int i = 0; i < n; i++)
             {
                 var el = p.GetArrayElementAtIndex(i);
-                WriteProperty(w, el, depth + 1);
+                WriteProperty(w, el, depth + 1, st, assetDepth);
             }
             w.EndArray();
             if (p.arraySize > MaxArrayElements)
@@ -290,7 +328,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             w.EndObject();
         }
 
-        private static void WriteStruct(JsonWriter w, SerializedProperty p, int depth)
+        private static void WriteStruct(JsonWriter w, SerializedProperty p, int depth, WalkState st, int assetDepth)
         {
             w.BeginObject();
             var end = p.GetEndProperty();
@@ -300,12 +338,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 enter = false;
                 w.PropName(child.name);
-                WriteProperty(w, child.Copy(), depth + 1);
+                WriteProperty(w, child.Copy(), depth + 1, st, assetDepth);
             }
             w.EndObject();
         }
 
-        private static void WriteObjectRef(JsonWriter w, UnityEngine.Object o)
+        private static void WriteObjectRef(JsonWriter w, UnityEngine.Object o, WalkState st, int assetDepth)
         {
             if (o == null) { w.Value(null); return; }
             w.BeginObject();
@@ -315,6 +353,52 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (!string.IsNullOrEmpty(assetPath)) w.Prop("assetPath", assetPath);
             if (o is Component c) w.Prop("scenePath", GetHierarchyPath(c.transform));
             if (o is GameObject g) w.Prop("scenePath", GetHierarchyPath(g.transform));
+
+            // Identity fold-in — unconditional, sub-asset-safe. One call resolves both handles;
+            // built-in resources return an all-zero GUID → emit neither (and never expand).
+            // fileId (localId) distinguishes sub-assets that share one file GUID (AddObjectToAsset),
+            // so it is load-bearing for both dedup and edit-addressability.
+            bool haveId = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(o, out string guid, out long localId)
+                          && !string.IsNullOrEmpty(guid) && guid != "00000000000000000000000000000000";
+            if (haveId)
+            {
+                w.Prop("guid", guid);
+                w.Prop("fileId", localId);
+            }
+
+            // Bounded, cycle-safe SO-asset expansion — opt-in via followAssets. Filter: saved
+            // ScriptableObject asset only (structurally excludes meshes/textures/materials/clips/
+            // controllers → no overlap with ControllerReport/ClipReport, and scene objects → no
+            // double-walk with the GameObject recursion).
+            if (haveId && st.FollowAssets && o is ScriptableObject && !string.IsNullOrEmpty(assetPath))
+            {
+                string key = guid + ":" + localId;
+                if (st.Dumped.Contains(key))
+                {
+                    // 1. Already dumped — highest priority; guarantees cycle/DAG termination.
+                    w.Prop("alreadyDumped", true);
+                }
+                else if (assetDepth >= MaxAssetDepth)
+                {
+                    // 2. Asset-hop cap. Does not consume budget nor enter Dumped — the asset may
+                    //    still expand on a shallower branch.
+                    w.Prop("assetDepthCapped", true);
+                }
+                else if (st.Budget == 0)
+                {
+                    // 3. Budget exhausted. Signal at the cut point (walk-wide count surfaces at top level).
+                    st.SkippedForBudget++;
+                    w.Prop("budgetSkipped", true);
+                }
+                else
+                {
+                    // 4. Expand. Key enters Dumped BEFORE the dump, so cycle-safety survives a throw
+                    //    inside WriteFields (a later revisit sees the key and stubs).
+                    st.Dumped.Add(key);
+                    st.Budget--;
+                    WriteFields(w, new SerializedObject(o), st, assetDepth + 1);
+                }
+            }
             w.EndObject();
         }
 
