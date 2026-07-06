@@ -1,0 +1,20 @@
+{
+    "name": "Ryan6VRC.AvatarTools.Editor",
+    "rootNamespace": "Ryan6Vrc.AvatarTools.Editor",
+    "references": [
+        "Ryan6VRC.AgentTools.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "VRC_SDK_VRCSDK3"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

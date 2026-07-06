@@ -1,0 +1,10 @@
+# This repo holds UPM packages only (no Unity project). Keep .meta files tracked —
+# Unity generates them on first import and they carry stable asset GUIDs.
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+.vs/
+.idea/
+.vscode/

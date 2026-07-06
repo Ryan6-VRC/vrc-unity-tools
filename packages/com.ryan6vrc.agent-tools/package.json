@@ -1,0 +1,10 @@
+{
+  "name": "com.ryan6vrc.agent-tools",
+  "version": "0.1.0",
+  "displayName": "Ryan6VRC Agent Tools",
+  "description": "Editor tooling for AI-assisted (Claude Code) VRChat avatar workflows: serialize selected GameObjects / scene hierarchy to JSON snapshots, an observe-modify-verify self-test, and the shared agent-tool conventions ([AgentTool] marker, RunLogFormat).",
+  "unity": "2022.3",
+  "author": { "name": "Ryan6-VRC" },
+  "license": "MIT",
+  "keywords": ["vrchat", "avatar", "editor", "agent", "automation", "inspection"]
+}
