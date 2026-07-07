@@ -30,7 +30,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// the trailer (ends <c>=&gt; RESULT</c>). On write failure returns a bare-FAIL summary with NO
         /// <c>| log=</c> trailer — the schema never points at an artifact that is not on disk. Does NOT
         /// log: the 5-param signature carries no PASS/FAIL flag, so each caller logs the returned summary
-        /// at the right severity (as AgentInspector/ImportVerify do).
+        /// at the right severity (as ControllerReport/ClipReport/AnimatorLint/AvatarLint/GimmickReport do).
         /// </summary>
         public static string WriteRunLog(string dir, string label, string summary, string body, string ext)
         {
