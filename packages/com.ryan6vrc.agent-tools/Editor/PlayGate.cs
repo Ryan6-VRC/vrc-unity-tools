@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
@@ -60,9 +61,23 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             catch (Exception e)
             {
-                // Fail closed: never let a throw fall through into a multi-minute build on an unverified scene.
+                // Fail closed: never let a throw fall through into a multi-minute build on an unverified
+                // scene. Route through EmitConsole so the exception FAIL names its fix + the override path
+                // (the error is the interface), same as an ordinary offender block.
                 EditorApplication.isPlaying = false;
-                Debug.LogError("[PlayGate] Play gate threw while evaluating — blocking to be safe => FAIL\n" + e);
+                EmitConsole(new PlayGateCore.PlayGateResult
+                {
+                    Pass = false,
+                    Offenders = new List<PlayGateCore.Offender>
+                    {
+                        new PlayGateCore.Offender
+                        {
+                            Tag = "PlayGate",
+                            Message = "play gate threw while evaluating — blocking to be safe:\n" + e,
+                            Fix = "fix the exception above; or override this one entry via the menu below",
+                        },
+                    },
+                });
             }
         }
 

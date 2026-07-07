@@ -281,9 +281,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Resolve each axis member as a property OR field (robust to an SDK field→property change);
             // the three travel as a trio, so a trio that resolves counts as a present group (whatever its
             // truth values) — that is what distinguishes "group absent" from "read miss" for `miss`.
-            bool? x = AxisValue(c, t, prefix + "X");
-            bool? y = AxisValue(c, t, prefix + "Y");
-            bool? z = AxisValue(c, t, prefix + "Z");
+            bool? x = ReadBoolMember(c, t, prefix + "X");
+            bool? y = ReadBoolMember(c, t, prefix + "Y");
+            bool? z = ReadBoolMember(c, t, prefix + "Z");
             if (x == null || y == null || z == null) return null; // this type has no such axis group
             groupsResolved++;
             if (!x.Value && !y.Value && !z.Value) return null; // present but fully off — omit
@@ -291,8 +291,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             return label + (x.Value ? "X" : "") + (y.Value ? "Y" : "") + (z.Value ? "Z" : "");
         }
 
-        // A bool Affects* member read as property-or-field; null when neither resolves (group not on type).
-        private static bool? AxisValue(object c, Type t, string name)
+        // A bool member read as property-or-field; null when neither resolves as a bool. internal (shared):
+        // PlayGateCore reads the emulator flags through this same SDK field→property-robust reflection
+        // rather than duplicating it — the reuse pattern GetHierarchyPath already set.
+        internal static bool? ReadBoolMember(object c, Type t, string name)
         {
             var p = t.GetProperty(name);
             if (p != null && p.PropertyType == typeof(bool)) return (bool)p.GetValue(c);
