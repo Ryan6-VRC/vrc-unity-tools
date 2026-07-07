@@ -187,6 +187,22 @@ public class AvatarLintTests
         return c;
     }
 
+    // Set the FullController "Path Rewrite Rules" (content.rewriteBindings) on an existing VRCF component.
+    private void SetVrcfRewriteBindings(Component c, params (string from, string to, bool delete)[] rules)
+    {
+        var so = new SerializedObject(c);
+        var arr = so.FindProperty("content").FindPropertyRelative("rewriteBindings");
+        arr.arraySize = rules.Length;
+        for (int i = 0; i < rules.Length; i++)
+        {
+            var el = arr.GetArrayElementAtIndex(i);
+            el.FindPropertyRelative("from").stringValue = rules[i].from;
+            el.FindPropertyRelative("to").stringValue = rules[i].to;
+            el.FindPropertyRelative("delete").boolValue = rules[i].delete;
+        }
+        so.ApplyModifiedPropertiesWithoutUndo();
+    }
+
     // A FullController with an empty (present) controllers array — the B1 not-drift boundary.
     private Component AddVrcfFullControllerNoControllers(GameObject go, GameObject rootOverride)
     {
@@ -272,6 +288,46 @@ public class AvatarLintTests
         StringAssert.Contains("clipBinding=1", r, "only the renamed base fails; the avatar-level obj resolves via upward strip: " + r);
         StringAssert.Contains("path=`Body_base`", log, log);
         Assert.IsFalse(log.Contains("path=`AvatarLevelThing`"), "D-A: an avatar-level object resolves upward and must not surface: " + log);
+    }
+
+    // ── VRCF rewriteBindings (D-A step 1) — the RemyDoll downward-relocation case ──────────────────────
+
+    // A prop's clips address a bone by a base-rooted path (Armature/Bone) but the bone is mounted DOWNWARD
+    // (Prop/Nested/Armature/Bone). The upward strip alone can't reach it; the FullController's own
+    // rewriteBindings rule (Armature → Nested/Armature) must be applied first, exactly as the build does.
+    [Test]
+    public void Vrcf_rewriteBindings_resolvesDownwardRelocation()
+    {
+        var a = NewAvatar("LintVrcfRw");
+        var prop = NewChild(a, "Prop");                        // VRCF mount
+        var armature = NewChild(NewChild(prop, "Nested"), "Armature");
+        NewChild(armature, "Bone");                            // real location: Prop/Nested/Armature/Bone
+
+        var clip = NewClip(TmpDir, "VrcfRwClip", "Armature/Bone", "Ghost/Missing");
+        var c = AddVrcfFullController(prop, NewController("VrcfRwCtrl", clip), prop);
+        SetVrcfRewriteBindings(c, ("Armature", "Nested/Armature", false));
+
+        var r = Inspect("LintVrcfRw");
+        var log = ReadLog(r);
+
+        Assert.IsFalse(log.Contains("path=`Armature/Bone`"),
+            "rewriteBindings must relocate Armature/Bone → Nested/Armature/Bone and resolve it: " + log);
+        StringAssert.Contains("clipBinding=1", r, "only the genuinely-missing Ghost/Missing survives: " + r);
+        StringAssert.Contains("path=`Ghost/Missing`", log, log);
+    }
+
+    // A matched delete rule drops the binding at build — it must not surface as a break.
+    [Test]
+    public void Vrcf_rewriteBindings_deleteRule_dropsBinding()
+    {
+        var a = NewAvatar("LintVrcfDel");
+        var prop = NewChild(a, "Prop");
+        var clip = NewClip(TmpDir, "VrcfDelClip", "DeleteMe/Gone");
+        var c = AddVrcfFullController(prop, NewController("VrcfDelCtrl", clip), prop);
+        SetVrcfRewriteBindings(c, ("DeleteMe", "", true)); // delete: the binding vanishes at build
+
+        var r = Inspect("LintVrcfDel");
+        StringAssert.Contains("clipBinding=0 => PASS", r, "a delete-ruled binding is not a break: " + r);
     }
 
     // ── clipAssetPath routing (R-E) ───────────────────────────────────────────────────────────────────

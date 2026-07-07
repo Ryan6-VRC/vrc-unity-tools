@@ -51,6 +51,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             "expecting a post-merge location) are not distinguished, and an unresolved binding there may be " +
             "intentional. Build-time object *deletions* (as opposed to moves) are also not visible here.";
 
+        // Two in-scene-unresolved patterns AvatarLint surfaces honestly but does NOT auto-fix — commonly
+        // intentional, left to model discretion (spec §Known limitations). Stated on every run.
+        private const string DiscretionLimitsLine =
+            "Known limitations, left to model discretion (not auto-resolved): (1) an Armature-Link-relocated bone " +
+            "— the mergeable's own bone animated at a base-armature path it only occupies post-merge, so it fails " +
+            "in-scene yet the build relocates it; (2) a binding typed for a Unity constraint (e.g. RotationConstraint) " +
+            "whose scene object carries the VRChat equivalent (VRCRotationConstraint) or vice-versa — it works at " +
+            "runtime though it will not resolve here.";
+
         // ── Injectable seams (internal) ───────────────────────────────────────────────────────────────
         // Real MA/VRCF types always reflect and MA's Get(Component) is always reachable in this Editor, and an
         // absent serialized FIELD (the drift the fail-loud rail guards) can't be constructed with the live
@@ -94,12 +103,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             // globally, so a controller shared across frames is resolved per frame.
             var pairs = new List<Pair>();
             var seen = new HashSet<(int ctrl, int root, int kind)>();
-            void AddPair(AnimatorController c, GameObject frameRoot, List<GameObject> roots, FrameKind kind, string label)
+            void AddPair(AnimatorController c, GameObject frameRoot, List<GameObject> roots, FrameKind kind, string label, Func<string, string> rewrite)
             {
                 if (c == null) return;
                 int rootId = frameRoot != null ? frameRoot.GetInstanceID() : 0;
                 if (!seen.Add((c.GetInstanceID(), rootId, (int)kind))) return;
-                pairs.Add(new Pair { Controller = c, Roots = roots, Kind = kind, Label = label });
+                pairs.Add(new Pair { Controller = c, Roots = roots, Kind = kind, Label = label, PathRewrite = rewrite });
             }
 
             // (a) Descriptor playable-layer controllers — avatar-root frame.
@@ -118,7 +127,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     string uncertain = MaFrameUncertaintyNote(c, avatarGO, maFrame);
                     var roots = new List<GameObject> { maFrame.Root ?? avatarGO };
                     AddPair(maCtrl, maFrame.Root ?? avatarGO,
-                        roots, FrameKind.MA, "MA MergeAnimator @ " + PathOf(c.gameObject));
+                        roots, FrameKind.MA, "MA MergeAnimator @ " + PathOf(c.gameObject), null); // MA has no path-rewrite rules
                     if (uncertain != null) rep.FrameUncertain.Add(uncertain);
                 }
 
@@ -128,8 +137,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                     if (anchor != null) SurfaceUnreflected(c, anchor, rep);
                     var mount = vrcfFrame.Root ?? c.gameObject;
                     var roots = AncestorChain(mount, avatarGO); // D-A upward strip: resolves at ANY level ⇒ not a break
+                    // vrcfFrame.PathRewrite is THIS component's rewriteBindings only — applied before the
+                    // ancestor walk, mirroring the build (fixes downward relocations the upward strip can't reach).
                     foreach (var vc in vrcfCtrls)
-                        AddPair(vc, mount, roots, FrameKind.VRCF, "VRCFury FullController @ " + PathOf(c.gameObject));
+                        AddPair(vc, mount, roots, FrameKind.VRCF, "VRCFury FullController @ " + PathOf(c.gameObject), vrcfFrame.PathRewrite);
                 }
             }
 
@@ -141,17 +152,24 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             // ---- Clip-binding classification (reuse AnimatorLint's walk, demotion off) -----------------
+            // Dedup per unique (controller, clip, binding path, binding type): one authored curve expands to
+            // several component curves (a Transform's position x/y/z, a rotation's quaternion) that share a
+            // path+type, and a controller shared across frames is walked once per frame — all the same break.
+            var clipSeen = new HashSet<(int ctrl, int clip, string path, Type type)>();
             foreach (var p in pairs)
             {
-                foreach (var (clip, b) in CollectUnresolvedBindingsCalled(p.Controller, p.Roots))
+                foreach (var (clip, b) in CollectUnresolvedBindingsCalled(p.Controller, p.Roots, p.PathRewrite))
                 {
+                    string clipAssetPath = AssetDatabase.GetAssetPath(clip);
+                    if (IsSdkProxyClip(clipAssetPath)) continue; // VRChat SDK humanoid proxy — swapped at runtime, never a scene ref
+                    if (!clipSeen.Add((p.Controller.GetInstanceID(), clip.GetInstanceID(), b.path, b.type))) continue;
                     rep.ClipBindings.Add(new Offender
                     {
                         Kind = "clip-binding",
                         Animator = p.Controller.name,
                         Clip = clip.name,
                         Path = b.path,
-                        ClipAssetPath = AssetDatabase.GetAssetPath(clip),
+                        ClipAssetPath = clipAssetPath,
                         Host = p.Label,
                     });
                 }
@@ -162,10 +180,10 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Surface enumeration helpers ───────────────────────────────────────────────────────────────
 
-        private struct Pair { public AnimatorController Controller; public List<GameObject> Roots; public FrameKind Kind; public string Label; }
+        private struct Pair { public AnimatorController Controller; public List<GameObject> Roots; public FrameKind Kind; public string Label; public Func<string, string> PathRewrite; }
 
         private static void CollectDescriptorLayers(VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor,
-            GameObject avatarGO, Action<AnimatorController, GameObject, List<GameObject>, FrameKind, string> add)
+            GameObject avatarGO, Action<AnimatorController, GameObject, List<GameObject>, FrameKind, string, Func<string, string>> add)
         {
             void Walk(VRC.SDK3.Avatars.Components.VRCAvatarDescriptor.CustomAnimLayer[] layers, string which)
             {
@@ -181,7 +199,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var c = layer.animatorController as AnimatorController;
                     if (c == null) continue;
                     add(c, avatarGO, new List<GameObject> { avatarGO }, FrameKind.DescriptorLayer,
-                        "descriptor " + which + " layer " + layer.type);
+                        "descriptor " + which + " layer " + layer.type, null); // avatar-root frame; no path-rewrite rules
                 }
             }
             Walk(descriptor.baseAnimationLayers, "base");
@@ -341,8 +359,16 @@ namespace Ryan6Vrc.AgentTools.Editor
         // off" behaviour: under D1 every unresolved-in-scene binding is a real, non-advisory clip-binding
         // offender (mapped to CLASSIFY, never FAIL).
         private static IEnumerable<(AnimationClip clip, EditorCurveBinding binding)> CollectUnresolvedBindingsCalled(
-            AnimatorController controller, List<GameObject> roots)
-            => AnimatorLint.CollectUnresolvedBindings(controller, roots);
+            AnimatorController controller, List<GameObject> roots, Func<string, string> pathRewrite)
+            => AnimatorLint.CollectUnresolvedBindings(controller, roots, pathRewrite);
+
+        // VRChat SDK proxy animations (…/ProxyAnim/proxy_*.anim) are humanoid-muscle placeholders the SDK
+        // swaps at runtime; their bone-path bindings never resolve to a scene object and are never a real
+        // break. Skip by the SDK's proxy-folder convention — the asset-granularity sibling of the
+        // humanoid-curve skip in the shared binding walk.
+        private static bool IsSdkProxyClip(string clipAssetPath)
+            => !string.IsNullOrEmpty(clipAssetPath)
+               && clipAssetPath.IndexOf("/ProxyAnim/", StringComparison.OrdinalIgnoreCase) >= 0;
 
         // ── Output ────────────────────────────────────────────────────────────────────────────────────
 
@@ -382,6 +408,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             sb.Append("\n## Notes\n\n");
             sb.Append("- ").Append(ExcludedEdgeLine).Append('\n');
+            sb.Append("- ").Append(DiscretionLimitsLine).Append('\n');
             foreach (var n in rep.FrameUncertain) sb.Append("- ").Append(n).Append('\n');
             foreach (var n in rep.Notes) sb.Append("- ").Append(n).Append('\n');
 

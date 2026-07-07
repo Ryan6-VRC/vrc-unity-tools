@@ -25,8 +25,11 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// Under <c>basis=auto</c> the tool reads the merge component at a scene <c>mergeSite</c> (MA
     /// MergeAnimator / VRCFury FullController) to detect that root the way the build will, and — because
     /// those frameworks rewrite binding paths at build — demotes the broken-binding rule to advisory so
-    /// an authored-scene resolve can't false-FAIL. Under <c>basis=explicit</c> the caller names the
-    /// roots and broken-binding stays error-tier.
+    /// an authored-scene resolve can't false-FAIL. It ALSO applies a VRCFury FullController's own
+    /// <c>rewriteBindings</c> rules before resolving, so the (demoted) broken-binding COUNT is truthful:
+    /// without it, a path a declared rule relocates reads as unresolvable and inflates the count with
+    /// false sample offenders — a lying diagnostic even though the verdict stays PASS. Under
+    /// <c>basis=explicit</c> the caller names the roots, no rewrite applies, and broken-binding stays error-tier.
     ///
     /// A typo must never read as pervasive rot: every unresolved input is a bare-FAIL naming the miss,
     /// with no artifact trailer. INSPECTION ONLY.
@@ -68,6 +71,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             bool buildRewrite;                        // demotes broken-binding to advisory when true
             string detection;                         // the "basis=…" line rendered atop the body
             var notes = new List<string>();           // non-offender caveats (e.g. avatar root not found)
+            Func<string, string> pathRewrite = null;  // VRCF FullController rewriteBindings under basis=auto (else identity)
 
             if (basis == "explicit")
             {
@@ -98,6 +102,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (d.Root != null) roots.Add(d.Root);
                 buildRewrite = d.BuildRewrite;
                 detection = d.DetectionLine;
+                pathRewrite = d.PathRewrite;
             }
 
             // ---- Collect the state/state-machine topology once (owning layers only) -------------------
@@ -120,7 +125,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             RuleMissingMotion(states, dangling, rep);
             RuleUndeclaredParam(controller, states, machines, rep);
             RuleEntryShadow(machines, rep);
-            RuleBrokenBinding(controller, roots, buildRewrite, rep, notes);
+            RuleBrokenBinding(controller, roots, buildRewrite, pathRewrite, rep, notes);
 
             // ---- Advisory-tier rules ------------------------------------------------------------------
             RuleWdInconsistency(states, rep);
@@ -134,7 +139,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ----- auto basis detection (untyped SerializedObject reads; missing MA/VRCFury assemblies -----
         //        degrade to "no such component" → the standard zero-component refusal) -----------------
 
-        private struct AutoResult { public string Refusal; public GameObject Root; public bool BuildRewrite; public string DetectionLine; }
+        private struct AutoResult { public string Refusal; public GameObject Root; public bool BuildRewrite; public string DetectionLine; public Func<string, string> PathRewrite; }
 
         private static AutoResult DetectAuto(AnimatorController controller, string mergeSite, List<string> notes)
         {
@@ -202,6 +207,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             public FrameKind Kind;
             public bool IsAbsolute;       // MA Absolute pathMode (basis is the avatar root, not a mount)
             public string UnreflectedAnchor; // non-null ⇒ a required frame field failed to reflect (fail loud)
+            // VRCF only: the FullController's "Path Rewrite Rules" (rewriteBindings) as a path transform,
+            // applied to each binding path BEFORE the nearest-match ancestor walk (the build applies them in
+            // that order). null ⇒ identity (no rules). Returns null for a path a delete-rule drops (the
+            // binding vanishes at build — not a real break). AnimatorLint ignores it; AvatarLint applies it.
+            public Func<string, string> PathRewrite;
         }
 
         // MA MergeAnimator: pathMode 0=Relative, 1=Absolute (confirmed live). Relative ⇒ mount at the
@@ -330,8 +340,82 @@ namespace Ryan6Vrc.AgentTools.Editor
             var over = content.FindPropertyRelative("rootObjOverride");
             if (over != null && over.objectReferenceValue is GameObject go) root = go;
             if (root == null) root = c.gameObject;
-            frame = new FrameResult { Root = root, Kind = FrameKind.VRCF, IsAbsolute = false, UnreflectedAnchor = unreflected };
+            frame = new FrameResult
+            {
+                Root = root, Kind = FrameKind.VRCF, IsAbsolute = false, UnreflectedAnchor = unreflected,
+                PathRewrite = BuildVrcfRewriter(content), // this component's rules only — no cross-controller bleed
+            };
             return true;
+        }
+
+        // Extract the VRCFury FullController "Path Rewrite Rules" (content.rewriteBindings: from/to/delete)
+        // and build a path transform replicating VF.Feature.FullControllerBuilder.RewritePath (+
+        // ClipRewritersService.Join). The build runs these BEFORE the nearest-match ancestor walk, so a
+        // caller resolves the rewritten path against the ancestor chain. Reads only THIS content's rules, so
+        // two FullControllers on one mount (e.g. one with rules, one without) never cross-contaminate.
+        // Returns null when there are no rules (identity). The transform returns null for a path a delete
+        // rule drops (that binding is removed at build — not a real break).
+        private static Func<string, string> BuildVrcfRewriter(SerializedProperty content)
+        {
+            var arr = content.FindPropertyRelative("rewriteBindings");
+            if (arr == null || !arr.isArray || arr.arraySize == 0) return null;
+            var rules = new List<(string from, string to, bool delete)>();
+            for (int i = 0; i < arr.arraySize; i++)
+            {
+                var el = arr.GetArrayElementAtIndex(i);
+                var f = el.FindPropertyRelative("from");
+                var t = el.FindPropertyRelative("to");
+                var d = el.FindPropertyRelative("delete");
+                rules.Add((f != null ? f.stringValue : "", t != null ? t.stringValue : "", d != null && d.boolValue));
+            }
+            return path =>
+            {
+                foreach (var (rawFrom, rawTo, delete) in rules)
+                {
+                    string from = TrimTrailingSlashes(rawFrom ?? "");
+                    string to = TrimTrailingSlashes(rawTo ?? "");
+                    if (from == "")
+                    {
+                        path = VrcfJoin(to, path);
+                        if (delete) return null;
+                    }
+                    else if (path.StartsWith(from + "/", StringComparison.Ordinal))
+                    {
+                        path = VrcfJoin(to, path.Substring(from.Length + 1));
+                        if (delete) return null;
+                    }
+                    else if (path == from)
+                    {
+                        path = to;
+                        if (delete) return null;
+                    }
+                }
+                return path;
+            };
+        }
+
+        private static string TrimTrailingSlashes(string s)
+        {
+            while (s.EndsWith("/", StringComparison.Ordinal)) s = s.Substring(0, s.Length - 1);
+            return s;
+        }
+
+        // Replicates VF.Service.ClipRewritersService.Join (allowAdvancedOperators=true): '/'-join with a
+        // leading-'/' reset, '..' pop, and '.'/'' segments omitted.
+        private static string VrcfJoin(string a, string b)
+        {
+            var ret = new List<string>();
+            foreach (var path in new[] { a, b })
+            {
+                if (path.StartsWith("/", StringComparison.Ordinal)) ret.Clear();
+                foreach (var part in path.Split('/'))
+                {
+                    if (part == ".." && ret.Count > 0 && ret[ret.Count - 1] != "..") ret.RemoveAt(ret.Count - 1);
+                    else if (part == "." || part == "") { /* omit */ }
+                    else ret.Add(part);
+                }
+            }
+            return string.Join("/", ret);
         }
 
         private static AutoResult? ParseVrcFury(Component c, AnimatorController controller)
@@ -341,7 +425,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             return new AutoResult
             {
                 Root = frame.Root, BuildRewrite = true,
-                DetectionLine = "basis=auto→mount(" + PathOf(frame.Root) + ") [VRCFury FullController]"
+                DetectionLine = "basis=auto→mount(" + PathOf(frame.Root) + ") [VRCFury FullController]",
+                // Honour THIS FullController's rewriteBindings so the (demoted) broken-binding count is
+                // truthful — without it, paths a declared rule relocates read as unresolvable (a lying count).
+                PathRewrite = frame.PathRewrite,
             };
         }
 
@@ -469,7 +556,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Rule 4: brokenBinding (error, or advisory under a build-rewrite auto site) -----------
         private static void RuleBrokenBinding(AnimatorController controller, List<GameObject> roots,
-            bool buildRewrite, Report rep, List<string> notes)
+            bool buildRewrite, Func<string, string> pathRewrite, Report rep, List<string> notes)
         {
             if (roots.Count == 0)
             {
@@ -482,7 +569,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // path each broken binding is a genuine named failure and gets its own line.
             var demotedSamples = new List<string>();
 
-            foreach (var (clip, b) in CollectUnresolvedBindings(controller, roots))
+            foreach (var (clip, b) in CollectUnresolvedBindings(controller, roots, pathRewrite))
             {
                 rep.BrokenBinding++;
                 if (rep.BrokenBindingIsError)
@@ -508,8 +595,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         // objref bindings, humanoid muscle/root curves skipped, each resolved against ANY of roots (first
         // hit ⇒ resolved). Returns the unresolved (clip, binding) pairs in AnimatorLint's traversal order
         // (clip-outer; float-then-objref inner) so a caller renders offenders in the exact same sequence.
+        // <paramref name="pathRewrite"/> (default null ⇒ identity, AnimatorLint's behavior) transforms each
+        // binding path before resolution — AvatarLint passes the VRCF FullController rewriter so a binding is
+        // resolved the way the build will (rewriteBindings then nearest-match). A rewrite returning null
+        // means a delete-rule drops that binding at build, so it is skipped (not unresolved). The returned
+        // pair always carries the ORIGINAL binding (what the .anim holds — what a repath must target).
         internal static List<(AnimationClip clip, EditorCurveBinding binding)> CollectUnresolvedBindings(
-            AnimatorController controller, List<GameObject> roots)
+            AnimatorController controller, List<GameObject> roots, Func<string, string> pathRewrite = null)
         {
             var unresolved = new List<(AnimationClip, EditorCurveBinding)>();
             foreach (var clip in AnimatorClipWalk.CollectClips(controller))
@@ -521,9 +613,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var b in bindings)
                 {
                     if (IsHumanoidAnimatorCurve(b)) continue; // muscle/root curves have no scene object
+                    var probe = b; // struct copy — preserves type/propertyName/isPPtrCurve, only path may change
+                    if (pathRewrite != null)
+                    {
+                        string rewritten = pathRewrite(b.path);
+                        if (rewritten == null) continue; // a delete-rule drops this binding at build — not a break
+                        probe.path = rewritten;
+                    }
                     bool resolved = false;
                     foreach (var root in roots)
-                        if (AnimationUtility.GetAnimatedObject(root, b) != null) { resolved = true; break; }
+                        if (AnimationUtility.GetAnimatedObject(root, probe) != null) { resolved = true; break; }
                     if (resolved) continue;
                     unresolved.Add((clip, b));
                 }
