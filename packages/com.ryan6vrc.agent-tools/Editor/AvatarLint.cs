@@ -155,6 +155,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Dedup per unique (controller, clip, binding path, binding type): one authored curve expands to
             // several component curves (a Transform's position x/y/z, a rotation's quaternion) that share a
             // path+type, and a controller shared across frames is walked once per frame — all the same break.
+            // The key omits the frame, so it assumes a binding resolves consistently across the frames a
+            // controller is walked under. The one topology that breaks that — the SAME controller mounted both
+            // by a descriptor layer (avatar-root, no rewrite) AND a VRCF FullController (rewrite) — is
+            // pathological (you would double-mount one controller) and fails safe (an extra CLASSIFY for
+            // agent discretion, never a hidden break), so it is left as a known limit rather than paid for
+            // with cross-pair aggregation on the hot path.
             var clipSeen = new HashSet<(int ctrl, int clip, string path, Type type)>();
             foreach (var p in pairs)
             {
@@ -362,12 +368,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             AnimatorController controller, List<GameObject> roots, Func<string, string> pathRewrite)
             => AnimatorLint.CollectUnresolvedBindings(controller, roots, pathRewrite);
 
-        // VRChat SDK proxy animations (…/ProxyAnim/proxy_*.anim) are humanoid-muscle placeholders the SDK
-        // swaps at runtime; their bone-path bindings never resolve to a scene object and are never a real
-        // break. Skip by the SDK's proxy-folder convention — the asset-granularity sibling of the
-        // humanoid-curve skip in the shared binding walk.
+        // VRChat SDK proxy animations (Packages/com.vrchat.*/…/ProxyAnim/proxy_*.anim) are humanoid-muscle
+        // placeholders the SDK swaps at runtime; their bone-path bindings never resolve to a scene object and
+        // are never a real break. Anchored to the SDK PACKAGE, not the folder name alone: a proxy's identity
+        // is its SDK location, and this is the one skip that could HIDE a break — so it must not fire on a
+        // user asset that merely shares a `ProxyAnim` folder name (fail-loud: when unsure, surface).
         private static bool IsSdkProxyClip(string clipAssetPath)
             => !string.IsNullOrEmpty(clipAssetPath)
+               && clipAssetPath.StartsWith("Packages/com.vrchat.", StringComparison.OrdinalIgnoreCase)
                && clipAssetPath.IndexOf("/ProxyAnim/", StringComparison.OrdinalIgnoreCase) >= 0;
 
         // ── Output ────────────────────────────────────────────────────────────────────────────────────
