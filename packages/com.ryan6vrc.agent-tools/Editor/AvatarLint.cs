@@ -51,22 +51,24 @@ namespace Ryan6Vrc.AgentTools.Editor
             "expecting a post-merge location) are not distinguished, and an unresolved binding there may be " +
             "intentional. Build-time object *deletions* (as opposed to moves) are also not visible here.";
 
-        // ── Test seams (internal, default off) ──────────────────────────────────────────────────────
-        // Real MA/VRCF types always reflect and MA's Get(Component) is always reachable in this Editor, so
-        // the fail-loud/degrade branches would be unexercisable. These force them without un-defining the
-        // real types. Each is a plain internal static a test flips, then resets in TearDown.
+        // ── Injectable seams (internal) ───────────────────────────────────────────────────────────────
+        // Real MA/VRCF types always reflect and MA's Get(Component) is always reachable in this Editor, and an
+        // absent serialized FIELD (the drift the fail-loud rail guards) can't be constructed with the live
+        // types — so the degrade/fail-loud branches are otherwise unexercisable. These delegates run
+        // UNCONDITIONALLY on the resolution hot path (no test-only conditional in production); a test swaps one
+        // in SetUp and restores it in TearDown to force a branch. Defaults are the real behaviour.
 
-        /// <summary>Force the pinned <c>Get(Component)</c> overload to be treated as unreachable, so every
-        /// scene-ref resolution takes the loud self-resolve fallback (targetObject-first, then referencePath).</summary>
-        internal static bool TestForceGetUnreachable = false;
+        /// <summary>Boxes an <c>AvatarObjectReference</c> property (default <c>p.boxedValue</c>, which THROWS
+        /// for unsupported shapes — R-J). A test swaps a throwing variant to exercise the caught-and-degrade path.</summary>
+        internal static Func<SerializedProperty, object> GetBoxedValue = p => p.boxedValue;
 
-        /// <summary>Force <c>SerializedProperty.boxedValue</c> to be treated as throwing (R-J), so resolution
-        /// catches it, warns, and self-resolves — completing with a verdict rather than propagating.</summary>
-        internal static bool TestForceBoxedThrow = false;
+        /// <summary>Resolves the pinned <c>Get(Component)→GameObject</c> overload for a boxed reference type
+        /// (default <see cref="PinGetOverloadImpl"/>; null ⇒ unreachable/drift → self-resolve fallback).</summary>
+        internal static Func<Type, MethodInfo> ResolveGetOverload = PinGetOverloadImpl;
 
-        /// <summary>When non-null, treat every discovered animator frame as having this unreflected anchor
-        /// (R-H), so the fail-loud "frame field didn't reflect" branch is exercisable on real MA/VRCF types.</summary>
-        internal static string TestForceUnreflectedAnchor = null;
+        /// <summary>Maps a discovered frame's unreflected-anchor (default identity). A test injects an anchor
+        /// onto a real MA/VRCF frame to exercise the R-H fail-loud surface for a drift it can't construct live.</summary>
+        internal static Func<string, string> FrameAnchorOverride = a => a;
 
         // ── Public API ──────────────────────────────────────────────────────────────────────────────
 
@@ -110,7 +112,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 if (TryMaFrame(c, avatarGO, out var maCtrl, out var maFrame))
                 {
-                    string anchor = maFrame.UnreflectedAnchor ?? TestForceUnreflectedAnchor;
+                    string anchor = FrameAnchorOverride(maFrame.UnreflectedAnchor);
                     if (anchor != null) SurfaceUnreflected(c, anchor, rep); // R-H — loud, but not dropped
                     // R-K — a Relative MA whose relativePathRoot is set-but-unresolved is a guessed frame.
                     string uncertain = MaFrameUncertaintyNote(c, avatarGO, maFrame);
@@ -122,7 +124,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 if (TryVrcfFrame(c, out var vrcfCtrls, out var vrcfFrame))
                 {
-                    string anchor = vrcfFrame.UnreflectedAnchor ?? TestForceUnreflectedAnchor;
+                    string anchor = FrameAnchorOverride(vrcfFrame.UnreflectedAnchor);
                     if (anchor != null) SurfaceUnreflected(c, anchor, rep);
                     var mount = vrcfFrame.Root ?? c.gameObject;
                     var roots = AncestorChain(mount, avatarGO); // D-A upward strip: resolves at ANY level ⇒ not a break
@@ -170,7 +172,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (layers == null) return;
                 foreach (var layer in layers)
                 {
-                    if (layer.isDefault) continue;               // SDK default controller — nothing authored here
+                    // Skip only SDK-default layers (nothing authored). CustomAnimLayer also carries an
+                    // `isEnabled` flag, but disabled-layer skipping is deliberately NOT adopted: whether the
+                    // SDK build honours isEnabled for base/special layers is unverified, and NOT skipping is the
+                    // fail-loud choice — a disabled layer's broken binding surfaces as a CLASSIFY offender for
+                    // agent discretion, never a false PASS.
+                    if (layer.isDefault) continue;
                     var c = layer.animatorController as AnimatorController;
                     if (c == null) continue;
                     add(c, avatarGO, new List<GameObject> { avatarGO }, FrameKind.DescriptorLayer,
@@ -215,9 +222,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static string MaFrameUncertaintyNote(Component c, GameObject avatarGO, FrameResult frame)
         {
             if (frame.IsAbsolute) return null;
-            var so = new SerializedObject(c);
+            SerializedObject so;
+            try { so = new SerializedObject(c); } catch { return null; } // B6
             var rel = so.FindProperty("relativePathRoot");
-            if (rel == null) return null;
+            if (rel == null) // B2: field absent (drift) — surface it, don't silently treat as a confident frame
+                return "frame-uncertain: the MA relativePathRoot field on '" + PathOf(c.gameObject)
+                     + "' did not reflect (API drift) — bindings were resolved against the fallback frame (its own GameObject).";
             var pathChild = rel.FindPropertyRelative("referencePath");
             string refPath = pathChild != null ? pathChild.stringValue : "";
             if (string.IsNullOrEmpty(refPath)) return null; // empty ⇒ own-GO by design, not a guess
@@ -269,7 +279,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // one-time reflect; null MethodInfo ⇒ unreachable (API drift / MA absent).
         private static bool _pinAttempted;
         private static MethodInfo _getOverload;
-        private static MethodInfo PinGetOverload(Type aorType)
+        private static MethodInfo PinGetOverloadImpl(Type aorType)
         {
             if (_pinAttempted) return _getOverload;
             _pinAttempted = true;
@@ -298,32 +308,28 @@ namespace Ryan6Vrc.AgentTools.Editor
             refPath = pathChild != null ? pathChild.stringValue : "";
             string reason = null;
 
-            if (!TestForceGetUnreachable && !TestForceBoxedThrow)
-            {
-                object boxed = null;
-                try { boxed = aor.boxedValue; }
-                catch (Exception e) { reason = "boxedValue threw (" + e.GetType().Name + ")"; }
+            object boxed = null;
+            try { boxed = GetBoxedValue(aor); }
+            catch (Exception e) { reason = "boxedValue threw (" + e.GetType().Name + ")"; }
 
-                if (reason == null && boxed != null)
+            if (reason == null && boxed != null)
+            {
+                var mi = ResolveGetOverload(boxed.GetType());
+                if (mi == null) reason = "Get(Component) overload unreachable (MA API drift / absent)";
+                else
                 {
-                    var mi = PinGetOverload(boxed.GetType());
-                    if (mi == null) reason = "Get(Component) overload unreachable (MA API drift / absent)";
-                    else
-                    {
-                        try { return (mi.Invoke(boxed, new object[] { host }) as GameObject) != null; }
-                        catch (Exception e) { reason = "Get(Component) invoke threw (" + e.GetType().Name + ")"; }
-                    }
+                    try { return (mi.Invoke(boxed, new object[] { host }) as GameObject) != null; }
+                    catch (Exception e) { reason = "Get(Component) invoke threw (" + e.GetType().Name + ")"; }
                 }
-                else if (reason == null) reason = "boxedValue was null";
             }
-            else reason = TestForceBoxedThrow ? "[test seam] forced boxedValue throw" : "[test seam] forced Get(Component) unreachable";
+            else if (reason == null) reason = "boxedValue was null";
 
             // ---- Guarded self-resolve from the children already located --------------------------------
             Debug.LogWarning("[AvatarLint] scene-ref resolve degraded on " + PathOf(host.gameObject)
                            + " (" + reason + ") — self-resolving from serialized children (targetObject-first, then referencePath).");
 
             var targetGO = targetChild != null ? targetChild.objectReferenceValue as GameObject : null;
-            if (targetGO != null && targetGO.transform.IsChildOf(avatarGO.transform)) return true; // targetObject wins
+            if (targetGO != null) return true; // B3: a live targetObject wins, mirroring .Get() (hierarchy-agnostic)
             if (string.IsNullOrEmpty(refPath)) return false;                                        // unset
             if (refPath == MaAvatarRootSentinel) return true;                                       // avatar root itself
             return avatarGO.transform.Find(refPath) != null;

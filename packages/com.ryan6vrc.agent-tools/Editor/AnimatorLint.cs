@@ -216,13 +216,23 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (c == null || c.GetType().FullName != "nadena.dev.modular_avatar.core.ModularAvatarMergeAnimator")
                 return false;
 
-            var so = new SerializedObject(c);
+            SerializedObject so;
+            try { so = new SerializedObject(c); } catch { return false; } // B6: parity with ScanSceneRefs' guard
+
+            // B2: a REQUIRED field that is ABSENT (FindProperty → null) is API drift — surface it loud (return
+            // true with an anchor) even when there is no controller to walk; the loud warning is the point. A
+            // present-but-null animator is an intentional empty (stay quiet, return false).
             var animProp = so.FindProperty("animator");
-            controller = animProp != null ? animProp.objectReferenceValue as AnimatorController : null;
-            if (controller == null) return false; // no controller referenced → not a usable MA frame
+            if (animProp == null)
+            {
+                frame = new FrameResult { Root = avatarGO, Kind = FrameKind.MA, IsAbsolute = false, UnreflectedAnchor = "MA.animator" };
+                return true;
+            }
+            controller = animProp.objectReferenceValue as AnimatorController;
+            if (controller == null) return false; // present-but-null: intentional empty, not drift
 
             var pathModeProp = so.FindProperty("pathMode");
-            string unreflected = pathModeProp == null ? "MA.pathMode" : null; // required frame field absent
+            string unreflected = pathModeProp == null ? "MA.pathMode" : null; // required frame field absent (drift)
             bool absolute = pathModeProp != null && pathModeProp.enumValueIndex == 1;
             GameObject root;
             if (absolute)
@@ -233,7 +243,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 root = null;
                 var rel = so.FindProperty("relativePathRoot");
-                if (rel != null)
+                if (rel == null)
+                {
+                    unreflected = unreflected ?? "MA.relativePathRoot"; // B2: field absent (drift) — anchor before the best-effort fallback
+                }
+                else
                 {
                     var target = rel.FindPropertyRelative("targetObject");
                     var refPath = rel.FindPropertyRelative("referencePath");
@@ -244,7 +258,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         root = t != null ? t.gameObject : null;
                     }
                 }
-                if (root == null) root = c.gameObject; // empty relativePathRoot ⇒ own GameObject (confirmed live)
+                if (root == null) root = c.gameObject; // empty/absent relativePathRoot ⇒ own GameObject best-effort
             }
             frame = new FrameResult { Root = root, Kind = FrameKind.MA, IsAbsolute = absolute, UnreflectedAnchor = unreflected };
             return true;
@@ -278,14 +292,30 @@ namespace Ryan6Vrc.AgentTools.Editor
             frame = default;
             if (c == null || c.GetType().FullName != "VF.Model.VRCFury") return false;
 
-            var so = new SerializedObject(c);
+            SerializedObject so;
+            try { so = new SerializedObject(c); } catch { return false; } // B6
+
+            // B1: the content field ABSENT (FindProperty → null) is API drift — surface it loud rather than
+            // silently skipping (a silent skip on a real FullController would be a forbidden false PASS).
             var content = so.FindProperty("content");
-            if (content == null) return false;
+            if (content == null)
+            {
+                frame = new FrameResult { Root = c.gameObject, Kind = FrameKind.VRCF, IsAbsolute = false, UnreflectedAnchor = "VRCF.content" };
+                return true;
+            }
             var tn = content.managedReferenceFullTypename;
+            // The ONLY silent skip: a present, typed feature that is genuinely not a FullController.
             if (string.IsNullOrEmpty(tn) || !tn.EndsWith("FullController")) return false;
 
+            // Typed as FullController but the controllers list can't decode (field renamed / not an array) is
+            // drift — anchor it. An empty-but-present array is a legit zero-controller FullController (stays quiet).
+            string unreflected = null;
             var controllersProp = content.FindPropertyRelative("controllers");
-            if (controllersProp != null && controllersProp.isArray)
+            if (controllersProp == null || !controllersProp.isArray)
+            {
+                unreflected = "VRCF.content.controllers";
+            }
+            else
             {
                 for (int i = 0; i < controllersProp.arraySize; i++)
                 {
@@ -300,7 +330,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var over = content.FindPropertyRelative("rootObjOverride");
             if (over != null && over.objectReferenceValue is GameObject go) root = go;
             if (root == null) root = c.gameObject;
-            frame = new FrameResult { Root = root, Kind = FrameKind.VRCF, IsAbsolute = false, UnreflectedAnchor = null };
+            frame = new FrameResult { Root = root, Kind = FrameKind.VRCF, IsAbsolute = false, UnreflectedAnchor = unreflected };
             return true;
         }
 
