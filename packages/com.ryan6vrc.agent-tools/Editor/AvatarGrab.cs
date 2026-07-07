@@ -300,6 +300,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var path = Application.temporaryCachePath + "/avatargrab_" + RunLogFormat.Sanitize(label) + "_" + stamp + ".png";
                 File.WriteAllBytes(path, png);
 
+                // The temp grab dir is never swept by Unity or Windows, so it accumulates across every
+                // session. Prune our own grabs older than 30 days here — the common write path — so it stays
+                // bounded; the just-written grab is always newer than the cutoff. Best-effort per file (a
+                // locked grab being Read elsewhere just survives to the next run).
+                var cutoff = DateTime.Now.AddDays(-30);
+                foreach (var old in Directory.GetFiles(Application.temporaryCachePath, "avatargrab_*.png"))
+                {
+                    try { if (File.GetLastWriteTime(old) < cutoff) File.Delete(old); }
+                    catch { /* locked or already gone — leave it for a later run */ }
+                }
+
                 // Focus caveat: NDMF/MA reactive preview only resolves while Unity holds OS focus. Driven
                 // headless (unfocused) the async build parks and the grab may show UNRESOLVED fit (heeled
                 // feet flat, dress un-shrunk). AvatarGrab never invalidates the preview, so a foreground
