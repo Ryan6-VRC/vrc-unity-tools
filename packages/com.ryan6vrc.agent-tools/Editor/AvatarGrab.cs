@@ -85,20 +85,24 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const string UnsettledNote = " | note=preview not settled (NDMF rebuild in flight) — re-grab in a separate call";
         private const string DriftNote = " | note=settle-state unknown (NDMF internals drifted)";
 
+        // Resolution routes through SafeGetProperty/SafeGetField (below) so a member lookup that THROWS
+        // (e.g. AmbiguousMatchException) at class load yields a null handle → the drift note at call time,
+        // never a TypeInitializationException from a field initializer. `?.` on the Types short-circuits a
+        // null declaring type before the call is even made.
         private static readonly Type PreviewSessionType = ResolveNdmfType("nadena.dev.ndmf.preview.PreviewSession");
-        private static readonly PropertyInfo PiCurrent = PreviewSessionType?.GetProperty("Current",
+        private static readonly PropertyInfo PiCurrent = SafeGetProperty(PreviewSessionType, "Current",
             BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-        private static readonly FieldInfo FiProxySession = PreviewSessionType?.GetField("_proxySession",
+        private static readonly FieldInfo FiProxySession = SafeGetField(PreviewSessionType, "_proxySession",
             BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly Type ProxySessionType = FiProxySession?.FieldType;
-        private static readonly FieldInfo FiActive = ProxySessionType?.GetField("_active",
+        private static readonly FieldInfo FiActive = SafeGetField(ProxySessionType, "_active",
             BindingFlags.Instance | BindingFlags.NonPublic);
-        private static readonly FieldInfo FiNext = ProxySessionType?.GetField("_next",
+        private static readonly FieldInfo FiNext = SafeGetField(ProxySessionType, "_next",
             BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly Type ProxyPipelineType = FiActive?.FieldType;
-        private static readonly PropertyInfo PiIsReady = ProxyPipelineType?.GetProperty("IsReady",
+        private static readonly PropertyInfo PiIsReady = SafeGetProperty(ProxyPipelineType, "IsReady",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        private static readonly PropertyInfo PiIsInvalidated = ProxyPipelineType?.GetProperty("IsInvalidated",
+        private static readonly PropertyInfo PiIsInvalidated = SafeGetProperty(ProxyPipelineType, "IsInvalidated",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
         /// <summary>
@@ -655,6 +659,24 @@ namespace Ryan6Vrc.AgentTools.Editor
                 catch { /* dynamic / unloadable assembly — skip */ }
             }
             return null;
+        }
+
+        // Member-handle resolution that NEVER throws — a null declaring type, a missing member, or a
+        // throwing lookup (e.g. AmbiguousMatchException) all yield null → the drift note at call time. The
+        // `?.` on the Types above already short-circuits a null type; this additionally swallows a throw
+        // from the reflection call itself, so class load can never raise TypeInitializationException.
+        private static PropertyInfo SafeGetProperty(Type type, string name, BindingFlags flags)
+        {
+            if (type == null) return null;
+            try { return type.GetProperty(name, flags); }
+            catch { return null; }
+        }
+
+        private static FieldInfo SafeGetField(Type type, string name, BindingFlags flags)
+        {
+            if (type == null) return null;
+            try { return type.GetField(name, flags); }
+            catch { return null; }
         }
 
         // Poll NDMF's preview settle-state at capture time (read-only). "" when settled OR when there is no
