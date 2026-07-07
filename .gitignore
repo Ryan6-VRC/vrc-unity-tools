@@ -8,3 +8,6 @@ desktop.ini
 .vs/
 .idea/
 .vscode/
+
+# git worktrees for isolated feature work
+.worktrees/
