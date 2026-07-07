@@ -30,6 +30,12 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// the bar. Headlight lighting is truthful for geometry/silhouette/clipping/fit; matcap / rim /
     /// fresnel / GrabPass effects are not the point — judge shading in the operator's scene view.
     ///
+    /// <b>Freshness — settle, not focus.</b> The preview rebuilds asynchronously, advanced only by NDMF
+    /// ticks that fire after a synchronous call returns — not by OS focus. A same-call edit+grab captures
+    /// the pre-edit proxy (stale), so <b>edit and grab in separate calls</b>; the summary's <c>note=</c>
+    /// reports the settle-state when it can't be sure. Mechanism →
+    /// docs/superpowers/surveys/2026-07-07-ndmf-preview-refresh.md.
+    ///
     /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
     /// (target upright, facing world +Z, unrotated). A target rotated in the scene shows the scene's
     /// front — a documented limitation; the upside is it also works on a child or a non-avatar object.
@@ -70,6 +76,30 @@ namespace Ryan6Vrc.AgentTools.Editor
             BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly PropertyInfo PiWire = AnnType?.GetProperty("showSelectionWire",
             BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
+        // ----- NDMF preview settle-state (reflection) -------------------------------------------
+        // The asmdef has references:[], so NDMF internal types are found by assembly-scan on the qualified
+        // name (never typeof). Every hop is null-conditional: a renamed/removed member leaves the field null
+        // → the drift note at call time, never a class-load throw. Settled predicate + mechanism:
+        // docs/superpowers/surveys/2026-07-07-ndmf-preview-refresh.md.
+        private const string UnsettledNote = " | note=preview not settled (NDMF rebuild in flight) — re-grab in a separate call";
+        private const string DriftNote = " | note=settle-state unknown (NDMF internals drifted)";
+
+        private static readonly Type PreviewSessionType = ResolveNdmfType("nadena.dev.ndmf.preview.PreviewSession");
+        private static readonly PropertyInfo PiCurrent = PreviewSessionType?.GetProperty("Current",
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo FiProxySession = PreviewSessionType?.GetField("_proxySession",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly Type ProxySessionType = FiProxySession?.FieldType;
+        private static readonly FieldInfo FiActive = ProxySessionType?.GetField("_active",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo FiNext = ProxySessionType?.GetField("_next",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly Type ProxyPipelineType = FiActive?.FieldType;
+        private static readonly PropertyInfo PiIsReady = ProxyPipelineType?.GetProperty("IsReady",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly PropertyInfo PiIsInvalidated = ProxyPipelineType?.GetProperty("IsInvalidated",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
         /// <summary>
         /// Render the GameObject subtree at <paramref name="target"/> in isolation from
@@ -311,22 +341,20 @@ namespace Ryan6Vrc.AgentTools.Editor
                     catch { /* locked or already gone — leave it for a later run */ }
                 }
 
-                // Focus caveat: NDMF/MA reactive preview only resolves while Unity holds OS focus. Driven
-                // headless (unfocused) the async build parks and the grab may show UNRESOLVED fit (heeled
-                // feet flat, dress un-shrunk). AvatarGrab never invalidates the preview, so a foreground
-                // Unity always grabs fresh. Warn only when it can actually be stale: unfocused, NOT in play
-                // mode (play renders the driven runtime, which updates headless), and reactive MA present.
-                string caveat = (!EditorApplication.isFocused && !Application.isPlaying && HasReactiveMA(root))
-                    ? " | note=reactive fit may be UNRESOLVED (Unity unfocused — NDMF preview parks headless); focus Unity and re-grab if fit matters"
-                    : "";
+                // Settle note: NDMF reactive preview rebuilds asynchronously, advanced only by
+                // EditorApplication.update ticks that fire AFTER this synchronous call returns — so a
+                // same-call edit+grab captures the pre-edit proxy. SettleNote polls the settled predicate
+                // (read-only) and REPORTS staleness; it does not settle (a sync call cannot force-complete a
+                // rebuild — survey). Mechanism → the class doc-comment's survey pointer.
+                string note = SettleNote(root);
 
-                // The caveat sits BEFORE png= so the png= trailer is always terminal — a consumer reading
+                // The note sits BEFORE png= so the png= trailer is always terminal — a consumer reading
                 // png= to end-of-line gets a clean path, never one with the note appended.
                 string summary = string.Format(CultureInfo.InvariantCulture,
                     "[AvatarGrab] {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7} => OK{8} | png={9}",
                     label, string.Join(",", resolvedAngles), n, tileRes, margin.ToString("0.##", CultureInfo.InvariantCulture),
                     showGizmos ? "on" : "off", hiddenCount, excludedCount,
-                    caveat, path);
+                    note, path);
                 Debug.Log(summary);
                 return summary;
             }
@@ -617,12 +645,60 @@ namespace Ryan6Vrc.AgentTools.Editor
             return byName != null ? byName.gameObject : null;
         }
 
+        // Assembly-scan for an NDMF internal type by qualified name (references:[] rules out typeof).
+        // Never throws — a scan miss or a load fault on any assembly just yields null → the drift note.
+        private static Type ResolveNdmfType(string fullName)
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try { var t = asm.GetType(fullName); if (t != null) return t; }
+                catch { /* dynamic / unloadable assembly — skip */ }
+            }
+            return null;
+        }
+
+        // Poll NDMF's preview settle-state at capture time (read-only). "" when settled OR when there is no
+        // settle risk (play mode / non-reactive target); UnsettledNote when a rebuild is in flight (predicate
+        // false, or any runtime hop legitimately null — no pipeline yet / between builds / absent fit);
+        // DriftNote when reflection itself failed (a handle didn't resolve, or a read threw). The whole body
+        // is wrapped in one try/catch and it ALWAYS returns a string, so an exception can never reach Capture's
+        // outer catch and drop the already-written png= trailer. Called after cap.Grab (~314): no update tick
+        // fires inside the synchronous call, so the polled state is exactly the state that produced the frame.
+        private static string SettleNote(GameObject root)
+        {
+            try
+            {
+                if (Application.isPlaying) return "";     // play renders the driven runtime — always fresh
+                if (!HasReactiveMA(root)) return "";       // no reactive fit → nothing to settle, no reflection
+                // Drift: a reflection handle failed to resolve at class load.
+                if (PiCurrent == null || FiProxySession == null || FiActive == null
+                    || FiNext == null || PiIsReady == null || PiIsInvalidated == null)
+                    return DriftNote;
+                // Global poll (NDMF has one preview session; single-LLM MCP → only this agent's edit unsettles it).
+                var current = PiCurrent.GetValue(null, null);
+                if (current == null) return UnsettledNote;  // no pipeline yet — unsettled, not drift
+                var prox = FiProxySession.GetValue(current);
+                if (prox == null) return UnsettledNote;
+                var active = FiActive.GetValue(prox);
+                if (active == null) return UnsettledNote;    // between builds / absent fit
+                var next = FiNext.GetValue(prox);            // non-null == a rebuild is queued to swap in
+                bool isReady = (bool)PiIsReady.GetValue(active, null);
+                bool isInvalidated = (bool)PiIsInvalidated.GetValue(active, null);
+                return (isReady && !isInvalidated && next == null) ? "" : UnsettledNote;
+            }
+            catch
+            {
+                return DriftNote;   // unexpected read exception / cast mismatch — drift, never throw
+            }
+        }
+
         // The MA reactive-object family (+ Blendshape Sync) — components whose rendered result only
-        // resolves in a settled NDMF preview, so a grab of them can be stale headless. Matched by type
-        // name (this asmdef has no MA reference — references: []), scoped to the modular_avatar namespace
-        // so a same-named foreign type can't false-positive. Static components (Merge Animator/Armature,
-        // Bone Proxy, Menu*, Parameters, Mesh Settings, VRChat Settings) deliberately do NOT match — they
-        // carry no preview-resolution risk. Drives the unfocused caveat only.
+        // resolves in a settled NDMF preview, so a grab of them can be stale before that preview settles.
+        // Matched by type name (this asmdef has no MA reference — references: []), scoped to the
+        // modular_avatar namespace so a same-named foreign type can't false-positive. Static components
+        // (Merge Animator/Armature, Bone Proxy, Menu*, Parameters, Mesh Settings, VRChat Settings)
+        // deliberately do NOT match — they carry no preview-resolution risk. Drives SettleNote's
+        // cheap-first non-reactive short-circuit (the settle-state pre-filter).
         private static readonly string[] ReactiveMarkers =
         {
             "ShapeChanger", "BlendshapeSync", "MaterialSetter", "MaterialSwap", "ObjectToggle",
