@@ -155,18 +155,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// As <see cref="FindByIndexedPath(Transform,Transform,Transform)"/>, but a <paramref name="renameMap"/>
         /// (<c>vendorName ⇒ ownedName</c>, source-name key → destination-name value) substitutes the segment
         /// NAME at each destination-side <see cref="NthChildWithName"/> lookup. The occurrence index is still
-        /// counted on the SOURCE side from the vendor name (<see cref="SiblingIndexAmongSameName"/>) —
-        /// rename preserves child order, so a source segment at occurrence k under its vendor name maps to
-        /// the dst child at occurrence k under the mapped name. An empty/absent/null map ⇒ every
+        /// counted on the SOURCE side, but in the resolving-to-<c>mapped</c> space
+        /// (<see cref="SiblingIndexAmongResolvingTo"/>) so it stays symmetric with the dst lookup — rename
+        /// preserves child order, so a source segment at occurrence k among siblings resolving to the mapped
+        /// name maps to the dst child at occurrence k under that name. An empty/absent/null map ⇒ every
         /// <see cref="Substitute"/> returns its input ⇒ byte-identical to the null-map overload.
         ///
-        /// A1 count-equality guard (silent-mis-bind hole, fail-loud): the index is counted in the vendor
-        /// name-space but the dst lookup uses the MAPPED name, so a mapped value that already exists on the
-        /// dst (or a non-injective map slipping a validation gap) could silently bind the WRONG sibling.
-        /// Whenever the map maps a segment's name, require
-        /// <c>CountChildrenWithName(srcParent, seg.name) == CountChildrenWithName(dstParent, mapped)</c>;
-        /// on mismatch set <paramref name="failReason"/> (a named signal, distinct from a plain missing path)
-        /// and return null. The guard fires ONLY when a name is mapped, so null-map callers never touch it.
+        /// A1 count-equality guard (silent-mis-bind hole, fail-loud): the dst lookup uses the MAPPED name, so
+        /// a mapped value that already exists on the dst (or a non-injective map slipping a validation gap)
+        /// could silently bind the WRONG sibling. <see cref="GuardRename"/> closes it — where a rename actually
+        /// funnels source siblings onto <c>mapped</c> at a parent (its resolving-to count differs from its
+        /// literal count), it requires
+        /// <c>CountChildrenResolvingTo(srcParent, mapped, map) == CountChildrenWithName(dstParent, mapped)</c>;
+        /// on mismatch it sets <paramref name="failReason"/> (a named signal, distinct from a plain missing
+        /// path) and this returns null. A null or non-funneling map never trips it.
         /// </summary>
         public static Transform FindByIndexedPath(Transform srcRoot, Transform dstRoot, Transform srcTarget,
                                                   IDictionary<string, string> renameMap, out string failReason)
