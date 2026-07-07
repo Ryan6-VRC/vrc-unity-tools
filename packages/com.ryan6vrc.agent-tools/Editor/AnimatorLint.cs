@@ -186,78 +186,132 @@ namespace Ryan6Vrc.AgentTools.Editor
             return new AutoResult { Refusal = "no merge component referencing this controller at '" + mergeSite + "'" };
         }
 
+        // ----- Reusable frame detection (shared with AvatarLint) ------------------------------------
+        // A "frame" is the binding-basis root a merge component establishes for the controller(s) it
+        // mounts, plus how it was derived. The Try* helpers run on ANY subtree component (they self-check
+        // type + controller reference), DISCOVER the referenced controller(s) so a caller can enumerate
+        // mount sites, and set UnreflectedAnchor (naming a required frame field that failed to reflect) so
+        // a fail-loud caller can refuse. AnimatorLint's own Parse* wrappers keep the historical SILENT
+        // skip: "not our controller" / unreflected ⇒ the same null they returned before.
+
+        internal enum FrameKind { DescriptorLayer, MA, VRCF }
+
+        internal struct FrameResult
+        {
+            public GameObject Root;       // the binding-basis root (mount, or avatar root for Absolute)
+            public FrameKind Kind;
+            public bool IsAbsolute;       // MA Absolute pathMode (basis is the avatar root, not a mount)
+            public string UnreflectedAnchor; // non-null ⇒ a required frame field failed to reflect (fail loud)
+        }
+
         // MA MergeAnimator: pathMode 0=Relative, 1=Absolute (confirmed live). Relative ⇒ mount at the
         // resolved relativePathRoot (an AvatarObjectReference: targetObject, else referencePath resolved
         // avatar-root-relative, else the component's OWN GameObject). Absolute ⇒ basis is the avatar root.
-        private static AutoResult? ParseMergeAnimator(Component c, AnimatorController controller, GameObject avatarGO)
+        // Returns true iff c is an MA MergeAnimator that references a controller (out via controller).
+        internal static bool TryMaFrame(Component c, GameObject avatarGO,
+            out AnimatorController controller, out FrameResult frame)
         {
+            controller = null;
+            frame = default;
+            if (c == null || c.GetType().FullName != "nadena.dev.modular_avatar.core.ModularAvatarMergeAnimator")
+                return false;
+
             var so = new SerializedObject(c);
             var animProp = so.FindProperty("animator");
-            if (animProp == null || animProp.objectReferenceValue != controller) return null; // not OUR controller
+            controller = animProp != null ? animProp.objectReferenceValue as AnimatorController : null;
+            if (controller == null) return false; // no controller referenced → not a usable MA frame
 
             var pathModeProp = so.FindProperty("pathMode");
+            string unreflected = pathModeProp == null ? "MA.pathMode" : null; // required frame field absent
             bool absolute = pathModeProp != null && pathModeProp.enumValueIndex == 1;
+            GameObject root;
             if (absolute)
-                return new AutoResult
-                {
-                    Root = avatarGO, BuildRewrite = true,
-                    DetectionLine = "basis=auto→avatar(" + PathOf(avatarGO) + ") [MA MergeAnimator, Absolute]"
-                };
-
-            GameObject root = null;
-            var rel = so.FindProperty("relativePathRoot");
-            if (rel != null)
             {
-                var target = rel.FindPropertyRelative("targetObject");
-                var refPath = rel.FindPropertyRelative("referencePath");
-                if (target != null && target.objectReferenceValue is GameObject tgo) root = tgo;
-                else if (refPath != null && !string.IsNullOrEmpty(refPath.stringValue) && avatarGO != null)
-                {
-                    var t = avatarGO.transform.Find(refPath.stringValue);
-                    root = t != null ? t.gameObject : null;
-                }
+                root = avatarGO;
             }
-            if (root == null) root = c.gameObject;   // empty relativePathRoot ⇒ own GameObject (confirmed live)
-            return new AutoResult
+            else
             {
-                Root = root, BuildRewrite = true,
-                DetectionLine = "basis=auto→mount(" + PathOf(root) + ") [MA MergeAnimator]"
-            };
+                root = null;
+                var rel = so.FindProperty("relativePathRoot");
+                if (rel != null)
+                {
+                    var target = rel.FindPropertyRelative("targetObject");
+                    var refPath = rel.FindPropertyRelative("referencePath");
+                    if (target != null && target.objectReferenceValue is GameObject tgo) root = tgo;
+                    else if (refPath != null && !string.IsNullOrEmpty(refPath.stringValue) && avatarGO != null)
+                    {
+                        var t = avatarGO.transform.Find(refPath.stringValue);
+                        root = t != null ? t.gameObject : null;
+                    }
+                }
+                if (root == null) root = c.gameObject; // empty relativePathRoot ⇒ own GameObject (confirmed live)
+            }
+            frame = new FrameResult { Root = root, Kind = FrameKind.MA, IsAbsolute = absolute, UnreflectedAnchor = unreflected };
+            return true;
+        }
+
+        private static AutoResult? ParseMergeAnimator(Component c, AnimatorController controller, GameObject avatarGO)
+        {
+            if (!TryMaFrame(c, avatarGO, out var discovered, out var frame)) return null;
+            if (discovered != controller) return null; // not OUR controller (silent skip, as before)
+            return frame.IsAbsolute
+                ? new AutoResult
+                {
+                    Root = frame.Root, BuildRewrite = true,
+                    DetectionLine = "basis=auto→avatar(" + PathOf(frame.Root) + ") [MA MergeAnimator, Absolute]"
+                }
+                : new AutoResult
+                {
+                    Root = frame.Root, BuildRewrite = true,
+                    DetectionLine = "basis=auto→mount(" + PathOf(frame.Root) + ") [MA MergeAnimator]"
+                };
         }
 
         // VRCFury FullController: content is a [SerializeReference]; FullController iff its managed type
-        // name ends in "FullController". References OUR controller iff any content.controllers[i]
-        // .controller.objRef == controller. Mount = content.rootObjOverride, else the component's OWN GO.
-        private static AutoResult? ParseVrcFury(Component c, AnimatorController controller)
+        // name ends in "FullController". Mounts every content.controllers[i].controller.objRef (out via
+        // controllers so a caller can DISCOVER them). Mount = content.rootObjOverride, else the OWN GO.
+        // Returns true iff c is a VRCFury FullController (regardless of which controllers it lists).
+        internal static bool TryVrcfFrame(Component c,
+            out List<AnimatorController> controllers, out FrameResult frame)
         {
+            controllers = new List<AnimatorController>();
+            frame = default;
+            if (c == null || c.GetType().FullName != "VF.Model.VRCFury") return false;
+
             var so = new SerializedObject(c);
             var content = so.FindProperty("content");
-            if (content == null) return null;
+            if (content == null) return false;
             var tn = content.managedReferenceFullTypename;
-            if (string.IsNullOrEmpty(tn) || !tn.EndsWith("FullController")) return null;
+            if (string.IsNullOrEmpty(tn) || !tn.EndsWith("FullController")) return false;
 
-            bool refs = false;
             var controllersProp = content.FindPropertyRelative("controllers");
             if (controllersProp != null && controllersProp.isArray)
             {
-                for (int i = 0; i < controllersProp.arraySize && !refs; i++)
+                for (int i = 0; i < controllersProp.arraySize; i++)
                 {
                     var el = controllersProp.GetArrayElementAtIndex(i);
                     var ctrl = el.FindPropertyRelative("controller");
                     var objRef = ctrl != null ? ctrl.FindPropertyRelative("objRef") : null;
-                    if (objRef != null && objRef.objectReferenceValue == controller) refs = true;
+                    if (objRef != null && objRef.objectReferenceValue is AnimatorController ac) controllers.Add(ac);
                 }
             }
-            if (!refs) return null;
 
             GameObject root = null;
             var over = content.FindPropertyRelative("rootObjOverride");
             if (over != null && over.objectReferenceValue is GameObject go) root = go;
             if (root == null) root = c.gameObject;
+            frame = new FrameResult { Root = root, Kind = FrameKind.VRCF, IsAbsolute = false, UnreflectedAnchor = null };
+            return true;
+        }
+
+        private static AutoResult? ParseVrcFury(Component c, AnimatorController controller)
+        {
+            if (!TryVrcfFrame(c, out var controllers, out var frame)) return null;
+            if (!controllers.Contains(controller)) return null; // not OUR controller (silent skip, as before)
             return new AutoResult
             {
-                Root = root, BuildRewrite = true,
-                DetectionLine = "basis=auto→mount(" + PathOf(root) + ") [VRCFury FullController]"
+                Root = frame.Root, BuildRewrite = true,
+                DetectionLine = "basis=auto→mount(" + PathOf(frame.Root) + ") [VRCFury FullController]"
             };
         }
 
@@ -398,6 +452,36 @@ namespace Ryan6Vrc.AgentTools.Editor
             // path each broken binding is a genuine named failure and gets its own line.
             var demotedSamples = new List<string>();
 
+            foreach (var (clip, b) in CollectUnresolvedBindings(controller, roots))
+            {
+                rep.BrokenBinding++;
+                if (rep.BrokenBindingIsError)
+                    rep.Errors.Add(new Offender
+                    {
+                        Kind = "brokenBinding", Where = clip.name,
+                        Detail = "binding path='" + b.path + "' type=" + b.type.Name + " prop='" + b.propertyName + "' resolves to no object"
+                    });
+                else if (demotedSamples.Count < 3)
+                    demotedSamples.Add(clip.name + ":" + b.path);
+            }
+
+            if (!rep.BrokenBindingIsError && rep.BrokenBinding > 0)
+                rep.Advisories.Add(new Offender
+                {
+                    Kind = "brokenBinding (demoted)", Where = rep.BrokenBinding + " binding(s)",
+                    Detail = "unresolvable in the authored scene; MA/VRCFury rewrite binding paths at build so this cannot be verified pre-build"
+                            + (demotedSamples.Count > 0 ? " — e.g. " + string.Join(", ", demotedSamples) : "")
+                });
+        }
+
+        // Shared binding walk (reused by AvatarLint): every clip a controller references, both float and
+        // objref bindings, humanoid muscle/root curves skipped, each resolved against ANY of roots (first
+        // hit ⇒ resolved). Returns the unresolved (clip, binding) pairs in AnimatorLint's traversal order
+        // (clip-outer; float-then-objref inner) so a caller renders offenders in the exact same sequence.
+        internal static List<(AnimationClip clip, EditorCurveBinding binding)> CollectUnresolvedBindings(
+            AnimatorController controller, List<GameObject> roots)
+        {
+            var unresolved = new List<(AnimationClip, EditorCurveBinding)>();
             foreach (var clip in AnimatorClipWalk.CollectClips(controller))
             {
                 if (clip == null) continue;
@@ -411,26 +495,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                     foreach (var root in roots)
                         if (AnimationUtility.GetAnimatedObject(root, b) != null) { resolved = true; break; }
                     if (resolved) continue;
-
-                    rep.BrokenBinding++;
-                    if (rep.BrokenBindingIsError)
-                        rep.Errors.Add(new Offender
-                        {
-                            Kind = "brokenBinding", Where = clip.name,
-                            Detail = "binding path='" + b.path + "' type=" + b.type.Name + " prop='" + b.propertyName + "' resolves to no object"
-                        });
-                    else if (demotedSamples.Count < 3)
-                        demotedSamples.Add(clip.name + ":" + b.path);
+                    unresolved.Add((clip, b));
                 }
             }
-
-            if (!rep.BrokenBindingIsError && rep.BrokenBinding > 0)
-                rep.Advisories.Add(new Offender
-                {
-                    Kind = "brokenBinding (demoted)", Where = rep.BrokenBinding + " binding(s)",
-                    Detail = "unresolvable in the authored scene; MA/VRCFury rewrite binding paths at build so this cannot be verified pre-build"
-                            + (demotedSamples.Count > 0 ? " — e.g. " + string.Join(", ", demotedSamples) : "")
-                });
+            return unresolved;
         }
 
         // Skip humanoid muscle + root/IK-goal curves: they animate the Animator itself and have no scene
@@ -442,7 +510,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             "RootT", "RootQ", "MotionT", "MotionQ", "LeftFootT", "LeftFootQ", "RightFootT", "RightFootQ",
             "LeftHandT", "LeftHandQ", "RightHandT", "RightHandQ",
         };
-        private static bool IsHumanoidAnimatorCurve(EditorCurveBinding b)
+        internal static bool IsHumanoidAnimatorCurve(EditorCurveBinding b)
         {
             if (b.type != typeof(Animator)) return false;
             if (_muscleNames == null)
