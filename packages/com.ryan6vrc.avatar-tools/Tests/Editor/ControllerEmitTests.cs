@@ -612,4 +612,40 @@ layers:
             Assert.AreEqual(kv.Value, snap2[kv.Key], "state " + kv.Key + " keeps the same grid position");
         }
     }
+
+    // ---- Unresolved motion refs (Task 4) ---------------------------------------------------------
+    // A ref flagged `unresolved: true` that does NOT resolve is tolerated: null motion + advisory record,
+    // not a throw. A bare broken ref (no marker) stays fatal. An all-zero GUID never resolves. NOTE the guid
+    // is QUOTED: an all-zero (all-digit) scalar parses as a YAML number, and the guid binder requires a string.
+
+    [Test]
+    public void Emit_Unresolved_Guid_Ref_Is_Null_Motion_Not_Throw()
+    {
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Dangle_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n" +
+            "      S: { motion: { ref: { guid: \"00000000000000000000000000000000\", unresolved: true } } }\n" +
+            "    default: S\n", "mem://dangle");
+
+        ControllerEmit.EmitResult r = null;
+        Assert.DoesNotThrow(() => ControllerEmit.Build(doc, out r));
+
+        var s = State(RootSm(r), "S");
+        Assert.IsNull(s.motion, "unresolved ref leaves the motion slot null");
+        Assert.AreEqual(1, r.UnresolvedRefs.Count, "the unresolved ref is recorded on the result");
+        Assert.AreEqual("S", r.UnresolvedRefs[0].state, "advisory names the owning state");
+        Assert.AreEqual("00000000000000000000000000000000", r.UnresolvedRefs[0].guid, "verbatim GUID preserved");
+    }
+
+    [Test]
+    public void Emit_Bare_Broken_Guid_Ref_Throws()
+    {
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Dangle2_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n" +
+            "      S: { motion: { ref: { guid: \"00000000000000000000000000000000\" } } }\n" +
+            "    default: S\n", "mem://dangle2");
+
+        Assert.Throws<ControllerEmit.EmitException>(() => ControllerEmit.Build(doc, out _));
+    }
 }

@@ -54,6 +54,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public List<AnimationClip> ClipList = new List<AnimationClip>();
             public List<BlendTree> Trees = new List<BlendTree>();
             public VRCExpressionParameters Params; // null only when every declared param is excluded (built-in / scratch)
+            // Motion refs that carried the `unresolved: true` marker and did NOT resolve — emitted as a null
+            // motion (a clean-empty state) instead of a fail-loud throw. Each entry names the owning STATE and
+            // the verbatim GUID so a compile advisory can preserve the round-trip note. A BARE broken ref (no
+            // marker) is never recorded here — it still throws EmitException.
+            public List<(string state, string guid)> UnresolvedRefs = new List<(string state, string guid)>();
         }
 
         // Fail-loud emission error, named so a coordinator/log points straight at the offending construct.
@@ -412,7 +417,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (!string.IsNullOrEmpty(s.SpeedParam)) { ast.speedParameterActive = true; ast.speedParameter = s.SpeedParam; }
                     if (!string.IsNullOrEmpty(s.MotionTimeParam)) { ast.timeParameterActive = true; ast.timeParameter = s.MotionTimeParam; }
                     ast.mirror = s.Mirror;
-                    if (s.Motion != null) ast.motion = BuildMotion(s.Motion, s.Name + "_BlendTree");
+                    if (s.Motion != null) ast.motion = BuildMotion(s.Motion, s.Name + "_BlendTree", s.Name);
                     EmitBehaviours(s.Behaviours, t => ast.AddStateMachineBehaviour(t));
                     scope.States[s.Name] = ast;
                 }
@@ -544,7 +549,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ----- motions / blend trees -----
 
-            private Motion BuildMotion(MotionRef mr, string treeName)
+            // stateContext names the OWNING state (threaded down through blend-tree children too) so an
+            // unresolved-marker guid ref can be recorded against its state for the compile advisory.
+            private Motion BuildMotion(MotionRef mr, string treeName, string stateContext)
             {
                 if (mr == null) return null;
                 if (mr.Clip != null)
@@ -562,10 +569,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (mr.RefGuid != null)
                 {
                     var m = ResolveGuidMotion(mr.RefGuid);
-                    if (m == null) throw new EmitException(GuidRefUnresolved(mr.RefGuid));
+                    if (m == null)
+                    {
+                        // A ref flagged `unresolved: true` is a KNOWN dangling handle (e.g. an asset absent from
+                        // this project) — leave the motion slot null (a clean-empty state) and record it for the
+                        // compile advisory, preserving the verbatim GUID for the round-trip note. Only a BARE
+                        // broken ref (no marker) is a hard error.
+                        if (mr.RefGuid.Unresolved)
+                        {
+                            _result.UnresolvedRefs.Add((stateContext, mr.RefGuid.Guid));
+                            return null;
+                        }
+                        throw new EmitException(GuidRefUnresolved(mr.RefGuid));
+                    }
                     return m;
                 }
-                if (mr.Tree != null) return BuildTree(mr.Tree, treeName);
+                if (mr.Tree != null) return BuildTree(mr.Tree, treeName, stateContext);
                 throw new EmitException("motion ref sets none of clip/ref/tree");
             }
 
@@ -592,7 +611,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private static string GuidRefUnresolved(GuidRef g)
                 => $"motion ref guid unresolved: {g.Guid}" + (g.FileID != 0 ? $" fileID:{g.FileID}" : "");
 
-            private BlendTree BuildTree(BlendTreeSpec spec, string name)
+            private BlendTree BuildTree(BlendTreeSpec spec, string name, string stateContext)
             {
                 var bt = new BlendTree { name = name, hideFlags = HideFlags.HideInHierarchy };
                 bt.blendType = MapTreeKind(spec.Kind);
@@ -604,7 +623,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 for (int i = 0; i < spec.Children.Count; i++)
                 {
                     var child = spec.Children[i];
-                    var childMotion = BuildMotion(child.Motion, name + "_" + i);
+                    var childMotion = BuildMotion(child.Motion, name + "_" + i, stateContext);
                     switch (spec.Kind)
                     {
                         case TreeKind.OneD: bt.AddChild(childMotion, child.Threshold); break;

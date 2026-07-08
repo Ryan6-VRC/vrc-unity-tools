@@ -122,4 +122,33 @@ public class CompileControllerTests
         Assert.IsNotEmpty(guid1, "controller has a GUID after the first compile");
         Assert.AreEqual(guid1, guid2, "recompile reuses the controller asset (stable GUID)");
     }
+
+    // An `unresolved: true` motion ref must NOT fail the compile — it emits a null motion and the RunLog
+    // body carries an advisory naming the state + the verbatim GUID (round-trip note).
+    [Test]
+    public void Compile_With_Unresolved_Ref_Is_OK_And_Advises()
+    {
+        string src = TestRoot + "/Dangle_Fx.yaml";
+        File.WriteAllText(src,
+            "schema: 1\ncontroller: Dangle_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n" +
+            "      S: { motion: { ref: { guid: \"00000000000000000000000000000000\", unresolved: true } } }\n" +
+            "    default: S\n");
+
+        string outDir = TestRoot + "/out_unresolved";
+        string result = CompileController.Compile(src, outDir, whatIf: false);
+
+        StringAssert.Contains("=> OK", result);
+
+        const string marker = "| log=";
+        int i = result.IndexOf(marker, System.StringComparison.Ordinal);
+        Assert.Greater(i, -1, "result carries the RunLog path in-band");
+        string logPath = result.Substring(i + marker.Length).Trim();
+        Assert.IsTrue(File.Exists(logPath), "RunLog file exists at " + logPath);
+
+        string body = File.ReadAllText(logPath);
+        StringAssert.Contains("unresolved motion ref", body, "body carries the unresolved-ref advisory");
+        StringAssert.Contains("00000000000000000000000000000000", body, "advisory names the GUID");
+        StringAssert.Contains("`S`", body, "advisory names the state");
+    }
 }

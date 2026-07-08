@@ -131,13 +131,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ── 6. Compile-only advisories (into the RunLog body; never fail the compile) ────────────
             var frameLatency = FrameLatencyAdvisories(doc);
             var driverIsolation = DriverIsolationAdvisories(doc);
+            var unresolvedRefs = UnresolvedRefAdvisories(built);
 
             int states = doc.Layers.Sum(l => CountStates(l.Root));
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[CompileController] {0}: layers={1} states={2} params={3} => OK{4}",
                 name, doc.Layers.Count, states, doc.Parameters.Count, whatIf ? " (whatIf)" : "");
 
-            string body = BuildBody(doc, finalPath, lint, frameLatency, driverIsolation, whatIf);
+            string body = BuildBody(doc, finalPath, lint, frameLatency, driverIsolation, unresolvedRefs, whatIf);
 
             // ── 7/8. Finalize: whatIf sweeps the temp; a real compile saves the asset ────────────────
             if (whatIf) { if (tempFolder != null) AssetDatabase.DeleteAsset(tempFolder); }
@@ -300,9 +301,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
+        // ── Advisory: unresolved motion refs ───────────────────────────────────────────────────────────
+        // A motion ref flagged `unresolved: true` whose GUID did not resolve in this project — ControllerEmit
+        // left the state's motion slot null rather than fail the compile (a BARE broken ref stays fatal). The
+        // verbatim GUID is preserved here so the round-trip note survives the compile.
+        private static List<string> UnresolvedRefAdvisories(ControllerEmit.EmitResult built)
+        {
+            var lines = new List<string>();
+            if (built == null || built.UnresolvedRefs == null) return lines;
+            foreach (var (state, guid) in built.UnresolvedRefs)
+                lines.Add("state `" + (string.IsNullOrEmpty(state) ? "(unnamed)" : state)
+                    + "` has an unresolved motion ref (guid=" + guid
+                    + ") — emitted as a null motion; resolve the asset or drop the ref");
+            return lines;
+        }
+
         // ── RunLog body ──────────────────────────────────────────────────────────────────────────────
         private static string BuildBody(AnimDocument doc, string finalPath, LintResult lint,
-            List<string> frameLatency, List<string> driverIsolation, bool whatIf)
+            List<string> frameLatency, List<string> driverIsolation, List<string> unresolvedRefs, bool whatIf)
         {
             var sb = new StringBuilder();
             sb.Append("# CompileController: ").Append(doc.ControllerName).Append('\n');
@@ -329,6 +345,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("\n## Compile advisory: driver isolation (AAP)\n\n");
             if (driverIsolation.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in driverIsolation) sb.Append("- ").Append(l).Append('\n');
+
+            sb.Append("\n## Compile advisory: unresolved motion refs\n\n");
+            if (unresolvedRefs.Count == 0) sb.Append("_(none)_\n");
+            else foreach (var l in unresolvedRefs) sb.Append("- ").Append(l).Append('\n');
 
             return sb.ToString();
         }
