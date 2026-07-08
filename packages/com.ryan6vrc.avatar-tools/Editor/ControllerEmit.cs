@@ -22,13 +22,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// rejected): state layout is a fixed grid keyed by document order, names come straight from the
     /// document, so recompiling the same document produces the same graph and Git sees no churn.
     ///
-    /// PERSISTENCE BOUNDARY (Task 5 owns the real output dir / idempotence / atomic write): several
-    /// sub-asset APIs used here — <c>AnimatorState.AddStateMachineBehaviour</c>, embedding clips/trees
-    /// as controller sub-assets — require the controller to be a persisted asset, not an in-memory
-    /// object. So Build materialises the controller at a SCRATCH path under Assets/Agent/Scratch/emit/
-    /// and attaches everything there. The path logic is isolated in <see cref="ScratchPathFor"/> +
-    /// <see cref="EnsureFolder"/> so Task 5 can relocate it. The load-bearing guarantee is topology:
-    /// the returned controller, reloaded from disk, has the correct graph.
+    /// PERSISTENCE BOUNDARY: several sub-asset APIs used here — <c>AnimatorState.AddStateMachineBehaviour</c>,
+    /// embedding clips/trees as controller sub-assets — require the controller to be a persisted asset, not an
+    /// in-memory object. So Build materialises the controller at <c>&lt;outDir&gt;/&lt;name&gt;.controller</c>
+    /// and attaches everything there. The 2-arg overload defaults <c>outDir</c> to the scratch dir under
+    /// Assets/Agent/Scratch/emit/; CompileController (the write-substrate door) passes the real output dir or
+    /// a whatIf temp. Emission is GUID-STABLE + idempotent: an existing controller at the path is reset in
+    /// place, not deleted + recreated. The load-bearing guarantee is topology: the returned controller,
+    /// reloaded from disk, has the correct graph.
     /// </summary>
     public static class ControllerEmit
     {
@@ -53,13 +54,26 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public EmitException(string message) : base(message) { }
         }
 
+        // Back-compat door: emit to the scratch dir, hashing SourcePath for provenance (Task 4 tests + any
+        // caller that only wants a throwaway build). CompileController uses the 4-arg overload below.
         public static void Build(AnimDocument doc, out EmitResult result)
+            => Build(doc, ScratchRoot, null, out result);
+
+        /// <summary>Emit <paramref name="doc"/> into <paramref name="outDir"/> (an <c>Assets/…</c>-relative
+        /// folder). <paramref name="sourceText"/>, when non-null, is the exact source-file text — its BYTES
+        /// are hashed into the controller's provenance userData so a later compile can detect an out-of-band
+        /// edit (Task 5 threads it; null falls back to hashing <see cref="AnimDocument.SourcePath"/>).
+        /// IDEMPOTENT + GUID-STABLE: an existing controller at the target path is RESET IN PLACE (its
+        /// sub-assets stripped and rebuilt) rather than deleted + recreated, so its GUID — and any external
+        /// reference to it — survives a recompile.</summary>
+        public static void Build(AnimDocument doc, string outDir, string sourceText, out EmitResult result)
         {
             if (doc == null) throw new EmitException("Build: document is null");
             if (string.IsNullOrEmpty(doc.ControllerName))
                 throw new EmitException("Build: document has no controller name");
+            if (string.IsNullOrEmpty(outDir)) throw new EmitException("Build: outDir is empty");
 
-            var ctx = new BuildContext(doc);
+            var ctx = new BuildContext(doc, outDir, sourceText);
             result = ctx.Run();
         }
 
@@ -67,13 +81,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private sealed class BuildContext
         {
             private readonly AnimDocument _doc;
+            private readonly string _outDir;
+            private readonly string _sourceText;   // exact source bytes for provenance; null ⇒ hash SourcePath
             private readonly EmitResult _result = new EmitResult();
             private readonly HashSet<string> _paramNames;
             private AnimatorController _controller;
 
-            public BuildContext(AnimDocument doc)
+            public BuildContext(AnimDocument doc, string outDir, string sourceText)
             {
                 _doc = doc;
+                _outDir = outDir;
+                _sourceText = sourceText;
                 // A clip that writes a bare parameter name (aap or not) binds it as an Animator float curve
                 // — the mechanism VRChat uses to drive any Animator parameter from a clip (AAPs are just the
                 // float-smoother case). The gate is "is this a declared Animator parameter", not the aap flag.
@@ -82,15 +100,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             public EmitResult Run()
             {
-                string path = ScratchPathFor(_doc.ControllerName);
-                EnsureFolder(ScratchRoot);
-                if (AssetDatabase.LoadMainAssetAtPath(path) != null)
-                    AssetDatabase.DeleteAsset(path); // idempotent at the scratch path (see class note)
+                string path = PathFor(_outDir, _doc.ControllerName);
+                EnsureFolder(_outDir);
 
-                // A bare `new AnimatorController()` persists with ZERO layers — no auto "Base Layer" to
-                // orphan (CreateAnimatorControllerAtPath would add one). We own every layer below.
-                _controller = new AnimatorController { name = _doc.ControllerName };
-                AssetDatabase.CreateAsset(_controller, path);
+                // GUID-STABLE idempotence: reuse the controller ASSET if one already lives at the path (its
+                // GUID + any external reference survives), stripping its sub-assets so the rebuilt graph is a
+                // pure function of the document. Only when nothing (or a non-controller) sits there do we
+                // create fresh. A bare `new AnimatorController()` persists with ZERO layers — no auto "Base
+                // Layer" to orphan (CreateAnimatorControllerAtPath would add one). We own every layer below.
+                _controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
+                if (_controller != null)
+                {
+                    StripSubAssets(path);
+                    _controller.name = _doc.ControllerName;
+                }
+                else
+                {
+                    if (AssetDatabase.LoadMainAssetAtPath(path) != null)
+                        AssetDatabase.DeleteAsset(path); // a non-controller squatting the path
+                    _controller = new AnimatorController { name = _doc.ControllerName };
+                    AssetDatabase.CreateAsset(_controller, path);
+                }
 
                 EmitParameters();
                 EmitClips();          // clips first: states/trees reference them by name
@@ -106,6 +136,26 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // remap instances). This makes the returned graph exactly what round-trip verification sees.
                 ReloadFromDisk(path);
                 return _result;
+            }
+
+            // Reset an existing controller for in-place rebuild: detach its layers/parameters, then destroy
+            // every animator sub-asset (+ embedded clips/trees) at the path. The top-level controller object
+            // — and its GUID — is kept. Clearing the references BEFORE destroying avoids destroying an object
+            // the controller still points at.
+            private void StripSubAssets(string path)
+            {
+                _controller.layers = new AnimatorControllerLayer[0];
+                _controller.parameters = new AnimatorControllerParameter[0];
+                foreach (var o in AssetDatabase.LoadAllAssetsAtPath(path))
+                {
+                    if (o == null || o == _controller) continue;
+                    if (o is AnimatorStateMachine || o is AnimatorState || o is BlendTree
+                        || o is StateMachineBehaviour || o is AnimatorTransitionBase || o is AnimationClip)
+                    {
+                        AssetDatabase.RemoveObjectFromAsset(o);
+                        UnityEngine.Object.DestroyImmediate(o);
+                    }
+                }
             }
 
             // ----- parameters -----
@@ -529,10 +579,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 var importer = AssetImporter.GetAtPath(path);
                 if (importer == null) return;
-                // Task 5 reads userData for out-of-band-edit detection. We only have SourcePath here (not the
-                // source TEXT), so we hash that; Task 5, which owns the file, can hash the bytes.
+                // CompileController reads this userData to WARN before clobbering an out-of-band edit. Hash the
+                // exact SOURCE BYTES when they were threaded through (the honest signal); fall back to hashing
+                // SourcePath for the scratch/2-arg door that never sees the text.
                 string src = _doc.SourcePath ?? "";
-                importer.userData = "compiled-from:" + src + ";srchash:" + ShortHash(src);
+                string hash = SourceHash(_sourceText ?? src);
+                importer.userData = "compiled-from:" + src + ";srchash:" + hash;
                 importer.SaveAndReimport();
             }
 
@@ -550,9 +602,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // ----- scratch-path logic (isolated so Task 5 can relocate output) -----
+        // ----- output-path logic (CompileController passes the real outDir; default is the scratch dir) -----
 
-        private static string ScratchPathFor(string controllerName) => ScratchRoot + "/" + controllerName + ".controller";
+        private static string PathFor(string outDir, string controllerName) => outDir + "/" + controllerName + ".controller";
 
         private static void EnsureFolder(string assetFolder)
         {
@@ -653,7 +705,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             throw new EmitException($"{ctx}: expected a mapping, got {(v == null ? "null" : v.GetType().Name)}");
         }
 
-        private static string ShortHash(string s)
+        /// <summary>The provenance source hash — first 8 bytes of the MD5 of <paramref name="s"/>, hex.
+        /// CompileController computes this over the current source text and compares it to the <c>srchash:</c>
+        /// stamped in a controller's userData to detect drift before overwriting.</summary>
+        public static string SourceHash(string s)
         {
             using (var md5 = MD5.Create())
             {

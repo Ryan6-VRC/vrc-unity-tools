@@ -230,7 +230,8 @@ layers:
 
         ControllerEmit.Build(doc, out var r1);
         var sm1 = RootSm(r1);
-        // Snapshot BEFORE the second build (it deletes+recreates the asset at the same scratch path).
+        // Snapshot BEFORE the second build (it resets the asset in place at the same scratch path,
+        // destroying r1's sub-asset objects while keeping the top-level controller + its GUID).
         var snap1 = sm1.states.ToDictionary(cs => cs.state.name, cs => cs.position);
 
         ControllerEmit.Build(doc, out var r2);
