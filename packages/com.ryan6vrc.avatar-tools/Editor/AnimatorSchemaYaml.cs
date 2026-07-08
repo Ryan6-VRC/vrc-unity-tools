@@ -419,7 +419,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static SchemaException Unsupported(string name, string sym, int lineNo)
             => new SchemaException($"unsupported YAML {name} '{sym}' at line {lineNo}");
 
-        // Scalar type inference (unquoted, non-empty, already checked for forbidden leaders).
+        // Scalar type inference (unquoted, non-empty, already checked for forbidden leaders). This is the READ
+        // half of the round-trip contract: AnimatorSchemaEmit.InfersNonString mirrors these rules to decide
+        // which string scalars it must QUOTE (a token that would infer here to bool/number/null), and
+        // AnimatorSchemaEmit.NumFromFloat mirrors ToNumber's double↔float handling. A change here must move in
+        // lockstep with those — NeedsQuote_Agrees_With_Parser_InferScalar_Across_Token_Battery guards the drift.
         private static object InferScalar(string t)
         {
             if (t == "~") return null;

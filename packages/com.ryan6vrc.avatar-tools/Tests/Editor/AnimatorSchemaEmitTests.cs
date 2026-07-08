@@ -299,4 +299,117 @@ public class AnimatorSchemaEmitTests
         // Serialize is idempotent through the parse of a decoded document.
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent through a parse");
     }
+
+    // ---- 2D blend tree: paramY + children carrying x:/y: (GoLoco locomotion is 2D) ----------------
+
+    [Test]
+    public void Serialize_Roundtrips_2D_Blend_Tree()
+    {
+        const string src =
+            "schema: 1\ncontroller: Tree2D_Fx\nbasis: avatar-root\n" +
+            "parameters:\n  VelX: float\n  VelY: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion:\n          tree: simpleDirectional2d\n          param: VelX\n          paramY: VelY\n          children:\n" +
+            "            - { clip: a, x: -1, y: 0 }\n            - { clip: b, x: 1, y: 0.5 }\n    default: S\n" +
+            "clips:\n  a: { seconds: 0.1 }\n  b: { seconds: 0.1 }\n";
+        var doc = AnimatorSchemaYaml.Parse(src, "test");
+        string yaml = AnimatorSchemaEmit.Serialize(doc);
+        var back = AnimatorSchemaYaml.Parse(yaml, "roundtrip");
+
+        var tree = back.Layers[0].Root.States[0].Motion.Tree;
+        Assert.AreEqual(TreeKind.SimpleDirectional2D, tree.Kind);
+        Assert.AreEqual("VelX", tree.Param);
+        Assert.AreEqual("VelY", tree.ParamY);
+        Assert.AreEqual(2, tree.Children.Count);
+        Assert.AreEqual(-1f, tree.Children[0].PosX, 1e-6f);
+        Assert.AreEqual(0f, tree.Children[0].PosY, 1e-6f);
+        Assert.AreEqual(1f, tree.Children[1].PosX, 1e-6f);
+        Assert.AreEqual(0.5f, tree.Children[1].PosY, 1e-6f);
+
+        Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
+    }
+
+    // ---- keyframed clip: the block-form `curves:` path (GoLoco has keyframed clips) ----------------
+
+    [Test]
+    public void Serialize_Roundtrips_Keyframed_Curves_Clip()
+    {
+        const string src =
+            "schema: 1\ncontroller: Curves_Fx\nbasis: avatar-root\n" +
+            "clips:\n  fade:\n    length: 0.5\n    curves: { \"Body.blendShape.Smile\": [ [0, 0], [0.5, 100] ] }\n";
+        var doc = AnimatorSchemaYaml.Parse(src, "test");
+        string yaml = AnimatorSchemaEmit.Serialize(doc);
+        var back = AnimatorSchemaYaml.Parse(yaml, "roundtrip");
+
+        var fade = back.Clips.First(c => c.Name == "fade");
+        Assert.AreEqual(0.5f, fade.Seconds.Value, 1e-6f);        // `length:` normalizes to `seconds:`
+        Assert.AreEqual(1, fade.Curves.Count);
+        Assert.AreEqual("Body.blendShape.Smile", fade.Curves[0].Binding);
+        Assert.AreEqual(2, fade.Curves[0].Keys.Count);
+        Assert.AreEqual(0f, fade.Curves[0].Keys[0].Time, 1e-6f);
+        Assert.AreEqual(0f, fade.Curves[0].Keys[0].Value, 1e-6f);
+        Assert.AreEqual(0.5f, fade.Curves[0].Keys[1].Time, 1e-6f);
+        Assert.AreEqual(100f, fade.Curves[0].Keys[1].Value, 1e-6f);
+
+        Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
+    }
+
+    // ---- RefPath motion: the bare project-path string branch (only RefGuid was covered) -----------
+
+    [Test]
+    public void Serialize_Roundtrips_RefPath_Motion()
+    {
+        const string src =
+            "schema: 1\ncontroller: Ref_Fx\nbasis: avatar-root\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: { ref: \"Assets/Anims/Walk.anim\" }\n    default: S\n";
+        var doc = AnimatorSchemaYaml.Parse(src, "test");
+        string yaml = AnimatorSchemaEmit.Serialize(doc);
+        var back = AnimatorSchemaYaml.Parse(yaml, "roundtrip");
+
+        var mr = back.Layers[0].Root.States[0].Motion;
+        Assert.AreEqual("Assets/Anims/Walk.anim", mr.RefPath);
+        Assert.IsNull(mr.RefGuid);
+        Assert.IsNull(mr.Clip);
+        Assert.IsNull(mr.Tree);
+
+        Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
+    }
+
+    // ---- InferScalar <-> InfersNonString divergence guard ----------------------------------------
+    // The serializer's quote decision (NeedsQuote/InfersNonString) must agree with what the parser's
+    // InferScalar actually returns for a scalar — quote iff the token would read back as a non-string.
+    // Both are private, so this observes them through the public surface: InferScalar's result via the
+    // runtime type a reserved (`_`-prefixed) key binds to, and the quote decision via whether Serialize
+    // wraps the token when it sits in a scalar value position (the controller name). Catches silent drift
+    // a comment can't (the Task-5 token-map failure mode).
+    [Test]
+    public void NeedsQuote_Agrees_With_Parser_InferScalar_Across_Token_Battery()
+    {
+        string[] battery =
+        {
+            "on", "off", "true", "false", "3", "-2", "3.0", "1e5", "~",
+            "00000000000000000000000000000000",              // all-hex GUID that reads as a number
+            "deadbeefcafe0123456789abcdef0000",              // hex GUID with letters -> a string
+            "Idle", "Sub/A",                                  // plain identifiers / slash path
+        };
+        var disagreements = new List<string>();
+        foreach (var tok in battery)
+        {
+            // A) what the parser's InferScalar does: a `_`-prefixed top-level key binds its value verbatim
+            // into ReservedNotes with no type-check, so the boxed runtime type IS the inference result.
+            var probe = AnimatorSchemaYaml.Parse(
+                "schema: 1\ncontroller: C\nbasis: avatar-root\n_p: " + tok + "\n", "probe");
+            bool infersNonString = !(probe.ReservedNotes["_p"] is string);
+
+            // B) what the serializer decides: the token in a scalar value position (controller name).
+            var doc = new AnimDocument { Schema = 1, Basis = BindingBasis.AvatarRoot, ControllerName = tok };
+            string y = AnimatorSchemaEmit.Serialize(doc);
+            bool quoted = y.Contains("controller: \"");
+
+            if (quoted != infersNonString)
+                disagreements.Add($"{tok}: infersNonString={infersNonString} quoted={quoted}");
+        }
+        CollectionAssert.IsEmpty(disagreements,
+            "NeedsQuote must quote exactly the tokens the parser would infer as non-string: "
+            + string.Join("; ", disagreements));
+    }
 }

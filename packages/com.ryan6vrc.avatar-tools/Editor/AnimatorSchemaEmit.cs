@@ -471,6 +471,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static string NumFromDouble(double d)
         {
+            // Intentional lossy clamp: NaN/Infinity have no token in the accepted subset and would emit
+            // unparseable text. A decompiled graph can't author them (Unity stores finite floats), so 0 keeps
+            // output parseable rather than silently corrupting it — not an accidental data change.
             if (double.IsNaN(d) || double.IsInfinity(d)) return "0";
             if (d == Math.Floor(d) && Math.Abs(d) < 1e15) return ((long)d).ToString(Inv);
             return d.ToString("R", Inv);
@@ -481,7 +484,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // the guarantee idempotence-through-a-parse rests on.
         private static string NumFromFloat(float f)
         {
-            if (float.IsNaN(f) || float.IsInfinity(f)) return "0";
+            if (float.IsNaN(f) || float.IsInfinity(f)) return "0"; // intentional lossy clamp (see NumFromDouble)
             if (f == Math.Floor(f) && Math.Abs(f) < 1e15f) return ((long)f).ToString(Inv);
             return NumFromDouble(double.Parse(f.ToString("R", Inv), Inv));
         }
