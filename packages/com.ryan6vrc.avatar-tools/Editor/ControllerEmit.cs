@@ -342,50 +342,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     };
                     AssetDatabase.AddObjectToAsset(sm, _controller);
 
-                    var byName = new Dictionary<string, AnimatorState>();
-                    var states = layer.Root.States;
-                    for (int i = 0; i < states.Count; i++)
-                    {
-                        var s = states[i];
-                        var pos = new Vector3(300f, 60f * i, 0f); // fixed grid keyed by document order
-                        var ast = sm.AddState(s.Name, pos);
-                        ast.writeDefaultValues = s.WriteDefaults ?? layer.WriteDefaults ?? _doc.Defaults.WriteDefaults;
-                        ast.speed = s.Speed;
-                        if (!string.IsNullOrEmpty(s.SpeedParam)) { ast.speedParameterActive = true; ast.speedParameter = s.SpeedParam; }
-                        if (!string.IsNullOrEmpty(s.MotionTimeParam)) { ast.timeParameterActive = true; ast.timeParameter = s.MotionTimeParam; }
-                        ast.mirror = s.Mirror;
-                        if (s.Motion != null) ast.motion = BuildMotion(s.Motion, s.Name + "_BlendTree");
-                        EmitBehaviours(s.Behaviours, t => ast.AddStateMachineBehaviour(t));
-                        byName[s.Name] = ast;
-                    }
+                    // MERGED layer-global indices: target resolution for ANY transition (state→state,
+                    // state→exit, entry, any, cross-sub-machine) must see EVERY state and sub-machine in the
+                    // whole layer, not just the current machine's — a cross-SM or entry-into-submachine target
+                    // lives elsewhere in the nesting. A per-machine map would throw a false dead-target.
+                    var stateIndex = new Dictionary<string, AnimatorState>();
+                    var smIndex = new Dictionary<string, AnimatorStateMachine>();
 
-                    if (!string.IsNullOrEmpty(layer.Root.DefaultState))
-                    {
-                        if (byName.TryGetValue(layer.Root.DefaultState, out var def)) sm.defaultState = def;
-                        else throw new EmitException($"layer '{layer.Name}': default state '{layer.Root.DefaultState}' is not a state in this machine");
-                    }
-
-                    // State transition ladders (ordered per source state = first-match order).
-                    for (int i = 0; i < states.Count; i++)
-                        foreach (var t in states[i].Transitions)
-                            ConfigureStateTransition(MakeStateTransition(byName[states[i].Name], t, byName), t);
-
-                    // AnyState ladder.
-                    foreach (var t in layer.Root.AnyLadder)
-                    {
-                        var atr = sm.AddAnyStateTransition(ResolveTargetState(t, byName));
-                        atr.canTransitionToSelf = t.CanTransitionToSelf;
-                        ConfigureStateTransition(atr, t);
-                    }
-
-                    // Entry ladder (no duration / exit-time — conditions only).
-                    foreach (var t in layer.Root.EntryLadder)
-                    {
-                        var etr = sm.AddEntryTransition(ResolveTargetState(t, byName));
-                        foreach (var c in t.When) etr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param);
-                    }
-
-                    EmitBehaviours(layer.Root.Behaviours, t => sm.AddStateMachineBehaviour(t));
+                    // Pass 1: emit states + sub-machines (arbitrary depth), populating both indices + behaviours.
+                    EmitMachine(layer, layer.Root, sm, stateIndex, smIndex);
+                    // Pass 2: wire defaults + all transitions against the now-complete merged indices.
+                    WireMachine(layer, layer.Root, sm, stateIndex, smIndex);
 
                     var acLayer = new AnimatorControllerLayer
                     {
@@ -414,23 +381,114 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _controller.layers = layers.ToArray();
             }
 
-            private AnimatorState ResolveTargetState(Transition t, Dictionary<string, AnimatorState> byName)
+            // Pass 1 — emit this machine's states + child sub-machines (recursing), registering each into the
+            // layer-global indices. NO transitions here: a transition may target something in a sibling machine
+            // that pass 1 hasn't reached yet, so all wiring waits for pass 2 (WireMachine) once both indices
+            // are complete.
+            private void EmitMachine(Layer layer, StateMachine model, AnimatorStateMachine target,
+                Dictionary<string, AnimatorState> stateIndex, Dictionary<string, AnimatorStateMachine> smIndex)
             {
-                if (t.ToExit || string.IsNullOrEmpty(t.To))
-                    throw new EmitException("entry/any ladder transition has no target state (Exit is not a valid target there)");
-                if (!byName.TryGetValue(t.To, out var to))
-                    throw new EmitException($"transition target state '{t.To}' not found in layer");
-                return to;
+                var states = model.States;
+                for (int i = 0; i < states.Count; i++)
+                {
+                    var s = states[i];
+                    var pos = new Vector3(300f, 60f * i, 0f); // fixed grid keyed by document order
+                    var ast = target.AddState(s.Name, pos);
+                    ast.writeDefaultValues = s.WriteDefaults ?? layer.WriteDefaults ?? _doc.Defaults.WriteDefaults;
+                    ast.speed = s.Speed;
+                    if (!string.IsNullOrEmpty(s.SpeedParam)) { ast.speedParameterActive = true; ast.speedParameter = s.SpeedParam; }
+                    if (!string.IsNullOrEmpty(s.MotionTimeParam)) { ast.timeParameterActive = true; ast.timeParameter = s.MotionTimeParam; }
+                    ast.mirror = s.Mirror;
+                    if (s.Motion != null) ast.motion = BuildMotion(s.Motion, s.Name + "_BlendTree");
+                    EmitBehaviours(s.Behaviours, t => ast.AddStateMachineBehaviour(t));
+                    stateIndex[s.Name] = ast;
+                }
+
+                var machines = model.Machines;
+                for (int i = 0; i < machines.Count; i++)
+                {
+                    var sub = machines[i];
+                    var pos = new Vector3(600f, 60f * i, 0f); // sub-machines to the right of the state grid
+                    var childSm = target.AddStateMachine(sub.Name, pos);
+                    childSm.hideFlags = HideFlags.HideInHierarchy;
+                    smIndex[sub.Name] = childSm;
+                    EmitMachine(layer, sub.Machine, childSm, stateIndex, smIndex);
+                }
+
+                EmitBehaviours(model.Behaviours, t => target.AddStateMachineBehaviour(t));
             }
 
-            private AnimatorStateTransition MakeStateTransition(AnimatorState from, Transition t, Dictionary<string, AnimatorState> byName)
+            // Pass 2 — wire default + transitions for this machine, resolving every target name against the
+            // MERGED layer indices, then recurse into child sub-machines. A target name may resolve to a STATE
+            // or a SUB-MACHINE anywhere in the layer's nesting.
+            private void WireMachine(Layer layer, StateMachine model, AnimatorStateMachine target,
+                Dictionary<string, AnimatorState> stateIndex, Dictionary<string, AnimatorStateMachine> smIndex)
+            {
+                // default naming a STATE → defaultState now; naming a SUB-MACHINE → an unconditional entry
+                // transition added AFTER the entry ladder (below) so it stays the last, catch-all entry.
+                bool defaultIsState = false;
+                if (!string.IsNullOrEmpty(model.DefaultState))
+                {
+                    if (stateIndex.TryGetValue(model.DefaultState, out var def)) { target.defaultState = def; defaultIsState = true; }
+                    else if (!smIndex.ContainsKey(model.DefaultState))
+                        throw new EmitException($"machine '{target.name}': default '{model.DefaultState}' is neither a state nor a sub-machine in this layer");
+                }
+
+                // State transition ladders (ordered per source state = first-match order).
+                foreach (var s in model.States)
+                    foreach (var t in s.Transitions)
+                        ConfigureStateTransition(MakeStateTransition(stateIndex[s.Name], t, stateIndex, smIndex), t);
+
+                // AnyState ladder.
+                foreach (var t in model.AnyLadder)
+                {
+                    var atr = ResolveTarget(t, smIndex, stateIndex, out var toState, out var toSm)
+                        ? target.AddAnyStateTransition(toState)
+                        : target.AddAnyStateTransition(toSm);
+                    atr.canTransitionToSelf = t.CanTransitionToSelf;
+                    ConfigureStateTransition(atr, t);
+                }
+
+                // Entry ladder (no duration / exit-time — conditions only).
+                foreach (var t in model.EntryLadder)
+                {
+                    ResolveTarget(t, smIndex, stateIndex, out var toState, out var toSm);
+                    var etr = toState != null ? target.AddEntryTransition(toState) : target.AddEntryTransition(toSm);
+                    foreach (var c in t.When) etr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param);
+                }
+
+                // default → sub-machine: unconditional catch-all entry, added last so any conditional entry
+                // ladder above wins first (first-match order).
+                if (!defaultIsState && !string.IsNullOrEmpty(model.DefaultState))
+                    target.AddEntryTransition(smIndex[model.DefaultState]);
+
+                var machines = model.Machines;
+                for (int i = 0; i < machines.Count; i++)
+                    WireMachine(layer, machines[i].Machine, smIndex[machines[i].Name], stateIndex, smIndex);
+            }
+
+            // Resolve an entry/any target name to a state (preferred) or sub-machine. Returns true if it landed
+            // on a state (toState set, toSm null); false on a sub-machine (toSm set, toState null). Throws on a
+            // missing/Exit target (Exit is not a valid entry/any destination).
+            private bool ResolveTarget(Transition t, Dictionary<string, AnimatorStateMachine> smIndex,
+                Dictionary<string, AnimatorState> stateIndex, out AnimatorState toState, out AnimatorStateMachine toSm)
+            {
+                if (t.ToExit || string.IsNullOrEmpty(t.To))
+                    throw new EmitException("entry/any ladder transition has no target (Exit is not a valid target there)");
+                if (stateIndex.TryGetValue(t.To, out toState)) { toSm = null; return true; }
+                if (smIndex.TryGetValue(t.To, out toSm)) { toState = null; return false; }
+                throw new EmitException($"transition target '{t.To}' not found in layer (no state or sub-machine by that name)");
+            }
+
+            private AnimatorStateTransition MakeStateTransition(AnimatorState from, Transition t,
+                Dictionary<string, AnimatorState> stateIndex, Dictionary<string, AnimatorStateMachine> smIndex)
             {
                 if (t.ToExit) return from.AddExitTransition();
                 if (string.IsNullOrEmpty(t.To))
                     throw new EmitException($"transition from '{from.name}' has neither a target nor ToExit");
-                if (!byName.TryGetValue(t.To, out var to))
-                    throw new EmitException($"transition target state '{t.To}' not found in layer");
-                return from.AddTransition(to);
+                if (stateIndex.TryGetValue(t.To, out var to)) return from.AddTransition(to);
+                if (smIndex.TryGetValue(t.To, out var toSm)) return from.AddTransition(toSm);
+                throw new EmitException($"transition target '{t.To}' not found in layer (no state or sub-machine by that name)");
             }
 
             private void ConfigureStateTransition(AnimatorStateTransition tr, Transition t)

@@ -293,6 +293,26 @@ layers:
         Assert.IsTrue(r.Trees.Count >= 2, "parent + nested trees are tracked");
     }
 
+    // ---- Nested sub-machines ---------------------------------------------------------------------
+
+    [Test]
+    public void Emit_Nested_SubMachine_Produces_Child_StateMachine()
+    {
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Nested_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    states:\n      Idle: { motion: ~ }\n" +
+            "    machines:\n      Sub:\n        states:\n          A: { motion: ~ }\n        default: A\n" +
+            "    entry:\n      - { to: Sub, when: [ P is true ] }\n" +
+            "    default: Idle\n", "test");
+        ControllerEmit.Build(doc, out var r);
+        var sm = r.Controller.layers[0].stateMachine;
+        Assert.AreEqual(1, sm.stateMachines.Length, "one child state machine emitted");
+        Assert.AreEqual("Sub", sm.stateMachines[0].stateMachine.name);
+        Assert.IsTrue(System.Array.Exists(sm.stateMachines[0].stateMachine.states, s => s.state.name == "A"));
+    }
+
     // ---- Determinism -----------------------------------------------------------------------------
 
     [Test]
