@@ -216,43 +216,38 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // ----- Rule 3b: deadTransition — a state transition that provably can never fire ------------
-        // Two precise shapes (conservative by design — anything outside these two is left alone):
-        //   (a) ERROR — an outgoing transition with NO conditions AND hasExitTime==false that is NOT a
-        //       to-Exit transition. Unity needs a condition or an exit time to ever activate a state→state
-        //       transition, so this one is inert and silently stalls the machine (the real bug this catches).
-        //   (b) ADVISORY — a transition whose SOURCE STATE has no motion but which relies on hasExitTime.
-        //       A motionless state's normalizedTime never advances, so the exit-time gate can't be met (the
-        //       debounce/codec fixtures add a carrier clip precisely to avoid this). Left ADVISORY, not error,
-        //       because this runs at error-tier on EVERY controller AnimatorLint sees and a WD/loop-state
-        //       nuance could in principle let some motionless state advance — promote to error only once that
-        //       is ruled out. to-Exit transitions are excluded from BOTH (they fire by their own rules).
+        // ONE precise shape (conservative by design — anything outside it is left alone): an outgoing
+        // state→state transition with NO conditions AND hasExitTime==false that is NOT a to-Exit transition.
+        // Unity needs a condition or an exit time to ever activate such a transition, so it is inert and
+        // silently stalls the machine. Surveyed across 144 real controllers (Plum-Remy corpus): ZERO hits,
+        // so error-tier carries no false-positive risk — the pattern simply does not occur in working avatars.
+        //
+        // NOT flagged: an exit-time transition from a MOTIONLESS (motion==null) state. An earlier draft
+        // flagged these on the theory that a motionless state's normalizedTime never advances so the exit
+        // gate can't be met — that theory is FALSE. An empty state has a default 1s length and its clock
+        // advances in real time; the transition fires normally. Proven two ways: manual Animator.Update on an
+        // empty state transitions on schedule, and shipped VRCFury Action-layer timer states (BlendOut→Restore
+        // Tracking, Idle→Refresh) rely on exactly this idiom on real avatars. Flagging it produced 16 false
+        // positives in the same 144-controller survey (9 of them also had conditions that fire the transition).
+        // Do not re-add that case. to-Exit transitions are excluded (they fire by their own rules).
         private static void RuleDeadTransition(List<StateCtx> states, LintResult rep)
         {
             foreach (var s in states)
             {
                 var st = s.State;
                 if (st == null) continue;
-                bool motionless = st.motion == null;
                 foreach (var t in st.transitions)
                 {
                     if (t == null || t.isExit) continue;
-                    string handle = "state '" + st.name + "' -> '" + TransitionDest(t) + "'";
                     bool noConds = t.conditions == null || t.conditions.Length == 0;
                     if (noConds && !t.hasExitTime)
                     {
                         rep.DeadTransition++;
                         rep.Errors.Add(new LintOffender
                         {
-                            Kind = "deadTransition", Where = handle,
+                            Kind = "deadTransition",
+                            Where = "state '" + st.name + "' -> '" + TransitionDest(t) + "'",
                             Detail = "no conditions and no exit time — never fires"
-                        });
-                    }
-                    else if (t.hasExitTime && motionless)
-                    {
-                        rep.Advisories.Add(new LintOffender
-                        {
-                            Kind = "deadTransition (motionless exit-time)", Where = handle,
-                            Detail = "exit-time transition from a motionless state — never fires"
                         });
                     }
                 }

@@ -78,12 +78,16 @@ public class ControllerRulesTests
     }
 
     [Test]
-    public void Run_Flags_ExitTime_From_Motionless_State_As_Advisory_Not_Error()
+    public void Run_Does_Not_Flag_ExitTime_From_Motionless_State()
     {
+        // A motionless state with an exit-time transition is a VALID timer idiom, not a dead transition:
+        // an empty state has a default 1s length and its normalizedTime advances in real time, so the
+        // transition fires on schedule (proven by manual Animator.Update; shipped VRCFury Action-layer timer
+        // states rely on it). The rule must leave it alone — neither error nor advisory.
         _controller = new AnimatorController();
         _controller.AddLayer("Base");
         var sm = _controller.layers[0].stateMachine;
-        var a = sm.AddState("A");   // no motion assigned → motionless: its normalizedTime never advances
+        var a = sm.AddState("A");   // no motion assigned → motionless, but exit-time still advances
         var b = sm.AddState("B");
 
         var tr = a.AddTransition(b);
@@ -92,8 +96,8 @@ public class ControllerRulesTests
 
         var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: true, pathRewrite: null);
 
-        Assert.AreEqual(0, r.DeadTransition, "case (b) is advisory-tier — it must NOT bump the error counter / flip the verdict");
-        Assert.IsTrue(r.Advisories.Any(o => o.Kind.StartsWith("deadTransition")),
-            "the motionless exit-time transition surfaces as an advisory");
+        Assert.AreEqual(0, r.DeadTransition, "a motionless exit-time transition fires normally — not a dead transition");
+        Assert.IsFalse(r.Advisories.Any(o => o.Kind.StartsWith("deadTransition")),
+            "the motionless exit-time timer idiom must not be flagged at all");
     }
 }
