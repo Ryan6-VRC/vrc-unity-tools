@@ -145,6 +145,35 @@ parameters:
     }
 
     [Test]
+    public void Parse_Binds_SubMachine_And_Ladders()
+    {
+        const string doc =
+            "schema: 1\ncontroller: Nested_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n" +
+            "  - name: L\n" +
+            "    states:\n      Idle: { motion: ~ }\n" +
+            "    machines:\n" +
+            "      Sub:\n" +
+            "        states:\n          A: { motion: ~ }\n" +
+            "        default: A\n" +
+            "    entry:\n" +
+            "      - { to: Sub, when: [ P is true ] }\n" +
+            "    any:\n" +
+            "      - { to: Idle, when: [ P is false ], canTransitionToSelf: false }\n" +
+            "    default: Idle\n";
+        var d = AnimatorSchemaYaml.Parse(doc, "test");
+        var root = d.Layers[0].Root;
+        Assert.AreEqual(1, root.Machines.Count);
+        Assert.AreEqual("Sub", root.Machines[0].Name);
+        Assert.AreEqual("A", root.Machines[0].Machine.DefaultState);
+        Assert.AreEqual(1, root.EntryLadder.Count);
+        Assert.AreEqual("Sub", root.EntryLadder[0].To);
+        Assert.AreEqual(1, root.AnyLadder.Count);
+        Assert.IsFalse(root.AnyLadder[0].CanTransitionToSelf);
+    }
+
+    [Test]
     public void Duplicate_State_Key_Throws()
     {
         const string doc = @"schema: 1

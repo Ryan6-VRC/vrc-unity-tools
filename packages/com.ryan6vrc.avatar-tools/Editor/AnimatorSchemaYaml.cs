@@ -630,14 +630,57 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case "mask": layer.Mask = ToStr(kv.Value, "layer.mask"); break;
                         case "blend": layer.Blend = ParseBlend(ToStr(kv.Value, "layer.blend")); break;
                         case "writeDefaults": layer.WriteDefaults = ToBool(kv.Value, "layer.writeDefaults"); break;
-                        case "states": BindStates(layer.Root, ToMap(kv.Value, "layer.states")); break;
-                        case "default": layer.Root.DefaultState = ToStr(kv.Value, "layer.default"); break;
-                        case "behaviours": BindBehaviours(layer.Root.Behaviours, ToList(kv.Value, "layer.behaviours")); break;
-                        default: throw new SchemaException($"unknown layer field '{kv.Key}'");
+                        // Machine-body keys (states/machines/entry/any/default/behaviours) bind into the
+                        // layer's Root machine — the same surface a nested sub-machine carries.
+                        default:
+                            if (!BindMachineKey(layer.Root, kv.Key, kv.Value, "layer"))
+                                throw new SchemaException($"unknown layer field '{kv.Key}'");
+                            break;
                     }
                 }
                 doc.Layers.Add(layer);
             }
+        }
+
+        // Binds one machine-body key shared by a layer's Root machine and every nested sub-machine.
+        // Returns false (without consuming) if the key isn't a machine-body key, so the layer caller can
+        // treat it as an unknown-layer-field error and the sub-machine caller as an unknown-machine-field.
+        private static bool BindMachineKey(StateMachine sm, string key, object value, string ctx)
+        {
+            switch (key)
+            {
+                case "states": BindStates(sm, ToMap(value, $"{ctx}.states")); return true;
+                case "machines": BindMachines(sm, ToMap(value, $"{ctx}.machines")); return true;
+                case "entry": BindLadder(sm.EntryLadder, ToList(value, $"{ctx}.entry"), anyLadder: false); return true;
+                case "any": BindLadder(sm.AnyLadder, ToList(value, $"{ctx}.any"), anyLadder: true); return true;
+                case "default": sm.DefaultState = ToStr(value, $"{ctx}.default"); return true;
+                case "behaviours": BindBehaviours(sm.Behaviours, ToList(value, $"{ctx}.behaviours")); return true;
+                default: return false;
+            }
+        }
+
+        // A sub-machine body is a pure machine body (no layer-level keys) that recurses through the same
+        // key binder — nested sub-machines fall out for free.
+        private static void BindMachines(StateMachine parent, Dictionary<string, object> map)
+        {
+            // Duplicate sub-machine names are already refused by stage-1's per-mapping guard (line-numbered).
+            foreach (var kv in map)
+            {
+                string name = kv.Key;
+                var body = ToMap(kv.Value, $"machine '{name}'");
+                var sub = new SubMachine { Name = name };
+                foreach (var bk in body)
+                    if (!BindMachineKey(sub.Machine, bk.Key, bk.Value, $"machine '{name}'"))
+                        throw new SchemaException($"machine '{name}': unknown field '{bk.Key}'");
+                parent.Machines.Add(sub);
+            }
+        }
+
+        // Entry / AnyState ladders are ordered transition lists; only the AnyState ladder may carry
+        // canTransitionToSelf (meaningless on entry, so refused there — fail loud).
+        private static void BindLadder(List<Transition> into, List<object> list, bool anyLadder)
+        {
+            BindTransitions(into, list, allowSelf: anyLadder);
         }
 
         private static LayerBlend ParseBlend(string v)
@@ -695,7 +738,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        private static void BindTransitions(List<Transition> into, List<object> list)
+        private static void BindTransitions(List<Transition> into, List<object> list, bool allowSelf = true)
         {
             foreach (var item in list)
             {
@@ -716,7 +759,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case "fixedDuration": t.FixedDuration = ToBool(kv.Value, "transition.fixedDuration"); break;
                         case "interruption": t.Interruption = ParseInterruption(ToStr(kv.Value, "transition.interruption")); break;
                         case "ordered": t.OrderedInterruption = ToBool(kv.Value, "transition.ordered"); break;
-                        case "canTransitionToSelf": t.CanTransitionToSelf = ToBool(kv.Value, "transition.canTransitionToSelf"); break;
+                        case "canTransitionToSelf":
+                            if (!allowSelf) throw new SchemaException("transition: 'canTransitionToSelf' is only valid on an AnyState ladder");
+                            t.CanTransitionToSelf = ToBool(kv.Value, "transition.canTransitionToSelf");
+                            break;
                         default: throw new SchemaException($"transition: unknown field '{kv.Key}'");
                     }
                 }
