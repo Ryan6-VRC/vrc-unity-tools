@@ -446,11 +446,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // direct states or direct sub-machines (Unity has no default into a foreign/nested machine). A
                 // state → defaultState; a sub-machine → an unconditional entry transition added AFTER the entry
                 // ladder (below) so it stays the last, catch-all entry.
+                // default is a bare LOCAL name (a direct state or sub-machine); unescape it before lookup.
                 bool defaultIsState = false;
-                if (!string.IsNullOrEmpty(model.DefaultState))
+                string defaultName = string.IsNullOrEmpty(model.DefaultState) ? null : AddressPath.UnescapeSegment(model.DefaultState);
+                if (defaultName != null)
                 {
-                    if (scope.States.TryGetValue(model.DefaultState, out var def)) { target.defaultState = def; defaultIsState = true; }
-                    else if (!scope.Subs.ContainsKey(model.DefaultState))
+                    if (scope.States.TryGetValue(defaultName, out var def)) { target.defaultState = def; defaultIsState = true; }
+                    else if (!scope.Subs.ContainsKey(defaultName))
                         throw new EmitException($"machine '{target.name}': default '{model.DefaultState}' is neither a direct state nor a direct sub-machine of this machine");
                 }
 
@@ -496,8 +498,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // a machine has no direct states, Unity's AnimatorStateMachine.defaultState GETTER resolves
                 // THROUGH to the child machine's own default. So downstream lint/decompile must not read
                 // `defaultState` as a reliable "was a direct-state default set" probe; the entry transition is.
-                if (!defaultIsState && !string.IsNullOrEmpty(model.DefaultState))
-                    target.AddEntryTransition(scope.Subs[model.DefaultState].Target);
+                if (!defaultIsState && defaultName != null)
+                    target.AddEntryTransition(scope.Subs[defaultName].Target);
 
                 foreach (var sub in model.Machines)
                     WireMachine(layer, sub.Machine, scope.Subs[sub.Name], root);
@@ -524,10 +526,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (name.Length > 0 && name[0] == '/')
                     return ResolveFromRoot(name.Substring(1), root, fromMachine, name, out toState, out toSm);
 
-                if (name.IndexOf('/') < 0)
+                // Split on UNescaped '/' — a single segment is a bare LOCAL name (its own '/' survives as '\/').
+                var segs = AddressPath.Split(name);
+                if (segs.Count == 1)
                 {
-                    if (scope.States.TryGetValue(name, out toState)) return true;
-                    if (scope.Subs.TryGetValue(name, out var sub)) { toSm = sub.Target; return false; }
+                    string local = AddressPath.UnescapeSegment(segs[0]);
+                    if (scope.States.TryGetValue(local, out toState)) return true;
+                    if (scope.Subs.TryGetValue(local, out var sub)) { toSm = sub.Target; return false; }
                     throw new EmitException($"transition target '{name}' not found in machine '{fromMachine}' — a bare name resolves only within its own machine; use a 'Sub/State' path or a '/Top' absolute address for a cross-machine target");
                 }
 
@@ -535,19 +540,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // Resolve a root-relative path: every non-final segment is a sub-machine, the final segment a state
-            // or a sub-machine. A single segment addresses a direct child of the layer root. `display` is the
-            // original authored token (may carry a leading '/') for error messages.
+            // or a sub-machine. A single segment addresses a direct child of the layer root; an empty path (bare
+            // '/') addresses the layer root itself. Segments split on UNescaped '/' then unescape ('\/'->'/',
+            // '\\'->'\'). `display` is the original authored token (may carry a leading '/') for error messages.
             private bool ResolveFromRoot(string path, MachineScope root, string fromMachine, string display,
                 out AnimatorState toState, out AnimatorStateMachine toSm)
             {
                 toState = null; toSm = null;
-                if (path.Length == 0) { toSm = root.Target; return false; } // bare '/' addresses the layer root itself
-                var segs = path.Split('/');
+                if (path.Length == 0) { toSm = root.Target; return false; }
+                var segs = AddressPath.Split(path);
                 var cur = root;
-                for (int i = 0; i < segs.Length - 1; i++)
-                    if (!cur.Subs.TryGetValue(segs[i], out cur))
-                        throw new EmitException($"transition target path '{display}' (from machine '{fromMachine}'): segment '{segs[i]}' is not a sub-machine on the path from the layer root");
-                var leaf = segs[segs.Length - 1];
+                for (int i = 0; i < segs.Count - 1; i++)
+                {
+                    string seg = AddressPath.UnescapeSegment(segs[i]);
+                    if (!cur.Subs.TryGetValue(seg, out cur))
+                        throw new EmitException($"transition target path '{display}' (from machine '{fromMachine}'): segment '{seg}' is not a sub-machine on the path from the layer root");
+                }
+                var leaf = AddressPath.UnescapeSegment(segs[segs.Count - 1]);
                 if (cur.States.TryGetValue(leaf, out toState)) return true;
                 if (cur.Subs.TryGetValue(leaf, out var subm)) { toSm = subm.Target; return false; }
                 throw new EmitException($"transition target path '{display}' (from machine '{fromMachine}'): final segment '{leaf}' is neither a state nor a sub-machine");

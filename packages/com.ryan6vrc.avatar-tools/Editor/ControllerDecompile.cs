@@ -203,12 +203,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         if (cs.state == null) continue;
                         _stateOwner[cs.state] = sm;
-                        _statePath[cs.state] = path.Length == 0 ? cs.state.name : path + "/" + cs.state.name;
+                        string es = AddressPath.EscapeSegment(cs.state.name);
+                        _statePath[cs.state] = path.Length == 0 ? es : path + "/" + es;
                     }
                     foreach (var child in sm.stateMachines)
                     {
                         if (child.stateMachine == null) continue;
-                        string cp = path.Length == 0 ? child.stateMachine.name : path + "/" + child.stateMachine.name;
+                        string ec = AddressPath.EscapeSegment(child.stateMachine.name);
+                        string cp = path.Length == 0 ? ec : path + "/" + ec;
                         Recurse(child.stateMachine, cp, sm);
                     }
                 }
@@ -234,7 +236,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // states, so it is only trusted when it names one of THIS machine's own direct states.
                 var directStates = new HashSet<AnimatorState>(sm.states.Where(x => x.state != null).Select(x => x.state));
                 bool defaultIsDirectState = sm.defaultState != null && directStates.Contains(sm.defaultState);
-                if (defaultIsDirectState) model.DefaultState = sm.defaultState.name;
+                if (defaultIsDirectState) model.DefaultState = AddressPath.EscapeSegment(sm.defaultState.name);
 
                 // Entry ladder. The trailing unconditional entry into a sub-machine is the sub-machine default,
                 // not a ladder rung — split it off.
@@ -246,7 +248,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if ((last.conditions == null || last.conditions.Length == 0) && last.destinationStateMachine != null && !last.isExit)
                     {
                         subDefaultIdx = entries.Length - 1;
-                        model.DefaultState = last.destinationStateMachine.name; // always a direct child ⇒ bare name
+                        model.DefaultState = AddressPath.EscapeSegment(last.destinationStateMachine.name); // direct child ⇒ escaped bare name
                     }
                 }
                 for (int i = 0; i < entries.Length; i++)
@@ -384,38 +386,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _result.Refusals.Add($"transition from {loc}: target resolves to no state/sub-machine/Exit");
             }
 
+            // Every emitted target is per-segment escaped (a '/' in a name survives as '\/'), so ResolveName can
+            // split on the UNescaped separator. A single-segment path is a top-level entity, anchored with '/'.
             private string StateTargetName(AnimatorState dest, AnimatorStateMachine srcSm, string loc)
             {
-                // A '/' in the name collides with the path separator — the address would be un-parseable
-                // (whether emitted bare or as a path), so refuse rather than emit output that breaks compile.
-                if (dest.name.IndexOf('/') >= 0)
-                {
-                    _result.Refusals.Add($"transition from {loc}: target state '{dest.name}' has a '/' in its name, which collides with the address path separator");
-                    return dest.name;
-                }
-                if (_stateOwner.TryGetValue(dest, out var owner) && owner == srcSm) return dest.name; // same machine ⇒ bare
+                if (_stateOwner.TryGetValue(dest, out var owner) && owner == srcSm) return AddressPath.EscapeSegment(dest.name); // same machine ⇒ bare
                 if (_statePath.TryGetValue(dest, out var path))
-                    // A root-level state's path is a single bare segment (which reads as LOCAL from a nested
-                    // source), so anchor it absolute with '/'; a multi-segment path is already root-relative.
-                    return path.IndexOf('/') < 0 ? "/" + path : path;
+                    return AddressPath.Split(path).Count == 1 ? "/" + path : path;
                 _result.Refusals.Add($"transition from {loc}: target state '{dest.name}' not found in the layer");
                 return dest.name;
             }
 
             private string SmTargetName(AnimatorStateMachine dest, AnimatorStateMachine srcSm, string loc)
             {
-                if (dest.name.IndexOf('/') >= 0)
-                {
-                    _result.Refusals.Add($"transition from {loc}: target sub-machine '{dest.name}' has a '/' in its name, which collides with the address path separator");
-                    return dest.name;
-                }
-                if (_smParent.TryGetValue(dest, out var parent) && parent == srcSm) return dest.name; // direct child ⇒ bare
+                if (_smParent.TryGetValue(dest, out var parent) && parent == srcSm) return AddressPath.EscapeSegment(dest.name); // direct child ⇒ bare
                 if (_smPath.TryGetValue(dest, out var path))
                     // The layer root itself (empty path) is a legal target — "re-enter the layer at its
-                    // default" — addressed by the bare '/' anchor. A top-level machine's path is a single bare
-                    // segment; anchor it absolute with '/' so a nested source can reach it. A multi-segment
-                    // path is already root-relative.
-                    return path.Length == 0 ? "/" : (path.IndexOf('/') < 0 ? "/" + path : path);
+                    // default" — addressed by the bare '/' anchor. A top-level machine is a single segment,
+                    // anchored '/'; a multi-segment path is already root-relative.
+                    return path.Length == 0 ? "/" : (AddressPath.Split(path).Count == 1 ? "/" + path : path);
                 _result.Refusals.Add($"transition from {loc}: target sub-machine '{dest.name}' not found in the layer");
                 return dest.name;
             }
