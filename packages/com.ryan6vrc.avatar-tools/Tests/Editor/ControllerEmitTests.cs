@@ -207,13 +207,13 @@ layers:
         motion:
           tree: direct
           children:
-            - weight: W1
+            - directWeight: W1
               tree: 1d
               param: Blend
               children:
                 - { clip: a, threshold: 0 }
                 - { clip: b, threshold: 1 }
-            - { weight: W2, clip: c }
+            - { directWeight: W2, clip: c }
     default: S
 ";
         var doc = AnimatorSchemaYaml.Parse(yaml, "mem://tree");

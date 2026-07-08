@@ -7,6 +7,7 @@ using System.Text;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
+using VRC.SDK3.Avatars.ScriptableObjects;
 using Ryan6Vrc.AgentTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Editor
@@ -75,6 +76,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string finalPath = cleanOut + "/" + name + ".controller";
             string tempFolder = whatIf ? ScratchTemp() : null;
             string emitDir = whatIf ? tempFolder : cleanOut;
+            string paramsPath = emitDir + "/" + name + "_Parameters.asset";
+            // A controller already at the target is left UNTOUCHED by a failed emit (ControllerEmit preflights
+            // external refs before it strips anything), so an emit failure must not delete it — only a
+            // freshly-created partial is rolled back.
+            bool controllerPreExisted = !whatIf && AssetDatabase.LoadAssetAtPath<AnimatorController>(finalPath) != null;
 
             // ── Out-of-band drift warning (real compile only, when an existing compiled asset is present) ─
             if (!whatIf) WarnIfOutOfBand(finalPath, text);
@@ -82,24 +88,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ── 4. Emit into the target (real outDir, or the whatIf temp) ────────────────────────────
             ControllerEmit.EmitResult built;
             try { ControllerEmit.Build(doc, emitDir, text, out built); }
-            catch (ControllerEmit.EmitException ee) { CleanupOnFailure(whatIf, tempFolder, finalPath); return Fail("emit: " + ee.Message); }
-            catch (Exception e) { CleanupOnFailure(whatIf, tempFolder, finalPath); return Fail("emit: " + e.GetType().Name + ": " + e.Message); }
+            catch (ControllerEmit.EmitException ee) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted); return Fail("emit: " + ee.Message); }
+            catch (Exception e) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted); return Fail("emit: " + e.GetType().Name + ": " + e.Message); }
 
-            // Persist the VRCExpressionParameters asset alongside the controller (ControllerEmit builds it
-            // in-memory only). In whatIf it lands in the temp folder and is swept with it.
-            string paramsPath = null;
+            // Persist the VRCExpressionParameters side-asset (ControllerEmit builds it in-memory only). REUSE an
+            // existing asset IN PLACE — overwrite its parameters, never delete+recreate — so its GUID survives a
+            // recompile (mirroring the controller's reset-in-place: any expressionParameters reference stays
+            // valid, and an unchanged source yields no Git churn). Create only when absent; and when NO param
+            // survives (all built-in/scratch), drop any stale asset so it can't linger. In whatIf the whole
+            // emit lands in the temp folder and is swept with it.
+            var existingParams = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(paramsPath);
             if (built.Params != null)
             {
-                paramsPath = emitDir + "/" + name + "_Parameters.asset";
-                if (AssetDatabase.LoadMainAssetAtPath(paramsPath) != null) AssetDatabase.DeleteAsset(paramsPath);
-                AssetDatabase.CreateAsset(built.Params, paramsPath);
+                if (existingParams != null) { existingParams.parameters = built.Params.parameters; EditorUtility.SetDirty(existingParams); }
+                else AssetDatabase.CreateAsset(built.Params, paramsPath);
             }
+            else if (existingParams != null) AssetDatabase.DeleteAsset(paramsPath);
 
             // ── 5. Pre-emission graph lint (roots empty ⇒ broken-binding rule skipped: no scene) ─────
             var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
             if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
             {
-                CleanupOnFailure(whatIf, tempFolder, finalPath);
+                CleanupAfterLint(whatIf, tempFolder, finalPath, paramsPath);
                 string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
                 return Fail("post-emit graph lint (" + lint.Errors.Count + "): " + offenders);
             }
@@ -246,7 +256,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static void DriverConflicts(Behaviour b, string where, Dictionary<string, string> written, List<string> lines)
         {
             if (b == null || b.Kind != "driver" || b.Fields == null) return;
-            foreach (var key in new[] { "set", "add" })
+            // Every driver op whose map KEY is the destination param collides identically with a clip that
+            // writes that param — set/add and equally copy/random (their dest is the map key too).
+            foreach (var key in new[] { "set", "add", "copy", "random" })
             {
                 if (!b.Fields.TryGetValue(key, out var val) || !(val is Dictionary<string, object> map)) continue;
                 foreach (var e in map)
@@ -314,10 +326,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static string ScratchTemp() => "Assets/Agent/Scratch/compile_tmp_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
-        private static void CleanupOnFailure(bool whatIf, string tempFolder, string finalPath)
+        // Emit failed before any params side-asset was written. whatIf sweeps its temp. A real compile deletes
+        // ONLY a freshly-created controller — a pre-existing one was left intact by ControllerEmit's pre-strip
+        // preflight, so deleting it would destroy the user's prior good asset.
+        private static void CleanupAfterEmit(bool whatIf, string tempFolder, string finalPath, bool controllerPreExisted)
         {
-            if (whatIf) { if (tempFolder != null && AssetDatabase.IsValidFolder(tempFolder)) AssetDatabase.DeleteAsset(tempFolder); }
-            else AssetDatabase.DeleteAsset(finalPath); // roll back the just-emitted (or overwritten-in-place) asset
+            if (whatIf) { if (tempFolder != null && AssetDatabase.IsValidFolder(tempFolder)) AssetDatabase.DeleteAsset(tempFolder); return; }
+            if (!controllerPreExisted) AssetDatabase.DeleteAsset(finalPath);
+        }
+
+        // Post-emit lint failed after a successful emit — roll back the controller AND its params side-asset so
+        // nothing that fails lint reaches outDir. KNOWN LIMIT (class docs): a recompile-over-existing that
+        // reaches here removes the prior asset too — mitigated by the owned controller being git-tracked.
+        private static void CleanupAfterLint(bool whatIf, string tempFolder, string finalPath, string paramsPath)
+        {
+            if (whatIf) { if (tempFolder != null && AssetDatabase.IsValidFolder(tempFolder)) AssetDatabase.DeleteAsset(tempFolder); return; }
+            AssetDatabase.DeleteAsset(finalPath);
+            if (!string.IsNullOrEmpty(paramsPath)) AssetDatabase.DeleteAsset(paramsPath);
         }
 
         private static string Fail(string why)

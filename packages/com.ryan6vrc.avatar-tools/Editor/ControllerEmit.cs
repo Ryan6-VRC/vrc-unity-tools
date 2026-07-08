@@ -106,6 +106,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string path = PathFor(_outDir, _doc.ControllerName);
                 EnsureFolder(_outDir);
 
+                // Resolve every EXTERNAL motion ref (ref:/guid:) up front — BEFORE the existing controller is
+                // stripped. A typo'd ref/guid must fail HERE, leaving any prior good controller at `path`
+                // untouched, rather than after StripSubAssets has already emptied it (silent data loss).
+                // Clip/tree-shape and dangling-clip-ref errors are gated earlier by SchemaValidation.
+                PreflightExternalMotions();
+
                 // GUID-STABLE idempotence: reuse the controller ASSET if one already lives at the path (its
                 // GUID + any external reference survives), stripping its sub-assets so the rebuilt graph is a
                 // pure function of the document. Only when nothing (or a non-controller) sits there do we
@@ -208,12 +214,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 if (!hasContent)
                 {
-                    // Seconds-only clip → inert `_CompilerNull` carrier: a non-existent GameObject path
-                    // animating m_IsActive to a flat 0, present ONLY to give the clip a genuine length.
+                    // Seconds-only clip → inert carrier that ONLY gives the clip a genuine length. Bind a flat
+                    // curve on a scratch ANIMATOR parameter (path="", typeof(Animator)) — NOT a non-existent
+                    // GameObject path. An animator-property binding resolves against any avatar root (the root
+                    // always carries an Animator), so AnimatorLint's broken-binding rule stays clean when the
+                    // emitted controller is linted against a real avatar; a fake GO path would false-FAIL it.
                     if (!spec.Seconds.HasValue)
                         throw new EmitException(
                             $"clip '{spec.Name}' declares no set/curves and no seconds — nothing to emit (parser/validator should have caught this)");
-                    var carrier = EditorCurveBinding.FloatCurve("_CompilerNull", typeof(GameObject), "m_IsActive");
+                    EnsureCarrierParam();
+                    var carrier = EditorCurveBinding.FloatCurve("", typeof(Animator), CarrierParam);
                     var flat = new AnimationCurve(new Keyframe(0f, 0f), new Keyframe(spec.Seconds.Value, 0f));
                     AnimationUtility.SetEditorCurve(clip, carrier, flat);
                     return clip;
@@ -242,9 +252,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return any ? max : MinClipLength;
             }
 
+            // The scratch float a seconds-only carrier animates. Declared on the controller on first use (never
+            // in doc.Parameters, so it is absent from the emitted VRCExpressionParameters), so the AAP curve
+            // targets a real, honest parameter rather than a phantom.
+            private const string CarrierParam = "_CompilerNull";
+            private bool _carrierDeclared;
+            private void EnsureCarrierParam()
+            {
+                if (_carrierDeclared) return;
+                if (!_paramNames.Contains(CarrierParam))
+                {
+                    _controller.AddParameter(new AnimatorControllerParameter
+                    {
+                        name = CarrierParam, type = AnimatorControllerParameterType.Float, defaultFloat = 0f,
+                    });
+                    _paramNames.Add(CarrierParam);
+                }
+                _carrierDeclared = true;
+            }
+
             // A bare identifier naming a declared Animator parameter → an Animator-parameter curve (path="").
             // Otherwise the general scene binding: "path/Component.property", split on the LAST '/' then
-            // the LAST '.'.
+            // the FIRST '.'. The first dot is the right split because a component type name never contains a
+            // dot, while the property CAN — `blendShape.Smile`, `material._Color` are the common cases a
+            // LastIndexOf split would fold into the type name (and then fail to resolve).
             private EditorCurveBinding ResolveBinding(string target)
             {
                 if (_paramNames.Contains(target))
@@ -254,7 +285,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string path = slash >= 0 ? target.Substring(0, slash) : "";
                 string compProp = slash >= 0 ? target.Substring(slash + 1) : target;
 
-                int dot = compProp.LastIndexOf('.');
+                int dot = compProp.IndexOf('.');
                 if (dot < 0)
                     throw new EmitException(
                         $"clip binding '{target}' is neither a declared AAP param nor a 'path/Component.property' scene binding");
@@ -412,13 +443,64 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 if (mr.RefGuid != null)
                 {
-                    string p = AssetDatabase.GUIDToAssetPath(mr.RefGuid.Guid);
-                    var m = string.IsNullOrEmpty(p) ? null : AssetDatabase.LoadAssetAtPath<Motion>(p);
-                    if (m == null) throw new EmitException($"motion ref guid unresolved: {mr.RefGuid.Guid}");
+                    var m = ResolveGuidMotion(mr.RefGuid);
+                    if (m == null) throw new EmitException(GuidRefUnresolved(mr.RefGuid));
                     return m;
                 }
                 if (mr.Tree != null) return BuildTree(mr.Tree, treeName);
                 throw new EmitException("motion ref sets none of clip/ref/tree");
+            }
+
+            // Resolve a guid[+fileID] motion ref. A non-zero fileID names a SUB-ASSET (e.g. one clip inside a
+            // multi-clip FBX) — select the Motion whose local file id matches, so the schema's fileID is not
+            // silently dropped onto the main asset. A zero fileID loads the main asset as a Motion (a plain
+            // .anim). Returns null on no match; callers name the failure.
+            private static Motion ResolveGuidMotion(GuidRef g)
+            {
+                string p = AssetDatabase.GUIDToAssetPath(g.Guid);
+                if (string.IsNullOrEmpty(p)) return null;
+                if (g.FileID != 0)
+                {
+                    foreach (var o in AssetDatabase.LoadAllAssetsAtPath(p))
+                        if (o is Motion mo
+                            && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(mo, out _, out long lfid)
+                            && lfid == g.FileID)
+                            return mo;
+                    return null; // fileID given but no sub-asset Motion matched
+                }
+                return AssetDatabase.LoadAssetAtPath<Motion>(p);
+            }
+
+            private static string GuidRefUnresolved(GuidRef g)
+                => $"motion ref guid unresolved: {g.Guid}" + (g.FileID != 0 ? $" fileID:{g.FileID}" : "");
+
+            // Resolvability check for every external ref, run before StripSubAssets (see Run). Mirrors what
+            // BuildMotion resolves during emit — state motions (EmitLayers only walks layer.Root.States) and
+            // nested tree children — so a bad ref/guid fails before the existing controller is touched.
+            private void PreflightExternalMotions()
+            {
+                foreach (var layer in _doc.Layers)
+                    foreach (var s in layer.Root.States)
+                        PreflightMotion(s?.Motion);
+            }
+
+            private void PreflightMotion(MotionRef mr)
+            {
+                if (mr == null) return;
+                if (mr.RefPath != null)
+                {
+                    if (AssetDatabase.LoadAssetAtPath<Motion>(mr.RefPath) == null)
+                        throw new EmitException($"motion ref path not found: {mr.RefPath}");
+                }
+                else if (mr.RefGuid != null)
+                {
+                    if (ResolveGuidMotion(mr.RefGuid) == null) throw new EmitException(GuidRefUnresolved(mr.RefGuid));
+                }
+                else if (mr.Tree != null)
+                {
+                    foreach (var c in mr.Tree.Children) PreflightMotion(c?.Motion);
+                }
+                // mr.Clip is a document-internal reference — SchemaValidation's dangling-clip-ref rule gates it.
             }
 
             private BlendTree BuildTree(BlendTreeSpec spec, string name)
