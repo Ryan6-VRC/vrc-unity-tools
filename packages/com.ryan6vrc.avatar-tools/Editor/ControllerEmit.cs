@@ -509,31 +509,48 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     throw new EmitException($"entry/any ladder transition in machine '{fromMachine}' has no target (Exit is not a valid target there)");
             }
 
-            // Resolve a transition target to a state (returns true) or a sub-machine (returns false). A BARE
-            // name resolves ONLY in `scope` — the referencing machine's own direct states + direct sub-machines.
-            // A SLASH-QUALIFIED name is a path from the LAYER `root`: every non-final segment is a sub-machine,
-            // the final segment is a state or a sub-machine. An unresolved target is fail-loud, naming the
-            // offender and the machine it was referenced from — NEVER a silent global fallback.
+            // Resolve a transition target to a state (returns true) or a sub-machine (returns false). Three
+            // addressing forms, disjoint by shape: a BARE name (no '/') resolves ONLY in `scope` — the
+            // referencing machine's own direct states + direct sub-machines. A leading-'/' name is ABSOLUTE
+            // from the LAYER `root` (the only way to reach a TOP-LEVEL entity, whose root path is a single bare
+            // segment that would otherwise read as local). Any other slash-qualified name is a path from
+            // `root`. An unresolved target is fail-loud, naming the offender and the machine it was referenced
+            // from — NEVER a silent global fallback.
             private bool ResolveName(string name, MachineScope scope, MachineScope root, string fromMachine,
                 out AnimatorState toState, out AnimatorStateMachine toSm)
             {
                 toState = null; toSm = null;
+
+                if (name.Length > 0 && name[0] == '/')
+                    return ResolveFromRoot(name.Substring(1), root, fromMachine, name, out toState, out toSm);
+
                 if (name.IndexOf('/') < 0)
                 {
                     if (scope.States.TryGetValue(name, out toState)) return true;
                     if (scope.Subs.TryGetValue(name, out var sub)) { toSm = sub.Target; return false; }
-                    throw new EmitException($"transition target '{name}' not found in machine '{fromMachine}' — a bare name resolves only within its own machine; use a 'Sub/State' path from the layer root for a cross-machine target");
+                    throw new EmitException($"transition target '{name}' not found in machine '{fromMachine}' — a bare name resolves only within its own machine; use a 'Sub/State' path or a '/Top' absolute address for a cross-machine target");
                 }
 
-                var segs = name.Split('/');
+                return ResolveFromRoot(name, root, fromMachine, name, out toState, out toSm);
+            }
+
+            // Resolve a root-relative path: every non-final segment is a sub-machine, the final segment a state
+            // or a sub-machine. A single segment addresses a direct child of the layer root. `display` is the
+            // original authored token (may carry a leading '/') for error messages.
+            private bool ResolveFromRoot(string path, MachineScope root, string fromMachine, string display,
+                out AnimatorState toState, out AnimatorStateMachine toSm)
+            {
+                toState = null; toSm = null;
+                if (path.Length == 0) { toSm = root.Target; return false; } // bare '/' addresses the layer root itself
+                var segs = path.Split('/');
                 var cur = root;
                 for (int i = 0; i < segs.Length - 1; i++)
                     if (!cur.Subs.TryGetValue(segs[i], out cur))
-                        throw new EmitException($"transition target path '{name}' (from machine '{fromMachine}'): segment '{segs[i]}' is not a sub-machine on the path from the layer root");
+                        throw new EmitException($"transition target path '{display}' (from machine '{fromMachine}'): segment '{segs[i]}' is not a sub-machine on the path from the layer root");
                 var leaf = segs[segs.Length - 1];
                 if (cur.States.TryGetValue(leaf, out toState)) return true;
                 if (cur.Subs.TryGetValue(leaf, out var subm)) { toSm = subm.Target; return false; }
-                throw new EmitException($"transition target path '{name}' (from machine '{fromMachine}'): final segment '{leaf}' is neither a state nor a sub-machine");
+                throw new EmitException($"transition target path '{display}' (from machine '{fromMachine}'): final segment '{leaf}' is neither a state nor a sub-machine");
             }
 
             private void ConfigureStateTransition(AnimatorStateTransition tr, Transition t)
@@ -544,6 +561,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 tr.hasFixedDuration = t.FixedDuration ?? true;
                 tr.interruptionSource = MapInterruption(t.Interruption ?? _doc.Defaults.Interruption);
                 tr.orderedInterruption = t.OrderedInterruption ?? true;
+                tr.mute = t.Mute;
+                tr.solo = t.Solo;
                 foreach (var c in t.When) tr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param); // empty When = unconditional
             }
 

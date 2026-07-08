@@ -183,7 +183,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // Map every state/sub-machine of the layer to its owning machine + path-from-root, so a transition
             // target can be addressed exactly as ControllerEmit.ResolveName consumes it: BARE within the source
-            // machine, SLASH-QUALIFIED (from the layer root) across machines.
+            // machine, SLASH-QUALIFIED (from the layer root) for a nested cross-machine target, and '/'-ANCHORED
+            // (absolute from root) for a TOP-LEVEL target whose root path is a single bare segment (which would
+            // otherwise read as local).
             private void BuildAddressMaps(AnimatorStateMachine root)
             {
                 _stateOwner = new Dictionary<AnimatorState, AnimatorStateMachine>();
@@ -351,8 +353,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 var tr = new Transition();
                 SetTarget(tr, t, srcSm, loc);
-                if (t.mute || t.solo)
-                    _result.Refusals.Add($"transition from {loc}: mute/solo flags are out of vocabulary");
+                tr.Mute = t.mute;
+                tr.Solo = t.solo;
 
                 tr.When = DecodeConditions(t.conditions);
                 tr.ExitTime = t.hasExitTime ? t.exitTime : (float?)null;
@@ -384,26 +386,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private string StateTargetName(AnimatorState dest, AnimatorStateMachine srcSm, string loc)
             {
+                // A '/' in the name collides with the path separator — the address would be un-parseable
+                // (whether emitted bare or as a path), so refuse rather than emit output that breaks compile.
+                if (dest.name.IndexOf('/') >= 0)
+                {
+                    _result.Refusals.Add($"transition from {loc}: target state '{dest.name}' has a '/' in its name, which collides with the address path separator");
+                    return dest.name;
+                }
                 if (_stateOwner.TryGetValue(dest, out var owner) && owner == srcSm) return dest.name; // same machine ⇒ bare
                 if (_statePath.TryGetValue(dest, out var path))
-                {
-                    if (path.IndexOf('/') < 0)
-                        _result.Refusals.Add($"transition from {loc}: cross-machine target state '{dest.name}' sits at the layer root and is not addressable from a nested machine");
-                    return path;
-                }
+                    // A root-level state's path is a single bare segment (which reads as LOCAL from a nested
+                    // source), so anchor it absolute with '/'; a multi-segment path is already root-relative.
+                    return path.IndexOf('/') < 0 ? "/" + path : path;
                 _result.Refusals.Add($"transition from {loc}: target state '{dest.name}' not found in the layer");
                 return dest.name;
             }
 
             private string SmTargetName(AnimatorStateMachine dest, AnimatorStateMachine srcSm, string loc)
             {
+                if (dest.name.IndexOf('/') >= 0)
+                {
+                    _result.Refusals.Add($"transition from {loc}: target sub-machine '{dest.name}' has a '/' in its name, which collides with the address path separator");
+                    return dest.name;
+                }
                 if (_smParent.TryGetValue(dest, out var parent) && parent == srcSm) return dest.name; // direct child ⇒ bare
                 if (_smPath.TryGetValue(dest, out var path))
-                {
-                    if (path.IndexOf('/') < 0)
-                        _result.Refusals.Add($"transition from {loc}: cross-machine target sub-machine '{dest.name}' is not addressable from a nested machine");
-                    return path;
-                }
+                    // The layer root itself (empty path) is a legal target — "re-enter the layer at its
+                    // default" — addressed by the bare '/' anchor. A top-level machine's path is a single bare
+                    // segment; anchor it absolute with '/' so a nested source can reach it. A multi-segment
+                    // path is already root-relative.
+                    return path.Length == 0 ? "/" : (path.IndexOf('/') < 0 ? "/" + path : path);
                 _result.Refusals.Add($"transition from {loc}: target sub-machine '{dest.name}' not found in the layer");
                 return dest.name;
             }

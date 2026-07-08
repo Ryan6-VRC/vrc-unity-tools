@@ -88,10 +88,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
     public sealed class Transition
     {
-        public string To;                       // target state/submachine name; null == "to Exit"
+        public string To;                       // bare == local; "Sub/State" == from layer root; "/Top" == absolute from root; null == "to Exit"
         public bool ToExit;
         public List<Condition> When = new List<Condition>();
         public bool CanTransitionToSelf;        // AnyState ladder only
+        public bool Mute; public bool Solo;     // AnimatorStateTransition editor flags (state + AnyState ladders)
         // null == inherit Defaults:
         public float? Duration; public float? ExitTime; public bool? FixedDuration;
         public TransitionInterruption? Interruption; public bool? OrderedInterruption;

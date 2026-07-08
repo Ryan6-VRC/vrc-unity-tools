@@ -333,6 +333,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (t.FixedDuration.HasValue) parts.Add("fixedDuration: " + Bool(t.FixedDuration.Value));
             if (t.Interruption.HasValue) parts.Add("interruption: " + InterruptionToken(t.Interruption.Value));
             if (t.OrderedInterruption.HasValue) parts.Add("ordered: " + Bool(t.OrderedInterruption.Value));
+            if (t.Mute) parts.Add("mute: true");
+            if (t.Solo) parts.Add("solo: true");
             if (anyLadder) parts.Add("canTransitionToSelf: " + Bool(t.CanTransitionToSelf));
             return "{ " + string.Join(", ", parts) + " }";
         }

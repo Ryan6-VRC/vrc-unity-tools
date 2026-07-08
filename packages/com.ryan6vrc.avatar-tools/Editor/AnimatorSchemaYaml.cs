@@ -763,6 +763,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case "fixedDuration": t.FixedDuration = ToBool(kv.Value, "transition.fixedDuration"); break;
                         case "interruption": t.Interruption = ParseInterruption(ToStr(kv.Value, "transition.interruption")); break;
                         case "ordered": t.OrderedInterruption = ToBool(kv.Value, "transition.ordered"); break;
+                        case "mute": t.Mute = ToBool(kv.Value, "transition.mute"); break;
+                        case "solo": t.Solo = ToBool(kv.Value, "transition.solo"); break;
                         case "canTransitionToSelf":
                             if (!allowSelf) throw new SchemaException("transition: 'canTransitionToSelf' is only valid on an AnyState ladder");
                             t.CanTransitionToSelf = ToBool(kv.Value, "transition.canTransitionToSelf");
