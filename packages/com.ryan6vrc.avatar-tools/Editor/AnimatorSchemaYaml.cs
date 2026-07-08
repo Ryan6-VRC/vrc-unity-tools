@@ -819,6 +819,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         foreach (var c in ToList(kv.Value, $"{ctx} tree.children"))
                             spec.Children.Add(BindTreeChild(ToMap(c, $"{ctx} tree child"), ctx));
                         break;
+                    // Child-level fields when this map is a tree-that-is-a-child: consumed by BindTreeChild,
+                    // ignored here (mirror of BindTreeChild ignoring tree-level fields).
+                    case "directWeight": case "threshold": case "timeScale": case "mirror": case "cycleOffset":
+                    case "x": case "y": case "posX": case "posY": break;
                     default: throw new SchemaException($"{ctx} tree: unknown field '{kv.Key}'");
                 }
             }
@@ -852,7 +856,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case "threshold": child.Threshold = ToNumber(kv.Value, $"{ctx} tree child threshold"); break;
                     case "x": case "posX": child.PosX = ToNumber(kv.Value, $"{ctx} tree child posX"); break;
                     case "y": case "posY": child.PosY = ToNumber(kv.Value, $"{ctx} tree child posY"); break;
-                    case "weight": child.DirectWeight = ToStr(kv.Value, $"{ctx} tree child weight"); break;
+                    case "directWeight": child.DirectWeight = ToStr(kv.Value, $"{ctx} tree child directWeight"); break;
                     case "timeScale": child.TimeScale = ToNumber(kv.Value, $"{ctx} tree child timeScale"); break;
                     case "mirror": child.Mirror = ToBool(kv.Value, $"{ctx} tree child mirror"); break;
                     case "cycleOffset": child.CycleOffset = ToNumber(kv.Value, $"{ctx} tree child cycleOffset"); break;
