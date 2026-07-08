@@ -122,6 +122,7 @@ _notes: { source: hand-authored }
     {
         const string doc = @"schema: 1
 controller: Params
+basis: avatar-root
 parameters:
   Short: float
   Long:
@@ -189,6 +190,7 @@ controller: &x Foo
     {
         const string doc = @"schema: 1
 controller: R
+basis: avatar-root
 _meta: { a: 1, b: two }
 ";
         var d = AnimatorSchemaYaml.Parse(doc, null);

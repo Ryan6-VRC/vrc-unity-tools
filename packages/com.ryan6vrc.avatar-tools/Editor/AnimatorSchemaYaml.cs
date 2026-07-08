@@ -458,6 +458,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     default: throw new SchemaException($"unknown top-level key '{key}'");
                 }
             }
+            // Basis has no unbound sentinel: the BindingBasis enum defaults to AvatarRoot, so an omitted key
+            // would silently read as avatar-root. Require it here — the earliest point — to close the
+            // silently-unbound-animation landmine before it reaches the model.
+            if (!map.ContainsKey("basis"))
+                throw new SchemaException("missing required key 'basis' (avatar-root | mount-root)");
             return doc;
         }
 
