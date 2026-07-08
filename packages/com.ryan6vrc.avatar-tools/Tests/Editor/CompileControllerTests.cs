@@ -77,6 +77,37 @@ public class CompileControllerTests
     }
 
     [Test]
+    public void Failing_Recompile_Leaves_Prior_Controller_Intact()
+    {
+        string outDir = TestRoot + "/out_proof";
+        string path = outDir + "/Debounce_Fx.controller";
+
+        // A good compile first.
+        CompileController.Compile(_srcPath, outDir, whatIf: false);
+        string guid1 = AssetDatabase.AssetPathToGUID(path);
+        int layersBefore = AssetDatabase.LoadAssetAtPath<AnimatorController>(path).layers.Length;
+        Assert.IsNotEmpty(guid1);
+        Assert.Greater(layersBefore, 0, "the good controller has layers");
+
+        // Recompile the SAME controller from a source that parses + validates but fails emit AFTER the
+        // in-place strip (a transition to a nonexistent state is a fail-loud emit path, not caught by
+        // validation). Without the proof-compile this would leave the prior controller stripped/empty.
+        string badSrc = TestRoot + "/BadTarget.yaml";
+        File.WriteAllText(badSrc,
+            "schema: 1\ncontroller: Debounce_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: float }\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        transitions:\n          - { to: NoSuchState }\n    default: S\n");
+        string result = CompileController.Compile(badSrc, outDir, whatIf: false);
+
+        StringAssert.Contains("FAIL", result);
+        Assert.IsTrue(File.Exists(path), "prior controller survives a failing recompile");
+        Assert.AreEqual(guid1, AssetDatabase.AssetPathToGUID(path), "same GUID — not deleted + recreated");
+        var after = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
+        Assert.IsNotNull(after, "prior controller still loads");
+        Assert.AreEqual(layersBefore, after.layers.Length, "prior controller was NOT stripped by the failed recompile");
+    }
+
+    [Test]
     public void Recompile_Keeps_Controller_Guid_Stable()
     {
         string outDir = TestRoot + "/out_idem";

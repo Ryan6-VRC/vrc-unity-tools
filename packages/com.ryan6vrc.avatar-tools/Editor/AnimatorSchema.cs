@@ -14,6 +14,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
     public enum TreeKind { OneD, SimpleDirectional2D, FreeformDirectional2D, FreeformCartesian2D, Direct }
     public enum CondOp { Is, IsNot, Greater, Less, Equals, NotEqual }
 
+    // Parameter names the compiler owns — an authored document must NOT declare these (SchemaValidation
+    // refuses them), so emission can inject them without colliding with a user param.
+    public static class ReservedNames
+    {
+        // The seconds-only carrier's scratch float: ControllerEmit declares it on the controller on first
+        // use to give a duration-only clip an honest, resolvable Animator-property curve; it is never listed
+        // in the emitted VRCExpressionParameters.
+        public const string CarrierParam = "_CompilerNull";
+    }
+
     public sealed class AnimDocument
     {
         public int Schema;

@@ -41,6 +41,16 @@ public class SchemaValidationTests
     }
 
     [Test]
+    public void Reserved_Carrier_Param_Is_Rejected()
+    {
+        var doc = new AnimDocument { Schema = 1 };
+        doc.Parameters.Add(new ParamSpec { Name = ReservedNames.CarrierParam, Type = AnimParamType.Float });
+        var errors = SchemaValidation.Validate(doc);
+        Assert.IsTrue(Any(errors, "reserved-param", ReservedNames.CarrierParam),
+            "declaring the reserved carrier param must be refused");
+    }
+
+    [Test]
     public void Greater_On_Bool_Param_Errors()
     {
         var doc = DocWithCondition("B", AnimParamType.Bool, CondOp.Greater, 0.5f);

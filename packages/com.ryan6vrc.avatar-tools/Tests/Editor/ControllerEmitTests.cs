@@ -77,9 +77,21 @@ public class ControllerEmitTests
 
         var bindings = AnimationUtility.GetCurveBindings(timer);
         Assert.AreEqual(1, bindings.Length, "exactly one carrier curve");
-        Assert.AreEqual("_CompilerNull", bindings[0].path);
-        Assert.AreEqual(typeof(GameObject), bindings[0].type);
-        Assert.AreEqual("m_IsActive", bindings[0].propertyName);
+        // The carrier animates a scratch ANIMATOR parameter (path="", type=Animator), NOT a fake GameObject
+        // path — an animator-property binding resolves against any avatar root, so AnimatorLint's broken-binding
+        // rule stays clean when the emitted controller is linted against a real avatar.
+        Assert.AreEqual("", bindings[0].path, "animator-param carrier, not a scene path");
+        Assert.AreEqual(typeof(Animator), bindings[0].type);
+        Assert.AreEqual("_CompilerNull", bindings[0].propertyName);
+
+        // The carrier param is DECLARED on the controller (so the curve targets a real parameter, keeping the
+        // undeclaredParam rule clean)...
+        Assert.IsTrue(r.Controller.parameters.Any(p => p.name == "_CompilerNull" && p.type == AnimatorControllerParameterType.Float),
+            "carrier param declared on the controller");
+        // ...but kept OUT of the emitted VRCExpressionParameters (it is not the controller's own to expose).
+        if (r.Params != null)
+            Assert.IsFalse(r.Params.parameters.Any(p => p.name == "_CompilerNull"),
+                "carrier param not listed in the emitted VRCExpressionParameters");
     }
 
     [Test]

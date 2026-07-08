@@ -106,11 +106,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string path = PathFor(_outDir, _doc.ControllerName);
                 EnsureFolder(_outDir);
 
-                // Resolve every EXTERNAL motion ref (ref:/guid:) up front — BEFORE the existing controller is
-                // stripped. A typo'd ref/guid must fail HERE, leaving any prior good controller at `path`
-                // untouched, rather than after StripSubAssets has already emptied it (silent data loss).
-                // Clip/tree-shape and dangling-clip-ref errors are gated earlier by SchemaValidation.
-                PreflightExternalMotions();
+                // NOTE: StripSubAssets (below) empties any prior controller at `path` before the fallible emit
+                // steps run, and several of them (transition targets, behaviour kinds, clip bindings) throw
+                // AFTER the strip. That is safe here only because the CompileController door PROVES an owned
+                // overwrite (a full emit+lint into a throwaway temp) before calling Build for real; direct
+                // 2-arg callers target disposable scratch. Do not rely on Build alone to protect a prior asset.
 
                 // GUID-STABLE idempotence: reuse the controller ASSET if one already lives at the path (its
                 // GUID + any external reference survives), stripping its sub-assets so the rebuilt graph is a
@@ -253,21 +253,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // The scratch float a seconds-only carrier animates. Declared on the controller on first use (never
-            // in doc.Parameters, so it is absent from the emitted VRCExpressionParameters), so the AAP curve
-            // targets a real, honest parameter rather than a phantom.
-            private const string CarrierParam = "_CompilerNull";
+            // in doc.Parameters, so it is absent from the emitted VRCExpressionParameters), so the carrier curve
+            // targets a real, honest parameter rather than a phantom. It is NOT added to _paramNames: the name is
+            // reserved (SchemaValidation refuses a user-declared `_CompilerNull`) and must not become a resolvable
+            // bare-param target for authored clip bindings — the carrier binding is constructed directly, below.
+            private const string CarrierParam = ReservedNames.CarrierParam;
             private bool _carrierDeclared;
             private void EnsureCarrierParam()
             {
                 if (_carrierDeclared) return;
+                // _paramNames guards the un-validated 2-arg Build path against a duplicate parameter; the door
+                // path can't reach here with `_CompilerNull` already declared (validation refuses it).
                 if (!_paramNames.Contains(CarrierParam))
-                {
                     _controller.AddParameter(new AnimatorControllerParameter
                     {
                         name = CarrierParam, type = AnimatorControllerParameterType.Float, defaultFloat = 0f,
                     });
-                    _paramNames.Add(CarrierParam);
-                }
                 _carrierDeclared = true;
             }
 
@@ -473,35 +474,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private static string GuidRefUnresolved(GuidRef g)
                 => $"motion ref guid unresolved: {g.Guid}" + (g.FileID != 0 ? $" fileID:{g.FileID}" : "");
-
-            // Resolvability check for every external ref, run before StripSubAssets (see Run). Mirrors what
-            // BuildMotion resolves during emit — state motions (EmitLayers only walks layer.Root.States) and
-            // nested tree children — so a bad ref/guid fails before the existing controller is touched.
-            private void PreflightExternalMotions()
-            {
-                foreach (var layer in _doc.Layers)
-                    foreach (var s in layer.Root.States)
-                        PreflightMotion(s?.Motion);
-            }
-
-            private void PreflightMotion(MotionRef mr)
-            {
-                if (mr == null) return;
-                if (mr.RefPath != null)
-                {
-                    if (AssetDatabase.LoadAssetAtPath<Motion>(mr.RefPath) == null)
-                        throw new EmitException($"motion ref path not found: {mr.RefPath}");
-                }
-                else if (mr.RefGuid != null)
-                {
-                    if (ResolveGuidMotion(mr.RefGuid) == null) throw new EmitException(GuidRefUnresolved(mr.RefGuid));
-                }
-                else if (mr.Tree != null)
-                {
-                    foreach (var c in mr.Tree.Children) PreflightMotion(c?.Motion);
-                }
-                // mr.Clip is a document-internal reference — SchemaValidation's dangling-clip-ref rule gates it.
-            }
 
             private BlendTree BuildTree(BlendTreeSpec spec, string name)
             {

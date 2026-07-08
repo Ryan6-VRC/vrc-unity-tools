@@ -22,14 +22,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <c>… =&gt; OK (whatIf) | log=&lt;path&gt;</c>; any refusal is a bare
     /// <c>[CompileController] FAIL: &lt;reason / named offenders&gt;</c> with no trailer and no asset written.
     ///
-    /// <para>ATOMICITY: nothing reaches <c>outDir</c> unless parse + validate + graph-lint all pass. Parse or
-    /// validate failure writes no asset (emission never runs). A whatIf run emits to a scratch temp, lints
-    /// there, then deletes it. Only the post-emit graph lint runs after the write; if it fires an error-tier
-    /// rule the just-emitted asset is rolled back. KNOWN LIMIT: a real recompile OVER an existing controller
-    /// overwrites it in place (reset-in-place, for GUID stability — see <see cref="ControllerEmit"/>), so a
-    /// recompile whose new source passes validate but fails the post-emit lint removes the prior asset too.
-    /// In practice validate gates the graph-lint offenders, so this belt-and-suspenders path is rare; and the
-    /// controller is owned → git-tracked, so it is a revertable diff.</para>
+    /// <para>ATOMICITY: nothing reaches <c>outDir</c> unless parse + validate + emit + graph-lint all pass. Parse
+    /// or validate failure writes no asset (emission never runs). A whatIf run emits to a scratch temp, lints
+    /// there, then deletes it. A recompile OVER an existing controller resets it in place for GUID stability
+    /// (see <see cref="ControllerEmit"/>), which strips it before the fallible emit steps — so an overwrite is
+    /// first PROVEN by a full emit+lint into a throwaway temp (see <c>ProofCompile</c>); the prior controller is
+    /// touched only after that proof passes clean. A failing overwrite (bad emit or lint) therefore leaves the
+    /// prior good controller untouched. A FRESH compile has nothing to protect — its partial is just deleted.</para>
     ///
     /// <para>IDEMPOTENCE: recompiling the same source to the same <c>outDir</c> reuses the controller at
     /// <c>&lt;outDir&gt;/&lt;name&gt;.controller</c> and keeps its GUID (ControllerEmit resets sub-assets in
@@ -74,18 +73,32 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string name = doc.ControllerName;
             string cleanOut = NormalizeDir(outDir);
             string finalPath = cleanOut + "/" + name + ".controller";
+            bool controllerPreExisted = !whatIf && AssetDatabase.LoadAssetAtPath<AnimatorController>(finalPath) != null;
+
+            // ── 4a. PROOF COMPILE — the atomicity guarantee for an overwrite ─────────────────────────
+            // ControllerEmit strips a prior controller IN PLACE (for GUID stability), and several emit steps
+            // (transition targets, behaviour kinds, clip bindings) throw AFTER that strip — so a mid-emit or
+            // lint failure on a real overwrite would leave the prior good controller stripped/empty. Before
+            // touching it, run the WHOLE emit+lint pipeline against a throwaway temp; only if it passes clean
+            // do we compile for real. A fresh compile needs no proof (a partial is just deleted); whatIf already
+            // emits to a temp. Emission is a pure function of (document, AssetDatabase), so a proof that passes
+            // guarantees the real in-place emit — same inputs — cannot throw or fail lint either.
+            if (controllerPreExisted)
+            {
+                string proofDir = ScratchTemp();
+                string proofFail = ProofCompile(doc, proofDir, text);
+                AssetDatabase.DeleteAsset(proofDir);
+                if (proofFail != null) return Fail(proofFail); // prior controller left untouched
+            }
+
             string tempFolder = whatIf ? ScratchTemp() : null;
             string emitDir = whatIf ? tempFolder : cleanOut;
             string paramsPath = emitDir + "/" + name + "_Parameters.asset";
-            // A controller already at the target is left UNTOUCHED by a failed emit (ControllerEmit preflights
-            // external refs before it strips anything), so an emit failure must not delete it — only a
-            // freshly-created partial is rolled back.
-            bool controllerPreExisted = !whatIf && AssetDatabase.LoadAssetAtPath<AnimatorController>(finalPath) != null;
 
             // ── Out-of-band drift warning (real compile only, when an existing compiled asset is present) ─
             if (!whatIf) WarnIfOutOfBand(finalPath, text);
 
-            // ── 4. Emit into the target (real outDir, or the whatIf temp) ────────────────────────────
+            // ── 4b. Emit into the target (real outDir, or the whatIf temp) ────────────────────────────
             ControllerEmit.EmitResult built;
             try { ControllerEmit.Build(doc, emitDir, text, out built); }
             catch (ControllerEmit.EmitException ee) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted); return Fail("emit: " + ee.Message); }
@@ -326,9 +339,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static string ScratchTemp() => "Assets/Agent/Scratch/compile_tmp_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
-        // Emit failed before any params side-asset was written. whatIf sweeps its temp. A real compile deletes
-        // ONLY a freshly-created controller — a pre-existing one was left intact by ControllerEmit's pre-strip
-        // preflight, so deleting it would destroy the user's prior good asset.
+        // Run the full emit + graph-lint pipeline into <paramref name="dir"/> (a throwaway temp) purely to prove
+        // a real overwrite will succeed before it strips the prior controller. Returns null on success, or the
+        // FAIL reason (same shape as the real paths). Skips persisting the params side-asset — lint reads the
+        // in-memory controller, not that asset — so the caller only has to sweep <paramref name="dir"/>.
+        private static string ProofCompile(AnimDocument doc, string dir, string text)
+        {
+            ControllerEmit.EmitResult built;
+            try { ControllerEmit.Build(doc, dir, text, out built); }
+            catch (ControllerEmit.EmitException ee) { return "emit: " + ee.Message; }
+            catch (Exception e) { return "emit: " + e.GetType().Name + ": " + e.Message; }
+
+            var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
+                return "post-emit graph lint (" + lint.Errors.Count + "): "
+                     + string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
+            return null;
+        }
+
+        // Emit failed before any params side-asset was written. whatIf sweeps its temp. A FRESH compile deletes
+        // the just-created partial. An overwrite never reaches here mid-strip — ProofCompile clears the emit in
+        // a temp before the prior controller is touched — so a pre-existing controller is left intact; the guard
+        // is belt-and-suspenders.
         private static void CleanupAfterEmit(bool whatIf, string tempFolder, string finalPath, bool controllerPreExisted)
         {
             if (whatIf) { if (tempFolder != null && AssetDatabase.IsValidFolder(tempFolder)) AssetDatabase.DeleteAsset(tempFolder); return; }
@@ -336,8 +368,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // Post-emit lint failed after a successful emit — roll back the controller AND its params side-asset so
-        // nothing that fails lint reaches outDir. KNOWN LIMIT (class docs): a recompile-over-existing that
-        // reaches here removes the prior asset too — mitigated by the owned controller being git-tracked.
+        // nothing that fails lint reaches outDir. Reached only for a FRESH compile now: an overwrite is proven
+        // lint-clean by ProofCompile before the real write, so this deletes only a freshly-created partial.
         private static void CleanupAfterLint(bool whatIf, string tempFolder, string finalPath, string paramsPath)
         {
             if (whatIf) { if (tempFolder != null && AssetDatabase.IsValidFolder(tempFolder)) AssetDatabase.DeleteAsset(tempFolder); return; }

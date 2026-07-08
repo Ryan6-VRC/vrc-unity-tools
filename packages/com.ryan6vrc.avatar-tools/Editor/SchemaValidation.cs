@@ -25,6 +25,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (doc.Schema != 1)
                 errors.Add($"# schema-version: unsupported schema {doc.Schema} (supported: 1) (at document)");
 
+            // Rule 1b — reserved parameter names. The compiler injects these (the seconds-only carrier), so an
+            // authored document must not declare one or emission would collide on a duplicate parameter.
+            foreach (var p in doc.Parameters)
+                if (p != null && p.Name == ReservedNames.CarrierParam)
+                    errors.Add($"# reserved-param: '{ReservedNames.CarrierParam}' is reserved for the compiler's seconds-only carrier and cannot be declared (at document)");
+
             // Rule 6 — base-fx layer floor. The base-FX index rule addresses layers 0-2, so fewer than three
             // layers cannot satisfy it.
             if (doc.Role == ControllerRole.BaseFx && doc.Layers.Count < 3)
