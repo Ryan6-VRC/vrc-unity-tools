@@ -502,6 +502,20 @@ layers:
     }
 
     [Test]
+    public void LayerControl_NonIntegral_Layer_Fails_Loud()
+    {
+        // AsInt must not silently round a non-integral layer index to a different layer.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadLayer_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - layerControl: { playable: fx, layer: 1.5 }\n" +
+            "    default: S\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("layerControl.layer", ex.Message);
+        StringAssert.Contains("non-integral", ex.Message);
+    }
+
+    [Test]
     public void Emit_PlayAudio_Behaviour_Sets_Order_Flags_Range_And_ApplySettings()
     {
         var st = SingleStateWithBehaviours(

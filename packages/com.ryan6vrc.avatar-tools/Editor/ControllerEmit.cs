@@ -1096,7 +1096,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 case long l: return (int)l;
                 case int i: return i;
-                case double d: return (int)Math.Round(d);
+                // A non-integral double here is malformed input (e.g. layerControl.layer: 1.5) — fail loud
+                // rather than silently rounding it to a different layer index.
+                case double d:
+                    if (d != Math.Floor(d))
+                        throw new EmitException($"{ctx}: expected an integer, got non-integral {d.ToString(CultureInfo.InvariantCulture)}");
+                    return (int)d;
                 default: throw new EmitException($"{ctx}: expected an integer, got {(v == null ? "null" : v.GetType().Name)}");
             }
         }

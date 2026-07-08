@@ -742,7 +742,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        private static void BindTransitions(List<Transition> into, List<object> list, bool allowSelf = true)
+        // allowSelf defaults FALSE so a state-transition list (which calls this without the flag) refuses
+        // canTransitionToSelf — a field only the AnyState ladder honors. The AnyState caller passes true.
+        private static void BindTransitions(List<Transition> into, List<object> list, bool allowSelf = false)
         {
             foreach (var item in list)
             {

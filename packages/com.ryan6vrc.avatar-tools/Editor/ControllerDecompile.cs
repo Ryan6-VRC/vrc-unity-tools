@@ -60,8 +60,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private readonly WalkResult _result = new WalkResult();
             private readonly AnimDocument _doc = new AnimDocument();
 
-            // Decoded inline clips, keyed by name so a clip shared by several states is emitted once.
+            // Decoded inline clips, keyed by name so a clip shared by several states is emitted once. The
+            // parallel _clipObjs holds the source AnimationClip per name so a DISTINCT clip re-using a name
+            // (which the name-keyed schema would silently collapse) is refused, not deduped as if shared.
             private readonly Dictionary<string, ClipSpec> _clips = new Dictionary<string, ClipSpec>();
+            private readonly Dictionary<string, AnimationClip> _clipObjs = new Dictionary<string, AnimationClip>();
 
             // Per-layer addressing maps, rebuilt for each layer (state names recur across machines, so these
             // are never layer-global lookups keyed by bare name — they are object-keyed).
@@ -70,14 +73,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private Dictionary<AnimatorStateMachine, string> _smPath;
             private Dictionary<AnimatorStateMachine, AnimatorStateMachine> _smParent;
 
-            // Dangling motion GUIDs recovered from the controller YAML (assets that no longer resolve).
-            private readonly Queue<string> _danglingGuids;
+            // Dangling motion GUIDs recovered from the controller YAML (assets that no longer resolve),
+            // keyed by the OWNING serialized object's local fileID so each null motion slot recovers its OWN
+            // guid. A shared FIFO mis-attributes: it dedups by unique guid (several slots → one entry) and
+            // drains in walk order, which need not match the YAML fill order.
+            private readonly Dictionary<long, Queue<string>> _danglingByOwner;
 
             public WalkContext(AnimatorController controller)
             {
                 _controller = controller;
                 _controllerPath = AssetDatabase.GetAssetPath(controller);
-                _danglingGuids = new Queue<string>(RecoverDanglingMotionGuids(controller));
+                _danglingByOwner = RecoverDanglingMotionGuids(controller);
+            }
+
+            // The next dangling guid recorded against this owning object (a State or BlendTree), in the
+            // object's own serialization order. "unknown" when the controller isn't a saved asset or the
+            // owner carries no recovered dangler (mirrors the pre-fix fallback).
+            private string NextDanglingGuid(Object owner)
+            {
+                if (owner != null
+                    && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(owner, out _, out long fid)
+                    && _danglingByOwner.TryGetValue(fid, out var q) && q.Count > 0)
+                    return q.Dequeue();
+                return "unknown";
             }
 
             public WalkResult Run()
@@ -222,7 +240,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 var model = new StateMachine();
 
-                DetectWhitespaceCollisions(sm);
+                DetectSiblingNameCollisions(sm);
                 foreach (var cs in sm.states)
                     if (cs.state != null) model.States.Add(DecodeState(cs.state, sm));
 
@@ -245,7 +263,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (!defaultIsDirectState && entries.Length > 0)
                 {
                     var last = entries[entries.Length - 1];
-                    if ((last.conditions == null || last.conditions.Length == 0) && last.destinationStateMachine != null && !last.isExit)
+                    // The trailing unconditional entry is the sub-machine default ONLY when its target is a
+                    // DIRECT child (the compiler only ever emits that shape). A target deeper in the tree is a
+                    // genuine cross-machine entry rung, not a default — leaving it in the ladder decodes it with
+                    // a proper slash-qualified address instead of mislabeling it as a bare (direct-child) default
+                    // that would fail to recompile.
+                    if ((last.conditions == null || last.conditions.Length == 0) && last.destinationStateMachine != null && !last.isExit
+                        && _smParent.TryGetValue(last.destinationStateMachine, out var lastParent) && lastParent == sm)
                     {
                         subDefaultIdx = entries.Length - 1;
                         model.DefaultState = AddressPath.EscapeSegment(last.destinationStateMachine.name); // direct child ⇒ escaped bare name
@@ -271,9 +295,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return model;
             }
 
-            // Sibling states whose names are equal once trimmed but differ raw (e.g. "S" vs "S ") collide under
-            // name-keyed addressing — a transition target `S` cannot disambiguate them. Refuse loudly (named +
-            // located), never silently collapse/dedup: both states are still decoded into the machine.
+            // Two flavours of sibling name collision, each a located Refusal (never a silent collapse):
+            //   (a) EXACT raw duplicates — two states, or two sub-machines, with the identical name. They
+            //       serialize as duplicate YAML keys the parser refuses on re-parse, so a decompile that
+            //       returned OK here would hand back a non-round-trippable document.
+            //   (b) whitespace collisions — names equal once trimmed but differing raw (e.g. "S" vs "S ") —
+            //       a legibility hazard under name-keyed addressing, refused even though quoting could carry
+            //       them, because two near-identical sibling names are almost always a mistake.
+            private void DetectSiblingNameCollisions(AnimatorStateMachine sm)
+            {
+                DetectExactDuplicates(sm.states.Where(x => x.state != null).Select(x => x.state.name), "state", sm);
+                DetectExactDuplicates(sm.stateMachines.Where(x => x.stateMachine != null).Select(x => x.stateMachine.name), "sub-machine", sm);
+                DetectWhitespaceCollisions(sm);
+            }
+
+            private void DetectExactDuplicates(IEnumerable<string> rawNames, string kind, AnimatorStateMachine sm)
+            {
+                var list = rawNames.ToList();
+                var counts = new Dictionary<string, int>();
+                foreach (var n in list) counts[n] = counts.TryGetValue(n, out var c) ? c + 1 : 1;
+                var reported = new HashSet<string>();
+                foreach (var n in list) // iterate the list (not the dict) so refusal order is deterministic
+                    if (counts[n] > 1 && reported.Add(n))
+                        _result.Refusals.Add(
+                            $"state-machine '{PathLabel(sm)}': {counts[n]} sibling {kind}s are named '{n}' — " +
+                            "identical sibling names serialize as duplicate keys and cannot round-trip");
+            }
+
             private void DetectWhitespaceCollisions(AnimatorStateMachine sm)
             {
                 var byTrim = new Dictionary<string, List<string>>();
@@ -325,7 +373,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     st.Motion = DecodeMotion(ast.motion, "state '" + ast.name + "'");
                 else if (HasDanglingMotion(ast))
                 {
-                    string guid = _danglingGuids.Count > 0 ? _danglingGuids.Dequeue() : "unknown";
+                    string guid = NextDanglingGuid(ast);
                     st.Motion = new MotionRef { RefGuid = new GuidRef { Guid = guid, Unresolved = true } };
                     _result.UnresolvedGuids.Add(guid);
                 }
@@ -345,8 +393,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // dangling ref to a since-deleted asset — distinct from a clean-empty state (instanceID 0).
             private static bool HasDanglingMotion(AnimatorState ast)
             {
-                var mp = new SerializedObject(ast).FindProperty("m_Motion");
-                return mp != null && mp.objectReferenceInstanceIDValue != 0;
+                using (var so = new SerializedObject(ast))
+                {
+                    var mp = so.FindProperty("m_Motion");
+                    return mp != null && mp.objectReferenceInstanceIDValue != 0;
+                }
             }
 
             // ----- transitions -----
@@ -358,7 +409,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 tr.Mute = t.mute;
                 tr.Solo = t.solo;
 
-                tr.When = DecodeConditions(t.conditions);
+                tr.When = DecodeConditions(t.conditions, loc);
                 tr.ExitTime = t.hasExitTime ? t.exitTime : (float?)null;
                 tr.Duration = t.duration != 0f ? t.duration : (float?)null;
                 tr.FixedDuration = t.hasFixedDuration ? (bool?)null : false;
@@ -371,8 +422,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private Transition DecodeEntryTransition(AnimatorTransition t, AnimatorStateMachine srcSm)
             {
                 var tr = new Transition();
-                SetTarget(tr, t, srcSm, "Entry in '" + PathLabel(srcSm) + "'");
-                tr.When = DecodeConditions(t.conditions);
+                string loc = "Entry in '" + PathLabel(srcSm) + "'";
+                SetTarget(tr, t, srcSm, loc);
+                tr.When = DecodeConditions(t.conditions, loc);
                 return tr;
             }
 
@@ -411,12 +463,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // Invert ControllerEmit.MapCondOp. Bool truth lives in the MODE there (If/IfNot); recover it as the
             // canonical `Is true` / `Is false` (Op=Is, Value 1/0). Numeric ops carry the threshold as the value.
-            private static List<Condition> DecodeConditions(AnimatorCondition[] conds)
+            private List<Condition> DecodeConditions(AnimatorCondition[] conds, string loc)
             {
                 var list = new List<Condition>();
                 if (conds == null) return list;
                 foreach (var c in conds)
                 {
+                    // A condition serializes as the plain 3-token string '<param> <op> <value>' inside a flow
+                    // list — a param carrying whitespace (breaks the token split) or a flow delimiter (breaks
+                    // the list) cannot round-trip. Refuse it (named + located) rather than emit a broken scalar.
+                    if (!string.IsNullOrEmpty(c.parameter) && ParamBreaksConditionGrammar(c.parameter))
+                        _result.Refusals.Add($"transition from {loc}: condition parameter '{c.parameter}' contains whitespace or a flow delimiter (,[]{{}}) — it cannot be expressed in the '<param> <op> <value>' condition grammar");
                     var cond = new Condition { Param = c.parameter };
                     switch (c.mode)
                     {
@@ -444,7 +501,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (string.IsNullOrEmpty(_controllerPath) || p == _controllerPath)
                     {
                         // Embedded controller sub-asset ⇒ inline ClipSpec.
-                        RegisterInlineClip(clip);
+                        RegisterInlineClip(clip, loc);
                         return new MotionRef { Clip = clip.name };
                     }
                     if (AssetDatabase.IsSubAsset(clip))
@@ -477,31 +534,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // recovery regex matches ChildMotion.m_Motion lines too, so a child dangler is in the same queue
                 // — decode it HERE (mirroring the state path) or it (a) loses the `unresolved` marker
                 // ControllerEmit.BuildMotion preserves, and (b) leaves an orphan guid a later state mis-dequeues.
-                var childs = new SerializedObject(bt).FindProperty("m_Childs");
-                var kids = bt.children;
-                for (int i = 0; i < kids.Length; i++)
+                using (var btSo = new SerializedObject(bt))
                 {
-                    var ch = kids[i];
-                    string childLoc = loc + " (tree child " + i + ")";
-                    var tc = new TreeChild
+                    var childs = btSo.FindProperty("m_Childs");
+                    var kids = bt.children;
+                    for (int i = 0; i < kids.Length; i++)
                     {
-                        TimeScale = ch.timeScale,
-                        Mirror = ch.mirror,
-                        CycleOffset = ch.cycleOffset,
-                    };
-                    if (ch.motion != null) tc.Motion = DecodeMotion(ch.motion, childLoc);
-                    else if (ChildHasDanglingMotion(childs, i))
-                    {
-                        string guid = _danglingGuids.Count > 0 ? _danglingGuids.Dequeue() : "unknown";
-                        tc.Motion = new MotionRef { RefGuid = new GuidRef { Guid = guid, Unresolved = true } };
-                        _result.UnresolvedGuids.Add(guid);
-                    }
-                    // else: a genuine empty child (rare) — leave Motion null, never silently dropping a dangler.
+                        var ch = kids[i];
+                        string childLoc = loc + " (tree child " + i + ")";
+                        var tc = new TreeChild
+                        {
+                            TimeScale = ch.timeScale,
+                            Mirror = ch.mirror,
+                            CycleOffset = ch.cycleOffset,
+                        };
+                        if (ch.motion != null) tc.Motion = DecodeMotion(ch.motion, childLoc);
+                        else if (ChildHasDanglingMotion(childs, i))
+                        {
+                            // Owner is the blend tree itself: its m_Childs danglers drain in child order,
+                            // matching this loop, so each child recovers its OWN guid.
+                            string guid = NextDanglingGuid(bt);
+                            tc.Motion = new MotionRef { RefGuid = new GuidRef { Guid = guid, Unresolved = true } };
+                            _result.UnresolvedGuids.Add(guid);
+                        }
+                        // else: a genuine empty child (rare) — leave Motion null, never silently dropping a dangler.
 
-                    if (direct) tc.DirectWeight = ch.directBlendParameter;
-                    else if (twoD) { tc.PosX = ch.position.x; tc.PosY = ch.position.y; }
-                    else tc.Threshold = ch.threshold;
-                    spec.Children.Add(tc);
+                        if (direct) tc.DirectWeight = ch.directBlendParameter;
+                        else if (twoD) { tc.PosX = ch.position.x; tc.PosY = ch.position.y; }
+                        else tc.Threshold = ch.threshold;
+                        spec.Children.Add(tc);
+                    }
                 }
                 return spec;
             }
@@ -515,9 +577,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ----- inline clips (invert ControllerEmit.BuildClip) -----
 
-            private void RegisterInlineClip(AnimationClip clip)
+            private void RegisterInlineClip(AnimationClip clip, string loc)
             {
-                if (_clips.ContainsKey(clip.name)) return;
+                if (_clipObjs.TryGetValue(clip.name, out var existing))
+                {
+                    // Same instance re-referenced by another state ⇒ correct dedup (emit it once). A DISTINCT
+                    // clip carrying the same name ⇒ the name-keyed clips: map would collapse them (the second's
+                    // curves lost) — refuse loudly (named + located) instead.
+                    if (!ReferenceEquals(existing, clip))
+                        _result.Refusals.Add(
+                            $"inline clip name '{clip.name}' (referenced from {loc}) is shared by two DISTINCT embedded clips — " +
+                            "the schema keys clips by name, which would collapse them");
+                    return;
+                }
+                _clipObjs[clip.name] = clip;
                 _clips[clip.name] = DecodeClip(clip);
             }
 
@@ -564,10 +637,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 // A Set curve carries no keyframes in the schema, so a Sets clip authored with an explicit
                 // `seconds:` (emitted as a constant curve stretched to that length) would otherwise re-emit at
-                // MinClipLength. Recover the declared length from the constant end time when it exceeds one
-                // frame (a plain Set with no seconds sits at MinClipLength ⇒ leave Seconds null). A keyframed
-                // curve needs no such recovery — its own last key already carries the length.
-                if (spec.Curves.Count == 0 && maxConstEnd > MinClipLength + 1e-4f)
+                // MinClipLength. Recover the declared length from the constant end whenever it exceeds what the
+                // keyframed curves already carry (their own last key) — so a MIXED set+curve clip whose sets run
+                // past the last keyframe keeps its length, not only a curves-absent clip. Floor is MinClipLength
+                // (a plain Set with no seconds sits there ⇒ leave Seconds null).
+                float maxCurveEnd = 0f;
+                foreach (var cs in spec.Curves)
+                    foreach (var k in cs.Keys)
+                        if (k.Time > maxCurveEnd) maxCurveEnd = k.Time;
+                if (maxConstEnd > Mathf.Max(maxCurveEnd, MinClipLength) + 1e-4f)
                     spec.Seconds = maxConstEnd;
                 return spec;
             }
@@ -604,7 +682,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 switch (smb)
                 {
-                    case VRC_AvatarParameterDriver drv: into.Add(DecodeDriver(drv)); break;
+                    case VRC_AvatarParameterDriver drv: into.Add(DecodeDriver(drv, loc)); break;
                     case VRC_AnimatorTrackingControl tc: into.Add(DecodeTracking(tc, loc)); break;
                     case VRC_PlayableLayerControl pl: into.Add(DecodePlayableLayer(pl, loc)); break;
                     case VRC_AnimatorLocomotionControl lc: into.Add(DecodeLocomotion(lc)); break;
@@ -617,11 +695,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            private static Behaviour DecodeDriver(VRC_AvatarParameterDriver drv)
+            private Behaviour DecodeDriver(VRC_AvatarParameterDriver drv, string loc)
             {
                 // Field-name tokens are shared from ControllerEmit.DriverKeys so encode/decode cannot drift.
                 var b = new Behaviour { Kind = "driver" };
                 if (drv.localOnly) b.Fields[ControllerEmit.DriverKeys.LocalOnly] = true; // default false is left implicit
+                DetectDriverOrderLoss(drv, loc);
                 var set = new Dictionary<string, object>();
                 var add = new Dictionary<string, object>();
                 var copy = new Dictionary<string, object>();
@@ -656,6 +735,53 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (copy.Count > 0) b.Fields[ControllerEmit.DriverKeys.Copy] = copy;
                 if (random.Count > 0) b.Fields[ControllerEmit.DriverKeys.Random] = random;
                 return b;
+            }
+
+            // VRC_AvatarParameterDriver.parameters is an ORDERED list the runtime applies top-to-bottom, but the
+            // schema regroups it into name-keyed set/add/copy/random buckets re-applied in that fixed order. That
+            // is faithful ONLY when the source list is already in bucket order with no repeated (type,name). Two
+            // ways it loses information, each a located Refusal (never a silent reorder/collapse):
+            //   - INTERLEAVING: a change-type appears after a later-bucket type (e.g. Set, Copy, Set). Re-emit
+            //     hoists all Sets ahead of the Copy, changing what the Copy reads.
+            //   - DUPLICATE: the same (type, name) appears twice. The name-keyed bucket keeps only the last.
+            private void DetectDriverOrderLoss(VRC_AvatarParameterDriver drv, string loc)
+            {
+                if (drv.parameters == null || drv.parameters.Count == 0) return;
+                int prev = -1;
+                bool interleaved = false;
+                var seen = new HashSet<string>();
+                foreach (var p in drv.parameters)
+                {
+                    int bucket = DriverBucket(p.type);
+                    if (bucket < prev) interleaved = true;
+                    prev = bucket;
+                    if (!seen.Add(p.type + " " + p.name))
+                        _result.Refusals.Add(
+                            $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' — the schema's name-keyed buckets keep only the last write");
+                }
+                if (interleaved)
+                    _result.Refusals.Add(
+                        $"behaviour on {loc}: driver operations interleave change-types (Set/Add/Copy/Random) — the schema re-applies them grouped by type, which would change their apply order");
+            }
+
+            private static int DriverBucket(Driver.ChangeType t)
+            {
+                switch (t)
+                {
+                    case Driver.ChangeType.Set: return 0;
+                    case Driver.ChangeType.Add: return 1;
+                    case Driver.ChangeType.Copy: return 2;
+                    default: return 3; // Random
+                }
+            }
+
+            // A condition serializes as '<param> <op> <value>' split on whitespace inside a flow list, so a
+            // param carrying whitespace or a flow delimiter can't round-trip.
+            private static bool ParamBreaksConditionGrammar(string param)
+            {
+                foreach (char c in param)
+                    if (char.IsWhiteSpace(c) || ",[]{}".IndexOf(c) >= 0) return true;
+                return false;
             }
 
             private Behaviour DecodeTracking(VRC_AnimatorTrackingControl tc, string loc)
@@ -868,24 +994,38 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ----- dangling-motion GUID recovery (mirror of the ControllerReport/ControllerRules YAML parse) -----
 
-        private static List<string> RecoverDanglingMotionGuids(AnimatorController controller)
+        // Map each dangling motion guid to the local fileID of the serialized object that owns it (a State or a
+        // BlendTree), in that object's own serialization order. A .controller text serializes each object as a
+        // block headed "--- !u!<class> &<fileID>"; a State block holds one m_Motion, a BlendTree block holds one
+        // per m_Childs entry (in child order). Keying by owner fileID lets each null motion slot recover its OWN
+        // guid at walk time (AssetDatabase.TryGetGUIDAndLocalFileIdentifier gives the same fileID), independent
+        // of how many slots dangle or whether walk order matches file order.
+        private static Dictionary<long, Queue<string>> RecoverDanglingMotionGuids(AnimatorController controller)
         {
-            var result = new List<string>();
+            var map = new Dictionary<long, Queue<string>>();
             string path = AssetDatabase.GetAssetPath(controller);
-            if (string.IsNullOrEmpty(path)) return result;
+            if (string.IsNullOrEmpty(path)) return map;
             try
             {
                 var text = File.ReadAllText(path);
-                var seen = new HashSet<string>();
-                foreach (Match m in Regex.Matches(text, @"m_Motion:\s*\{fileID:\s*\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}"))
+                var heads = Regex.Matches(text, @"^--- !u!\d+ &(-?\d+)", RegexOptions.Multiline);
+                for (int i = 0; i < heads.Count; i++)
                 {
-                    var g = m.Groups[1].Value;
-                    if (seen.Add(g) && string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(g)))
-                        result.Add(g);
+                    long fileId = long.Parse(heads[i].Groups[1].Value);
+                    int start = heads[i].Index;
+                    int end = i + 1 < heads.Count ? heads[i + 1].Index : text.Length;
+                    string block = text.Substring(start, end - start);
+                    foreach (Match m in Regex.Matches(block, @"m_Motion:\s*\{fileID:\s*-?\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}"))
+                    {
+                        var g = m.Groups[1].Value;
+                        if (!string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(g))) continue; // still resolves — not dangling
+                        if (!map.TryGetValue(fileId, out var q)) { q = new Queue<string>(); map[fileId] = q; }
+                        q.Enqueue(g);
+                    }
                 }
             }
             catch { /* binary-serialized or unreadable — no guids recoverable */ }
-            return result;
+            return map;
         }
     }
 }

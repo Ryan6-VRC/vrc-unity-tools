@@ -231,6 +231,22 @@ parameters:
     }
 
     [Test]
+    public void CanTransitionToSelf_On_State_Transition_Throws()
+    {
+        // A state transition ignores canTransitionToSelf (only the AnyState ladder honors it). Accepting it
+        // silently would drop the field — fail loud instead (allowSelf now defaults false for state lists).
+        const string doc =
+            "schema: 1\ncontroller: Bad_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n" +
+            "  - name: L\n" +
+            "    states:\n" +
+            "      Idle:\n        motion: ~\n        transitions:\n          - { to: Idle, canTransitionToSelf: true }\n" +
+            "    default: Idle\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("canTransitionToSelf", ex.Message);
+    }
+
+    [Test]
     public void Duplicate_State_Key_Throws()
     {
         const string doc = @"schema: 1

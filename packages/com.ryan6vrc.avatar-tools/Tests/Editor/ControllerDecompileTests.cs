@@ -477,4 +477,203 @@ public class ControllerDecompileTests
         Assert.IsTrue(w.Refusals.Any(r => r.Contains("playAudio") && r.Contains("null clip")),
             "a null playAudio clip entry -> located refusal");
     }
+
+    // ---- Review #1: driver ops that interleave change-types or repeat a (type,name) -> refusals -------------
+
+    [Test]
+    public void Walk_Driver_Interleaved_And_Duplicate_Ops_Refuse()
+    {
+        // The schema regroups an ordered driver list into name-keyed set/add/copy/random buckets — faithful
+        // ONLY when the list is already bucket-ordered with no repeated (type,name). Emit a driver, then
+        // overwrite its parameters with an interleaved + duplicated list the emitter itself never produces.
+        const string yaml =
+            "schema: 1\ncontroller: DrvOrder_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  X: float\n  Y: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - driver: { set: { X: 1 } }\n" +
+            "    default: S\n";
+        var src = AnimatorSchemaYaml.Parse(yaml, "test");
+        ControllerEmit.Build(src, out var emitted);
+        var st = emitted.Controller.layers[0].stateMachine.states[0].state;
+        var drv = (VRC.SDKBase.VRC_AvatarParameterDriver)st.behaviours[0];
+        drv.parameters = new List<VRC.SDKBase.VRC_AvatarParameterDriver.Parameter>
+        {
+            new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { type = VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Set, name = "X", value = 1f },
+            new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { type = VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Copy, name = "Y", source = "X" },
+            new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { type = VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Set, name = "X", value = 2f },
+        };
+        EditorUtility.SetDirty(drv);
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("interleave")), "interleaved change-types -> refusal");
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("repeats operation")), "the duplicate Set X -> refusal");
+    }
+
+    // ---- Review #2: two DISTINCT embedded clips sharing a name -> a refusal (not a silent dedup) -----------
+
+    [Test]
+    public void Walk_Distinct_SameName_Embedded_Clips_Refuse()
+    {
+        EnsureScratch();
+        var c = new AnimatorController { name = "DupClip_Fx" };
+        AssetDatabase.CreateAsset(c, ScratchFolder + "/DupClip_Fx.controller");
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        var s1 = sm.AddState("S1");
+        var s2 = sm.AddState("S2");
+        s1.motion = AddEmbeddedClip(c, "dup", 1f);
+        s2.motion = AddEmbeddedClip(c, "dup", 2f); // distinct instance, same name
+        AssetDatabase.SaveAssets();
+
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("dup") && r.Contains("DISTINCT")),
+            "two distinct embedded clips sharing a name -> located refusal");
+    }
+
+    private static AnimationClip AddEmbeddedClip(AnimatorController c, string name, float v)
+    {
+        var clip = new AnimationClip { name = name, hideFlags = HideFlags.HideInHierarchy };
+        AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve("", typeof(Animator), "P"),
+            AnimationCurve.Constant(0f, 0.1f, v));
+        AssetDatabase.AddObjectToAsset(clip, c);
+        return clip;
+    }
+
+    // ---- Review #3: a MIXED set+curve clip whose sets run past the last keyframe keeps its length ----------
+
+    [Test]
+    public void Walk_Mixed_Set_And_Curve_Recovers_Longer_Seconds()
+    {
+        EnsureScratch();
+        var c = new AnimatorController { name = "MixedClip_Fx" };
+        AssetDatabase.CreateAsset(c, ScratchFolder + "/MixedClip_Fx.controller");
+        // Declare the two bindings as params so the decoded doc re-emits them as Animator-param curves.
+        c.AddParameter("SetP", AnimatorControllerParameterType.Float);
+        c.AddParameter("CurveP", AnimatorControllerParameterType.Float);
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        var clip = new AnimationClip { name = "mixed", hideFlags = HideFlags.HideInHierarchy };
+        // A constant Set running to t=2.0 ...
+        AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve("", typeof(Animator), "SetP"),
+            AnimationCurve.Constant(0f, 2.0f, 1f));
+        // ... plus a keyframed curve whose last key is only at t=1.0.
+        AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve("", typeof(Animator), "CurveP"),
+            new AnimationCurve(new Keyframe(0f, 0f), new Keyframe(1.0f, 1f)));
+        AssetDatabase.AddObjectToAsset(clip, c);
+        st.motion = clip;
+        AssetDatabase.SaveAssets();
+
+        var w = ControllerDecompile.Walk(c);
+        var decoded = w.Doc.Clips.First(x => x.Name == "mixed");
+        Assert.IsTrue(decoded.Seconds.HasValue, "the longer set length is recovered on a mixed clip");
+        Assert.AreEqual(2.0f, decoded.Seconds.Value, 1e-3f);
+        Assert.AreEqual(1, decoded.Sets.Count, "the constant binding decoded as a Set");
+        Assert.AreEqual(1, decoded.Curves.Count, "the keyframed binding decoded as a Curve");
+
+        // Re-emit: the clip keeps length 2.0 (would shrink to the 1.0 curve end without the recovery).
+        ControllerEmit.Build(w.Doc, out var r2);
+        Assert.AreEqual(2.0f, r2.Clips["mixed"].length, 1e-3f);
+    }
+
+    // ---- Review #4: exact-duplicate sibling names (states AND sub-machines) -> located refusals ------------
+
+    [Test]
+    public void Walk_Exact_Duplicate_Sibling_States_Refuse()
+    {
+        var c = new AnimatorController { name = "DupState_Fx" };
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        sm.AddState("S");
+        var s2 = sm.AddState("Temp"); s2.name = "S"; // force an exact-duplicate raw name
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("identical sibling names") && r.Contains("states")),
+            "two states named 'S' -> located refusal");
+        Assert.AreEqual(2, w.Doc.Layers[0].Root.States.Count, "both are still decoded (never collapsed)");
+        Object.DestroyImmediate(c);
+    }
+
+    [Test]
+    public void Walk_Exact_Duplicate_Sibling_SubMachines_Refuse()
+    {
+        var c = new AnimatorController { name = "DupSm_Fx" };
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        sm.AddStateMachine("M");
+        var m2 = sm.AddStateMachine("Temp"); m2.name = "M"; // force an exact-duplicate raw name
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("identical sibling names") && r.Contains("sub-machines")),
+            "two sub-machines named 'M' -> located refusal");
+        Object.DestroyImmediate(c);
+    }
+
+    // ---- Review #5: two slots dangling to the SAME missing clip each recover the guid ---------------------
+
+    [Test]
+    public void Walk_Two_States_Same_Dangling_Clip_Both_Recover_The_Guid()
+    {
+        EnsureScratch();
+        string clipPath = ScratchFolder + "/shared_src.anim";
+        var ext = new AnimationClip { name = "shared_src" };
+        AnimationUtility.SetEditorCurve(ext, EditorCurveBinding.FloatCurve("", typeof(Animator), "Blend"),
+            AnimationCurve.Constant(0f, 0.1f, 0f));
+        AssetDatabase.CreateAsset(ext, clipPath);
+        string realGuid = AssetDatabase.AssetPathToGUID(clipPath);
+
+        var doc = new AnimDocument { Schema = 1, ControllerName = "SharedDangle_Fx" };
+        doc.Parameters.Add(new ParamSpec { Name = "Blend", Type = AnimParamType.Float });
+        var layer = new Layer { Name = "L" };
+        layer.Root.States.Add(new State { Name = "A", Motion = new MotionRef { RefPath = clipPath } });
+        layer.Root.States.Add(new State { Name = "B", Motion = new MotionRef { RefPath = clipPath } });
+        layer.Root.DefaultState = "A";
+        doc.Layers.Add(layer);
+        ControllerEmit.Build(doc, out var emitted);
+        string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
+
+        // Rewrite BOTH states' motion refs to a guid that resolves to NOTHING — the imported "missing vendor
+        // asset" reality. (DeleteAsset is unreliable here: its guid->path cache lingers within a synchronous
+        // test, so the deleted guid still "resolves" and nothing reads as dangling.)
+        const string missingGuid = "0123456789abcdef0123456789abcdef";
+        Assert.IsEmpty(AssetDatabase.GUIDToAssetPath(missingGuid), "the fake guid must be unresolvable");
+        string text = System.IO.File.ReadAllText(ctrlPath).Replace(realGuid, missingGuid);
+        System.IO.File.WriteAllText(ctrlPath, text);
+        AssetDatabase.ImportAsset(ctrlPath, ImportAssetOptions.ForceUpdate);
+        AssetDatabase.DeleteAsset(clipPath); // the real clip is now unreferenced
+
+        var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(ctrlPath);
+        var w = ControllerDecompile.Walk(controller);
+        var a = w.Doc.Layers[0].Root.States.First(s => s.Name == "A");
+        var b = w.Doc.Layers[0].Root.States.First(s => s.Name == "B");
+        Assert.IsNotNull(a.Motion?.RefGuid, "state A decodes a dangling guid ref");
+        Assert.IsNotNull(b.Motion?.RefGuid, "state B decodes a dangling guid ref");
+        Assert.AreEqual(missingGuid, a.Motion.RefGuid.Guid, "state A recovers the missing guid");
+        Assert.AreEqual(missingGuid, b.Motion.RefGuid.Guid, "state B ALSO recovers it (the old shared FIFO gave the 2nd 'unknown')");
+        Assert.AreEqual(2, w.UnresolvedGuids.Count, "both dangling slots are listed");
+    }
+
+    // ---- Review #7b: a condition param that can't survive the '<param> <op> <value>' grammar -> refusal ----
+
+    [Test]
+    public void Walk_Condition_Param_With_Whitespace_Refuses()
+    {
+        var c = new AnimatorController { name = "CondWs_Fx" };
+        c.AddParameter("Bad Param", AnimatorControllerParameterType.Bool);
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        var s = sm.AddState("S");
+        var t = sm.AddState("T");
+        var tr = s.AddTransition(t);
+        tr.AddCondition(AnimatorConditionMode.If, 0f, "Bad Param");
+
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("Bad Param") && r.Contains("condition")),
+            "a condition param carrying whitespace -> located refusal");
+        Object.DestroyImmediate(c);
+    }
+
+    private static void EnsureScratch()
+    {
+        if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");
+        if (!AssetDatabase.IsValidFolder("Assets/Agent/Scratch")) AssetDatabase.CreateFolder("Assets/Agent", "Scratch");
+        if (!AssetDatabase.IsValidFolder(ScratchFolder)) AssetDatabase.CreateFolder("Assets/Agent/Scratch", "emit");
+    }
 }
