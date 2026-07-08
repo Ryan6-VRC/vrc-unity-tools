@@ -39,7 +39,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
     public sealed class ParamSpec
     {
         public string Name; public AnimParamType Type; public float Default;
-        public bool Aap; public VrcParamMeta Vrc; // null unless a vrc: block was declared
+        public bool Aap; public bool Scratch; // Scratch == internal/working param, kept out of the emitted VRCExpressionParameters
+        public VrcParamMeta Vrc;               // null unless a vrc: block was declared
     }
     public sealed class VrcParamMeta { public bool Synced; public bool Saved; public bool Osc; public AnimParamType? VrcType; }
 

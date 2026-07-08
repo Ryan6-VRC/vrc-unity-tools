@@ -9,6 +9,7 @@ using UnityEditor.Animations;
 using UnityEngine;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
+using Ryan6Vrc.AgentTools.Editor;
 using Driver = VRC.SDKBase.VRC_AvatarParameterDriver;
 
 namespace Ryan6Vrc.AvatarTools.Editor
@@ -16,7 +17,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <summary>
     /// Codegen core: turns a parsed <see cref="AnimDocument"/> into a real Unity
     /// <see cref="AnimatorController"/> with embedded clips + blend trees, plus a
-    /// <see cref="VRCExpressionParameters"/> asset when any parameter declares a <c>vrc:</c> block.
+    /// <see cref="VRCExpressionParameters"/> asset listing the controller's OWN declared params (every
+    /// declared param except VRC built-ins and <c>scratch:</c> working params) so the merged FX stays
+    /// legible — non-synced params appear with <c>networkSynced=false</c> (free, no sync-bit cost).
     ///
     /// PURE FUNCTION OF THE DOCUMENT. No random identity (AaC's random suffixes are deliberately
     /// rejected): state layout is a fixed grid keyed by document order, names come straight from the
@@ -45,7 +48,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public Dictionary<string, AnimationClip> Clips = new Dictionary<string, AnimationClip>();
             public List<AnimationClip> ClipList = new List<AnimationClip>();
             public List<BlendTree> Trees = new List<BlendTree>();
-            public VRCExpressionParameters Params; // null unless a param declared vrc:
+            public VRCExpressionParameters Params; // null only when every declared param is excluded (built-in / scratch)
         }
 
         // Fail-loud emission error, named so a coordinator/log points straight at the offending construct.
@@ -548,25 +551,31 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return p;
             }
 
-            // ----- VRC expression parameters (in-memory; Task 5 persists) -----
+            // ----- VRC expression parameters (in-memory; CompileController persists) -----
 
+            // Emit a VRCExpressionParameters asset listing the controller's OWN declared params — for
+            // legibility, so a human inspecting the merged FX sees them like a "Parameters - …" asset — even
+            // when they are NOT synced. Excludes VRC built-ins (not ours to declare) and scratch/working
+            // params (internal residue). A non-synced param lists networkSynced=false: it costs no sync bit.
             private void EmitVrcParameters()
             {
-                var withVrc = _doc.Parameters.Where(p => p.Vrc != null).ToList();
-                if (withVrc.Count == 0) return;
+                var listed = _doc.Parameters
+                    .Where(p => !p.Scratch && !ControllerRules.IsVrcReserved(p.Name))
+                    .ToList();
+                if (listed.Count == 0) return;
 
                 var ep = ScriptableObject.CreateInstance<VRCExpressionParameters>();
                 var list = new List<VRCExpressionParameters.Parameter>();
-                foreach (var p in withVrc)
+                foreach (var p in listed)
                 {
-                    var vt = p.Vrc.VrcType ?? p.Type;
+                    var vt = p.Vrc?.VrcType ?? p.Type;
                     list.Add(new VRCExpressionParameters.Parameter
                     {
                         name = p.Name,
                         valueType = MapValueType(vt),
                         defaultValue = p.Default,
-                        saved = p.Vrc.Saved,
-                        networkSynced = p.Vrc.Synced,
+                        saved = p.Vrc?.Saved ?? false,
+                        networkSynced = p.Vrc?.Synced ?? false,
                     });
                 }
                 ep.parameters = list.ToArray();

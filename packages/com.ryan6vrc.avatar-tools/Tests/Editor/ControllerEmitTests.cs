@@ -131,38 +131,57 @@ layers:
     // ---- VRC expression parameters ---------------------------------------------------------------
 
     [Test]
-    public void Vrc_Params_Produce_Expression_Parameters_Asset()
+    public void Expression_Parameters_List_All_NonBuiltin_NonScratch()
     {
+        // For legibility the asset lists the controller's OWN params even when NOT synced: A (plain bool,
+        // networkSynced=false) and B (vrc synced+saved). It EXCLUDES a VRC built-in (IsLocal) and a scratch
+        // working param (Work).
         const string yaml = @"schema: 1
-controller: VrcParams
+controller: ParamList
 basis: avatar-root
 parameters:
-  Plain: float
-  Synced:
-    type: int
-    default: 2
-    vrc: { synced: true, saved: false }
+  A: bool
+  B: { type: bool, default: true, vrc: { synced: true, saved: true } }
+  IsLocal: bool
+  Work: { type: float, scratch: true }
 ";
-        var doc = AnimatorSchemaYaml.Parse(yaml, "mem://vrc");
+        var doc = AnimatorSchemaYaml.Parse(yaml, "mem://paramlist");
         ControllerEmit.Build(doc, out var r);
 
         Assert.IsNotNull(r.Params, "an expression-parameters asset was produced");
-        Assert.AreEqual(1, r.Params.parameters.Length, "only the vrc: param is added");
-        var p = r.Params.parameters[0];
-        Assert.AreEqual("Synced", p.name);
-        Assert.AreEqual(VRCExpressionParameters.ValueType.Int, p.valueType);
-        Assert.AreEqual(2f, p.defaultValue, 1e-6f);
-        Assert.IsTrue(p.networkSynced);
-        Assert.IsFalse(p.saved);
-        Assert.IsFalse(r.Params.parameters.Any(x => x.name == "Plain"), "non-vrc param is absent");
+        var names = r.Params.parameters.Select(p => p.name).ToList();
+        Assert.AreEqual(2, r.Params.parameters.Length, "exactly A and B are listed");
+        Assert.IsTrue(names.Contains("A"), "plain param A is listed");
+        Assert.IsTrue(names.Contains("B"), "vrc param B is listed");
+        Assert.IsFalse(names.Contains("IsLocal"), "VRC built-in IsLocal is excluded");
+        Assert.IsFalse(names.Contains("Work"), "scratch working param Work is excluded");
+
+        var a = r.Params.parameters.First(p => p.name == "A");
+        Assert.AreEqual(VRCExpressionParameters.ValueType.Bool, a.valueType);
+        Assert.IsFalse(a.networkSynced, "non-synced param appears with networkSynced=false (no sync-bit cost)");
+        Assert.IsFalse(a.saved);
+
+        var b = r.Params.parameters.First(p => p.name == "B");
+        Assert.AreEqual(VRCExpressionParameters.ValueType.Bool, b.valueType);
+        Assert.AreEqual(1f, b.defaultValue, 1e-6f);
+        Assert.IsTrue(b.networkSynced, "vrc synced param stays synced");
+        Assert.IsTrue(b.saved, "vrc saved param stays saved");
     }
 
     [Test]
-    public void No_Vrc_Params_Leaves_Params_Null()
+    public void All_Excluded_Params_Leave_Params_Null()
     {
-        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "mem://debounce");
+        // Every declared param is excluded (a built-in + a scratch) → nothing to list → null Params.
+        const string yaml = @"schema: 1
+controller: AllExcluded
+basis: avatar-root
+parameters:
+  IsLocal: bool
+  Work: { type: float, scratch: true }
+";
+        var doc = AnimatorSchemaYaml.Parse(yaml, "mem://excluded");
         ControllerEmit.Build(doc, out var r);
-        Assert.IsNull(r.Params, "no vrc: block anywhere => null Params");
+        Assert.IsNull(r.Params, "all params excluded (built-in + scratch) => null Params");
     }
 
     // ---- Direct blend tree with per-child weight + nested 1D --------------------------------------
