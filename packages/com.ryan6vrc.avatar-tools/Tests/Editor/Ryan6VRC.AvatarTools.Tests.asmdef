@@ -4,6 +4,7 @@
     "references": [
         "Ryan6VRC.AvatarTools.Editor",
         "Ryan6VRC.AgentTools.Editor",
+        "VRC.SDK3A",
         "UnityEngine.TestRunner",
         "UnityEditor.TestRunner"
     ],
@@ -14,7 +15,9 @@
     "allowUnsafeCode": false,
     "overrideReferences": true,
     "precompiledReferences": [
-        "nunit.framework.dll"
+        "nunit.framework.dll",
+        "VRCSDK3A.dll",
+        "VRCSDKBase.dll"
     ],
     "autoReferenced": false,
     "defineConstraints": [
