@@ -118,6 +118,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static Dictionary<string, object> ParseMapping(List<Line> lines, ref int i, int indent)
         {
+            // Parameter/state/clip ORDER is the Dictionary's insertion-order enumeration (keys are only ever
+            // added, never removed, so it stays stable). A future edit that removes+re-adds keys would break
+            // that ordering contract — use an order-preserving structure if that ever changes.
             var map = new Dictionary<string, object>();
             while (i < lines.Count && lines[i].Indent == indent && !IsSeqLine(lines[i].Text))
             {
@@ -544,12 +547,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static void BindParameters(AnimDocument doc, Dictionary<string, object> map)
         {
-            var seen = new HashSet<string>();
+            // Duplicate names are already refused by stage-1's per-mapping guard (line-numbered).
             foreach (var kv in map)
             {
                 string name = kv.Key;
-                if (!seen.Add(name))
-                    throw new SchemaException($"duplicate parameter '{name}'");
                 var spec = new ParamSpec { Name = name };
                 object v = kv.Value;
                 if (v is Dictionary<string, object> m)
@@ -621,7 +622,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case "mask": layer.Mask = ToStr(kv.Value, "layer.mask"); break;
                         case "blend": layer.Blend = ParseBlend(ToStr(kv.Value, "layer.blend")); break;
                         case "writeDefaults": layer.WriteDefaults = ToBool(kv.Value, "layer.writeDefaults"); break;
-                        case "states": BindStates(layer.Root, ToMap(kv.Value, "layer.states"), layer.Name); break;
+                        case "states": BindStates(layer.Root, ToMap(kv.Value, "layer.states")); break;
                         case "default": layer.Root.DefaultState = ToStr(kv.Value, "layer.default"); break;
                         case "behaviours": BindBehaviours(layer.Root.Behaviours, ToList(kv.Value, "layer.behaviours")); break;
                         default: throw new SchemaException($"unknown layer field '{kv.Key}'");
@@ -641,14 +642,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        private static void BindStates(StateMachine sm, Dictionary<string, object> map, string layerName)
+        private static void BindStates(StateMachine sm, Dictionary<string, object> map)
         {
-            var seen = new HashSet<string>();
+            // Duplicate state names are already refused by stage-1's per-mapping guard (line-numbered).
             foreach (var kv in map)
             {
                 string name = kv.Key;
-                if (!seen.Add(name))
-                    throw new SchemaException($"duplicate state '{name}' in layer '{layerName}'");
                 sm.States.Add(BindState(name, ToMap(kv.Value, $"state '{name}'")));
             }
         }
@@ -858,28 +857,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return child;
         }
 
+        // Canonical pinned tree-kind tokens (case-sensitive) — these are the exact surface Task 8's
+        // blend-tree exercises author. No alternates.
         private static TreeKind ParseTreeKind(string v)
         {
-            switch (v.ToLowerInvariant())
+            switch (v)
             {
                 case "1d": return TreeKind.OneD;
-                case "simple-directional-2d": case "simpledirectional2d": return TreeKind.SimpleDirectional2D;
-                case "freeform-directional-2d": case "freeformdirectional2d": return TreeKind.FreeformDirectional2D;
-                case "freeform-cartesian-2d": case "freeformcartesian2d": return TreeKind.FreeformCartesian2D;
+                case "simpleDirectional2d": return TreeKind.SimpleDirectional2D;
+                case "freeformDirectional2d": return TreeKind.FreeformDirectional2D;
+                case "freeformCartesian2d": return TreeKind.FreeformCartesian2D;
                 case "direct": return TreeKind.Direct;
                 default: throw new SchemaException(
-                    $"invalid tree kind '{v}' (expected 1d, simple-directional-2d, freeform-directional-2d, freeform-cartesian-2d, direct)");
+                    $"invalid tree kind '{v}' (expected 1d, simpleDirectional2d, freeformDirectional2d, freeformCartesian2d, direct)");
             }
         }
 
         private static void BindClips(AnimDocument doc, Dictionary<string, object> map)
         {
-            var seen = new HashSet<string>();
+            // Duplicate clip names are already refused by stage-1's per-mapping guard (line-numbered).
             foreach (var kv in map)
             {
                 string name = kv.Key;
-                if (!seen.Add(name))
-                    throw new SchemaException($"duplicate clip '{name}'");
                 var m = ToMap(kv.Value, $"clip '{name}'");
                 var clip = new ClipSpec { Name = name };
                 foreach (var ck in m)
@@ -945,26 +944,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
             throw new SchemaException($"{ctx}: expected a boolean, got {Describe(v)}");
         }
 
+        // InferScalar only ever yields long/double for numbers, never int — no int arm needed.
         private static float ToNumber(object v, string ctx)
         {
             if (v is long l) return l;
             if (v is double d) return (float)d;
-            if (v is int i) return i;
             throw new SchemaException($"{ctx}: expected a number, got {Describe(v)}");
         }
 
         private static int ToInt(object v, string ctx)
         {
-            if (v is long l) return checked((int)l);
-            if (v is int i) return i;
-            if (v is double d && d == Math.Floor(d)) return (int)d;
+            if (v is long l)
+            {
+                if (l < int.MinValue || l > int.MaxValue)
+                    throw new SchemaException($"{ctx}: value {l} is out of range for an integer");
+                return (int)l;
+            }
+            if (v is double d && d == Math.Floor(d) && d >= int.MinValue && d <= int.MaxValue) return (int)d;
             throw new SchemaException($"{ctx}: expected an integer, got {Describe(v)}");
         }
 
         private static long ToLong(object v, string ctx)
         {
             if (v is long l) return l;
-            if (v is int i) return i;
             if (v is double d && d == Math.Floor(d)) return (long)d;
             throw new SchemaException($"{ctx}: expected an integer, got {Describe(v)}");
         }
@@ -975,7 +977,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (v is bool b) return b ? 1f : 0f;
             if (v is long l) return l;
             if (v is double d) return (float)d;
-            if (v is int i) return i;
             throw new SchemaException($"{ctx}: expected a boolean or number, got {Describe(v)}");
         }
 
