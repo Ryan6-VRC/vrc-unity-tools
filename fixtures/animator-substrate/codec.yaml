@@ -27,11 +27,12 @@ parameters:
 
 layers:
   - name: Codec
-    # Each walk state carries a tiny inert `tick` clip so normalizedTime advances and the unconditional
-    # "proceed"/"else" hops can fire on `exitTime: 1.0` (clip end, ~1 frame). A motionless state has no
-    # clock, so its exit-time transitions never fire — the carrier is what makes the walk step. The
-    # conditional Accept branch is listed first (fires immediately when Work exceeds the weight);
-    # otherwise the state runs out its tick and the Reject hop fires. ~1 frame per state, ~8 per encode.
+    # Each walk state carries a tiny inert `tick` clip so its exit-time hop fires FAST. An exit-time
+    # transition fires at clip-end; a motionless state still advances but takes the 1s default empty-state
+    # length, so a multi-hop walk would crawl (~1s per state). The 0.02s tick makes `exitTime: 1.0` land in
+    # ~1 frame instead — the carrier is a speed control, not a correctness fix. The conditional Accept branch
+    # is listed first (fires immediately when Work exceeds the weight); otherwise the state runs out its tick
+    # and the Reject hop fires. ~1 frame per state, ~8 per encode.
     states:
       Start:
         motion: { clip: tick }
@@ -87,4 +88,4 @@ layers:
     default: Start
 
 clips:
-  tick: { seconds: 0.02 }   # ~1 frame at 60fps; inert carrier so exitTime hops can fire
+  tick: { seconds: 0.02 }   # ~1 frame at 60fps; short length so exitTime hops fire fast (not the 1s default)
