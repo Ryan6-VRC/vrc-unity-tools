@@ -1,9 +1,12 @@
 using System.IO;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 using Ryan6Vrc.AvatarTools.Editor;
 using UnityEditor;
 using UnityEditor.Animations;
+using UnityEngine;
+using UnityEngine.TestTools;
 
 // Behavioral tests for the CompileController door. These touch the filesystem (source YAML) and the
 // AssetDatabase (the emitted .controller). NOT run via MCP run_tests (it crashes the editor); run from the
@@ -70,6 +73,9 @@ public class CompileControllerTests
         File.WriteAllText(badSrc, AnimatorSchemaYamlTests.DebounceDoc.Replace("schema: 1", "schema: 2"));
 
         string outDir = TestRoot + "/out_bad";
+        // The door reports a refusal via Debug.LogError; declare it so the test framework doesn't count the
+        // intentional error log as a failure.
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] FAIL: validation failed"));
         string result = CompileController.Compile(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
@@ -97,6 +103,8 @@ public class CompileControllerTests
             "schema: 1\ncontroller: Debounce_Fx\nbasis: avatar-root\nrole: fx\n" +
             "parameters:\n  P: { type: float }\n" +
             "layers:\n  - name: L\n    states:\n      S:\n        transitions:\n          - { to: NoSuchState }\n    default: S\n");
+        // The failing recompile reports its refusal via Debug.LogError; declare it as expected.
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] FAIL: emit:"));
         string result = CompileController.Compile(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
