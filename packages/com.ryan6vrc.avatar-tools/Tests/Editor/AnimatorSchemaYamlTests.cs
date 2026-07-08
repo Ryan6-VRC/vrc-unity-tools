@@ -174,6 +174,63 @@ parameters:
     }
 
     [Test]
+    public void Parse_Nests_SubMachines_Two_Levels()
+    {
+        const string doc =
+            "schema: 1\ncontroller: Nested2_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n" +
+            "  - name: L\n" +
+            "    states:\n      Idle: { motion: ~ }\n" +
+            "    machines:\n" +
+            "      Outer:\n" +
+            "        states:\n          O: { motion: ~ }\n" +
+            "        default: O\n" +
+            "        machines:\n" +
+            "          Inner:\n" +
+            "            states:\n              I: { motion: ~ }\n" +
+            "            default: I\n" +
+            "    default: Idle\n";
+        var d = AnimatorSchemaYaml.Parse(doc, "test");
+        var outer = d.Layers[0].Root.Machines[0];
+        Assert.AreEqual("Outer", outer.Name);
+        Assert.AreEqual("O", outer.Machine.DefaultState);
+        Assert.AreEqual(1, outer.Machine.Machines.Count);
+        var inner = outer.Machine.Machines[0];
+        Assert.AreEqual("Inner", inner.Name);
+        Assert.AreEqual("I", inner.Machine.DefaultState);
+    }
+
+    [Test]
+    public void Unknown_Machine_Field_Throws_By_Name()
+    {
+        const string doc =
+            "schema: 1\ncontroller: Bad_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n" +
+            "  - name: L\n" +
+            "    states:\n      Idle: { motion: ~ }\n" +
+            "    machines:\n" +
+            "      Sub:\n        bogus: 1\n" +
+            "    default: Idle\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("bogus", ex.Message);
+    }
+
+    [Test]
+    public void CanTransitionToSelf_On_Entry_Ladder_Throws()
+    {
+        const string doc =
+            "schema: 1\ncontroller: Bad_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n" +
+            "  - name: L\n" +
+            "    states:\n      Idle: { motion: ~ }\n" +
+            "    entry:\n" +
+            "      - { to: Idle, canTransitionToSelf: true }\n" +
+            "    default: Idle\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("canTransitionToSelf", ex.Message);
+    }
+
+    [Test]
     public void Duplicate_State_Key_Throws()
     {
         const string doc = @"schema: 1
