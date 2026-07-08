@@ -380,6 +380,25 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
+    [Test]
+    public void Walk_NonEmpty_TimeParameter_Binds_Without_A_Note()
+    {
+        // A real motion-time binding (the vendor Shinano/CasualStroll scrubber shape) is decoded verbatim —
+        // NOT the empty-param normalization, so no Note is recorded for it.
+        var c = new AnimatorController { name = "MotionTimeTP_Fx" };
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        st.timeParameterActive = true;
+        st.timeParameter = "MotionTime";
+
+        var w = ControllerDecompile.Walk(c);
+        var s = w.Doc.Layers[0].Root.States.First(x => x.Name == "S");
+        Assert.AreEqual("MotionTime", s.MotionTimeParam, "a non-empty timeParameter is bound verbatim");
+        Assert.AreEqual(0, w.Refusals.Count, "a real motion-time binding is in-vocabulary");
+        Assert.IsFalse(w.Notes.Any(n => n.Contains("timeParameter")), "no normalization Note for a real binding");
+        Object.DestroyImmediate(c);
+    }
+
     // ---- Task 7 item 3: sibling states differing only by trailing whitespace -> a located Refusal ------------
 
     [Test]
@@ -425,7 +444,8 @@ public class ControllerDecompileTests
         st.motion = new AnimationClip { name = "empty" }; // no curve bindings
 
         var w = ControllerDecompile.Walk(c);
-        Assert.IsTrue(w.Refusals.Any(r => r.Contains("empty") && r.Contains("animatable content")),
+        // Assert on the message text, not the clip NAME ("empty") — a rename must not satisfy it.
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("zero curve bindings")),
             "an inline clip with zero bindings -> located refusal");
         Object.DestroyImmediate(c);
     }
