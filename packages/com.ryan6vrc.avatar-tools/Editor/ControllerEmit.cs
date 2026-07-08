@@ -333,7 +333,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     foreach (var t in layer.Root.EntryLadder)
                     {
                         var etr = sm.AddEntryTransition(ResolveTargetState(t, byName));
-                        foreach (var c in t.When) etr.AddCondition(MapCondOp(c.Op), c.Value, c.Param);
+                        foreach (var c in t.When) etr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param);
                     }
 
                     EmitBehaviours(layer.Root.Behaviours, t => sm.AddStateMachineBehaviour(t));
@@ -387,7 +387,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 tr.hasFixedDuration = t.FixedDuration ?? true;
                 tr.interruptionSource = MapInterruption(t.Interruption ?? _doc.Defaults.Interruption);
                 tr.orderedInterruption = t.OrderedInterruption ?? true;
-                foreach (var c in t.When) tr.AddCondition(MapCondOp(c.Op), c.Value, c.Param); // empty When = unconditional
+                foreach (var c in t.When) tr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param); // empty When = unconditional
             }
 
             // ----- motions / blend trees -----
@@ -620,12 +620,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ----- construct -> Unity enum maps -----
 
-        private static AnimatorConditionMode MapCondOp(CondOp op)
+        // Bool conditions carry their truth in the VALUE (`is true` = Is/1, `is false` = Is/0); Unity
+        // encodes it in the MODE (If/IfNot) and ignores the threshold — so Is/IsNot must fold the value
+        // into If vs IfNot, or `is false` wrongly reads as `If` (fires on true). Numeric ops pass through.
+        private static AnimatorConditionMode MapCondOp(CondOp op, float value)
         {
+            bool truthy = value != 0f;
             switch (op)
             {
-                case CondOp.Is: return AnimatorConditionMode.If;
-                case CondOp.IsNot: return AnimatorConditionMode.IfNot;
+                case CondOp.Is:    return truthy ? AnimatorConditionMode.If : AnimatorConditionMode.IfNot;
+                case CondOp.IsNot: return truthy ? AnimatorConditionMode.IfNot : AnimatorConditionMode.If;
                 case CondOp.Greater: return AnimatorConditionMode.Greater;
                 case CondOp.Less: return AnimatorConditionMode.Less;
                 case CondOp.Equals: return AnimatorConditionMode.Equals;

@@ -1,0 +1,49 @@
+# Debounce layer — worked example for the animator write substrate.
+#
+# A raw input must stay HIGH for a fixed dwell before the debounced output flips on; a blip shorter
+# than the dwell is ignored. This is the arbitration idiom from docs/gimmicks.md ("raw contact bools
+# feed a small timer state machine ... exitTime as the dwell"). Keep raw (RawInput) and debounced
+# (Debounced) parameters distinct.
+#
+# Compiles with CompileController; AnimatorLint PASS (basis=explicit); rung-3 verified in the emulator.
+
+schema: 1
+controller: Debounce_Fx
+basis: avatar-root
+role: fx
+
+defaults:
+  writeDefaults: on
+  transition: { duration: 0, exitTime: none, interruption: none }
+
+parameters:
+  RawInput:  bool    # the raw, un-debounced input (driven externally / by a contact)
+  Debounced: bool    # the debounced output (what downstream logic reads)
+
+layers:
+  - name: Debounce
+    states:
+      Idle:
+        motion: ~
+        behaviours:
+          - driver: { set: { Debounced: 0 } }   # reset on every return to rest — a sub-dwell blip leaves 0
+        transitions:
+          - { to: Pending, when: [ RawInput is true ] }
+      Pending:
+        motion: { clip: timer }                 # duration-only clip: the compiler emits an inert carrier
+        transitions:
+          # 0.2s dwell (empirical — long enough to reject a contact bounce, short enough to feel instant).
+          # exitTime fires when the timer clip completes; unconditional, so only a held input reaches Active.
+          - { to: Active, when: [], exitTime: 1.0 }
+          - { to: Idle,   when: [ RawInput is false ] }   # released before the dwell → no flip
+      Active:
+        motion: { clip: hold_on }
+        behaviours:
+          - driver: { set: { Debounced: 1 } }   # dwell survived → output high
+        transitions:
+          - { to: Idle, when: [ RawInput is false ] }
+    default: Idle
+
+clips:
+  timer:   { seconds: 0.2 }                     # the dwell; only content is its length
+  hold_on: { set: { Debounced: 1 } }            # holds the output while Active (bare param id → animator curve)
