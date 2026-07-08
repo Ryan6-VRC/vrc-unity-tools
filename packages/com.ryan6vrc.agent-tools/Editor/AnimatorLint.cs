@@ -462,6 +462,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static string Emit(AnimatorController controller, LintResult rep, string detection, List<string> notes)
         {
             bool errorTierFired = rep.MissingMotion > 0 || rep.UndeclaredParam > 0 || rep.EntryShadow > 0
+                                  || rep.DeadTransition > 0
                                   || (rep.BrokenBindingIsError && rep.BrokenBinding > 0);
             string result = errorTierFired ? "FAIL" : "PASS";
 
@@ -470,8 +471,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             int advisories = rep.Advisories.Count;
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[AnimatorLint] {0}: missingMotion={1} undeclaredParam={2} entryShadow={3} brokenBinding={4} advisories={5} => {6}",
-                controller.name, rep.MissingMotion, rep.UndeclaredParam, rep.EntryShadow, rep.BrokenBinding, advisories, result);
+                "[AnimatorLint] {0}: missingMotion={1} undeclaredParam={2} entryShadow={3} deadTransition={4} brokenBinding={5} advisories={6} => {7}",
+                controller.name, rep.MissingMotion, rep.UndeclaredParam, rep.EntryShadow, rep.DeadTransition, rep.BrokenBinding, advisories, result);
 
             var sb = new StringBuilder();
             sb.Append("# AnimatorLint: ").Append(controller.name).Append('\n');

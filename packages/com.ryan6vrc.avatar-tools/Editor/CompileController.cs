@@ -97,7 +97,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ── 5. Pre-emission graph lint (roots empty ⇒ broken-binding rule skipped: no scene) ─────
             var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
-            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.EntryShadow > 0)
+            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
             {
                 CleanupOnFailure(whatIf, tempFolder, finalPath);
                 string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
@@ -272,6 +272,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("missingMotion=").Append(lint.MissingMotion)
               .Append(" undeclaredParam=").Append(lint.UndeclaredParam)
               .Append(" entryShadow=").Append(lint.EntryShadow)
+              .Append(" deadTransition=").Append(lint.DeadTransition)
               .Append(" (errors ").Append(lint.Errors.Count).Append(") — PASS\n");
             if (lint.Advisories.Count > 0)
                 foreach (var o in lint.Advisories)

@@ -41,6 +41,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             "ScaleFactorInverse", "EyeHeightAsMeters", "EyeHeightAsPercent",
         };
 
+        private static readonly HashSet<string> VrcReservedSet = new HashSet<string>(VrcReservedParams);
+
+        /// <summary>True when <paramref name="name"/> is a VRChat reserved/built-in animator parameter
+        /// (IsLocal, Viseme, GestureLeft, …) — declared nowhere yet referenced everywhere, so avatar tooling
+        /// must exempt it. The one authoritative predicate over <see cref="VrcReservedParams"/>: the undeclared-param
+        /// rule uses it, and the compiler's VRCExpressionParameters emitter reuses it to keep built-ins out of the
+        /// emitted params asset (they cost nothing and aren't the controller's own to declare).</summary>
+        public static bool IsVrcReserved(string name) => name != null && VrcReservedSet.Contains(name);
+
         // ----- Public API ---------------------------------------------------------------------------
 
         /// <summary>Run the v1 rule set against <paramref name="controller"/> with the binding basis already
@@ -73,6 +82,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             RuleMissingMotion(states, dangling, rep);
             RuleUndeclaredParam(controller, states, machines, rep);
             RuleEntryShadow(machines, rep);
+            RuleDeadTransition(states, rep);
             RuleBrokenBinding(controller, roots, pathRewrite, rep);
 
             // ---- Advisory-tier rules ------------------------------------------------------------------
@@ -109,7 +119,6 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             var declared = new HashSet<string>();
             foreach (var p in controller.parameters) declared.Add(p.name);
-            var exempt = new HashSet<string>(VrcReservedParams);
 
             // name -> first location it was referenced (for the offender handle)
             var referenced = new Dictionary<string, string>();
@@ -150,7 +159,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             foreach (var kv in referenced)
             {
-                if (declared.Contains(kv.Key) || exempt.Contains(kv.Key)) continue;
+                if (declared.Contains(kv.Key) || IsVrcReserved(kv.Key)) continue;
                 rep.UndeclaredParam++;
                 rep.Errors.Add(new LintOffender
                 {
@@ -204,6 +213,57 @@ namespace Ryan6Vrc.AgentTools.Editor
                     Detail = shadowed + " entry transition(s) after the unconditional entry at index " + firstUncond + " are unreachable"
                 });
             }
+        }
+
+        // ----- Rule 3b: deadTransition — a state transition that provably can never fire ------------
+        // Two precise shapes (conservative by design — anything outside these two is left alone):
+        //   (a) ERROR — an outgoing transition with NO conditions AND hasExitTime==false that is NOT a
+        //       to-Exit transition. Unity needs a condition or an exit time to ever activate a state→state
+        //       transition, so this one is inert and silently stalls the machine (the real bug this catches).
+        //   (b) ADVISORY — a transition whose SOURCE STATE has no motion but which relies on hasExitTime.
+        //       A motionless state's normalizedTime never advances, so the exit-time gate can't be met (the
+        //       debounce/codec fixtures add a carrier clip precisely to avoid this). Left ADVISORY, not error,
+        //       because this runs at error-tier on EVERY controller AnimatorLint sees and a WD/loop-state
+        //       nuance could in principle let some motionless state advance — promote to error only once that
+        //       is ruled out. to-Exit transitions are excluded from BOTH (they fire by their own rules).
+        private static void RuleDeadTransition(List<StateCtx> states, LintResult rep)
+        {
+            foreach (var s in states)
+            {
+                var st = s.State;
+                if (st == null) continue;
+                bool motionless = st.motion == null;
+                foreach (var t in st.transitions)
+                {
+                    if (t == null || t.isExit) continue;
+                    string handle = "state '" + st.name + "' -> '" + TransitionDest(t) + "'";
+                    bool noConds = t.conditions == null || t.conditions.Length == 0;
+                    if (noConds && !t.hasExitTime)
+                    {
+                        rep.DeadTransition++;
+                        rep.Errors.Add(new LintOffender
+                        {
+                            Kind = "deadTransition", Where = handle,
+                            Detail = "no conditions and no exit time — never fires"
+                        });
+                    }
+                    else if (t.hasExitTime && motionless)
+                    {
+                        rep.Advisories.Add(new LintOffender
+                        {
+                            Kind = "deadTransition (motionless exit-time)", Where = handle,
+                            Detail = "exit-time transition from a motionless state — never fires"
+                        });
+                    }
+                }
+            }
+        }
+
+        private static string TransitionDest(AnimatorStateTransition t)
+        {
+            if (t.destinationStateMachine != null) return t.destinationStateMachine.name;
+            if (t.destinationState != null) return t.destinationState.name;
+            return "(none)";
         }
 
         // ----- Rule 4: brokenBinding (error, or advisory under a build-rewrite auto site) -----------
@@ -475,7 +535,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// the broken-binding rule ran at, so the caller can fold it into the verdict.</summary>
     public sealed class LintResult
     {
-        public int MissingMotion, UndeclaredParam, EntryShadow, BrokenBinding;
+        public int MissingMotion, UndeclaredParam, EntryShadow, BrokenBinding, DeadTransition;
         public bool BrokenBindingIsError;
         public readonly List<LintOffender> Errors = new List<LintOffender>();
         public readonly List<LintOffender> Advisories = new List<LintOffender>();

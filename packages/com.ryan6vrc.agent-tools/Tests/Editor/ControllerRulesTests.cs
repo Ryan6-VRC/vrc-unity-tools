@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using NUnit.Framework;
 using UnityEditor.Animations;
 using UnityEngine;
@@ -54,5 +55,45 @@ public class ControllerRulesTests
         Assert.AreEqual(1, r.UndeclaredParam, "the single undeclared condition parameter must be counted");
         Assert.GreaterOrEqual(r.EntryShadow, 1, "the second entry transition is shadowed by the earlier unconditional entry");
         Assert.AreEqual(0, r.BrokenBinding, "roots empty ⇒ the broken-binding rule is skipped (no basis root)");
+    }
+
+    [Test]
+    public void Run_Flags_NoCondition_NoExit_Transition_As_Dead_Error()
+    {
+        _controller = new AnimatorController();
+        _controller.AddLayer("Base");
+        var sm = _controller.layers[0].stateMachine;
+        var a = sm.AddState("A");
+        var b = sm.AddState("B");
+
+        // No conditions AND no exit time AND not a to-Exit transition — Unity can never activate it.
+        var tr = a.AddTransition(b);
+        tr.hasExitTime = false;
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: true, pathRewrite: null);
+
+        Assert.AreEqual(1, r.DeadTransition, "the no-condition + no-exit transition is a dead (never-firing) transition");
+        Assert.IsTrue(r.Errors.Any(o => o.Kind == "deadTransition" && o.Where.Contains("A") && o.Where.Contains("B")),
+            "the dead transition is an error-tier offender named by source -> dest");
+    }
+
+    [Test]
+    public void Run_Flags_ExitTime_From_Motionless_State_As_Advisory_Not_Error()
+    {
+        _controller = new AnimatorController();
+        _controller.AddLayer("Base");
+        var sm = _controller.layers[0].stateMachine;
+        var a = sm.AddState("A");   // no motion assigned → motionless: its normalizedTime never advances
+        var b = sm.AddState("B");
+
+        var tr = a.AddTransition(b);
+        tr.hasExitTime = true;
+        tr.exitTime = 1.0f;
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: true, pathRewrite: null);
+
+        Assert.AreEqual(0, r.DeadTransition, "case (b) is advisory-tier — it must NOT bump the error counter / flip the verdict");
+        Assert.IsTrue(r.Advisories.Any(o => o.Kind.StartsWith("deadTransition")),
+            "the motionless exit-time transition surfaces as an advisory");
     }
 }
