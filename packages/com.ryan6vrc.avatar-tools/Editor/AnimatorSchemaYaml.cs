@@ -889,18 +889,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var child = new TreeChild();
             bool hasClip = m.ContainsKey("clip"), hasRef = m.ContainsKey("ref"), hasTree = m.ContainsKey("tree");
             int n = (hasClip ? 1 : 0) + (hasRef ? 1 : 0) + (hasTree ? 1 : 0);
-            if (n == 0) throw new SchemaException($"{ctx} tree child: must set exactly one motion of clip/ref/tree");
             if (n > 1) throw new SchemaException($"{ctx} tree child: sets more than one motion of clip/ref/tree");
-            var mr = new MotionRef();
-            if (hasClip) mr.Clip = ToStr(m["clip"], $"{ctx} tree child clip");
-            else if (hasRef)
+            // n == 0 is a legal EMPTY child (an unassigned blend-tree slot) — Unity permits it, and it is the
+            // normalized form of a broken ref after the first compile nulls the motion. Leave Motion null.
+            if (n == 1)
             {
-                object rv = m["ref"];
-                if (rv is Dictionary<string, object> gm) mr.RefGuid = BindGuid(gm, ctx);
-                else mr.RefPath = ToStr(rv, $"{ctx} tree child ref");
+                var mr = new MotionRef();
+                if (hasClip) mr.Clip = ToStr(m["clip"], $"{ctx} tree child clip");
+                else if (hasRef)
+                {
+                    object rv = m["ref"];
+                    if (rv is Dictionary<string, object> gm) mr.RefGuid = BindGuid(gm, ctx);
+                    else mr.RefPath = ToStr(rv, $"{ctx} tree child ref");
+                }
+                else mr.Tree = BindTree(m, ctx);
+                child.Motion = mr;
             }
-            else mr.Tree = BindTree(m, ctx);
-            child.Motion = mr;
 
             foreach (var kv in m)
             {
