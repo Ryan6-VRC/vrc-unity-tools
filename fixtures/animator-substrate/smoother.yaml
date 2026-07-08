@@ -1,0 +1,55 @@
+# AAP exponential smoother — worked example for the animator write substrate.
+#
+# A single always-on Direct blend tree that low-pass-filters `Target` into `Smoothed` (an AAP the tree
+# both reads and writes): Smoothed += (1 - lambda) * (Target - Smoothed) each frame, i.e.
+#   Smoothed_next = lambda * Smoothed + (1 - lambda) * Target
+# implemented as a Direct tree summing two weighted sub-trees — "maintain" (read Smoothed, weight
+# lambda) + "apply" (read Target, weight 1-lambda). Each sub-tree is a 1D tree mapping its param 0..1
+# onto the ±range AAP clips. (docs/gimmicks.md "AAP exponential smoother".)
+#
+# lambda is FRAMERATE-DEPENDENT: at a fixed lambda the settle time scales with fps. lambda=0.9 here
+# means ~10% of the gap closes per frame — visibly gradual, good for an emulator convergence read.
+# In production you feed a frametime compensator; for this worked example the constant is the point.
+#
+# Compiles with CompileController; AnimatorLint PASS; rung-3 verified (Smoothed climbs toward Target).
+
+schema: 1
+controller: Smoother_Fx
+basis: avatar-root
+role: fx
+
+defaults:
+  writeDefaults: on          # the Direct-tree AAP feedback idiom is WD-ON (runtime.md sanctioned mix)
+
+parameters:
+  Target:          { type: float, default: 0.0 }   # the input to smooth (driven externally)
+  Smoothed:        { type: float, aap: true }       # the filtered output (AAP: written by the tree)
+  SmoothFactor:    { type: float, default: 0.9 }    # lambda: fraction of the OLD value kept per frame
+  SmoothFactorInv: { type: float, default: 0.1 }    # 1 - lambda: fraction of the NEW target mixed in
+
+layers:
+  - name: Smoother
+    states:
+      Filter:
+        motion:
+          tree: direct
+          children:
+            # maintain: read the current Smoothed value, weight it by lambda
+            - tree: 1d
+              param: Smoothed
+              directWeight: SmoothFactor
+              children:
+                - { clip: aap_min, threshold: 0.0 }
+                - { clip: aap_max, threshold: 1.0 }
+            # apply: pull toward Target, weight it by (1 - lambda)
+            - tree: 1d
+              param: Target
+              directWeight: SmoothFactorInv
+              children:
+                - { clip: aap_min, threshold: 0.0 }
+                - { clip: aap_max, threshold: 1.0 }
+    default: Filter
+
+clips:
+  aap_min: { set: { Smoothed: 0.0 } }   # AAP endpoints: a bare param id compiles to an animator curve
+  aap_max: { set: { Smoothed: 1.0 } }
