@@ -434,6 +434,117 @@ layers:
         StringAssert.Contains("is not a sub-machine", ex.Message);
     }
 
+    // ---- Behaviours: the six non-driver VRC SMB kinds --------------------------------------------
+
+    private static AnimatorState SingleStateWithBehaviours(string kindLine)
+    {
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Bhv_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - " + kindLine + "\n" +
+            "    default: S\n", "test");
+        ControllerEmit.Build(doc, out var r);
+        return State(RootSm(r), "S");
+    }
+
+    [Test]
+    public void Emit_Tracking_Behaviour_Sets_Channels()
+    {
+        var st = SingleStateWithBehaviours("tracking: { head: animation, leftHand: tracking }");
+        var smb = st.behaviours[0] as VRCAnimatorTrackingControl;
+        Assert.IsNotNull(smb, "tracking SMB emitted");
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.Animation, smb.trackingHead);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.Tracking, smb.trackingLeftHand);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.NoChange, smb.trackingRightHand,
+            "an unmentioned channel keeps the SDK default (NoChange)");
+    }
+
+    [Test]
+    public void Emit_PlayableLayer_Behaviour_Sets_Layer_And_Weight()
+    {
+        var st = SingleStateWithBehaviours("playableLayer: { layer: fx, goalWeight: 1, blendDuration: 0.25 }");
+        var smb = st.behaviours[0] as VRCPlayableLayerControl;
+        Assert.IsNotNull(smb, "playableLayer SMB emitted");
+        Assert.AreEqual(VRC.SDKBase.VRC_PlayableLayerControl.BlendableLayer.FX, smb.layer);
+        Assert.AreEqual(1f, smb.goalWeight, 1e-6f);
+        Assert.AreEqual(0.25f, smb.blendDuration, 1e-6f);
+    }
+
+    [Test]
+    public void Emit_Locomotion_Behaviour_Sets_Disable()
+    {
+        var st = SingleStateWithBehaviours("locomotion: { disableLocomotion: true }");
+        var smb = st.behaviours[0] as VRCAnimatorLocomotionControl;
+        Assert.IsNotNull(smb, "locomotion SMB emitted");
+        Assert.IsTrue(smb.disableLocomotion);
+    }
+
+    [Test]
+    public void Emit_PoseSpace_Behaviour_Sets_Fields()
+    {
+        var st = SingleStateWithBehaviours("poseSpace: { enterPoseSpace: true, delayTime: 0.5 }");
+        var smb = st.behaviours[0] as VRCAnimatorTemporaryPoseSpace;
+        Assert.IsNotNull(smb, "poseSpace SMB emitted");
+        Assert.IsTrue(smb.enterPoseSpace);
+        Assert.AreEqual(0.5f, smb.delayTime, 1e-6f);
+    }
+
+    [Test]
+    public void Emit_LayerControl_Behaviour_Sets_Playable_LayerIndex_And_Weight()
+    {
+        var st = SingleStateWithBehaviours("layerControl: { playable: gesture, layer: 3, goalWeight: 0.5, blendDuration: 0.1 }");
+        var smb = st.behaviours[0] as VRCAnimatorLayerControl;
+        Assert.IsNotNull(smb, "layerControl SMB emitted");
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorLayerControl.BlendableLayer.Gesture, smb.playable);
+        Assert.AreEqual(3, smb.layer, "the integer layer index");
+        Assert.AreEqual(0.5f, smb.goalWeight, 1e-6f);
+        Assert.AreEqual(0.1f, smb.blendDuration, 1e-6f);
+    }
+
+    [Test]
+    public void Emit_PlayAudio_Behaviour_Sets_Order_Flags_And_Range()
+    {
+        var st = SingleStateWithBehaviours(
+            "playAudio: { sourcePath: Audio/Src, playbackOrder: uniqueRandom, volume: [ 0.8, 1.0 ], playOnEnter: true, stopOnExit: true }");
+        var smb = st.behaviours[0] as VRCAnimatorPlayAudio;
+        Assert.IsNotNull(smb, "playAudio SMB emitted");
+        Assert.AreEqual("Audio/Src", smb.SourcePath);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.Order.UniqueRandom, smb.PlaybackOrder);
+        Assert.AreEqual(0.8f, smb.Volume.x, 1e-6f);
+        Assert.AreEqual(1.0f, smb.Volume.y, 1e-6f);
+        Assert.IsTrue(smb.PlayOnEnter);
+        Assert.IsTrue(smb.StopOnExit);
+    }
+
+    [Test]
+    public void Unknown_Behaviour_Field_In_Known_Kind_Fails_Loud()
+    {
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadField_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - tracking: { nose: animation }\n" +
+            "    default: S\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("nose", ex.Message);
+        StringAssert.Contains("unknown channel", ex.Message);
+    }
+
+    [Test]
+    public void Unknown_Behaviour_Kind_Fails_Loud()
+    {
+        // The parser accepts any single-key behaviour map; emit is the fail-loud gate on the kind.
+        var doc = new AnimDocument { Schema = 1, ControllerName = "BadKind_Fx" };
+        var layer = new Layer { Name = "L" };
+        var s = new State { Name = "S" };
+        s.Behaviours.Add(new Ryan6Vrc.AvatarTools.Editor.Behaviour { Kind = "teleport" });
+        layer.Root.States.Add(s);
+        layer.Root.DefaultState = "S";
+        doc.Layers.Add(layer);
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("teleport", ex.Message);
+        StringAssert.Contains("unknown kind", ex.Message);
+    }
+
     // ---- Determinism -----------------------------------------------------------------------------
 
     [Test]

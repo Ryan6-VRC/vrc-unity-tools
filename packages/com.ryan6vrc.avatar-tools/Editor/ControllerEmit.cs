@@ -11,6 +11,11 @@ using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
 using Ryan6Vrc.AgentTools.Editor;
 using Driver = VRC.SDKBase.VRC_AvatarParameterDriver;
+using TrackingType = VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType;
+using PlayableLayer = VRC.SDKBase.VRC_PlayableLayerControl.BlendableLayer;
+using LayerCtrlLayer = VRC.SDKBase.VRC_AnimatorLayerControl.BlendableLayer;
+using AudioOrder = VRC.SDKBase.VRC_AnimatorPlayAudio.Order;
+using AudioApply = VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
@@ -623,22 +628,42 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return bt;
             }
 
-            // ----- behaviours (driver fully; the other six kinds fail loud) -----
-
+            // ----- behaviours (all seven VRC SMB kinds) -----
+            // One encoder per kind, each mirroring the driver encoder's shape: materialise the concrete VRC
+            // SMB via `add(typeof(...))`, then a per-field switch that sets the SMB's fields and throws
+            // EmitException (named offender) on any unknown field. The WRITE-side field vocabulary is the
+            // mirror of ControllerReport's READ-side decode (Task 5 round-trips through it).
             private void EmitBehaviours(List<Behaviour> behaviours, Func<Type, StateMachineBehaviour> add)
             {
                 if (behaviours == null) return;
                 foreach (var b in behaviours)
                 {
-                    if (b.Kind == "driver")
+                    switch (b.Kind)
                     {
-                        var drv = (VRCAvatarParameterDriver)add(typeof(VRCAvatarParameterDriver));
-                        PopulateDriver(drv, b.Fields);
-                    }
-                    else
-                    {
-                        throw new EmitException(
-                            $"behaviour kind '{b.Kind}' declared but emission not implemented in pair 1 — driver only; others land with pair 2 fixtures");
+                        case "driver":
+                            PopulateDriver((VRCAvatarParameterDriver)add(typeof(VRCAvatarParameterDriver)), b.Fields);
+                            break;
+                        case "tracking":
+                            PopulateTracking((VRCAnimatorTrackingControl)add(typeof(VRCAnimatorTrackingControl)), b.Fields);
+                            break;
+                        case "playableLayer":
+                            PopulatePlayableLayer((VRCPlayableLayerControl)add(typeof(VRCPlayableLayerControl)), b.Fields);
+                            break;
+                        case "locomotion":
+                            PopulateLocomotion((VRCAnimatorLocomotionControl)add(typeof(VRCAnimatorLocomotionControl)), b.Fields);
+                            break;
+                        case "poseSpace":
+                            PopulatePoseSpace((VRCAnimatorTemporaryPoseSpace)add(typeof(VRCAnimatorTemporaryPoseSpace)), b.Fields);
+                            break;
+                        case "playAudio":
+                            PopulatePlayAudio((VRCAnimatorPlayAudio)add(typeof(VRCAnimatorPlayAudio)), b.Fields);
+                            break;
+                        case "layerControl":
+                            PopulateLayerControl((VRCAnimatorLayerControl)add(typeof(VRCAnimatorLayerControl)), b.Fields);
+                            break;
+                        default:
+                            throw new EmitException(
+                                $"behaviour: unknown kind '{b.Kind}' (expected driver/tracking/playableLayer/locomotion/poseSpace/playAudio/layerControl)");
                     }
                 }
             }
@@ -715,6 +740,124 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
                 return p;
+            }
+
+            // tracking: { <channel>: <state> } where channel is one of the ten VRC tracking channels and state
+            // is animation|tracking|noChange. Mirrors ControllerReport.AppendTracking's channel enumeration so
+            // decode round-trips. An untouched channel keeps its SDK default (NoChange).
+            private static void PopulateTracking(VRCAnimatorTrackingControl tc, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    var v = ParseEnumToken(kv.Value, TrackingTokens, "tracking." + kv.Key);
+                    switch (kv.Key)
+                    {
+                        case "head": tc.trackingHead = v; break;
+                        case "leftHand": tc.trackingLeftHand = v; break;
+                        case "rightHand": tc.trackingRightHand = v; break;
+                        case "hip": tc.trackingHip = v; break;
+                        case "leftFoot": tc.trackingLeftFoot = v; break;
+                        case "rightFoot": tc.trackingRightFoot = v; break;
+                        case "leftFingers": tc.trackingLeftFingers = v; break;
+                        case "rightFingers": tc.trackingRightFingers = v; break;
+                        case "eyes": tc.trackingEyes = v; break;
+                        case "mouth": tc.trackingMouth = v; break;
+                        default:
+                            throw new EmitException($"tracking: unknown channel '{kv.Key}' (expected head/leftHand/rightHand/hip/leftFoot/rightFoot/leftFingers/rightFingers/eyes/mouth)");
+                    }
+                }
+            }
+
+            // playableLayer: { layer: action|fx|gesture|additive, goalWeight: <f>, blendDuration: <f> }
+            private static void PopulatePlayableLayer(VRCPlayableLayerControl c, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    switch (kv.Key)
+                    {
+                        case "layer": c.layer = ParseEnumToken(kv.Value, PlayableLayerTokens, "playableLayer.layer"); break;
+                        case "goalWeight": c.goalWeight = AsFloat(kv.Value, "playableLayer.goalWeight"); break;
+                        case "blendDuration": c.blendDuration = AsFloat(kv.Value, "playableLayer.blendDuration"); break;
+                        default: throw new EmitException($"playableLayer: unknown field '{kv.Key}' (expected layer/goalWeight/blendDuration)");
+                    }
+                }
+            }
+
+            // locomotion: { disableLocomotion: <bool> }
+            private static void PopulateLocomotion(VRCAnimatorLocomotionControl c, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    switch (kv.Key)
+                    {
+                        case "disableLocomotion": c.disableLocomotion = AsBool(kv.Value, "locomotion.disableLocomotion"); break;
+                        default: throw new EmitException($"locomotion: unknown field '{kv.Key}' (expected disableLocomotion)");
+                    }
+                }
+            }
+
+            // poseSpace: { enterPoseSpace: <bool>, fixedDelay: <bool>, delayTime: <f> }
+            private static void PopulatePoseSpace(VRCAnimatorTemporaryPoseSpace c, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    switch (kv.Key)
+                    {
+                        case "enterPoseSpace": c.enterPoseSpace = AsBool(kv.Value, "poseSpace.enterPoseSpace"); break;
+                        case "fixedDelay": c.fixedDelay = AsBool(kv.Value, "poseSpace.fixedDelay"); break;
+                        case "delayTime": c.delayTime = AsFloat(kv.Value, "poseSpace.delayTime"); break;
+                        default: throw new EmitException($"poseSpace: unknown field '{kv.Key}' (expected enterPoseSpace/fixedDelay/delayTime)");
+                    }
+                }
+            }
+
+            // layerControl: { playable: action|fx|gesture|additive, layer: <int index>, goalWeight: <f>, blendDuration: <f> }.
+            // NOTE the SDK asymmetry vs playableLayer: here `playable` is the target playable enum and `layer` is
+            // the integer LAYER INDEX within it.
+            private static void PopulateLayerControl(VRCAnimatorLayerControl c, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    switch (kv.Key)
+                    {
+                        case "playable": c.playable = ParseEnumToken(kv.Value, LayerCtrlTokens, "layerControl.playable"); break;
+                        case "layer": c.layer = AsInt(kv.Value, "layerControl.layer"); break;
+                        case "goalWeight": c.goalWeight = AsFloat(kv.Value, "layerControl.goalWeight"); break;
+                        case "blendDuration": c.blendDuration = AsFloat(kv.Value, "layerControl.blendDuration"); break;
+                        default: throw new EmitException($"layerControl: unknown field '{kv.Key}' (expected playable/layer/goalWeight/blendDuration)");
+                    }
+                }
+            }
+
+            // playAudio: the VRCAnimatorPlayAudio serializable surface. The AudioSource itself is addressed by
+            // hierarchy path (sourcePath) — the SDK resolves the live Source from it at runtime; clips are asset
+            // paths. Volume/pitch are [min, max] ranges. ControllerReport does not yet decode this kind, so this
+            // token surface is the authority Task 5's decode must mirror.
+            private static void PopulatePlayAudio(VRCAnimatorPlayAudio c, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    switch (kv.Key)
+                    {
+                        case "sourcePath": c.SourcePath = AsString(kv.Value, "playAudio.sourcePath"); break;
+                        case "playbackOrder": c.PlaybackOrder = ParseEnumToken(kv.Value, AudioOrderTokens, "playAudio.playbackOrder"); break;
+                        case "parameter": c.ParameterName = AsString(kv.Value, "playAudio.parameter"); break;
+                        case "volume": c.Volume = AsVector2(kv.Value, "playAudio.volume"); break;
+                        case "volumeApply": c.VolumeApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.volumeApply"); break;
+                        case "pitch": c.Pitch = AsVector2(kv.Value, "playAudio.pitch"); break;
+                        case "pitchApply": c.PitchApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.pitchApply"); break;
+                        case "loop": c.Loop = AsBool(kv.Value, "playAudio.loop"); break;
+                        case "loopApply": c.LoopApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.loopApply"); break;
+                        case "clips": c.Clips = AsClips(kv.Value, "playAudio.clips"); break;
+                        case "clipsApply": c.ClipsApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.clipsApply"); break;
+                        case "delaySeconds": c.DelayInSeconds = AsFloat(kv.Value, "playAudio.delaySeconds"); break;
+                        case "playOnEnter": c.PlayOnEnter = AsBool(kv.Value, "playAudio.playOnEnter"); break;
+                        case "stopOnEnter": c.StopOnEnter = AsBool(kv.Value, "playAudio.stopOnEnter"); break;
+                        case "playOnExit": c.PlayOnExit = AsBool(kv.Value, "playAudio.playOnExit"); break;
+                        case "stopOnExit": c.StopOnExit = AsBool(kv.Value, "playAudio.stopOnExit"); break;
+                        default: throw new EmitException($"playAudio: unknown field '{kv.Key}' (expected sourcePath/playbackOrder/parameter/volume/volumeApply/pitch/pitchApply/loop/loopApply/clips/clipsApply/delaySeconds/playOnEnter/stopOnEnter/playOnExit/stopOnExit)");
+                    }
+                }
             }
 
             // ----- VRC expression parameters (in-memory; CompileController persists) -----
@@ -883,6 +1026,80 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (v is Dictionary<string, object> m) return m;
             throw new EmitException($"{ctx}: expected a mapping, got {(v == null ? "null" : v.GetType().Name)}");
         }
+
+        private static int AsInt(object v, string ctx)
+        {
+            switch (v)
+            {
+                case long l: return (int)l;
+                case int i: return i;
+                case double d: return (int)Math.Round(d);
+                default: throw new EmitException($"{ctx}: expected an integer, got {(v == null ? "null" : v.GetType().Name)}");
+            }
+        }
+
+        // A [min, max] flow list → Vector2 (VRCAnimatorPlayAudio volume/pitch ranges).
+        private static Vector2 AsVector2(object v, string ctx)
+        {
+            if (!(v is List<object> list))
+                throw new EmitException($"{ctx}: expected a [min, max] list, got {(v == null ? "null" : v.GetType().Name)}");
+            if (list.Count != 2)
+                throw new EmitException($"{ctx}: expected exactly 2 numbers, got {list.Count}");
+            return new Vector2(AsFloat(list[0], ctx + "[0]"), AsFloat(list[1], ctx + "[1]"));
+        }
+
+        // A list of project asset paths → AudioClip[]. A path that doesn't resolve to a clip is fail-loud
+        // (consistent with the avatarMask / motion-ref path handling).
+        private static AudioClip[] AsClips(object v, string ctx)
+        {
+            if (!(v is List<object> list))
+                throw new EmitException($"{ctx}: expected a list of asset paths, got {(v == null ? "null" : v.GetType().Name)}");
+            var clips = new AudioClip[list.Count];
+            for (int i = 0; i < list.Count; i++)
+            {
+                string path = AsString(list[i], ctx + "[" + i + "]");
+                var clip = AssetDatabase.LoadAssetAtPath<AudioClip>(path);
+                if (clip == null) throw new EmitException($"{ctx}: audio clip not found at '{path}'");
+                clips[i] = clip;
+            }
+            return clips;
+        }
+
+        // Decode a schema token to its SDK enum via the kind's token map; an unknown token is fail-loud with
+        // the accepted set. Enum fields carry their truth in a token, not a raw number.
+        private static T ParseEnumToken<T>(object v, Dictionary<string, T> map, string ctx) where T : struct
+        {
+            string s = AsString(v, ctx);
+            if (map.TryGetValue(s, out var e)) return e;
+            throw new EmitException($"{ctx}: unknown value '{s}' (expected {string.Join("/", map.Keys)})");
+        }
+
+        // ----- schema-token → SDK-enum maps (the enum-valued behaviour fields) -----
+
+        private static readonly Dictionary<string, TrackingType> TrackingTokens = new Dictionary<string, TrackingType>
+        {
+            { "noChange", TrackingType.NoChange }, { "tracking", TrackingType.Tracking }, { "animation", TrackingType.Animation },
+        };
+
+        private static readonly Dictionary<string, PlayableLayer> PlayableLayerTokens = new Dictionary<string, PlayableLayer>
+        {
+            { "action", PlayableLayer.Action }, { "fx", PlayableLayer.FX }, { "gesture", PlayableLayer.Gesture }, { "additive", PlayableLayer.Additive },
+        };
+
+        private static readonly Dictionary<string, LayerCtrlLayer> LayerCtrlTokens = new Dictionary<string, LayerCtrlLayer>
+        {
+            { "action", LayerCtrlLayer.Action }, { "fx", LayerCtrlLayer.FX }, { "gesture", LayerCtrlLayer.Gesture }, { "additive", LayerCtrlLayer.Additive },
+        };
+
+        private static readonly Dictionary<string, AudioOrder> AudioOrderTokens = new Dictionary<string, AudioOrder>
+        {
+            { "random", AudioOrder.Random }, { "uniqueRandom", AudioOrder.UniqueRandom }, { "roundabout", AudioOrder.Roundabout }, { "parameter", AudioOrder.Parameter },
+        };
+
+        private static readonly Dictionary<string, AudioApply> AudioApplyTokens = new Dictionary<string, AudioApply>
+        {
+            { "alwaysApply", AudioApply.AlwaysApply }, { "applyIfStopped", AudioApply.ApplyIfStopped }, { "neverApply", AudioApply.NeverApply },
+        };
 
         /// <summary>The provenance source hash — first 8 bytes of the MD5 of <paramref name="s"/>, hex.
         /// CompileController computes this over the current source text and compares it to the <c>srchash:</c>
