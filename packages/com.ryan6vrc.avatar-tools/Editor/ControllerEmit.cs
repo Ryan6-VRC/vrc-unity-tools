@@ -482,7 +482,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
 
                 // default → sub-machine: unconditional catch-all entry, added last so any conditional entry
-                // ladder above wins first (first-match order).
+                // ladder above wins first (first-match order). NOTE: we set NO `defaultState` here — and when
+                // a machine has no direct states, Unity's AnimatorStateMachine.defaultState GETTER resolves
+                // THROUGH to the child machine's own default. So downstream lint/decompile must not read
+                // `defaultState` as a reliable "was a direct-state default set" probe; the entry transition is.
                 if (!defaultIsState && !string.IsNullOrEmpty(model.DefaultState))
                     target.AddEntryTransition(scope.Subs[model.DefaultState].Target);
 

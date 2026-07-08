@@ -400,6 +400,40 @@ layers:
         Assert.AreEqual(inner, idle.transitions[0].destinationState, "Idle resolves A/inner into the nested machine");
     }
 
+    // Fail-loud is the change's core value and nothing upstream backstops it — ResolveName's throws are the
+    // only guard against a mis-scoped/typo'd target. Pin both scope rules.
+
+    [Test]
+    public void Bare_Target_Does_Not_Leak_Across_Sibling_Scopes()
+    {
+        // Idle (root scope) targets bare `A`, which exists ONLY inside sub-machine Sub — a bare name must NOT
+        // reach across scopes (the cross-machine ref would need the qualified path `Sub/A`).
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadBare_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    states:\n      Idle:\n        motion: ~\n        transitions:\n          - { to: A, when: [ P is true ] }\n" +
+            "    machines:\n      Sub:\n        states:\n          A: { motion: ~ }\n        default: A\n" +
+            "    default: Idle\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("not found in machine", ex.Message);
+    }
+
+    [Test]
+    public void Qualified_Path_Through_A_State_Fails_Loud()
+    {
+        // `Idle/foo` — the intermediate segment `Idle` is a STATE, not a sub-machine, so the path cannot be
+        // walked.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadPath_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    states:\n      Idle:\n        motion: ~\n        transitions:\n          - { to: Idle/foo, when: [ P is true ] }\n" +
+            "    default: Idle\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("is not a sub-machine", ex.Message);
+    }
+
     // ---- Determinism -----------------------------------------------------------------------------
 
     [Test]
