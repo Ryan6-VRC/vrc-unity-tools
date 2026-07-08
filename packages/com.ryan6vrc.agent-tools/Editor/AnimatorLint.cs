@@ -1,9 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
 using System.Text;
-using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
@@ -37,20 +35,6 @@ namespace Ryan6Vrc.AgentTools.Editor
     [AgentTool]
     public static class AnimatorLint
     {
-        // VRChat reserved/built-in animator parameters — referenced constantly, declared nowhere, so
-        // they must be exempt from undeclaredParam or the rule FAILs every real controller. This mirrors
-        // the SDK's reserved-parameter list (VRCExpressionParameters / the avatar-parameters docs); it is
-        // the source of truth, this array only tracks it. If the SDK exposes this set at compile time,
-        // prefer querying it over this literal.
-        private static readonly string[] VrcReservedParams =
-        {
-            "IsLocal", "Viseme", "Voice", "GestureLeft", "GestureRight", "GestureLeftWeight",
-            "GestureRightWeight", "AngularY", "VelocityX", "VelocityY", "VelocityZ", "VelocityMagnitude",
-            "Upright", "Grounded", "Seated", "AFK", "TrackingType", "VRMode", "MuteSelf", "InStation",
-            "Earmuffs", "IsOnFriendsList", "AvatarVersion", "ScaleModified", "ScaleFactor",
-            "ScaleFactorInverse", "EyeHeightAsMeters", "EyeHeightAsPercent",
-        };
-
         // ----- Public API ---------------------------------------------------------------------------
 
         /// <summary>Lint <paramref name="controller"/> against the v1 rule set. <paramref name="basis"/>
@@ -105,35 +89,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 pathRewrite = d.PathRewrite;
             }
 
-            // ---- Collect the state/state-machine topology once (owning layers only) -------------------
-            var states = new List<StateCtx>();
-            var machines = new List<SmCtx>();
-            var layers = controller.layers;
-            for (int li = 0; li < layers.Length; li++)
-            {
-                var layer = layers[li];
-                if (layer.syncedLayerIndex >= 0) continue;   // synced layers re-skin the source layer's states
-                if (layer.stateMachine == null) continue;
-                CollectSm(layer.stateMachine, layer.name, li, "", states, machines);
-            }
+            // ---- Run the shared rule set on the resolved basis. The rule methods, topology collectors,
+            //      and report data live in ControllerRules so a future compiler can run the SAME rules on an
+            //      in-memory controller; AnimatorLint owns only basis resolution (above) and rendering (below).
+            //      brokenBindingIsError = !buildRewrite: a build-rewrite auto site demotes broken bindings.
+            var r = ControllerRules.Run(controller, roots, !buildRewrite, pathRewrite);
+            notes.AddRange(r.Notes); // rule-produced caveats (skipped rules), after the basis-resolution notes
 
-            var rep = new Report { Controller = controller };
-            rep.BrokenBindingIsError = !buildRewrite;
-
-            // ---- Error-tier rules ---------------------------------------------------------------------
-            var dangling = RecoverDanglingMotionGuids(controller);
-            RuleMissingMotion(states, dangling, rep);
-            RuleUndeclaredParam(controller, states, machines, rep);
-            RuleEntryShadow(machines, rep);
-            RuleBrokenBinding(controller, roots, buildRewrite, pathRewrite, rep, notes);
-
-            // ---- Advisory-tier rules ------------------------------------------------------------------
-            RuleWdInconsistency(states, rep);
-            RuleOrphanSubAsset(controller, notes, rep);
-            RuleDeadLayer(controller, rep);
-            RuleCrossPackageAndArchive(controller, rep);
-
-            return Emit(rep, detection, notes);
+            return Emit(controller, r, detection, notes);
         }
 
         // ----- auto basis detection (untyped SerializedObject reads; missing MA/VRCFury assemblies -----
@@ -432,165 +395,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             };
         }
 
-        // ----- Rule 1: missingMotion (error) --------------------------------------------------------
-        // A state whose motion reference is present but the asset is gone. NEVER fires on a clean-empty
-        // motion (instanceID 0) — that is a standard idiom. The dangling GUID is the only surviving handle.
-        private static void RuleMissingMotion(List<StateCtx> states, List<string> dangling, Report rep)
-        {
-            foreach (var s in states)
-            {
-                var st = s.State;
-                if (st == null || st.motion != null) continue;
-                var mp = new SerializedObject(st).FindProperty("m_Motion");
-                if (mp == null || mp.objectReferenceInstanceIDValue == 0) continue; // clean-empty
-                rep.MissingMotion++;
-                string guid = dangling.Count == 1 ? "guid=" + dangling[0]
-                            : dangling.Count > 1 ? "guid ∈ {" + string.Join(", ", dangling) + "}"
-                            : "guid unrecoverable from controller YAML";
-                rep.Errors.Add(new Offender { Kind = "missingMotion", Where = s.Path, Detail = "dangling motion reference — " + guid });
-            }
-        }
-
-        // ----- Rule 2: undeclaredParam (error) ------------------------------------------------------
-        private static void RuleUndeclaredParam(AnimatorController controller, List<StateCtx> states,
-            List<SmCtx> machines, Report rep)
-        {
-            var declared = new HashSet<string>();
-            foreach (var p in controller.parameters) declared.Add(p.name);
-            var exempt = new HashSet<string>(VrcReservedParams);
-
-            // name -> first location it was referenced (for the offender handle)
-            var referenced = new Dictionary<string, string>();
-            void Ref(string name, string where)
-            {
-                if (string.IsNullOrEmpty(name)) return;
-                if (!referenced.ContainsKey(name)) referenced[name] = where;
-            }
-            void Conds(AnimatorCondition[] conds, string where)
-            {
-                if (conds == null) return;
-                foreach (var cd in conds) Ref(cd.parameter, where);
-            }
-
-            foreach (var m in machines)
-            {
-                foreach (var t in m.Sm.anyStateTransitions) Conds(t.conditions, m.Path + " AnyState");
-                foreach (var t in m.Sm.entryTransitions) Conds(t.conditions, m.Path + " Entry");
-                // Sub-state-machine → sub-state-machine transitions carry conditions too; without this a
-                // param used only on an SM→SM transition escapes the rule (false-negative).
-                foreach (var child in m.Sm.stateMachines)
-                    if (child.stateMachine != null)
-                        foreach (var t in m.Sm.GetStateMachineTransitions(child.stateMachine))
-                            Conds(t.conditions, m.Path + " → " + child.stateMachine.name);
-                if (m.Sm.behaviours != null) foreach (var b in m.Sm.behaviours) DriverParams(b, m.Path + " (SM behaviour)", Ref);
-            }
-            foreach (var s in states)
-            {
-                var st = s.State;
-                foreach (var t in st.transitions) Conds(t.conditions, s.Path);
-                if (st.speedParameterActive) Ref(st.speedParameter, s.Path + " speedParameter");
-                if (st.timeParameterActive) Ref(st.timeParameter, s.Path + " motionTime");
-                if (st.mirrorParameterActive) Ref(st.mirrorParameter, s.Path + " mirrorParameter");
-                if (st.cycleOffsetParameterActive) Ref(st.cycleOffsetParameter, s.Path + " cycleOffset");
-                BlendParams(st.motion, s.Path, Ref);
-                if (st.behaviours != null) foreach (var b in st.behaviours) DriverParams(b, s.Path + " (driver)", Ref);
-            }
-
-            foreach (var kv in referenced)
-            {
-                if (declared.Contains(kv.Key) || exempt.Contains(kv.Key)) continue;
-                rep.UndeclaredParam++;
-                rep.Errors.Add(new Offender
-                {
-                    Kind = "undeclaredParam", Where = kv.Value,
-                    Detail = "parameter `" + kv.Key + "` referenced but not declared on the controller (exempt set tracks the VRC SDK reserved list)"
-                });
-            }
-        }
-
-        private static void BlendParams(Motion m, string where, Action<string, string> reff)
-        {
-            if (!(m is BlendTree bt)) return;
-            if (bt.blendType != BlendTreeType.Direct)
-            {
-                reff(bt.blendParameter, where + " blendParameter");
-                if (Is2D(bt.blendType)) reff(bt.blendParameterY, where + " blendParameterY");
-            }
-            foreach (var ch in bt.children)
-            {
-                if (bt.blendType == BlendTreeType.Direct) reff(ch.directBlendParameter, where + " directBlendParameter");
-                BlendParams(ch.motion, where, reff);
-            }
-        }
-
-        private static void DriverParams(StateMachineBehaviour b, string where, Action<string, string> reff)
-        {
-            if (!(b is VRC.SDKBase.VRC_AvatarParameterDriver drv) || drv.parameters == null) return;
-            foreach (var p in drv.parameters)
-            {
-                reff(p.name, where);
-                if (p.type == VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Copy) reff(p.source, where + " (source)");
-            }
-        }
-
-        // ----- Rule 3: entryShadow (error, deterministic) -------------------------------------------
-        // An earlier UNCONDITIONAL entry transition makes every later entry transition unreachable.
-        private static void RuleEntryShadow(List<SmCtx> machines, Report rep)
-        {
-            foreach (var m in machines)
-            {
-                var ets = m.Sm.entryTransitions;
-                int firstUncond = -1;
-                for (int i = 0; i < ets.Length; i++)
-                    if (ets[i].conditions == null || ets[i].conditions.Length == 0) { firstUncond = i; break; }
-                if (firstUncond < 0 || firstUncond >= ets.Length - 1) continue;
-                int shadowed = ets.Length - 1 - firstUncond;
-                rep.EntryShadow += shadowed;
-                rep.Errors.Add(new Offender
-                {
-                    Kind = "entryShadow", Where = m.Path,
-                    Detail = shadowed + " entry transition(s) after the unconditional entry at index " + firstUncond + " are unreachable"
-                });
-            }
-        }
-
-        // ----- Rule 4: brokenBinding (error, or advisory under a build-rewrite auto site) -----------
-        private static void RuleBrokenBinding(AnimatorController controller, List<GameObject> roots,
-            bool buildRewrite, Func<string, string> pathRewrite, Report rep, List<string> notes)
-        {
-            if (roots.Count == 0)
-            {
-                notes.Add("broken-binding rule skipped: no basis root available to resolve clip bindings against.");
-                return;
-            }
-            // Demoted (build-rewrite auto) bindings are collapsed into ONE advisory with a small sample:
-            // under MA/VRCFury each unresolved binding is expected pre-build (paths get rewritten), so
-            // hundreds of identical per-line advisories would only drown the digest. On the error-tier
-            // path each broken binding is a genuine named failure and gets its own line.
-            var demotedSamples = new List<string>();
-
-            foreach (var (clip, b) in CollectUnresolvedBindings(controller, roots, pathRewrite))
-            {
-                rep.BrokenBinding++;
-                if (rep.BrokenBindingIsError)
-                    rep.Errors.Add(new Offender
-                    {
-                        Kind = "brokenBinding", Where = clip.name,
-                        Detail = "binding path='" + b.path + "' type=" + b.type.Name + " prop='" + b.propertyName + "' resolves to no object"
-                    });
-                else if (demotedSamples.Count < 3)
-                    demotedSamples.Add(clip.name + ":" + b.path);
-            }
-
-            if (!rep.BrokenBindingIsError && rep.BrokenBinding > 0)
-                rep.Advisories.Add(new Offender
-                {
-                    Kind = "brokenBinding (demoted)", Where = rep.BrokenBinding + " binding(s)",
-                    Detail = "unresolvable in the authored scene; MA/VRCFury rewrite binding paths at build so this cannot be verified pre-build"
-                            + (demotedSamples.Count > 0 ? " — e.g. " + string.Join(", ", demotedSamples) : "")
-                });
-        }
-
         // Shared binding walk (reused by AvatarLint): every clip a controller references, both float and
         // objref bindings, humanoid muscle/root curves skipped, each resolved against ANY of roots (first
         // hit ⇒ resolved). Returns the unresolved (clip, binding) pairs in AnimatorLint's traversal order
@@ -653,218 +457,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return false;
         }
 
-        // ----- Rule 5: wdInconsistency (advisory) — WITHIN one layer only ---------------------------
-        private static void RuleWdInconsistency(List<StateCtx> states, Report rep)
-        {
-            var byLayer = new Dictionary<int, int[]>(); // li -> [on, off]
-            var layerName = new Dictionary<int, string>();
-            foreach (var s in states)
-            {
-                if (!byLayer.TryGetValue(s.LayerIndex, out var oo)) { oo = new int[2]; byLayer[s.LayerIndex] = oo; layerName[s.LayerIndex] = s.LayerName; }
-                if (s.State.writeDefaultValues) oo[0]++; else oo[1]++;
-            }
-            foreach (var kv in byLayer)
-            {
-                if (kv.Value[0] > 0 && kv.Value[1] > 0)
-                    rep.Advisories.Add(new Offender
-                    {
-                        Kind = "wdInconsistency", Where = "layer '" + layerName[kv.Key] + "'",
-                        Detail = "states disagree on Write Defaults (on=" + kv.Value[0] + " off=" + kv.Value[1] + ")"
-                    });
-            }
-        }
-
-        // ----- Rule 6: orphanSubAsset (advisory) — complete reachability walk -----------------------
-        private static void RuleOrphanSubAsset(AnimatorController controller, List<string> notes, Report rep)
-        {
-            string path = AssetDatabase.GetAssetPath(controller);
-            if (string.IsNullOrEmpty(path)) { notes.Add("orphan-sub-asset rule skipped: controller is not a saved asset."); return; }
-
-            var reachable = new HashSet<UnityEngine.Object>();
-            void AddMotion(Motion m)
-            {
-                if (m is BlendTree bt && reachable.Add(bt))
-                    foreach (var ch in bt.children) AddMotion(ch.motion);
-            }
-            void AddSm(AnimatorStateMachine sm)
-            {
-                if (sm == null || !reachable.Add(sm)) return;
-                // KNOWN ADVISORY BOUND: StateMachineBehaviours are marked reachable but their serialized
-                // refs are NOT followed. No standard VRC/Unity SMB holds a controller sub-asset ref, so a
-                // full SerializedObject sweep would add cost for a purely theoretical case — and this rule
-                // is advisory-tier, so even a false-positive orphan never flips the verdict.
-                if (sm.behaviours != null) foreach (var b in sm.behaviours) if (b != null) reachable.Add(b);
-                foreach (var t in sm.anyStateTransitions) if (t != null) reachable.Add(t);
-                foreach (var t in sm.entryTransitions) if (t != null) reachable.Add(t);
-                foreach (var cs in sm.states)
-                {
-                    var st = cs.state;
-                    if (st == null) continue;
-                    reachable.Add(st);
-                    if (st.behaviours != null) foreach (var b in st.behaviours) if (b != null) reachable.Add(b);
-                    foreach (var t in st.transitions) if (t != null) reachable.Add(t);
-                    AddMotion(st.motion);
-                }
-                foreach (var child in sm.stateMachines)
-                {
-                    if (child.stateMachine == null) continue;
-                    foreach (var t in sm.GetStateMachineTransitions(child.stateMachine)) if (t != null) reachable.Add(t);
-                    AddSm(child.stateMachine);
-                }
-            }
-            // A synced layer's per-state OVERRIDE motions/behaviours (layer.GetOverrideMotion/Behaviours)
-            // are distinct sub-assets NOT reachable through the source SM's own states — mark them, or an
-            // override BlendTree false-positives as an orphan. Mirrors AnimatorClipWalk's synced handling.
-            void AddSyncedOverrides(AnimatorStateMachine sm, AnimatorControllerLayer layer)
-            {
-                if (sm == null) return;
-                foreach (var cs in sm.states)
-                {
-                    if (cs.state == null) continue;
-                    AddMotion(layer.GetOverrideMotion(cs.state));
-                    var ob = layer.GetOverrideBehaviours(cs.state);
-                    if (ob != null) foreach (var b in ob) if (b != null) reachable.Add(b);
-                }
-                foreach (var child in sm.stateMachines)
-                    if (child.stateMachine != null) AddSyncedOverrides(child.stateMachine, layer);
-            }
-            var layers = controller.layers;
-            foreach (var layer in layers)
-            {
-                if (layer.syncedLayerIndex >= 0)
-                    AddSyncedOverrides(layers[layer.syncedLayerIndex].stateMachine, layer);
-                else
-                    AddSm(layer.stateMachine);
-            }
-
-            // No IsSubAsset gate: LoadAllAssetsAtPath is already path-scoped to this one controller, and
-            // AssetDatabase.IsSubAsset returns FALSE for HideInHierarchy sub-objects — which is what a
-            // controller's own states/machines/transitions/blend-trees are. Verified live against 67
-            // real-world controllers: of the orphan objects, ~97% were hidden (0 satisfied IsSubAsset), so
-            // an IsSubAsset gate would have hidden the real dead weight this rule exists to name (and that
-            // SweepController exists to remove). o != controller + the five-type filter is the real gate.
-            foreach (var o in AssetDatabase.LoadAllAssetsAtPath(path))
-            {
-                if (o == null || o == controller) continue;
-                if (!(o is AnimatorStateMachine || o is AnimatorState || o is BlendTree
-                      || o is StateMachineBehaviour || o is AnimatorTransitionBase)) continue;
-                if (reachable.Contains(o)) continue;
-                rep.Advisories.Add(new Offender
-                {
-                    Kind = "orphanSubAsset", Where = o.GetType().Name + " '" + o.name + "'",
-                    Detail = "sub-asset reachable from no layer state machine (dead weight an owned cleaner would strip)"
-                });
-            }
-        }
-
-        // ----- Rule 7: deadLayer (advisory) ---------------------------------------------------------
-        private static void RuleDeadLayer(AnimatorController controller, Report rep)
-        {
-            var layers = controller.layers;
-            for (int li = 0; li < layers.Length; li++)
-            {
-                var layer = layers[li];
-                if (layer.defaultWeight != 0f) continue;
-                if (layer.syncedLayerIndex >= 0) continue;
-                if (CountStates(layer.stateMachine) > 0) continue;
-                if (HasAnyBehaviour(layer.stateMachine)) continue; // driver-only weight-0 layer is a valid idiom
-                rep.Advisories.Add(new Offender
-                {
-                    Kind = "deadLayer", Where = "layer '" + layer.name + "' (index " + li + ")",
-                    Detail = "defaultWeight=0 with no states and no behaviours — cannot affect output. Known limit: a cross-layer VRCAnimatorLayerControl / weight driver can revive it, so this is advisory only"
-                });
-            }
-        }
-
-        // ----- Rule 8/9: crossPackageRef + archiveClip (advisory) -----------------------------------
-        private static void RuleCrossPackageAndArchive(AnimatorController controller, Report rep)
-        {
-            foreach (var clip in AnimatorClipWalk.CollectClips(controller))
-            {
-                if (clip == null || AssetDatabase.IsSubAsset(clip)) continue;
-                string path = AssetDatabase.GetAssetPath(clip);
-                if (string.IsNullOrEmpty(path)) continue;
-
-                if (path.StartsWith("Packages/", StringComparison.Ordinal))
-                {
-                    var seg = path.Split('/');
-                    string pkg = seg.Length > 1 ? seg[1] : "";
-                    if (!pkg.StartsWith("com.vrchat.", StringComparison.Ordinal))
-                        rep.Advisories.Add(new Offender
-                        {
-                            Kind = "crossPackageRef", Where = "`" + clip.name + "`",
-                            Detail = "clip lives under a removable VPM package `" + pkg + "` (`" + path + "`) — breaks if that dep is removed"
-                        });
-                }
-
-                if (("/" + path + "/").IndexOf("/Archive/", StringComparison.Ordinal) >= 0)
-                    rep.Advisories.Add(new Offender
-                    {
-                        Kind = "archiveClip", Where = "`" + clip.name + "`",
-                        Detail = "load-bearing clip under an Archive/ path (`" + path + "`)"
-                    });
-            }
-        }
-
-        // ----- Topology collection ------------------------------------------------------------------
-
-        private static void CollectSm(AnimatorStateMachine sm, string layerName, int li, string prefix,
-            List<StateCtx> states, List<SmCtx> machines)
-        {
-            if (sm == null) return;
-            string smPath = layerName + " : " + (prefix.Length == 0 ? "(root)" : prefix.TrimEnd('/'));
-            machines.Add(new SmCtx { Sm = sm, Path = smPath });
-            foreach (var cs in sm.states)
-                if (cs.state != null)
-                    states.Add(new StateCtx { State = cs.state, Path = layerName + " : " + prefix + cs.state.name, LayerIndex = li, LayerName = layerName });
-            foreach (var child in sm.stateMachines)
-                if (child.stateMachine != null)
-                    CollectSm(child.stateMachine, layerName, li, prefix + child.stateMachine.name + "/", states, machines);
-        }
-
-        private static int CountStates(AnimatorStateMachine sm)
-        {
-            if (sm == null) return 0;
-            int n = sm.states.Length;
-            foreach (var c in sm.stateMachines) n += CountStates(c.stateMachine);
-            return n;
-        }
-
-        private static bool HasAnyBehaviour(AnimatorStateMachine sm)
-        {
-            if (sm == null) return false;
-            if (sm.behaviours != null && sm.behaviours.Length > 0) return true;
-            foreach (var cs in sm.states)
-                if (cs.state != null && cs.state.behaviours != null && cs.state.behaviours.Length > 0) return true;
-            foreach (var c in sm.stateMachines)
-                if (HasAnyBehaviour(c.stateMachine)) return true;
-            return false;
-        }
-
-        // ----- Dangling-motion GUID recovery (parse controller YAML once) ---------------------------
-        private static List<string> RecoverDanglingMotionGuids(AnimatorController controller)
-        {
-            var result = new List<string>();
-            string path = AssetDatabase.GetAssetPath(controller);
-            if (string.IsNullOrEmpty(path)) return result;
-            try
-            {
-                var text = File.ReadAllText(path);
-                var seen = new HashSet<string>();
-                foreach (Match m in Regex.Matches(text, @"m_Motion:\s*\{fileID:\s*\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}"))
-                {
-                    var g = m.Groups[1].Value;
-                    if (seen.Add(g) && string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(g)))
-                        result.Add(g);
-                }
-            }
-            catch { /* binary-serialized or unreadable — no guids recoverable */ }
-            return result;
-        }
-
         // ----- Output -------------------------------------------------------------------------------
 
-        private static string Emit(Report rep, string detection, List<string> notes)
+        private static string Emit(AnimatorController controller, LintResult rep, string detection, List<string> notes)
         {
             bool errorTierFired = rep.MissingMotion > 0 || rep.UndeclaredParam > 0 || rep.EntryShadow > 0
                                   || (rep.BrokenBindingIsError && rep.BrokenBinding > 0);
@@ -876,11 +471,11 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[AnimatorLint] {0}: missingMotion={1} undeclaredParam={2} entryShadow={3} brokenBinding={4} advisories={5} => {6}",
-                rep.Controller.name, rep.MissingMotion, rep.UndeclaredParam, rep.EntryShadow, rep.BrokenBinding, advisories, result);
+                controller.name, rep.MissingMotion, rep.UndeclaredParam, rep.EntryShadow, rep.BrokenBinding, advisories, result);
 
             var sb = new StringBuilder();
-            sb.Append("# AnimatorLint: ").Append(rep.Controller.name).Append('\n');
-            string assetPath = AssetDatabase.GetAssetPath(rep.Controller);
+            sb.Append("# AnimatorLint: ").Append(controller.name).Append('\n');
+            string assetPath = AssetDatabase.GetAssetPath(controller);
             sb.Append("asset: `").Append(string.IsNullOrEmpty(assetPath) ? "(unsaved)" : assetPath).Append("`  \n");
             sb.Append(detection).Append("  \n");
             foreach (var n in notes) sb.Append("> note: ").Append(n).Append("  \n");
@@ -894,12 +489,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (rep.Advisories.Count == 0) sb.Append("_(none)_\n");
             else foreach (var o in rep.Advisories) AppendOffender(sb, o);
 
-            var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "animatorlint_" + rep.Controller.name, summary, sb.ToString(), ".md");
+            var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "animatorlint_" + controller.name, summary, sb.ToString(), ".md");
             if (result == "PASS") Debug.Log(res); else Debug.LogError(res);
             return res;
         }
 
-        private static void AppendOffender(StringBuilder sb, Offender o) =>
+        private static void AppendOffender(StringBuilder sb, LintOffender o) =>
             sb.Append("- **").Append(o.Kind).Append("** ").Append(o.Where).Append(" — ").Append(o.Detail).Append('\n');
 
         // ----- Scene resolver (duplicated from AgentInspector.FindByHierarchyPath — kept local so this
@@ -939,24 +534,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             var sb = new StringBuilder(t.name);
             while (t.parent != null) { t = t.parent; sb.Insert(0, t.name + "/"); }
             return sb.ToString();
-        }
-
-        private static bool Is2D(BlendTreeType t) =>
-            t == BlendTreeType.SimpleDirectional2D || t == BlendTreeType.FreeformDirectional2D || t == BlendTreeType.FreeformCartesian2D;
-
-        // ----- Types --------------------------------------------------------------------------------
-
-        private struct StateCtx { public AnimatorState State; public string Path; public int LayerIndex; public string LayerName; }
-        private struct SmCtx { public AnimatorStateMachine Sm; public string Path; }
-        private struct Offender { public string Kind; public string Where; public string Detail; }
-
-        private class Report
-        {
-            public AnimatorController Controller;
-            public int MissingMotion, UndeclaredParam, EntryShadow, BrokenBinding;
-            public bool BrokenBindingIsError;
-            public readonly List<Offender> Errors = new List<Offender>();
-            public readonly List<Offender> Advisories = new List<Offender>();
         }
     }
 }
