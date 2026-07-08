@@ -28,13 +28,17 @@ using UnityEngine.TestTools;
 // A FIXPOINT BREAK IS A REAL BUG in decode / serialize / compile, to be fixed at the true site — never
 // worked around by weakening the assertion here. This round-trip is the compiler's lossless oracle.
 //
-// GoLoco (GoLocoBaseFullPoses, 597 states / 180 sub-machines / 787 trees) is the intended scale fixture but
-// is NOT yet in the fixpoint set. Its cross-machine addressing (~135 transitions to top-level entities /
-// the layer root from nested machines) and 5 mute/solo transitions ARE now handled (root-anchored '/'
-// addressing + the mute/solo fields). One construct remains OUT of vocabulary: a single state literally
-// named "FBT InStation/Action" — a '/' inside a name collides with the address path separator, so it is a
-// named refusal. Whether to add name-escaping (or the fixture is amended) is a coordinator decision;
-// until then GoLoco cannot reach a textual fixpoint and stays out of the [TestCase] set below.
+// GoLoco (GoLocoBaseFullPoses, 597 states / 180 sub-machines / 787 trees) is the intended scale fixture and
+// now round-trips EVERYTHING the substrate models — cross-machine/root-anchored addressing, mute/solo, 1D
+// blend-tree thresholds, and a state literally named "FBT InStation/Action" (the '/' survives via per-segment
+// escaping; see Roundtrip_SlashInName_LocalAndCrossMachine). It is NOT yet in the [TestCase] set for ONE
+// remaining reason unrelated to the substrate's coverage: in the Plum-Remy project it references 4 clip
+// assets that do not exist (genuinely broken refs, objectReferenceValue == null). By design a broken ref is
+// decoded into the Doc as `unresolved: true` (Task 6, tested) yet compiles to a NULL motion slot (Task 4,
+// tested) — so a recompile turns those 4 children empty and strict textual identity cannot hold. Every OTHER
+// byte of GoLoco's ~843 KB intermediate is identical across the round-trip. Reconciling that (relax the
+// GoLoco assertion to "modulo unresolved refs", import the 4 clips, or preserve broken refs on compile) is a
+// coordinator decision; until then GoLoco stays out of the [TestCase] set.
 //
 // NOT run via MCP run_tests (it crashes the editor); run from the Test Runner window or batchmode CI. The
 // two fixpoint fixtures live in the Plum-Remy project; in a project lacking them the case self-Ignores.
@@ -107,5 +111,45 @@ public class FixpointAcceptanceTests
         StringAssert.Contains("FAIL", res);
         StringAssert.Contains("Trigger", res, "the refusal names the offending construct");
         Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
+    }
+
+    // A state whose NAME contains the addressing path separator '/', referenced BOTH same-machine (local) and
+    // cross-machine (a from-root path). Per-segment escaping ('/'->'\/') must let both references resolve after
+    // escape → serialize → parse → compile → re-decode, and the round-trip must reach a textual fixpoint. This
+    // is the durable witness for the name-escaping extension (the exact GoLoco "FBT InStation/Action" shape).
+    [Test]
+    public void Roundtrip_SlashInName_LocalAndCrossMachine()
+    {
+        string ctrlPath = TestRoot + "/SlashName_Fx.controller";
+        var rc = AnimatorController.CreateAnimatorControllerAtPath(ctrlPath);
+        rc.AddParameter("g", AnimatorControllerParameterType.Bool);
+        var root = rc.layers[0].stateMachine;
+        var mA = root.AddStateMachine("A");
+        var slash = mA.AddState("Foo/Bar");   // name literally contains the path separator
+        var other = mA.AddState("Other");
+        var mB = root.AddStateMachine("B");
+        var bx = mB.AddState("BX");
+        other.AddTransition(slash).AddCondition(AnimatorConditionMode.If, 0, "g"); // local same-machine ref
+        bx.AddTransition(slash).AddCondition(AnimatorConditionMode.If, 0, "g");    // cross-machine ref (A/Foo\/Bar)
+        AssetDatabase.SaveAssets();
+
+        string yaml1 = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(rc).Doc);
+        StringAssert.Contains("to: Foo\\/Bar", yaml1, "the local reference escapes the '/'");
+        StringAssert.Contains("A/Foo\\/Bar", yaml1, "the cross-machine reference escapes the segment's '/'");
+
+        string y1Path = TestRoot + "/slashname.yaml";
+        File.WriteAllText(y1Path, yaml1);
+        string outDir = TestRoot + "/out_slashname";
+        Directory.CreateDirectory(outDir);
+        AssetDatabase.Refresh();
+        string comp = CompileController.Compile(Path.GetFullPath(y1Path), outDir, whatIf: false);
+        StringAssert.Contains("=> OK", comp);
+
+        var c1 = AssetDatabase.LoadAssetAtPath<AnimatorController>(outDir + "/SlashName_Fx.controller");
+        Assert.IsNotNull(c1, "recompiled controller loads");
+
+        string yaml2 = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(c1).Doc);
+        Assert.AreEqual(yaml1, yaml2, "the slash-in-name controller reaches a textual fixpoint");
+        StringAssert.Contains("=> PASS", AnimatorLint.Lint(c1, "explicit", null, null, null));
     }
 }
