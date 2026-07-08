@@ -308,4 +308,153 @@ public class ControllerDecompileTests
         var c2 = w.Doc.Clips.First(x => x.Name == "c");
         Assert.IsFalse(c2.Seconds.HasValue, "a plain Set clip (MinClipLength) does not gain a spurious seconds");
     }
+
+    // ---- Task 7 item 1: mixed WD hoists to a modal layer policy + minority overrides, re-emits the same mix --
+
+    [Test]
+    public void Walk_MixedWD_Hoists_Modal_Policy_And_ReEmits_Same_Mix()
+    {
+        // Two states, one WD-true one WD-false: a 1/1 tie, resolved to the stated tie-break (prefer true).
+        var doc = new AnimDocument { Schema = 1, ControllerName = "MixedWD_Fx" };
+        var layer = new Layer { Name = "L" };
+        layer.Root.States.Add(new State { Name = "A", Motion = null, WriteDefaults = true });
+        layer.Root.States.Add(new State { Name = "B", Motion = null, WriteDefaults = false });
+        layer.Root.DefaultState = "A";
+        doc.Layers.Add(layer);
+        ControllerEmit.Build(doc, out var emitted);
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        var L = w.Doc.Layers[0];
+        Assert.AreEqual(true, L.WriteDefaults, "modal WD policy on a 1/1 tie prefers true");
+
+        var a = L.Root.States.First(s => s.Name == "A");
+        var b = L.Root.States.First(s => s.Name == "B");
+        Assert.IsFalse(a.WriteDefaults.HasValue, "majority state's override is cleared (inherits the layer policy)");
+        Assert.AreEqual(false, b.WriteDefaults, "minority state keeps an explicit override");
+
+        // Re-emit the decoded doc: the per-state WD mix is reproduced exactly.
+        ControllerEmit.Build(w.Doc, out var r2);
+        Assert.IsTrue(FirstState(r2, "A").writeDefaultValues, "A re-emits WD true (from layer policy)");
+        Assert.IsFalse(FirstState(r2, "B").writeDefaultValues, "B re-emits WD false (from its override)");
+    }
+
+    // ---- Task 7 item 1 / acceptance #5: a uniform-WD layer hoists to a policy with ZERO overrides ------------
+
+    [Test]
+    public void Walk_UniformWD_Hoists_Policy_With_No_Overrides()
+    {
+        var doc = new AnimDocument { Schema = 1, ControllerName = "UniformWD_Fx" };
+        var layer = new Layer { Name = "L" };
+        layer.Root.States.Add(new State { Name = "A", WriteDefaults = false });
+        layer.Root.States.Add(new State { Name = "B", WriteDefaults = false });
+        layer.Root.DefaultState = "A";
+        doc.Layers.Add(layer);
+        ControllerEmit.Build(doc, out var emitted);
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        var L = w.Doc.Layers[0];
+        Assert.AreEqual(false, L.WriteDefaults, "uniform WD-false hoists to a false layer policy");
+        Assert.IsTrue(L.Root.States.All(s => !s.WriteDefaults.HasValue), "no per-state overrides remain");
+
+        ControllerEmit.Build(w.Doc, out var r2);
+        Assert.IsFalse(FirstState(r2, "A").writeDefaultValues);
+        Assert.IsFalse(FirstState(r2, "B").writeDefaultValues);
+    }
+
+    // ---- Task 7 item 2: timeParameterActive + empty timeParameter -> unbound motion time + a Note ------------
+
+    [Test]
+    public void Walk_Empty_TimeParameter_Normalizes_To_Null_With_Note()
+    {
+        var c = new AnimatorController { name = "EmptyTP_Fx" };
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        st.timeParameterActive = true;
+        st.timeParameter = ""; // the SDK HandsLayer2 template shape
+
+        var w = ControllerDecompile.Walk(c);
+        var s = w.Doc.Layers[0].Root.States.First(x => x.Name == "S");
+        Assert.IsNull(s.MotionTimeParam, "empty timeParameter is not bound");
+        Assert.AreEqual(0, w.Refusals.Count, "an empty timeParameter is tolerated, never refused");
+        Assert.IsTrue(w.Notes.Any(n => n.Contains("timeParameter")), "a Note records the normalization");
+        Object.DestroyImmediate(c);
+    }
+
+    // ---- Task 7 item 3: sibling states differing only by trailing whitespace -> a located Refusal ------------
+
+    [Test]
+    public void Walk_Whitespace_Sibling_States_Refuse_Naming_Both()
+    {
+        var c = new AnimatorController { name = "WsCollide_Fx" };
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        sm.AddState("S");
+        sm.AddState("S "); // trailing space
+
+        var w = ControllerDecompile.Walk(c);
+        Assert.AreEqual(1, w.Refusals.Count(r => r.Contains("whitespace")), "one whitespace-collision refusal");
+        var refusal = w.Refusals.First(r => r.Contains("whitespace"));
+        StringAssert.Contains("'S'", refusal, "names the first sibling");
+        StringAssert.Contains("'S '", refusal, "names the second sibling");
+        // Both states are still decoded — never silently collapsed/dedup'd.
+        Assert.AreEqual(2, w.Doc.Layers[0].Root.States.Count, "both colliding states remain decoded");
+        Object.DestroyImmediate(c);
+    }
+
+    // ---- Task 7 item 4a: a layer with a null state machine -> a located Refusal (not an NRE) -----------------
+
+    [Test]
+    public void Walk_Null_StateMachine_Refuses()
+    {
+        var c = new AnimatorController { name = "NullSM_Fx" };
+        c.layers = new[] { new AnimatorControllerLayer { name = "L", defaultWeight = 1f, stateMachine = null } };
+
+        var w = ControllerDecompile.Walk(c); // must NOT throw
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("no state machine")), "null state machine -> located refusal");
+        Object.DestroyImmediate(c);
+    }
+
+    // ---- Task 7 item 4b: an empty inline clip (zero bindings) -> a located Refusal (not silently empty) ------
+
+    [Test]
+    public void Walk_Empty_Inline_Clip_Refuses()
+    {
+        var c = new AnimatorController { name = "EmptyClip_Fx" };
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        st.motion = new AnimationClip { name = "empty" }; // no curve bindings
+
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("empty") && r.Contains("animatable content")),
+            "an inline clip with zero bindings -> located refusal");
+        Object.DestroyImmediate(c);
+    }
+
+    // ---- Task 7 item 4c: a null playAudio clip entry -> a located Refusal (not an NRE) -----------------------
+
+    [Test]
+    public void Walk_Null_PlayAudio_Clip_Refuses()
+    {
+        // Emit a playAudio behaviour (ControllerEmit adds the SMB on a persisted controller), then null out its
+        // Clips entry to model a since-deleted AudioClip — the reachable-import reality this refusal guards.
+        const string yaml =
+            "schema: 1\ncontroller: NullAudio_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n" +
+            "          - playAudio: { sourcePath: Audio/Src, playbackOrder: uniqueRandom, parameter: Idx, " +
+            "volume: [ 0.8, 1.0 ], volumeApply: neverApply, pitch: [ 1, 1 ], pitchApply: alwaysApply, " +
+            "loop: true, loopApply: applyIfStopped, clipsApply: alwaysApply, delaySeconds: 0.1, " +
+            "playOnEnter: true, stopOnEnter: false, playOnExit: true, stopOnExit: false }\n" +
+            "    default: S\n";
+        var src = AnimatorSchemaYaml.Parse(yaml, "test");
+        ControllerEmit.Build(src, out var emitted);
+        var st = emitted.Controller.layers[0].stateMachine.states[0].state;
+        var pa = (VRC.SDKBase.VRC_AnimatorPlayAudio)st.behaviours[0];
+        pa.Clips = new AudioClip[] { null };
+        EditorUtility.SetDirty(pa);
+
+        var w = ControllerDecompile.Walk(emitted.Controller); // must NOT throw
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("playAudio") && r.Contains("null clip")),
+            "a null playAudio clip entry -> located refusal");
+    }
 }

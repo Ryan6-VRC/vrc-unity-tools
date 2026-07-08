@@ -27,13 +27,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// never emitted. A dangling motion GUID (asset gone) decodes to a <see cref="GuidRef"/> marked
     /// <c>Unresolved</c> and is listed in <see cref="WalkResult.UnresolvedGuids"/>.
     ///
-    /// SCOPE (Task 5): produces the full document from an emitted/clean controller. Import TOLERANCES (mixed-WD
-    /// hoisting, empty-timeParameter normalization, whitespace collisions) and the full REFUSAL taxonomy are
-    /// Task 7 — here, a construct that cannot be expressed in the schema is appended to
-    /// <see cref="WalkResult.Refusals"/> (named + located) rather than silently approximated. Write-Defaults,
-    /// transition durations, etc. are decoded EXPLICITLY per state/transition (never hoisted to inherited
-    /// defaults), so the re-emit is exact even though the authoring form that produced the controller may have
-    /// used inheritance.
+    /// SCOPE: produces the full document from an emitted/clean or imported controller. Import TOLERANCES —
+    /// mixed Write-Defaults hoisted to a modal layer policy + minority per-state overrides (Task 7), and an
+    /// empty <c>timeParameter</c> normalized to an unbound motion time with a Note — plus the full REFUSAL
+    /// taxonomy: a construct that cannot be expressed in the schema (out-of-vocabulary or malformed input:
+    /// whitespace-colliding sibling states, a null state machine, an empty inline clip, a null playAudio clip)
+    /// is appended to <see cref="WalkResult.Refusals"/> (named + located) rather than silently approximated or
+    /// thrown. Transition durations etc. are decoded EXPLICITLY per transition (never hoisted to inherited
+    /// defaults), so the re-emit is exact even though the authoring form may have used inheritance.
     /// </summary>
     public static class ControllerDecompile
     {
@@ -141,11 +142,43 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 };
                 if (layer.avatarMask != null) model.Mask = AssetDatabase.GetAssetPath(layer.avatarMask);
 
-                // DEFERRED (Task 7): a layer with a null stateMachine (a malformed controller) NREs here rather
-                // than producing a located Refusal — that tolerance/refusal edge belongs to the Task-7 pass.
+                if (layer.stateMachine == null)
+                {
+                    // A malformed controller: a layer with no state machine has no reachable graph to decode.
+                    _result.Refusals.Add($"layer '{layer.name}': has no state machine (null root) — malformed controller");
+                    return model; // empty Root, WriteDefaults left null (no states to derive a policy from)
+                }
                 BuildAddressMaps(layer.stateMachine);
                 model.Root = DecodeMachine(layer.stateMachine);
+                HoistWriteDefaults(model);
                 return model;
+            }
+
+            // Derive the layer's Write-Defaults policy as the MODAL per-state WD value across ALL of the layer's
+            // states (root + every sub-machine), set it on the Layer, and clear the now-redundant per-state
+            // override on every majority state — leaving an explicit State.WriteDefaults only on the minority.
+            // Re-emit (s.WriteDefaults ?? layer.WriteDefaults ?? Defaults) then reproduces the SAME per-state WD
+            // mix. DETERMINISTIC: on a tie prefer true (trueCount >= falseCount). A uniform-WD layer hoists to a
+            // single policy with zero overrides — so it round-trips unchanged, and the Task-9 fixpoint holds.
+            private static void HoistWriteDefaults(Layer model)
+            {
+                var states = new List<State>();
+                CollectStates(model.Root, states);
+                if (states.Count == 0) return; // nothing to derive from; leave WriteDefaults null
+
+                int trueCount = 0, falseCount = 0;
+                foreach (var s in states) { if (s.WriteDefaults == true) trueCount++; else falseCount++; }
+                bool policy = trueCount >= falseCount; // tie-break: prefer true
+                model.WriteDefaults = policy;
+                foreach (var s in states)
+                    if (s.WriteDefaults == policy) s.WriteDefaults = null; // majority inherits the layer policy
+            }
+
+            private static void CollectStates(StateMachine sm, List<State> into)
+            {
+                if (sm == null) return;
+                into.AddRange(sm.States);
+                foreach (var child in sm.Machines) CollectStates(child.Machine, into);
             }
 
             // Map every state/sub-machine of the layer to its owning machine + path-from-root, so a transition
@@ -185,6 +218,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 var model = new StateMachine();
 
+                DetectWhitespaceCollisions(sm);
                 foreach (var cs in sm.states)
                     if (cs.state != null) model.States.Add(DecodeState(cs.state, sm));
 
@@ -233,6 +267,31 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return model;
             }
 
+            // Sibling states whose names are equal once trimmed but differ raw (e.g. "S" vs "S ") collide under
+            // name-keyed addressing — a transition target `S` cannot disambiguate them. Refuse loudly (named +
+            // located), never silently collapse/dedup: both states are still decoded into the machine.
+            private void DetectWhitespaceCollisions(AnimatorStateMachine sm)
+            {
+                var byTrim = new Dictionary<string, List<string>>();
+                foreach (var cs in sm.states)
+                {
+                    if (cs.state == null) continue;
+                    string raw = cs.state.name;
+                    string key = raw.Trim();
+                    if (!byTrim.TryGetValue(key, out var list)) { list = new List<string>(); byTrim[key] = list; }
+                    if (!list.Contains(raw)) list.Add(raw);
+                }
+                foreach (var cs in sm.states) // iterate states (not the dict) so the refusal order is deterministic
+                {
+                    if (cs.state == null) continue;
+                    string key = cs.state.name.Trim();
+                    if (byTrim.TryGetValue(key, out var list) && list.Count > 1 && list[0] == cs.state.name)
+                        _result.Refusals.Add(
+                            $"state-machine '{PathLabel(sm)}': sibling states {string.Join(", ", list.Select(n => "'" + n + "'"))} " +
+                            $"collide on trimmed name '{key}' — they differ only by surrounding whitespace");
+                }
+            }
+
             private State DecodeState(AnimatorState ast, AnimatorStateMachine owner)
             {
                 var st = new State
@@ -243,7 +302,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     WriteDefaults = ast.writeDefaultValues,
                 };
                 if (ast.speedParameterActive) st.SpeedParam = ast.speedParameter;
-                if (ast.timeParameterActive) st.MotionTimeParam = ast.timeParameter;
+                if (ast.timeParameterActive)
+                {
+                    // Every vendor Gesture (the SDK HandsLayer2 template) ships timeParameterActive with an EMPTY
+                    // timeParameter — a no-op the runtime ignores. TOLERATE it (never a Refusal): normalize to an
+                    // unbound motion time (MotionTimeParam == null) + a Note, so re-emit does not fabricate a bind.
+                    if (string.IsNullOrEmpty(ast.timeParameter))
+                        _result.Notes.Add($"state '{ast.name}': timeParameterActive with an empty timeParameter — normalized to unbound motion time");
+                    else
+                        st.MotionTimeParam = ast.timeParameter;
+                }
                 if (ast.mirrorParameterActive)
                     _result.Refusals.Add($"state '{ast.name}': mirror-parameter binding '{ast.mirrorParameter}' is out of vocabulary");
                 if (ast.cycleOffsetParameterActive)
@@ -467,9 +535,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return spec;
                 }
 
-                // DEFERRED (Task 7): a hand-authored clip with ZERO bindings decodes to an empty ClipSpec, which
-                // ControllerEmit.BuildClip then rejects (no content, no seconds). That malformed-input edge
-                // belongs to the tolerance/refusal pass, not here.
+                // A hand-authored clip with ZERO curve bindings has no animatable content — ControllerEmit.BuildClip
+                // would reject the resulting empty ClipSpec (no content, no seconds). Refuse loudly here instead.
+                if (bindings.Length == 0)
+                {
+                    _result.Refusals.Add($"inline clip '{clip.name}': has no animatable content (zero curve bindings) — malformed");
+                    return spec;
+                }
+
                 float maxConstEnd = 0f;
                 foreach (var b in bindings)
                 {
@@ -657,10 +730,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 b.Fields[ControllerEmit.PlayAudioKeys.StopOnExit] = c.StopOnExit;
                 if (c.Clips != null && c.Clips.Length > 0)
                 {
-                    // DEFERRED (Task 7): a null Clips[] entry (a since-deleted AudioClip) decodes to a null path
-                    // that ControllerEmit.AsClips then rejects — a malformed-input edge for the refusal pass.
+                    // A null Clips[] entry (a since-deleted AudioClip) would decode to a null path that
+                    // ControllerEmit.AsClips rejects — refuse loudly (named + located), dropping the null entry.
                     var paths = new List<object>();
-                    foreach (var clip in c.Clips) paths.Add(clip != null ? AssetDatabase.GetAssetPath(clip) : null);
+                    foreach (var clip in c.Clips)
+                    {
+                        if (clip == null)
+                        {
+                            _result.Refusals.Add($"behaviour on {loc}: playAudio has a null clip entry (a since-deleted AudioClip)");
+                            continue;
+                        }
+                        paths.Add(AssetDatabase.GetAssetPath(clip));
+                    }
                     b.Fields[ControllerEmit.PlayAudioKeys.Clips] = paths;
                 }
                 return b;
