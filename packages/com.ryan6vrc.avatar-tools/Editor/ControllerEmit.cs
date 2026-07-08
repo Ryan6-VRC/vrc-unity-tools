@@ -704,22 +704,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     switch (kv.Key)
                     {
-                        case "localOnly":
+                        case DriverKeys.LocalOnly:
                             drv.localOnly = AsBool(kv.Value, "driver.localOnly");
                             break;
-                        case "set":
+                        case DriverKeys.Set:
                             foreach (var e in AsMap(kv.Value, "driver.set"))
                                 ps.Add(new Driver.Parameter { type = Driver.ChangeType.Set, name = e.Key, value = AsFloat(e.Value, "driver.set." + e.Key) });
                             break;
-                        case "add":
+                        case DriverKeys.Add:
                             foreach (var e in AsMap(kv.Value, "driver.add"))
                                 ps.Add(new Driver.Parameter { type = Driver.ChangeType.Add, name = e.Key, value = AsFloat(e.Value, "driver.add." + e.Key) });
                             break;
-                        case "copy":
+                        case DriverKeys.Copy:
                             foreach (var e in AsMap(kv.Value, "driver.copy"))
                                 ps.Add(BuildCopy(e.Key, e.Value));
                             break;
-                        case "random":
+                        case DriverKeys.Random:
                             foreach (var e in AsMap(kv.Value, "driver.random"))
                                 ps.Add(BuildRandom(e.Key, e.Value));
                             break;
@@ -741,11 +741,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     switch (kv.Key)
                     {
-                        case "source": p.source = AsString(kv.Value, "driver.copy." + dest + ".source"); break;
-                        case "sourceMin": p.sourceMin = AsFloat(kv.Value, "driver.copy." + dest + ".sourceMin"); range = true; break;
-                        case "sourceMax": p.sourceMax = AsFloat(kv.Value, "driver.copy." + dest + ".sourceMax"); range = true; break;
-                        case "destMin": p.destMin = AsFloat(kv.Value, "driver.copy." + dest + ".destMin"); range = true; break;
-                        case "destMax": p.destMax = AsFloat(kv.Value, "driver.copy." + dest + ".destMax"); range = true; break;
+                        case DriverKeys.Source: p.source = AsString(kv.Value, "driver.copy." + dest + ".source"); break;
+                        case DriverKeys.SourceMin: p.sourceMin = AsFloat(kv.Value, "driver.copy." + dest + ".sourceMin"); range = true; break;
+                        case DriverKeys.SourceMax: p.sourceMax = AsFloat(kv.Value, "driver.copy." + dest + ".sourceMax"); range = true; break;
+                        case DriverKeys.DestMin: p.destMin = AsFloat(kv.Value, "driver.copy." + dest + ".destMin"); range = true; break;
+                        case DriverKeys.DestMax: p.destMax = AsFloat(kv.Value, "driver.copy." + dest + ".destMax"); range = true; break;
                         default: throw new EmitException($"driver.copy.{dest}: unknown field '{kv.Key}'");
                     }
                 }
@@ -762,9 +762,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     switch (kv.Key)
                     {
-                        case "min": p.valueMin = AsFloat(kv.Value, "driver.random." + name + ".min"); break;
-                        case "max": p.valueMax = AsFloat(kv.Value, "driver.random." + name + ".max"); break;
-                        case "chance": p.chance = AsFloat(kv.Value, "driver.random." + name + ".chance"); break;
+                        case DriverKeys.Min: p.valueMin = AsFloat(kv.Value, "driver.random." + name + ".min"); break;
+                        case DriverKeys.Max: p.valueMax = AsFloat(kv.Value, "driver.random." + name + ".max"); break;
+                        case DriverKeys.Chance: p.chance = AsFloat(kv.Value, "driver.random." + name + ".chance"); break;
                         default: throw new EmitException($"driver.random.{name}: unknown field '{kv.Key}'");
                     }
                 }
@@ -869,22 +869,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     switch (kv.Key)
                     {
-                        case "sourcePath": c.SourcePath = AsString(kv.Value, "playAudio.sourcePath"); break;
-                        case "playbackOrder": c.PlaybackOrder = ParseEnumToken(kv.Value, AudioOrderTokens, "playAudio.playbackOrder"); break;
-                        case "parameter": c.ParameterName = AsString(kv.Value, "playAudio.parameter"); break;
-                        case "volume": c.Volume = AsVector2(kv.Value, "playAudio.volume"); break;
-                        case "volumeApply": c.VolumeApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.volumeApply"); break;
-                        case "pitch": c.Pitch = AsVector2(kv.Value, "playAudio.pitch"); break;
-                        case "pitchApply": c.PitchApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.pitchApply"); break;
-                        case "loop": c.Loop = AsBool(kv.Value, "playAudio.loop"); break;
-                        case "loopApply": c.LoopApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.loopApply"); break;
-                        case "clips": c.Clips = AsClips(kv.Value, "playAudio.clips"); break;
-                        case "clipsApply": c.ClipsApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.clipsApply"); break;
-                        case "delaySeconds": c.DelayInSeconds = AsFloat(kv.Value, "playAudio.delaySeconds"); break;
-                        case "playOnEnter": c.PlayOnEnter = AsBool(kv.Value, "playAudio.playOnEnter"); break;
-                        case "stopOnEnter": c.StopOnEnter = AsBool(kv.Value, "playAudio.stopOnEnter"); break;
-                        case "playOnExit": c.PlayOnExit = AsBool(kv.Value, "playAudio.playOnExit"); break;
-                        case "stopOnExit": c.StopOnExit = AsBool(kv.Value, "playAudio.stopOnExit"); break;
+                        case PlayAudioKeys.SourcePath: c.SourcePath = AsString(kv.Value, "playAudio.sourcePath"); break;
+                        case PlayAudioKeys.PlaybackOrder: c.PlaybackOrder = ParseEnumToken(kv.Value, AudioOrderTokens, "playAudio.playbackOrder"); break;
+                        case PlayAudioKeys.Parameter: c.ParameterName = AsString(kv.Value, "playAudio.parameter"); break;
+                        case PlayAudioKeys.Volume: c.Volume = AsVector2(kv.Value, "playAudio.volume"); break;
+                        case PlayAudioKeys.VolumeApply: c.VolumeApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.volumeApply"); break;
+                        case PlayAudioKeys.Pitch: c.Pitch = AsVector2(kv.Value, "playAudio.pitch"); break;
+                        case PlayAudioKeys.PitchApply: c.PitchApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.pitchApply"); break;
+                        case PlayAudioKeys.Loop: c.Loop = AsBool(kv.Value, "playAudio.loop"); break;
+                        case PlayAudioKeys.LoopApply: c.LoopApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.loopApply"); break;
+                        case PlayAudioKeys.Clips: c.Clips = AsClips(kv.Value, "playAudio.clips"); break;
+                        case PlayAudioKeys.ClipsApply: c.ClipsApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.clipsApply"); break;
+                        case PlayAudioKeys.DelaySeconds: c.DelayInSeconds = AsFloat(kv.Value, "playAudio.delaySeconds"); break;
+                        case PlayAudioKeys.PlayOnEnter: c.PlayOnEnter = AsBool(kv.Value, "playAudio.playOnEnter"); break;
+                        case PlayAudioKeys.StopOnEnter: c.StopOnEnter = AsBool(kv.Value, "playAudio.stopOnEnter"); break;
+                        case PlayAudioKeys.PlayOnExit: c.PlayOnExit = AsBool(kv.Value, "playAudio.playOnExit"); break;
+                        case PlayAudioKeys.StopOnExit: c.StopOnExit = AsBool(kv.Value, "playAudio.stopOnExit"); break;
                         default: throw new EmitException($"playAudio: unknown field '{kv.Key}' (expected sourcePath/playbackOrder/parameter/volume/volumeApply/pitch/pitchApply/loop/loopApply/clips/clipsApply/delaySeconds/playOnEnter/stopOnEnter/playOnExit/stopOnExit)");
                     }
                 }
@@ -1106,30 +1106,52 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ----- schema-token → SDK-enum maps (the enum-valued behaviour fields) -----
 
-        private static readonly Dictionary<string, TrackingType> TrackingTokens = new Dictionary<string, TrackingType>
+        // INTERNAL, so ControllerDecompile builds its reverse (enum→token) maps FROM these — one source of
+        // truth. A new SDK enum member added here is automatically decodable; a value present in neither
+        // direction is fail-loud on both sides (emit throws; decode refuses), never silently approximated.
+        internal static readonly Dictionary<string, TrackingType> TrackingTokens = new Dictionary<string, TrackingType>
         {
             { "noChange", TrackingType.NoChange }, { "tracking", TrackingType.Tracking }, { "animation", TrackingType.Animation },
         };
 
-        private static readonly Dictionary<string, PlayableLayer> PlayableLayerTokens = new Dictionary<string, PlayableLayer>
+        internal static readonly Dictionary<string, PlayableLayer> PlayableLayerTokens = new Dictionary<string, PlayableLayer>
         {
             { "action", PlayableLayer.Action }, { "fx", PlayableLayer.FX }, { "gesture", PlayableLayer.Gesture }, { "additive", PlayableLayer.Additive },
         };
 
-        private static readonly Dictionary<string, LayerCtrlLayer> LayerCtrlTokens = new Dictionary<string, LayerCtrlLayer>
+        internal static readonly Dictionary<string, LayerCtrlLayer> LayerCtrlTokens = new Dictionary<string, LayerCtrlLayer>
         {
             { "action", LayerCtrlLayer.Action }, { "fx", LayerCtrlLayer.FX }, { "gesture", LayerCtrlLayer.Gesture }, { "additive", LayerCtrlLayer.Additive },
         };
 
-        private static readonly Dictionary<string, AudioOrder> AudioOrderTokens = new Dictionary<string, AudioOrder>
+        internal static readonly Dictionary<string, AudioOrder> AudioOrderTokens = new Dictionary<string, AudioOrder>
         {
             { "random", AudioOrder.Random }, { "uniqueRandom", AudioOrder.UniqueRandom }, { "roundabout", AudioOrder.Roundabout }, { "parameter", AudioOrder.Parameter },
         };
 
-        private static readonly Dictionary<string, AudioApply> AudioApplyTokens = new Dictionary<string, AudioApply>
+        internal static readonly Dictionary<string, AudioApply> AudioApplyTokens = new Dictionary<string, AudioApply>
         {
             { "alwaysApply", AudioApply.AlwaysApply }, { "applyIfStopped", AudioApply.ApplyIfStopped }, { "neverApply", AudioApply.NeverApply },
         };
+
+        // Field-name tokens for the two field-dense behaviour kinds — SHARED with ControllerDecompile so the
+        // encode case labels and the decode dictionary keys can never drift apart (a rename breaks both, and
+        // the compiler enforces it). Other kinds' field names are few + stable and stay inline.
+        internal static class DriverKeys
+        {
+            public const string LocalOnly = "localOnly", Set = "set", Add = "add", Copy = "copy", Random = "random";
+            public const string Source = "source", SourceMin = "sourceMin", SourceMax = "sourceMax", DestMin = "destMin", DestMax = "destMax";
+            public const string Min = "min", Max = "max", Chance = "chance";
+        }
+
+        internal static class PlayAudioKeys
+        {
+            public const string SourcePath = "sourcePath", PlaybackOrder = "playbackOrder", Parameter = "parameter";
+            public const string Volume = "volume", VolumeApply = "volumeApply", Pitch = "pitch", PitchApply = "pitchApply";
+            public const string Loop = "loop", LoopApply = "loopApply", Clips = "clips", ClipsApply = "clipsApply";
+            public const string DelaySeconds = "delaySeconds", PlayOnEnter = "playOnEnter", StopOnEnter = "stopOnEnter";
+            public const string PlayOnExit = "playOnExit", StopOnExit = "stopOnExit";
+        }
 
         /// <summary>The provenance source hash — first 8 bytes of the MD5 of <paramref name="s"/>, hex.
         /// CompileController computes this over the current source text and compares it to the <c>srchash:</c>

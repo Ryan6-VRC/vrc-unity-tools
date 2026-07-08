@@ -141,6 +141,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 };
                 if (layer.avatarMask != null) model.Mask = AssetDatabase.GetAssetPath(layer.avatarMask);
 
+                // DEFERRED (Task 7): a layer with a null stateMachine (a malformed controller) NREs here rather
+                // than producing a located Refusal — that tolerance/refusal edge belongs to the Task-7 pass.
                 BuildAddressMaps(layer.stateMachine);
                 model.Root = DecodeMachine(layer.stateMachine);
                 return model;
@@ -289,7 +291,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 tr.Duration = t.duration != 0f ? t.duration : (float?)null;
                 tr.FixedDuration = t.hasFixedDuration ? (bool?)null : false;
                 tr.Interruption = t.interruptionSource == TransitionInterruptionSource.None
-                    ? (TransitionInterruption?)null : MapInterruption(t.interruptionSource);
+                    ? (TransitionInterruption?)null : MapInterruption(t.interruptionSource, loc);
                 tr.OrderedInterruption = t.orderedInterruption ? (bool?)null : false;
                 return tr;
             }
@@ -394,7 +396,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private BlendTreeSpec DecodeTree(BlendTree bt, string loc)
             {
-                var spec = new BlendTreeSpec { Kind = MapTreeKind(bt.blendType) };
+                var spec = new BlendTreeSpec { Kind = MapTreeKind(bt.blendType, loc) };
                 bool direct = spec.Kind == TreeKind.Direct;
                 bool twoD = Is2D(bt.blendType);
                 if (!direct)
@@ -402,21 +404,44 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     spec.Param = bt.blendParameter;
                     if (twoD) spec.ParamY = bt.blendParameterY;
                 }
-                foreach (var ch in bt.children)
+                // A tree CHILD can carry a dangling motion ref exactly like a state's motion slot can. The
+                // recovery regex matches ChildMotion.m_Motion lines too, so a child dangler is in the same queue
+                // — decode it HERE (mirroring the state path) or it (a) loses the `unresolved` marker
+                // ControllerEmit.BuildMotion preserves, and (b) leaves an orphan guid a later state mis-dequeues.
+                var childs = new SerializedObject(bt).FindProperty("m_Childs");
+                var kids = bt.children;
+                for (int i = 0; i < kids.Length; i++)
                 {
+                    var ch = kids[i];
+                    string childLoc = loc + " (tree child " + i + ")";
                     var tc = new TreeChild
                     {
-                        Motion = DecodeMotion(ch.motion, loc + " (tree child)"),
                         TimeScale = ch.timeScale,
                         Mirror = ch.mirror,
                         CycleOffset = ch.cycleOffset,
                     };
+                    if (ch.motion != null) tc.Motion = DecodeMotion(ch.motion, childLoc);
+                    else if (ChildHasDanglingMotion(childs, i))
+                    {
+                        string guid = _danglingGuids.Count > 0 ? _danglingGuids.Dequeue() : "unknown";
+                        tc.Motion = new MotionRef { RefGuid = new GuidRef { Guid = guid, Unresolved = true } };
+                        _result.UnresolvedGuids.Add(guid);
+                    }
+                    // else: a genuine empty child (rare) — leave Motion null, never silently dropping a dangler.
+
                     if (direct) tc.DirectWeight = ch.directBlendParameter;
                     else if (twoD) { tc.PosX = ch.position.x; tc.PosY = ch.position.y; }
                     else tc.Threshold = ch.threshold;
                     spec.Children.Add(tc);
                 }
                 return spec;
+            }
+
+            private static bool ChildHasDanglingMotion(SerializedProperty childs, int i)
+            {
+                if (childs == null || i >= childs.arraySize) return false;
+                var mp = childs.GetArrayElementAtIndex(i).FindPropertyRelative("m_Motion");
+                return mp != null && mp.objectReferenceInstanceIDValue != 0;
             }
 
             // ----- inline clips (invert ControllerEmit.BuildClip) -----
@@ -442,13 +467,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return spec;
                 }
 
+                // DEFERRED (Task 7): a hand-authored clip with ZERO bindings decodes to an empty ClipSpec, which
+                // ControllerEmit.BuildClip then rejects (no content, no seconds). That malformed-input edge
+                // belongs to the tolerance/refusal pass, not here.
+                float maxConstEnd = 0f;
                 foreach (var b in bindings)
                 {
                     var curve = AnimationUtility.GetEditorCurve(clip, b);
                     string target = ReconstructBindingTarget(b);
                     if (curve == null || curve.length == 0) continue;
                     if (IsConstant(curve))
+                    {
                         spec.Sets[target] = curve.keys[0].value;
+                        maxConstEnd = Mathf.Max(maxConstEnd, curve.keys[curve.length - 1].time);
+                    }
                     else
                         spec.Curves.Add(new CurveSpec
                         {
@@ -456,8 +488,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             Keys = curve.keys.Select(k => new Keyframe2(k.time, k.value)).ToList(),
                         });
                 }
+                // A Set curve carries no keyframes in the schema, so a Sets clip authored with an explicit
+                // `seconds:` (emitted as a constant curve stretched to that length) would otherwise re-emit at
+                // MinClipLength. Recover the declared length from the constant end time when it exceeds one
+                // frame (a plain Set with no seconds sits at MinClipLength ⇒ leave Seconds null). A keyframed
+                // curve needs no such recovery — its own last key already carries the length.
+                if (spec.Curves.Count == 0 && maxConstEnd > MinClipLength + 1e-4f)
+                    spec.Seconds = maxConstEnd;
                 return spec;
             }
+
+            // One frame at 60fps — ControllerEmit's honest floor for a content-only clip's derived length.
+            private const float MinClipLength = 1f / 60f;
 
             private static bool IsConstant(AnimationCurve curve)
             {
@@ -489,12 +531,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 switch (smb)
                 {
                     case VRC_AvatarParameterDriver drv: into.Add(DecodeDriver(drv)); break;
-                    case VRC_AnimatorTrackingControl tc: into.Add(DecodeTracking(tc)); break;
-                    case VRC_PlayableLayerControl pl: into.Add(DecodePlayableLayer(pl)); break;
+                    case VRC_AnimatorTrackingControl tc: into.Add(DecodeTracking(tc, loc)); break;
+                    case VRC_PlayableLayerControl pl: into.Add(DecodePlayableLayer(pl, loc)); break;
                     case VRC_AnimatorLocomotionControl lc: into.Add(DecodeLocomotion(lc)); break;
                     case VRC_AnimatorTemporaryPoseSpace ps: into.Add(DecodePoseSpace(ps)); break;
-                    case VRC_AnimatorPlayAudio pa: into.Add(DecodePlayAudio(pa)); break;
-                    case VRC_AnimatorLayerControl lyc: into.Add(DecodeLayerControl(lyc)); break;
+                    case VRC_AnimatorPlayAudio pa: into.Add(DecodePlayAudio(pa, loc)); break;
+                    case VRC_AnimatorLayerControl lyc: into.Add(DecodeLayerControl(lyc, loc)); break;
                     default:
                         _result.Refusals.Add($"behaviour on {loc}: unsupported SMB type '{smb.GetType().Name}' is out of vocabulary");
                         break;
@@ -503,8 +545,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private static Behaviour DecodeDriver(VRC_AvatarParameterDriver drv)
             {
+                // Field-name tokens are shared from ControllerEmit.DriverKeys so encode/decode cannot drift.
                 var b = new Behaviour { Kind = "driver" };
-                if (drv.localOnly) b.Fields["localOnly"] = true; // default false is left implicit
+                if (drv.localOnly) b.Fields[ControllerEmit.DriverKeys.LocalOnly] = true; // default false is left implicit
                 var set = new Dictionary<string, object>();
                 var add = new Dictionary<string, object>();
                 var copy = new Dictionary<string, object>();
@@ -520,30 +563,31 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                 if (p.convertRange)
                                     copy[p.name] = new Dictionary<string, object>
                                     {
-                                        { "source", p.source }, { "sourceMin", p.sourceMin }, { "sourceMax", p.sourceMax },
-                                        { "destMin", p.destMin }, { "destMax", p.destMax },
+                                        { ControllerEmit.DriverKeys.Source, p.source },
+                                        { ControllerEmit.DriverKeys.SourceMin, p.sourceMin }, { ControllerEmit.DriverKeys.SourceMax, p.sourceMax },
+                                        { ControllerEmit.DriverKeys.DestMin, p.destMin }, { ControllerEmit.DriverKeys.DestMax, p.destMax },
                                     };
                                 else copy[p.name] = p.source;
                                 break;
                             case Driver.ChangeType.Random:
                                 random[p.name] = new Dictionary<string, object>
                                 {
-                                    { "min", p.valueMin }, { "max", p.valueMax }, { "chance", p.chance },
+                                    { ControllerEmit.DriverKeys.Min, p.valueMin }, { ControllerEmit.DriverKeys.Max, p.valueMax }, { ControllerEmit.DriverKeys.Chance, p.chance },
                                 };
                                 break;
                         }
                     }
-                if (set.Count > 0) b.Fields["set"] = set;
-                if (add.Count > 0) b.Fields["add"] = add;
-                if (copy.Count > 0) b.Fields["copy"] = copy;
-                if (random.Count > 0) b.Fields["random"] = random;
+                if (set.Count > 0) b.Fields[ControllerEmit.DriverKeys.Set] = set;
+                if (add.Count > 0) b.Fields[ControllerEmit.DriverKeys.Add] = add;
+                if (copy.Count > 0) b.Fields[ControllerEmit.DriverKeys.Copy] = copy;
+                if (random.Count > 0) b.Fields[ControllerEmit.DriverKeys.Random] = random;
                 return b;
             }
 
-            private static Behaviour DecodeTracking(VRC_AnimatorTrackingControl tc)
+            private Behaviour DecodeTracking(VRC_AnimatorTrackingControl tc, string loc)
             {
                 var b = new Behaviour { Kind = "tracking" };
-                void Ch(string name, TrackingType v) { if (v != TrackingType.NoChange) b.Fields[name] = TrackingToken(v); }
+                void Ch(string name, TrackingType v) { if (v != TrackingType.NoChange) b.Fields[name] = Token(TrackingRev, v, loc + " tracking." + name); }
                 Ch("head", tc.trackingHead);
                 Ch("leftHand", tc.trackingLeftHand);
                 Ch("rightHand", tc.trackingRightHand);
@@ -557,10 +601,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return b;
             }
 
-            private static Behaviour DecodePlayableLayer(VRC_PlayableLayerControl c)
+            private Behaviour DecodePlayableLayer(VRC_PlayableLayerControl c, string loc)
             {
                 var b = new Behaviour { Kind = "playableLayer" };
-                b.Fields["layer"] = PlayableLayerToken(c.layer);
+                b.Fields["layer"] = Token(PlayableLayerRev, c.layer, loc + " playableLayer.layer");
                 b.Fields["goalWeight"] = c.goalWeight;
                 b.Fields["blendDuration"] = c.blendDuration;
                 return b;
@@ -582,39 +626,42 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return b;
             }
 
-            private static Behaviour DecodeLayerControl(VRC_AnimatorLayerControl c)
+            private Behaviour DecodeLayerControl(VRC_AnimatorLayerControl c, string loc)
             {
                 var b = new Behaviour { Kind = "layerControl" };
-                b.Fields["playable"] = LayerCtrlToken(c.playable);
+                b.Fields["playable"] = Token(LayerCtrlRev, c.playable, loc + " layerControl.playable");
                 b.Fields["layer"] = c.layer;   // the integer layer INDEX (SDK asymmetry vs playableLayer)
                 b.Fields["goalWeight"] = c.goalWeight;
                 b.Fields["blendDuration"] = c.blendDuration;
                 return b;
             }
 
-            private Behaviour DecodePlayAudio(VRC_AnimatorPlayAudio c)
+            private Behaviour DecodePlayAudio(VRC_AnimatorPlayAudio c, string loc)
             {
+                // Field-name tokens shared from ControllerEmit.PlayAudioKeys so encode/decode cannot drift.
                 var b = new Behaviour { Kind = "playAudio" };
-                b.Fields["sourcePath"] = c.SourcePath;
-                b.Fields["playbackOrder"] = AudioOrderToken(c.PlaybackOrder);
-                b.Fields["parameter"] = c.ParameterName;
-                b.Fields["volume"] = new List<object> { c.Volume.x, c.Volume.y };
-                b.Fields["volumeApply"] = AudioApplyToken(c.VolumeApplySettings);
-                b.Fields["pitch"] = new List<object> { c.Pitch.x, c.Pitch.y };
-                b.Fields["pitchApply"] = AudioApplyToken(c.PitchApplySettings);
-                b.Fields["loop"] = c.Loop;
-                b.Fields["loopApply"] = AudioApplyToken(c.LoopApplySettings);
-                b.Fields["clipsApply"] = AudioApplyToken(c.ClipsApplySettings);
-                b.Fields["delaySeconds"] = c.DelayInSeconds;
-                b.Fields["playOnEnter"] = c.PlayOnEnter;
-                b.Fields["stopOnEnter"] = c.StopOnEnter;
-                b.Fields["playOnExit"] = c.PlayOnExit;
-                b.Fields["stopOnExit"] = c.StopOnExit;
+                b.Fields[ControllerEmit.PlayAudioKeys.SourcePath] = c.SourcePath;
+                b.Fields[ControllerEmit.PlayAudioKeys.PlaybackOrder] = Token(AudioOrderRev, c.PlaybackOrder, loc + " playAudio.playbackOrder");
+                b.Fields[ControllerEmit.PlayAudioKeys.Parameter] = c.ParameterName;
+                b.Fields[ControllerEmit.PlayAudioKeys.Volume] = new List<object> { c.Volume.x, c.Volume.y };
+                b.Fields[ControllerEmit.PlayAudioKeys.VolumeApply] = Token(AudioApplyRev, c.VolumeApplySettings, loc + " playAudio.volumeApply");
+                b.Fields[ControllerEmit.PlayAudioKeys.Pitch] = new List<object> { c.Pitch.x, c.Pitch.y };
+                b.Fields[ControllerEmit.PlayAudioKeys.PitchApply] = Token(AudioApplyRev, c.PitchApplySettings, loc + " playAudio.pitchApply");
+                b.Fields[ControllerEmit.PlayAudioKeys.Loop] = c.Loop;
+                b.Fields[ControllerEmit.PlayAudioKeys.LoopApply] = Token(AudioApplyRev, c.LoopApplySettings, loc + " playAudio.loopApply");
+                b.Fields[ControllerEmit.PlayAudioKeys.ClipsApply] = Token(AudioApplyRev, c.ClipsApplySettings, loc + " playAudio.clipsApply");
+                b.Fields[ControllerEmit.PlayAudioKeys.DelaySeconds] = c.DelayInSeconds;
+                b.Fields[ControllerEmit.PlayAudioKeys.PlayOnEnter] = c.PlayOnEnter;
+                b.Fields[ControllerEmit.PlayAudioKeys.StopOnEnter] = c.StopOnEnter;
+                b.Fields[ControllerEmit.PlayAudioKeys.PlayOnExit] = c.PlayOnExit;
+                b.Fields[ControllerEmit.PlayAudioKeys.StopOnExit] = c.StopOnExit;
                 if (c.Clips != null && c.Clips.Length > 0)
                 {
+                    // DEFERRED (Task 7): a null Clips[] entry (a since-deleted AudioClip) decodes to a null path
+                    // that ControllerEmit.AsClips then rejects — a malformed-input edge for the refusal pass.
                     var paths = new List<object>();
                     foreach (var clip in c.Clips) paths.Add(clip != null ? AssetDatabase.GetAssetPath(clip) : null);
-                    b.Fields["clips"] = paths;
+                    b.Fields[ControllerEmit.PlayAudioKeys.Clips] = paths;
                 }
                 return b;
             }
@@ -676,61 +723,66 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (_smPath != null && _smPath.TryGetValue(sm, out var p)) return p.Length == 0 ? "(root)" : p;
                 return sm != null ? sm.name : "(null)";
             }
+
+            // TOTAL enum→token lookup: an SDK value with no schema token (a member added to the SDK but not to
+            // ControllerEmit's token map) is a located Refusal, never a silent approximation.
+            private string Token<TEnum>(Dictionary<TEnum, string> rev, TEnum v, string loc)
+            {
+                if (rev.TryGetValue(v, out var s)) return s;
+                _result.Refusals.Add($"{loc}: SDK value '{v}' has no schema token (out of vocabulary)");
+                return v.ToString();
+            }
+
+            private TreeKind MapTreeKind(BlendTreeType t, string loc)
+            {
+                switch (t)
+                {
+                    case BlendTreeType.Simple1D: return TreeKind.OneD;
+                    case BlendTreeType.SimpleDirectional2D: return TreeKind.SimpleDirectional2D;
+                    case BlendTreeType.FreeformDirectional2D: return TreeKind.FreeformDirectional2D;
+                    case BlendTreeType.FreeformCartesian2D: return TreeKind.FreeformCartesian2D;
+                    case BlendTreeType.Direct: return TreeKind.Direct;
+                    default:
+                        _result.Refusals.Add($"{loc}: blend-tree type '{t}' is out of vocabulary");
+                        return TreeKind.Direct;
+                }
+            }
+
+            private TransitionInterruption MapInterruption(TransitionInterruptionSource s, string loc)
+            {
+                switch (s)
+                {
+                    case TransitionInterruptionSource.None: return TransitionInterruption.None;
+                    case TransitionInterruptionSource.Source: return TransitionInterruption.Source;
+                    case TransitionInterruptionSource.Destination: return TransitionInterruption.Destination;
+                    case TransitionInterruptionSource.SourceThenDestination: return TransitionInterruption.SourceThenDestination;
+                    case TransitionInterruptionSource.DestinationThenSource: return TransitionInterruption.DestinationThenSource;
+                    default:
+                        _result.Refusals.Add($"{loc}: transition interruption source '{s}' is out of vocabulary");
+                        return TransitionInterruption.None;
+                }
+            }
         }
 
-        // ----- Unity-enum -> schema-token maps (inverse of ControllerEmit's token maps) -----
+        // ----- Unity-enum -> schema-token reverse maps (built FROM ControllerEmit's token maps) -----
+        // Single source of truth: these invert ControllerEmit's forward (token→enum) dictionaries, so a new
+        // SDK enum member added there is automatically decodable and the two directions cannot drift.
+
+        private static readonly Dictionary<TrackingType, string> TrackingRev = Invert(ControllerEmit.TrackingTokens);
+        private static readonly Dictionary<PlayableLayer, string> PlayableLayerRev = Invert(ControllerEmit.PlayableLayerTokens);
+        private static readonly Dictionary<LayerCtrlLayer, string> LayerCtrlRev = Invert(ControllerEmit.LayerCtrlTokens);
+        private static readonly Dictionary<AudioOrder, string> AudioOrderRev = Invert(ControllerEmit.AudioOrderTokens);
+        private static readonly Dictionary<AudioApply, string> AudioApplyRev = Invert(ControllerEmit.AudioApplyTokens);
+
+        private static Dictionary<TEnum, string> Invert<TEnum>(Dictionary<string, TEnum> fwd)
+        {
+            var rev = new Dictionary<TEnum, string>();
+            foreach (var kv in fwd) rev[kv.Value] = kv.Key; // forward maps are 1:1, so the inverse is total
+            return rev;
+        }
 
         private static bool Is2D(BlendTreeType t) =>
             t == BlendTreeType.SimpleDirectional2D || t == BlendTreeType.FreeformDirectional2D || t == BlendTreeType.FreeformCartesian2D;
-
-        private static TreeKind MapTreeKind(BlendTreeType t)
-        {
-            switch (t)
-            {
-                case BlendTreeType.Simple1D: return TreeKind.OneD;
-                case BlendTreeType.SimpleDirectional2D: return TreeKind.SimpleDirectional2D;
-                case BlendTreeType.FreeformDirectional2D: return TreeKind.FreeformDirectional2D;
-                case BlendTreeType.FreeformCartesian2D: return TreeKind.FreeformCartesian2D;
-                default: return TreeKind.Direct;
-            }
-        }
-
-        private static TransitionInterruption MapInterruption(TransitionInterruptionSource s)
-        {
-            switch (s)
-            {
-                case TransitionInterruptionSource.Source: return TransitionInterruption.Source;
-                case TransitionInterruptionSource.Destination: return TransitionInterruption.Destination;
-                case TransitionInterruptionSource.SourceThenDestination: return TransitionInterruption.SourceThenDestination;
-                case TransitionInterruptionSource.DestinationThenSource: return TransitionInterruption.DestinationThenSource;
-                default: return TransitionInterruption.None;
-            }
-        }
-
-        private static string TrackingToken(TrackingType v)
-        {
-            switch (v) { case TrackingType.Tracking: return "tracking"; case TrackingType.Animation: return "animation"; default: return "noChange"; }
-        }
-
-        private static string PlayableLayerToken(PlayableLayer v)
-        {
-            switch (v) { case PlayableLayer.Action: return "action"; case PlayableLayer.FX: return "fx"; case PlayableLayer.Gesture: return "gesture"; default: return "additive"; }
-        }
-
-        private static string LayerCtrlToken(LayerCtrlLayer v)
-        {
-            switch (v) { case LayerCtrlLayer.Action: return "action"; case LayerCtrlLayer.FX: return "fx"; case LayerCtrlLayer.Gesture: return "gesture"; default: return "additive"; }
-        }
-
-        private static string AudioOrderToken(AudioOrder v)
-        {
-            switch (v) { case AudioOrder.Random: return "random"; case AudioOrder.UniqueRandom: return "uniqueRandom"; case AudioOrder.Roundabout: return "roundabout"; default: return "parameter"; }
-        }
-
-        private static string AudioApplyToken(AudioApply v)
-        {
-            switch (v) { case AudioApply.AlwaysApply: return "alwaysApply"; case AudioApply.ApplyIfStopped: return "applyIfStopped"; default: return "neverApply"; }
-        }
 
         // ----- dangling-motion GUID recovery (mirror of the ControllerReport/ControllerRules YAML parse) -----
 

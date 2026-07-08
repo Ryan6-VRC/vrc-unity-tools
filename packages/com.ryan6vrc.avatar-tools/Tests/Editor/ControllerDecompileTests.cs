@@ -150,4 +150,162 @@ public class ControllerDecompileTests
         Assert.AreEqual(1, w.OrphanCount, "the unreferenced clip is counted as an orphan");
         Assert.IsFalse(w.Doc.Clips.Any(c => c.Name == "ORPHAN"), "orphan is not emitted into the Doc");
     }
+
+    // ---- Item 1: a blend-tree child's dangling motion ref is decoded, not dropped -----------------
+
+    [Test]
+    public void Walk_TreeChild_Dangling_Ref_Is_Marked_Unresolved_And_ReEmits()
+    {
+        // Emit a controller whose tree child references a real external clip, then delete that clip so the
+        // child's m_Motion becomes a dangling guid ref (an imported-controller reality). Walk must decode it
+        // to GuidRef{Unresolved} + list the guid — NOT silently drop it (the pre-fix bug) — and re-emitting
+        // the decoded doc must round-trip the unresolved marker (ControllerEmit tolerates it as a null motion).
+        if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");
+        if (!AssetDatabase.IsValidFolder("Assets/Agent/Scratch")) AssetDatabase.CreateFolder("Assets/Agent", "Scratch");
+        if (!AssetDatabase.IsValidFolder(ScratchFolder)) AssetDatabase.CreateFolder("Assets/Agent/Scratch", "emit");
+        string clipPath = ScratchFolder + "/dangle_child.anim";
+        var extClip = new AnimationClip { name = "dangle_child" };
+        AnimationUtility.SetEditorCurve(extClip, EditorCurveBinding.FloatCurve("", typeof(Animator), "Blend"),
+            AnimationCurve.Constant(0f, 0.1f, 0f));
+        AssetDatabase.CreateAsset(extClip, clipPath);
+
+        var doc = new AnimDocument { Schema = 1, ControllerName = "TreeDangle_Fx" };
+        doc.Parameters.Add(new ParamSpec { Name = "Blend", Type = AnimParamType.Float });
+        var layer = new Layer { Name = "L" };
+        var owner = new State { Name = "Owner" };
+        var tree = new BlendTreeSpec { Kind = TreeKind.OneD, Param = "Blend" };
+        tree.Children.Add(new TreeChild { Motion = new MotionRef { RefPath = clipPath }, Threshold = 0f });
+        owner.Motion = new MotionRef { Tree = tree };
+        layer.Root.States.Add(owner);
+        layer.Root.DefaultState = "Owner";
+        doc.Layers.Add(layer);
+        ControllerEmit.Build(doc, out var emitted);
+        string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
+
+        AssetDatabase.DeleteAsset(clipPath); // now the tree child's ref dangles
+        var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(ctrlPath);
+
+        var w = ControllerDecompile.Walk(controller);
+        var child = w.Doc.Layers[0].Root.States.First(s => s.Name == "Owner").Motion.Tree.Children[0];
+        Assert.IsNotNull(child.Motion, "the dangling child motion is decoded, not dropped");
+        Assert.IsNotNull(child.Motion.RefGuid, "decoded as a guid ref");
+        Assert.IsTrue(child.Motion.RefGuid.Unresolved, "marked unresolved");
+        Assert.AreEqual(1, w.UnresolvedGuids.Count, "the child's guid is listed");
+
+        // Re-emit the decoded doc: ControllerEmit preserves the unresolved marker (null motion + advisory),
+        // attributed to the owning state — proving the marker survives decode -> re-emit.
+        ControllerEmit.Build(w.Doc, out var r2);
+        var reTree = FirstState(r2, "Owner").motion as BlendTree;
+        Assert.IsNotNull(reTree);
+        Assert.IsNull(reTree.children[0].motion, "re-emitted child motion is null (tolerated unresolved ref)");
+        Assert.AreEqual(1, r2.UnresolvedRefs.Count, "re-emit records the unresolved ref");
+        Assert.AreEqual("Owner", r2.UnresolvedRefs[0].state, "attributed to the owning state");
+    }
+
+    private static AnimatorState FirstState(ControllerEmit.EmitResult r, string name) =>
+        r.Controller.layers[0].stateMachine.states.First(cs => cs.state.name == name).state;
+
+    // ---- Item 3: round-trip the four behaviour kinds with no dedicated test ------------------------
+
+    [Test]
+    public void Walk_Roundtrips_PlayableLayer_PoseSpace_LayerControl_PlayAudio_Fields()
+    {
+        const string yaml =
+            "schema: 1\ncontroller: FourBhv_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n" +
+            "          - playableLayer: { layer: fx, goalWeight: 1, blendDuration: 0.25 }\n" +
+            "          - poseSpace: { enterPoseSpace: true, fixedDelay: false, delayTime: 0.5 }\n" +
+            "          - layerControl: { playable: gesture, layer: 3, goalWeight: 0.5, blendDuration: 0.1 }\n" +
+            "          - playAudio: { sourcePath: Audio/Src, playbackOrder: uniqueRandom, parameter: Idx, " +
+            "volume: [ 0.8, 1.0 ], volumeApply: neverApply, pitch: [ 1, 1 ], pitchApply: alwaysApply, " +
+            "loop: true, loopApply: applyIfStopped, clipsApply: alwaysApply, delaySeconds: 0.1, " +
+            "playOnEnter: true, stopOnEnter: false, playOnExit: true, stopOnExit: false }\n" +
+            "    default: S\n";
+        var src = AnimatorSchemaYaml.Parse(yaml, "test");
+        ControllerEmit.Build(src, out var emitted);
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.AreEqual(0, w.Refusals.Count, "all four kinds are in-vocabulary");
+        var bhvs = w.Doc.Layers[0].Root.States.First(s => s.Name == "S").Behaviours;
+
+        var pl = bhvs.First(b => b.Kind == "playableLayer").Fields;
+        Assert.AreEqual("fx", (string)pl["layer"]);
+        Assert.AreEqual(1f, AsF(pl["goalWeight"]), 1e-6f);
+        Assert.AreEqual(0.25f, AsF(pl["blendDuration"]), 1e-6f);
+
+        var ps = bhvs.First(b => b.Kind == "poseSpace").Fields;
+        Assert.AreEqual(true, (bool)ps["enterPoseSpace"]);
+        Assert.AreEqual(false, (bool)ps["fixedDelay"]);
+        Assert.AreEqual(0.5f, AsF(ps["delayTime"]), 1e-6f);
+
+        var lc = bhvs.First(b => b.Kind == "layerControl").Fields;
+        Assert.AreEqual("gesture", (string)lc["playable"]);
+        Assert.AreEqual(3, (int)lc["layer"]);
+        Assert.AreEqual(0.5f, AsF(lc["goalWeight"]), 1e-6f);
+        Assert.AreEqual(0.1f, AsF(lc["blendDuration"]), 1e-6f);
+
+        var pa = bhvs.First(b => b.Kind == "playAudio").Fields;
+        Assert.AreEqual("Audio/Src", (string)pa["sourcePath"]);
+        Assert.AreEqual("uniqueRandom", (string)pa["playbackOrder"]);
+        Assert.AreEqual("Idx", (string)pa["parameter"]);
+        var vol = (List<object>)pa["volume"];
+        Assert.AreEqual(0.8f, AsF(vol[0]), 1e-6f);
+        Assert.AreEqual(1.0f, AsF(vol[1]), 1e-6f);
+        Assert.AreEqual("neverApply", (string)pa["volumeApply"]);
+        Assert.AreEqual("alwaysApply", (string)pa["pitchApply"]);
+        Assert.AreEqual("applyIfStopped", (string)pa["loopApply"]);
+        Assert.AreEqual("alwaysApply", (string)pa["clipsApply"]);
+        Assert.AreEqual(true, (bool)pa["loop"]);
+        Assert.AreEqual(0.1f, AsF(pa["delaySeconds"]), 1e-6f);
+        Assert.AreEqual(true, (bool)pa["playOnEnter"]);
+        Assert.AreEqual(false, (bool)pa["stopOnEnter"]);
+        Assert.AreEqual(true, (bool)pa["playOnExit"]);
+        Assert.AreEqual(false, (bool)pa["stopOnExit"]);
+    }
+
+    // ---- Item 4: a Set clip authored with `seconds:` keeps its length across decode ----------------
+
+    [Test]
+    public void Walk_Set_Clip_With_Seconds_Recovers_Length()
+    {
+        var doc = new AnimDocument { Schema = 1, ControllerName = "SetSeconds_Fx" };
+        doc.Parameters.Add(new ParamSpec { Name = "P", Type = AnimParamType.Float });
+        var clip = new ClipSpec { Name = "c", Seconds = 0.5f };
+        clip.Sets["P"] = 1f;
+        doc.Clips.Add(clip);
+        var layer = new Layer { Name = "L" };
+        layer.Root.States.Add(new State { Name = "S", Motion = new MotionRef { Clip = "c" } });
+        layer.Root.DefaultState = "S";
+        doc.Layers.Add(layer);
+        ControllerEmit.Build(doc, out var emitted);
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        var c2 = w.Doc.Clips.First(x => x.Name == "c");
+        Assert.AreEqual(0.5f, c2.Seconds.Value, 1e-3f, "the explicit length is recovered from the constant curve");
+        Assert.AreEqual(1f, c2.Sets["P"], 1e-6f);
+
+        // Re-emit: the length survives (would collapse to MinClipLength without the recovery).
+        ControllerEmit.Build(w.Doc, out var r2);
+        Assert.AreEqual(0.5f, r2.Clips["c"].length, 1e-3f, "re-emitted clip keeps the declared length");
+    }
+
+    [Test]
+    public void Walk_Plain_Set_Clip_Leaves_Seconds_Null()
+    {
+        // A Set clip with NO authored seconds sits at MinClipLength — the recovery must NOT invent a seconds.
+        var doc = new AnimDocument { Schema = 1, ControllerName = "PlainSet_Fx" };
+        doc.Parameters.Add(new ParamSpec { Name = "P", Type = AnimParamType.Float });
+        var clip = new ClipSpec { Name = "c" };
+        clip.Sets["P"] = 1f;
+        doc.Clips.Add(clip);
+        var layer = new Layer { Name = "L" };
+        layer.Root.States.Add(new State { Name = "S", Motion = new MotionRef { Clip = "c" } });
+        layer.Root.DefaultState = "S";
+        doc.Layers.Add(layer);
+        ControllerEmit.Build(doc, out var emitted);
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        var c2 = w.Doc.Clips.First(x => x.Name == "c");
+        Assert.IsFalse(c2.Seconds.HasValue, "a plain Set clip (MinClipLength) does not gain a spurious seconds");
+    }
 }
