@@ -124,7 +124,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             if (sm == null) return 0;
             int n = sm.States.Count;
-            foreach (var sub in sm.Machines) if (sub != null) n += CountStates(sub.Machine);
+            foreach (var sub in sm.Machines) if (sub != null && sub.Machine != null) n += CountStates(sub.Machine);
             return n;
         }
 

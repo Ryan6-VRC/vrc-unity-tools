@@ -44,6 +44,14 @@ public class DecompileControllerTests
         StringAssert.Contains("=> OK", dec);
         Assert.IsTrue(File.Exists(yamlOut), "the .yaml is written");
 
+        // The OK line points at a Snapshot RunLog in-band — assert it is actually on disk (closes the
+        // "returned OK but wrote nothing" blind spot for the RunLog, mirroring the .yaml assertion above).
+        const string marker = "| log=";
+        int i = dec.IndexOf(marker, System.StringComparison.Ordinal);
+        Assert.Greater(i, -1, "the OK line carries the RunLog path in-band");
+        string logPath = dec.Substring(i + marker.Length).Trim();
+        Assert.IsTrue(File.Exists(logPath), "the Snapshot RunLog exists at " + logPath);
+
         string rec = CompileController.Compile(Path.GetFullPath(yamlOut), TestRoot + "/out_rt", whatIf: false);
         StringAssert.Contains("=> OK", rec);
 
@@ -112,6 +120,18 @@ public class DecompileControllerTests
     {
         LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
         string res = DecompileController.Decompile("", TestRoot + "/x.yaml", whatIf: false);
+        StringAssert.Contains("FAIL", res);
+    }
+
+    [Test]
+    public void Empty_OutPath_Fails()
+    {
+        var src = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
+        ControllerEmit.Build(src, TestRoot + "/emit", "src", out var emitted);
+        string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
+
+        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+        string res = DecompileController.Decompile(ctrlPath, "", whatIf: false);
         StringAssert.Contains("FAIL", res);
     }
 
