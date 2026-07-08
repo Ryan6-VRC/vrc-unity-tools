@@ -502,18 +502,61 @@ layers:
     }
 
     [Test]
-    public void Emit_PlayAudio_Behaviour_Sets_Order_Flags_And_Range()
+    public void Emit_PlayAudio_Behaviour_Sets_Order_Flags_Range_And_ApplySettings()
     {
         var st = SingleStateWithBehaviours(
-            "playAudio: { sourcePath: Audio/Src, playbackOrder: uniqueRandom, volume: [ 0.8, 1.0 ], playOnEnter: true, stopOnExit: true }");
+            "playAudio: { sourcePath: Audio/Src, playbackOrder: uniqueRandom, parameter: Idx, " +
+            "volume: [ 0.8, 1.0 ], volumeApply: neverApply, pitch: [ 1, 1 ], pitchApply: alwaysApply, " +
+            "loop: true, loopApply: applyIfStopped, clipsApply: alwaysApply, delaySeconds: 0.1, " +
+            "playOnEnter: true, stopOnEnter: true, playOnExit: true, stopOnExit: true }");
         var smb = st.behaviours[0] as VRCAnimatorPlayAudio;
         Assert.IsNotNull(smb, "playAudio SMB emitted");
         Assert.AreEqual("Audio/Src", smb.SourcePath);
         Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.Order.UniqueRandom, smb.PlaybackOrder);
+        Assert.AreEqual("Idx", smb.ParameterName);
         Assert.AreEqual(0.8f, smb.Volume.x, 1e-6f);
         Assert.AreEqual(1.0f, smb.Volume.y, 1e-6f);
+        Assert.AreEqual(1f, smb.Pitch.x, 1e-6f);
+        Assert.AreEqual(1f, smb.Pitch.y, 1e-6f);
+        // Each ApplySettings site decodes its token (the enum map's 3 members × 4 sites).
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.NeverApply, smb.VolumeApplySettings);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.AlwaysApply, smb.PitchApplySettings);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.ApplyIfStopped, smb.LoopApplySettings);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.AlwaysApply, smb.ClipsApplySettings);
+        Assert.IsTrue(smb.Loop);
+        Assert.AreEqual(0.1f, smb.DelayInSeconds, 1e-6f);
         Assert.IsTrue(smb.PlayOnEnter);
+        Assert.IsTrue(smb.StopOnEnter);
+        Assert.IsTrue(smb.PlayOnExit);
         Assert.IsTrue(smb.StopOnExit);
+    }
+
+    [Test]
+    public void PlayAudio_Volume_Wrong_Arity_Fails_Loud()
+    {
+        // AsVector2 requires exactly [min, max]; a single-element list is fail-loud.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadVol_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - playAudio: { volume: [ 0.8 ] }\n" +
+            "    default: S\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("playAudio.volume", ex.Message);
+        StringAssert.Contains("exactly 2", ex.Message);
+    }
+
+    [Test]
+    public void PlayAudio_Missing_Clip_Path_Fails_Loud()
+    {
+        // AsClips loads each path as an AudioClip; an unresolved path is fail-loud, naming the offending path.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadClip_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - playAudio: { clips: [ Assets/DoesNotExist_7c6b5a.wav ] }\n" +
+            "    default: S\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("Assets/DoesNotExist_7c6b5a.wav", ex.Message);
+        StringAssert.Contains("not found", ex.Message);
     }
 
     [Test]

@@ -631,8 +631,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ----- behaviours (all seven VRC SMB kinds) -----
             // One encoder per kind, each mirroring the driver encoder's shape: materialise the concrete VRC
             // SMB via `add(typeof(...))`, then a per-field switch that sets the SMB's fields and throws
-            // EmitException (named offender) on any unknown field. The WRITE-side field vocabulary is the
-            // mirror of ControllerReport's READ-side decode (Task 5 round-trips through it).
+            // EmitException (named offender) on any unknown field.
+            //
+            // WRITE ↔ READ alignment: this side's field/channel NAMES mirror ControllerReport's read side so
+            // decode round-trips — but ControllerReport is a Markdown report, not a decoder: it renders enums
+            // via ToString() (PascalCase, e.g. `Animation`) whereas the emit tokens here are camelCase (e.g.
+            // `animation`). The enum-token casing is DEFINED HERE (the token→enum maps below), not inherited
+            // from the report. And the report only decodes 3 of 7 kinds (driver, tracking, locomotion); the
+            // other four — playableLayer, poseSpace, playAudio, layerControl — have NO read side yet, so their
+            // token surface here is the authority Task 5's decode must match, not a mirror of existing code.
             private void EmitBehaviours(List<Behaviour> behaviours, Func<Type, StateMachineBehaviour> add)
             {
                 if (behaviours == null) return;
@@ -743,8 +750,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // tracking: { <channel>: <state> } where channel is one of the ten VRC tracking channels and state
-            // is animation|tracking|noChange. Mirrors ControllerReport.AppendTracking's channel enumeration so
-            // decode round-trips. An untouched channel keeps its SDK default (NoChange).
+            // is animation|tracking|noChange. Channel NAMES mirror ControllerReport.AppendTracking's channel
+            // enumeration; the enum-token casing (camelCase) is defined by TrackingTokens below, not by the
+            // report's PascalCase ToString() rendering. An untouched channel keeps its SDK default (NoChange).
             private static void PopulateTracking(VRCAnimatorTrackingControl tc, Dictionary<string, object> fields)
             {
                 foreach (var kv in fields)
