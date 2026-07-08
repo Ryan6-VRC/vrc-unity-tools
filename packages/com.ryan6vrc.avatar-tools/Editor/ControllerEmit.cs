@@ -646,6 +646,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 var bt = new BlendTree { name = name, hideFlags = HideFlags.HideInHierarchy };
                 bt.blendType = MapTreeKind(spec.Kind);
+                // A fresh 1D tree defaults to useAutomaticThresholds=true, which makes Unity OVERWRITE our
+                // explicit per-child thresholds with even spacing (0, 1/n, …). Disable it BEFORE adding children
+                // so the authored thresholds stick. The schema stores threshold VALUES (what runtime uses), so
+                // an originally-automatic tree round-trips as manual with identical values — lossless in effect.
+                if (spec.Kind == TreeKind.OneD) bt.useAutomaticThresholds = false;
                 if (!string.IsNullOrEmpty(spec.Param)) bt.blendParameter = spec.Param;
                 if (!string.IsNullOrEmpty(spec.ParamY)) bt.blendParameterY = spec.ParamY;
                 AssetDatabase.AddObjectToAsset(bt, _controller);
