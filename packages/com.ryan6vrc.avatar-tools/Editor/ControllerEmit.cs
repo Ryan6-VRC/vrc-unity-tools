@@ -577,6 +577,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         // broken ref (no marker) is a hard error.
                         if (mr.RefGuid.Unresolved)
                         {
+                            // Record the OWNING state (threaded from EmitMachine through any blend-tree nesting),
+                            // not the synthetic tree name; the child index is deliberately omitted — the verbatim
+                            // guid in the advisory already localizes which ref within the state failed.
                             _result.UnresolvedRefs.Add((stateContext, mr.RefGuid.Guid));
                             return null;
                         }

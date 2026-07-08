@@ -648,4 +648,42 @@ layers:
 
         Assert.Throws<ControllerEmit.EmitException>(() => ControllerEmit.Build(doc, out _));
     }
+
+    // A child of a blend tree can carry an unresolved ref too — the marker must be honored on the tree-child
+    // path (BuildTree → BuildMotion), and the advisory must attribute it to the OWNING STATE, not the
+    // synthetic tree name. Guards the stateContext threading a refactor could silently break.
+    [Test]
+    public void Emit_Unresolved_Ref_In_BlendTree_Child_Attributes_To_Owning_State()
+    {
+        const string yaml = @"schema: 1
+controller: DangleTree_Fx
+basis: avatar-root
+role: fx
+parameters:
+  Blend: float
+layers:
+  - name: L
+    states:
+      Owner:
+        motion:
+          tree: 1d
+          param: Blend
+          children:
+            - { ref: { guid: ""00000000000000000000000000000000"", unresolved: true }, threshold: 0 }
+    default: Owner
+";
+        var doc = AnimatorSchemaYaml.Parse(yaml, "mem://dangletree");
+
+        ControllerEmit.EmitResult r = null;
+        Assert.DoesNotThrow(() => ControllerEmit.Build(doc, out r));
+
+        var tree = State(RootSm(r), "Owner").motion as BlendTree;
+        Assert.IsNotNull(tree, "state motion is a blend tree");
+        Assert.AreEqual(1, tree.children.Length);
+        Assert.IsNull(tree.children[0].motion, "the unresolved child motion is null");
+
+        Assert.AreEqual(1, r.UnresolvedRefs.Count, "the child's unresolved ref is recorded");
+        Assert.AreEqual("Owner", r.UnresolvedRefs[0].state, "attributed to the OWNING state, not the tree name");
+        Assert.AreEqual("00000000000000000000000000000000", r.UnresolvedRefs[0].guid, "verbatim GUID preserved");
+    }
 }
