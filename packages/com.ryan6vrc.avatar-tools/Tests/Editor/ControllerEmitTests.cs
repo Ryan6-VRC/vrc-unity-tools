@@ -298,19 +298,106 @@ layers:
     [Test]
     public void Emit_Nested_SubMachine_Produces_Child_StateMachine()
     {
+        // Bare `to:`/`default:` resolve in their OWN machine's scope; a cross-machine target is a
+        // slash-qualified path from the layer root — Idle→A inside Sub is `Sub/A`. Entry `to: Sub` stays
+        // bare because Sub is in the root machine's own scope.
         var doc = AnimatorSchemaYaml.Parse(
             "schema: 1\ncontroller: Nested_Fx\nbasis: avatar-root\nrole: fx\n" +
             "parameters:\n  P: { type: bool }\n" +
             "layers:\n  - name: L\n" +
-            "    states:\n      Idle: { motion: ~ }\n" +
+            "    states:\n      Idle:\n        motion: ~\n        transitions:\n          - { to: Sub/A, when: [ P is true ] }\n" +
             "    machines:\n      Sub:\n        states:\n          A: { motion: ~ }\n        default: A\n" +
             "    entry:\n      - { to: Sub, when: [ P is true ] }\n" +
             "    default: Idle\n", "test");
         ControllerEmit.Build(doc, out var r);
         var sm = r.Controller.layers[0].stateMachine;
         Assert.AreEqual(1, sm.stateMachines.Length, "one child state machine emitted");
-        Assert.AreEqual("Sub", sm.stateMachines[0].stateMachine.name);
-        Assert.IsTrue(System.Array.Exists(sm.stateMachines[0].stateMachine.states, s => s.state.name == "A"));
+        var sub = sm.stateMachines[0].stateMachine;
+        Assert.AreEqual("Sub", sub.name);
+        var a = sub.states.First(cs => cs.state.name == "A").state;
+        Assert.IsNotNull(a, "declared sub-machine state A is present");
+        // Idle's `Sub/A` path target resolves into the child machine's A state.
+        var idle = State(sm, "Idle");
+        Assert.IsTrue(idle.transitions.Any(t => t.destinationState == a), "Idle wires to Sub/A across the nesting");
+        // Entry `to: Sub` wires into the sub-machine.
+        Assert.AreEqual(1, sm.entryTransitions.Length);
+        Assert.AreEqual(sub, sm.entryTransitions[0].destinationStateMachine, "entry wires into the sub-machine");
+    }
+
+    [Test]
+    public void SubMachine_As_Default_Wires_Unconditional_Entry()
+    {
+        // `default:` naming a SUB-MACHINE (not a state) → an unconditional (no-condition) entry transition
+        // into that sub-machine, added after any entry ladder so it is the catch-all.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: SubDefault_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    machines:\n      Sub:\n        states:\n          A: { motion: ~ }\n        default: A\n" +
+            "    default: Sub\n", "test");
+        ControllerEmit.Build(doc, out var r);
+        var sm = r.Controller.layers[0].stateMachine;
+        var sub = sm.stateMachines[0].stateMachine;
+        // The mechanism is an unconditional entry transition into the sub-machine — NOT a defaultState we
+        // set. (Unity's defaultState getter resolves through to the child's own default when the root has no
+        // direct states, so it is not a reliable probe here; the entry transition is.)
+        Assert.AreEqual(0, sm.states.Length, "root machine has no direct states of its own");
+        Assert.AreEqual(1, sm.entryTransitions.Length, "one entry transition for the sub-machine default");
+        Assert.AreEqual(sub, sm.entryTransitions[0].destinationStateMachine);
+        Assert.AreEqual(0, sm.entryTransitions[0].conditions.Length, "the default entry is unconditional");
+    }
+
+    [Test]
+    public void Duplicate_State_Name_Across_Sibling_Machines_Wires_Each_Own_Transition()
+    {
+        // REGRESSION GUARD for the layer-global-index bug: two sibling sub-machines each declare a state "S"
+        // whose transition targets a DIFFERENT sibling-local state. Under a global bare-name index the
+        // last-emitted "S" would win and both transitions would attach to it / resolve to the wrong target.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Dup_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    machines:\n" +
+            "      M1:\n        states:\n          S:\n            motion: ~\n            transitions:\n              - { to: X, when: [ P is true ] }\n          X: { motion: ~ }\n        default: S\n" +
+            "      M2:\n        states:\n          S:\n            motion: ~\n            transitions:\n              - { to: Y, when: [ P is true ] }\n          Y: { motion: ~ }\n        default: S\n" +
+            "    default: M1\n", "test");
+        ControllerEmit.Build(doc, out var r);
+        var sm = r.Controller.layers[0].stateMachine;
+        var m1 = sm.stateMachines.First(cs => cs.stateMachine.name == "M1").stateMachine;
+        var m2 = sm.stateMachines.First(cs => cs.stateMachine.name == "M2").stateMachine;
+
+        var s1 = m1.states.First(cs => cs.state.name == "S").state;
+        var x = m1.states.First(cs => cs.state.name == "X").state;
+        var s2 = m2.states.First(cs => cs.state.name == "S").state;
+        var y = m2.states.First(cs => cs.state.name == "Y").state;
+
+        // M1's S is a DIFFERENT object than M2's S, and each carries exactly its own transition.
+        Assert.AreNotSame(s1, s2, "each machine has its own distinct S state");
+        Assert.AreEqual(1, s1.transitions.Length);
+        Assert.AreEqual(x, s1.transitions[0].destinationState, "M1's S wires to M1's X");
+        Assert.AreEqual(1, s2.transitions.Length);
+        Assert.AreEqual(y, s2.transitions[0].destinationState, "M2's S wires to M2's Y");
+    }
+
+    [Test]
+    public void Qualified_Path_Resolves_Into_Nested_SubMachine()
+    {
+        // A deep slash-qualified path `A/inner` from the layer root walks sub-machine A, then its state
+        // `inner`. Top-level state Idle → `A/inner`.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Path_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    states:\n      Idle:\n        motion: ~\n        transitions:\n          - { to: A/inner, when: [ P is true ] }\n" +
+            "    machines:\n      A:\n        states:\n          inner: { motion: ~ }\n        default: inner\n" +
+            "    default: Idle\n", "test");
+        ControllerEmit.Build(doc, out var r);
+        var sm = r.Controller.layers[0].stateMachine;
+        var a = sm.stateMachines.First(cs => cs.stateMachine.name == "A").stateMachine;
+        var inner = a.states.First(cs => cs.state.name == "inner").state;
+        var idle = State(sm, "Idle");
+        Assert.AreEqual(1, idle.transitions.Length);
+        Assert.AreEqual(inner, idle.transitions[0].destinationState, "Idle resolves A/inner into the nested machine");
     }
 
     // ---- Determinism -----------------------------------------------------------------------------

@@ -342,17 +342,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     };
                     AssetDatabase.AddObjectToAsset(sm, _controller);
 
-                    // MERGED layer-global indices: target resolution for ANY transition (state→state,
-                    // state→exit, entry, any, cross-sub-machine) must see EVERY state and sub-machine in the
-                    // whole layer, not just the current machine's — a cross-SM or entry-into-submachine target
-                    // lives elsewhere in the nesting. A per-machine map would throw a false dead-target.
-                    var stateIndex = new Dictionary<string, AnimatorState>();
-                    var smIndex = new Dictionary<string, AnimatorStateMachine>();
-
-                    // Pass 1: emit states + sub-machines (arbitrary depth), populating both indices + behaviours.
-                    EmitMachine(layer, layer.Root, sm, stateIndex, smIndex);
-                    // Pass 2: wire defaults + all transitions against the now-complete merged indices.
-                    WireMachine(layer, layer.Root, sm, stateIndex, smIndex);
+                    // Pass 1: emit states + sub-machines (arbitrary depth), building a tree of per-machine
+                    // scopes (each holds only its OWN direct states + direct sub-machines). Target resolution
+                    // is scoped, NOT global: Unity scopes state names per state machine, and the schema lets
+                    // the SAME name recur in different machines — a layer-global index would silently mis-wire.
+                    var rootScope = EmitMachine(layer, layer.Root, sm);
+                    // Pass 2: wire defaults + all transitions, resolving each target in its own machine's scope
+                    // (bare names) or by walking a slash-qualified path from the layer root (cross-machine).
+                    WireMachine(layer, layer.Root, rootScope, rootScope);
 
                     var acLayer = new AnimatorControllerLayer
                     {
@@ -381,13 +378,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _controller.layers = layers.ToArray();
             }
 
-            // Pass 1 — emit this machine's states + child sub-machines (recursing), registering each into the
-            // layer-global indices. NO transitions here: a transition may target something in a sibling machine
-            // that pass 1 hasn't reached yet, so all wiring waits for pass 2 (WireMachine) once both indices
-            // are complete.
-            private void EmitMachine(Layer layer, StateMachine model, AnimatorStateMachine target,
-                Dictionary<string, AnimatorState> stateIndex, Dictionary<string, AnimatorStateMachine> smIndex)
+            // One machine's resolution scope: the emitted state machine plus ONLY its direct states and direct
+            // sub-machines (each sub keeps its own MachineScope). Because Unity scopes state names per machine
+            // and the schema permits a name to recur across machines, resolution is per-scope — never a single
+            // layer-global name dictionary (that would last-write-win and silently mis-wire, e.g. GoLoco's
+            // 180 sub-machines with reused state names).
+            private sealed class MachineScope
             {
+                public AnimatorStateMachine Target;
+                public readonly Dictionary<string, AnimatorState> States = new Dictionary<string, AnimatorState>();
+                public readonly Dictionary<string, MachineScope> Subs = new Dictionary<string, MachineScope>();
+            }
+
+            // Pass 1 — emit this machine's states + child sub-machines (recursing), returning its scope. NO
+            // transitions here: a target may name something in a sibling/child machine not yet emitted, so all
+            // wiring waits for pass 2 (WireMachine) once the whole scope tree exists.
+            private MachineScope EmitMachine(Layer layer, StateMachine model, AnimatorStateMachine target)
+            {
+                var scope = new MachineScope { Target = target };
                 var states = model.States;
                 for (int i = 0; i < states.Count; i++)
                 {
@@ -401,7 +409,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     ast.mirror = s.Mirror;
                     if (s.Motion != null) ast.motion = BuildMotion(s.Motion, s.Name + "_BlendTree");
                     EmitBehaviours(s.Behaviours, t => ast.AddStateMachineBehaviour(t));
-                    stateIndex[s.Name] = ast;
+                    scope.States[s.Name] = ast;
                 }
 
                 var machines = model.Machines;
@@ -411,40 +419,55 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var pos = new Vector3(600f, 60f * i, 0f); // sub-machines to the right of the state grid
                     var childSm = target.AddStateMachine(sub.Name, pos);
                     childSm.hideFlags = HideFlags.HideInHierarchy;
-                    smIndex[sub.Name] = childSm;
-                    EmitMachine(layer, sub.Machine, childSm, stateIndex, smIndex);
+                    scope.Subs[sub.Name] = EmitMachine(layer, sub.Machine, childSm);
                 }
 
                 EmitBehaviours(model.Behaviours, t => target.AddStateMachineBehaviour(t));
+                return scope;
             }
 
-            // Pass 2 — wire default + transitions for this machine, resolving every target name against the
-            // MERGED layer indices, then recurse into child sub-machines. A target name may resolve to a STATE
-            // or a SUB-MACHINE anywhere in the layer's nesting.
-            private void WireMachine(Layer layer, StateMachine model, AnimatorStateMachine target,
-                Dictionary<string, AnimatorState> stateIndex, Dictionary<string, AnimatorStateMachine> smIndex)
+            // Pass 2 — wire default + transitions for this machine (resolving in its OWN scope + qualified paths
+            // from `root`), then recurse into child sub-machines.
+            private void WireMachine(Layer layer, StateMachine model, MachineScope scope, MachineScope root)
             {
-                // default naming a STATE → defaultState now; naming a SUB-MACHINE → an unconditional entry
-                // transition added AFTER the entry ladder (below) so it stays the last, catch-all entry.
+                var target = scope.Target;
+
+                // default resolves in THIS machine's LOCAL scope only — a machine's default is one of its own
+                // direct states or direct sub-machines (Unity has no default into a foreign/nested machine). A
+                // state → defaultState; a sub-machine → an unconditional entry transition added AFTER the entry
+                // ladder (below) so it stays the last, catch-all entry.
                 bool defaultIsState = false;
                 if (!string.IsNullOrEmpty(model.DefaultState))
                 {
-                    if (stateIndex.TryGetValue(model.DefaultState, out var def)) { target.defaultState = def; defaultIsState = true; }
-                    else if (!smIndex.ContainsKey(model.DefaultState))
-                        throw new EmitException($"machine '{target.name}': default '{model.DefaultState}' is neither a state nor a sub-machine in this layer");
+                    if (scope.States.TryGetValue(model.DefaultState, out var def)) { target.defaultState = def; defaultIsState = true; }
+                    else if (!scope.Subs.ContainsKey(model.DefaultState))
+                        throw new EmitException($"machine '{target.name}': default '{model.DefaultState}' is neither a direct state nor a direct sub-machine of this machine");
                 }
 
-                // State transition ladders (ordered per source state = first-match order).
+                // State transition ladders (ordered per source state = first-match order). `from` is THIS
+                // machine's own emitted state, never a global lookup (a same-named state in another machine
+                // would attach the transition to the wrong node).
                 foreach (var s in model.States)
+                {
+                    var from = scope.States[s.Name];
                     foreach (var t in s.Transitions)
-                        ConfigureStateTransition(MakeStateTransition(stateIndex[s.Name], t, stateIndex, smIndex), t);
+                    {
+                        AnimatorStateTransition tr;
+                        if (t.ToExit) tr = from.AddExitTransition();
+                        else if (string.IsNullOrEmpty(t.To))
+                            throw new EmitException($"transition from '{from.name}' has neither a target nor ToExit");
+                        else tr = ResolveName(t.To, scope, root, target.name, out var toState, out var toSm)
+                            ? from.AddTransition(toState) : from.AddTransition(toSm);
+                        ConfigureStateTransition(tr, t);
+                    }
+                }
 
                 // AnyState ladder.
                 foreach (var t in model.AnyLadder)
                 {
-                    var atr = ResolveTarget(t, smIndex, stateIndex, out var toState, out var toSm)
-                        ? target.AddAnyStateTransition(toState)
-                        : target.AddAnyStateTransition(toSm);
+                    RequireTargetName(t, target.name);
+                    var atr = ResolveName(t.To, scope, root, target.name, out var toState, out var toSm)
+                        ? target.AddAnyStateTransition(toState) : target.AddAnyStateTransition(toSm);
                     atr.canTransitionToSelf = t.CanTransitionToSelf;
                     ConfigureStateTransition(atr, t);
                 }
@@ -452,43 +475,52 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // Entry ladder (no duration / exit-time — conditions only).
                 foreach (var t in model.EntryLadder)
                 {
-                    ResolveTarget(t, smIndex, stateIndex, out var toState, out var toSm);
-                    var etr = toState != null ? target.AddEntryTransition(toState) : target.AddEntryTransition(toSm);
+                    RequireTargetName(t, target.name);
+                    var etr = ResolveName(t.To, scope, root, target.name, out var toState, out var toSm)
+                        ? target.AddEntryTransition(toState) : target.AddEntryTransition(toSm);
                     foreach (var c in t.When) etr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param);
                 }
 
                 // default → sub-machine: unconditional catch-all entry, added last so any conditional entry
                 // ladder above wins first (first-match order).
                 if (!defaultIsState && !string.IsNullOrEmpty(model.DefaultState))
-                    target.AddEntryTransition(smIndex[model.DefaultState]);
+                    target.AddEntryTransition(scope.Subs[model.DefaultState].Target);
 
-                var machines = model.Machines;
-                for (int i = 0; i < machines.Count; i++)
-                    WireMachine(layer, machines[i].Machine, smIndex[machines[i].Name], stateIndex, smIndex);
+                foreach (var sub in model.Machines)
+                    WireMachine(layer, sub.Machine, scope.Subs[sub.Name], root);
             }
 
-            // Resolve an entry/any target name to a state (preferred) or sub-machine. Returns true if it landed
-            // on a state (toState set, toSm null); false on a sub-machine (toSm set, toState null). Throws on a
-            // missing/Exit target (Exit is not a valid entry/any destination).
-            private bool ResolveTarget(Transition t, Dictionary<string, AnimatorStateMachine> smIndex,
-                Dictionary<string, AnimatorState> stateIndex, out AnimatorState toState, out AnimatorStateMachine toSm)
+            private static void RequireTargetName(Transition t, string fromMachine)
             {
                 if (t.ToExit || string.IsNullOrEmpty(t.To))
-                    throw new EmitException("entry/any ladder transition has no target (Exit is not a valid target there)");
-                if (stateIndex.TryGetValue(t.To, out toState)) { toSm = null; return true; }
-                if (smIndex.TryGetValue(t.To, out toSm)) { toState = null; return false; }
-                throw new EmitException($"transition target '{t.To}' not found in layer (no state or sub-machine by that name)");
+                    throw new EmitException($"entry/any ladder transition in machine '{fromMachine}' has no target (Exit is not a valid target there)");
             }
 
-            private AnimatorStateTransition MakeStateTransition(AnimatorState from, Transition t,
-                Dictionary<string, AnimatorState> stateIndex, Dictionary<string, AnimatorStateMachine> smIndex)
+            // Resolve a transition target to a state (returns true) or a sub-machine (returns false). A BARE
+            // name resolves ONLY in `scope` — the referencing machine's own direct states + direct sub-machines.
+            // A SLASH-QUALIFIED name is a path from the LAYER `root`: every non-final segment is a sub-machine,
+            // the final segment is a state or a sub-machine. An unresolved target is fail-loud, naming the
+            // offender and the machine it was referenced from — NEVER a silent global fallback.
+            private bool ResolveName(string name, MachineScope scope, MachineScope root, string fromMachine,
+                out AnimatorState toState, out AnimatorStateMachine toSm)
             {
-                if (t.ToExit) return from.AddExitTransition();
-                if (string.IsNullOrEmpty(t.To))
-                    throw new EmitException($"transition from '{from.name}' has neither a target nor ToExit");
-                if (stateIndex.TryGetValue(t.To, out var to)) return from.AddTransition(to);
-                if (smIndex.TryGetValue(t.To, out var toSm)) return from.AddTransition(toSm);
-                throw new EmitException($"transition target '{t.To}' not found in layer (no state or sub-machine by that name)");
+                toState = null; toSm = null;
+                if (name.IndexOf('/') < 0)
+                {
+                    if (scope.States.TryGetValue(name, out toState)) return true;
+                    if (scope.Subs.TryGetValue(name, out var sub)) { toSm = sub.Target; return false; }
+                    throw new EmitException($"transition target '{name}' not found in machine '{fromMachine}' — a bare name resolves only within its own machine; use a 'Sub/State' path from the layer root for a cross-machine target");
+                }
+
+                var segs = name.Split('/');
+                var cur = root;
+                for (int i = 0; i < segs.Length - 1; i++)
+                    if (!cur.Subs.TryGetValue(segs[i], out cur))
+                        throw new EmitException($"transition target path '{name}' (from machine '{fromMachine}'): segment '{segs[i]}' is not a sub-machine on the path from the layer root");
+                var leaf = segs[segs.Length - 1];
+                if (cur.States.TryGetValue(leaf, out toState)) return true;
+                if (cur.Subs.TryGetValue(leaf, out var subm)) { toSm = subm.Target; return false; }
+                throw new EmitException($"transition target path '{name}' (from machine '{fromMachine}'): final segment '{leaf}' is neither a state nor a sub-machine");
             }
 
             private void ConfigureStateTransition(AnimatorStateTransition tr, Transition t)
