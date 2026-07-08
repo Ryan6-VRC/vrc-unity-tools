@@ -111,6 +111,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // survives (all built-in/scratch), drop any stale asset so it can't linger. In whatIf the whole
             // emit lands in the temp folder and is swept with it.
             var existingParams = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(paramsPath);
+            bool paramsPreExisted = existingParams != null;
             if (built.Params != null)
             {
                 if (existingParams != null) { existingParams.parameters = built.Params.parameters; EditorUtility.SetDirty(existingParams); }
@@ -122,7 +123,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
             if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
             {
-                CleanupAfterLint(whatIf, tempFolder, finalPath, paramsPath);
+                CleanupAfterLint(whatIf, tempFolder, finalPath, paramsPath, controllerPreExisted, paramsPreExisted);
                 string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
                 return Fail("post-emit graph lint (" + lint.Errors.Count + "): " + offenders);
             }
@@ -177,30 +178,38 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return end < 0 ? userData.Substring(i) : userData.Substring(i, end - i);
         }
 
-        // ── Advisory: frame latency (longest conditional-transition chain per layer) ──────────────────
-        // Each hop across a CONDITIONAL transition costs one frame; a multi-hop codec (e.g. a binary
-        // float→bool decoder) pays N frames of latency. Report the longest simple chain in each layer's
-        // conditional-transition graph (guarded against cycles by the simple-path visited set). Single-hop
-        // chains are every controller's normal traffic, so only genuine multi-hop chains (≥2 transitions)
-        // are surfaced.
+        // ── Advisory: frame latency (longest FIRING-transition chain per layer) ───────────────────────
+        // A multi-hop chain pays latency at every hop: a conditional hop resolves a frame later, and an
+        // exit-time hop waits out its source state's clip. The binary codec walk (Start→Test0→…) advances
+        // almost entirely through exit-time hops, so BOTH edge kinds must count or the advisory reads empty on
+        // the very fixture built to demonstrate it. Report the longest simple chain of FIRING transitions
+        // (conditional, or exit-time — explicit or via the doc default); a dead transition (no condition + no
+        // exit time) never fires and is excluded, as is to-Exit. Only genuine multi-hop chains (≥2 hops) surface.
         private static List<string> FrameLatencyAdvisories(AnimDocument doc)
         {
             var lines = new List<string>();
+            bool defaultExitTime = doc.Defaults.TransitionHasExitTime;
             foreach (var layer in doc.Layers)
             {
-                var chain = LongestConditionalChain(layer);
-                if (chain != null && chain.Count >= 3)
+                var (chain, overBudget) = LongestFiringChain(layer, defaultExitTime);
+                if (overBudget)
+                    lines.Add("layer '" + (layer.Name ?? "(unnamed)")
+                        + "' frame-latency advisory skipped — transition graph too dense to bound cheaply");
+                else if (chain != null && chain.Count >= 3)
                     lines.Add("layer '" + (layer.Name ?? "(unnamed)") + "' chain '" + string.Join("→", chain)
-                        + "' costs " + (chain.Count - 1) + " frames (one transition per frame)");
+                        + "' is " + (chain.Count - 1) + " hops of latency (each conditional hop ~1 frame; an "
+                        + "exit-time hop costs its state's clip length)");
             }
             return lines;
         }
 
-        private static List<string> LongestConditionalChain(Layer layer)
+        // Returns (longest firing chain, overBudget). overBudget=true means the DFS hit its step budget and the
+        // result is not trustworthy — the caller surfaces that rather than a possibly-wrong chain.
+        private static (List<string> chain, bool overBudget) LongestFiringChain(Layer layer, bool defaultExitTime)
         {
             var states = new List<State>();
             CollectStates(layer.Root, states);
-            if (states.Count == 0 || states.Count > 128) return null; // pathological-size guard
+            if (states.Count == 0 || states.Count > 128) return (null, false); // pathological-size guard
             var names = new HashSet<string>(states.Select(s => s.Name));
 
             var adj = new Dictionary<string, List<string>>();
@@ -210,24 +219,34 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var t in s.Transitions)
                 {
                     if (t == null || t.ToExit || string.IsNullOrEmpty(t.To)) continue;
-                    if (t.When == null || t.When.Count == 0) continue;  // only conditional edges count
+                    bool conditional = t.When != null && t.When.Count > 0;
+                    bool exitTimed = t.ExitTime.HasValue || (!conditional && defaultExitTime);
+                    if (!conditional && !exitTimed) continue; // dead transition — never fires
                     if (names.Contains(t.To)) adj[s.Name].Add(t.To);
                 }
             }
 
+            // Longest simple path is NP-hard; the node-count guard bounds nodes but not edge density, so a densely
+            // connected layer could still explode. Bound the DFS by a step budget — an advisory is never worth
+            // hanging a compile — and report over-budget rather than a truncated (wrong) chain.
+            const int StepBudget = 50000;
+            int steps = 0;
+            bool overBudget = false;
             var best = new List<string>();
             var onPath = new HashSet<string>();
             var cur = new List<string>();
             void Dfs(string node)
             {
+                if (overBudget) return;
+                if (++steps > StepBudget) { overBudget = true; return; }
                 cur.Add(node); onPath.Add(node);
                 if (cur.Count > best.Count) best = new List<string>(cur);
                 foreach (var nx in adj[node])
                     if (!onPath.Contains(nx)) Dfs(nx);
                 cur.RemoveAt(cur.Count - 1); onPath.Remove(node);
             }
-            foreach (var s in states) Dfs(s.Name);
-            return best;
+            foreach (var s in states) { Dfs(s.Name); if (overBudget) break; }
+            return overBudget ? (null, true) : (best, false);
         }
 
         // ── Advisory: AAP / driver isolation ─────────────────────────────────────────────────────────
@@ -367,14 +386,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!controllerPreExisted) AssetDatabase.DeleteAsset(finalPath);
         }
 
-        // Post-emit lint failed after a successful emit — roll back the controller AND its params side-asset so
-        // nothing that fails lint reaches outDir. Reached only for a FRESH compile now: an overwrite is proven
-        // lint-clean by ProofCompile before the real write, so this deletes only a freshly-created partial.
-        private static void CleanupAfterLint(bool whatIf, string tempFolder, string finalPath, string paramsPath)
+        // Post-emit lint failed after a successful emit — roll back so nothing that fails lint reaches outDir.
+        // ProofCompile makes this unreachable for an overwrite (an overwrite is proven lint-clean first), but the
+        // guards make the atomicity local rather than resting on that cross-function invariant: delete ONLY a
+        // freshly-created controller / params asset, never one that pre-existed the compile.
+        private static void CleanupAfterLint(bool whatIf, string tempFolder, string finalPath, string paramsPath,
+            bool controllerPreExisted, bool paramsPreExisted)
         {
             if (whatIf) { if (tempFolder != null && AssetDatabase.IsValidFolder(tempFolder)) AssetDatabase.DeleteAsset(tempFolder); return; }
-            AssetDatabase.DeleteAsset(finalPath);
-            if (!string.IsNullOrEmpty(paramsPath)) AssetDatabase.DeleteAsset(paramsPath);
+            if (!controllerPreExisted) AssetDatabase.DeleteAsset(finalPath);
+            if (!paramsPreExisted && !string.IsNullOrEmpty(paramsPath)) AssetDatabase.DeleteAsset(paramsPath);
         }
 
         private static string Fail(string why)

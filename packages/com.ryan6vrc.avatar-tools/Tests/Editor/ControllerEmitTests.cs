@@ -110,6 +110,47 @@ public class ControllerEmitTests
         Assert.AreEqual(1f, drv.parameters[0].value, 1e-6f);
     }
 
+    // ---- fail-loud + length ----------------------------------------------------------------------
+
+    [Test]
+    public void Missing_AvatarMask_Fails_Loud()
+    {
+        var doc = new AnimDocument { Schema = 1, ControllerName = "T_Mask" };
+        doc.Parameters.Add(new ParamSpec { Name = "P", Type = AnimParamType.Float });
+        var layer = new Layer { Name = "L", Mask = "Assets/DoesNotExist_9f8e7d.mask" };
+        layer.Root.States.Add(new State { Name = "S" });
+        layer.Root.DefaultState = "S";
+        doc.Layers.Add(layer);
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("avatarMask", ex.Message);
+    }
+
+    [Test]
+    public void Seconds_Extends_Keyframed_Curve_Length()
+    {
+        var doc = new AnimDocument { Schema = 1, ControllerName = "T_Len" };
+        var clip = new ClipSpec { Name = "c", Seconds = 1.0f };
+        clip.Curves.Add(new CurveSpec { Binding = "Prop/Renderer.enabled", Keys = { new Keyframe2(0f, 0f), new Keyframe2(0.2f, 1f) } });
+        doc.Clips.Add(clip);
+        var layer = new Layer { Name = "L" };
+        layer.Root.States.Add(new State { Name = "S", Motion = new MotionRef { Clip = "c" } });
+        layer.Root.DefaultState = "S";
+        doc.Layers.Add(layer);
+        ControllerEmit.Build(doc, out var r);
+        Assert.AreEqual(1.0f, r.Clips["c"].length, 1e-3f, "seconds declares the length by holding the last key");
+    }
+
+    [Test]
+    public void Seconds_Shorter_Than_Last_Key_Fails()
+    {
+        var doc = new AnimDocument { Schema = 1, ControllerName = "T_Short" };
+        var clip = new ClipSpec { Name = "c", Seconds = 0.1f };
+        clip.Curves.Add(new CurveSpec { Binding = "Prop/Renderer.enabled", Keys = { new Keyframe2(0f, 0f), new Keyframe2(0.2f, 1f) } });
+        doc.Clips.Add(clip);
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("shorter", ex.Message);
+    }
+
     // ---- AAP / animator-parameter clip binding ---------------------------------------------------
 
     [Test]

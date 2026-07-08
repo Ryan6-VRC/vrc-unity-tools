@@ -238,8 +238,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var cs in spec.Curves)
                 {
                     var binding = ResolveBinding(cs.Binding);
-                    var keys = cs.Keys.Select(k => new Keyframe(k.Time, k.Value)).ToArray();
-                    AnimationUtility.SetEditorCurve(clip, binding, new AnimationCurve(keys));
+                    var keys = cs.Keys.Select(k => new Keyframe(k.Time, k.Value)).ToList();
+                    // Unity derives a keyframed clip's length from its last key, so an explicit `seconds:` must be
+                    // stamped onto the curve too or it is silently ignored (animator-schema.md: seconds declares
+                    // the length; matters for motion-time / blend-tree timing). Hold the last value out to
+                    // `seconds`; refuse a `seconds` shorter than the authored content (it can't truncate a key).
+                    if (spec.Seconds.HasValue && keys.Count > 0)
+                    {
+                        var last = keys[0];
+                        foreach (var k in keys) if (k.time > last.time) last = k;
+                        if (spec.Seconds.Value < last.time)
+                            throw new EmitException(
+                                $"clip '{spec.Name}': seconds={spec.Seconds.Value} is shorter than curve '{cs.Binding}' last key at {last.time}");
+                        if (spec.Seconds.Value > last.time)
+                            keys.Add(new Keyframe(spec.Seconds.Value, last.value)); // hold to the declared length
+                    }
+                    AnimationUtility.SetEditorCurve(clip, binding, new AnimationCurve(keys.ToArray()));
                 }
                 return clip;
             }
@@ -384,8 +398,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     };
                     if (!string.IsNullOrEmpty(layer.Mask))
                     {
+                        // Fail loud: a mask path that doesn't resolve must not silently emit an UNMASKED layer
+                        // (an unmasked gesture/additive layer animates the whole avatar) — a typo'd/moved path is
+                        // a compile error, not a shrug.
                         var mask = AssetDatabase.LoadAssetAtPath<AvatarMask>(layer.Mask);
-                        if (mask != null) acLayer.avatarMask = mask;
+                        if (mask == null)
+                            throw new EmitException($"layer '{layer.Name}': avatarMask '{layer.Mask}' not found (path did not resolve to an AvatarMask)");
+                        acLayer.avatarMask = mask;
                     }
                     layers.Add(acLayer);
                 }
