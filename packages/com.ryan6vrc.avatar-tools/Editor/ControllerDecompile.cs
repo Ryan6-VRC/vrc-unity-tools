@@ -1111,7 +1111,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var b = new Behaviour { Kind = "playAudio" };
                 b.Fields[ControllerEmit.PlayAudioKeys.SourcePath] = c.SourcePath;
                 b.Fields[ControllerEmit.PlayAudioKeys.PlaybackOrder] = Token(AudioOrderRev, c.PlaybackOrder, loc + " playAudio.playbackOrder");
-                b.Fields[ControllerEmit.PlayAudioKeys.Parameter] = c.ParameterName;
+                // An unset/empty audio-source parameter is meaningless; omit the key (like Clips below) so it
+                // round-trips — emitting parameter: <null> would make CompileController refuse the re-compile.
+                if (!string.IsNullOrEmpty(c.ParameterName))
+                    b.Fields[ControllerEmit.PlayAudioKeys.Parameter] = c.ParameterName;
                 b.Fields[ControllerEmit.PlayAudioKeys.Volume] = new List<object> { c.Volume.x, c.Volume.y };
                 b.Fields[ControllerEmit.PlayAudioKeys.VolumeApply] = Token(AudioApplyRev, c.VolumeApplySettings, loc + " playAudio.volumeApply");
                 b.Fields[ControllerEmit.PlayAudioKeys.Pitch] = new List<object> { c.Pitch.x, c.Pitch.y };

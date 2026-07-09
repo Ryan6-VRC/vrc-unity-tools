@@ -29,7 +29,6 @@ layers:
           - layerControl: { playable: fx, layer: 3, goalWeight: 1, blendDuration: 0.1 }
           - playAudio:
               sourcePath: "Head/Voice"
-              parameter: ""
               volume: [ 1, 1 ]
               playbackOrder: roundabout
               volumeApply: alwaysApply
