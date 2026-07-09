@@ -145,6 +145,159 @@ parameters:
     }
 
     [Test]
+    public void Parse_Binds_SubMachine_And_Ladders()
+    {
+        const string doc =
+            "schema: 1\ncontroller: Nested_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n" +
+            "  - name: L\n" +
+            "    states:\n      Idle: { motion: ~ }\n" +
+            "    machines:\n" +
+            "      Sub:\n" +
+            "        states:\n          A: { motion: ~ }\n" +
+            "        default: A\n" +
+            "    entry:\n" +
+            "      - { to: Sub, when: [ P is true ] }\n" +
+            "    any:\n" +
+            "      - { to: Idle, when: [ P is false ], canTransitionToSelf: false }\n" +
+            "    default: Idle\n";
+        var d = AnimatorSchemaYaml.Parse(doc, "test");
+        var root = d.Layers[0].Root;
+        Assert.AreEqual(1, root.Machines.Count);
+        Assert.AreEqual("Sub", root.Machines[0].Name);
+        Assert.AreEqual("A", root.Machines[0].Machine.DefaultState);
+        Assert.AreEqual(1, root.EntryLadder.Count);
+        Assert.AreEqual("Sub", root.EntryLadder[0].To);
+        Assert.AreEqual(1, root.AnyLadder.Count);
+        Assert.IsFalse(root.AnyLadder[0].CanTransitionToSelf);
+    }
+
+    [Test]
+    public void Parse_Nests_SubMachines_Two_Levels()
+    {
+        const string doc =
+            "schema: 1\ncontroller: Nested2_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n" +
+            "  - name: L\n" +
+            "    states:\n      Idle: { motion: ~ }\n" +
+            "    machines:\n" +
+            "      Outer:\n" +
+            "        states:\n          O: { motion: ~ }\n" +
+            "        default: O\n" +
+            "        machines:\n" +
+            "          Inner:\n" +
+            "            states:\n              I: { motion: ~ }\n" +
+            "            default: I\n" +
+            "    default: Idle\n";
+        var d = AnimatorSchemaYaml.Parse(doc, "test");
+        var outer = d.Layers[0].Root.Machines[0];
+        Assert.AreEqual("Outer", outer.Name);
+        Assert.AreEqual("O", outer.Machine.DefaultState);
+        Assert.AreEqual(1, outer.Machine.Machines.Count);
+        var inner = outer.Machine.Machines[0];
+        Assert.AreEqual("Inner", inner.Name);
+        Assert.AreEqual("I", inner.Machine.DefaultState);
+    }
+
+    [Test]
+    public void Unknown_Machine_Field_Throws_By_Name()
+    {
+        const string doc =
+            "schema: 1\ncontroller: Bad_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n" +
+            "  - name: L\n" +
+            "    states:\n      Idle: { motion: ~ }\n" +
+            "    machines:\n" +
+            "      Sub:\n        bogus: 1\n" +
+            "    default: Idle\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("bogus", ex.Message);
+    }
+
+    [Test]
+    public void CanTransitionToSelf_On_Entry_Ladder_Throws()
+    {
+        const string doc =
+            "schema: 1\ncontroller: Bad_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n" +
+            "  - name: L\n" +
+            "    states:\n      Idle: { motion: ~ }\n" +
+            "    entry:\n" +
+            "      - { to: Idle, canTransitionToSelf: true }\n" +
+            "    default: Idle\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("canTransitionToSelf", ex.Message);
+    }
+
+    [Test]
+    public void Mute_On_Entry_Ladder_Throws()
+    {
+        // Entry transitions honor no mute/solo (the entry-emit path never reads them); accepting the field
+        // would silently drop it. Refuse it there, mirroring the canTransitionToSelf precedent.
+        const string doc =
+            "schema: 1\ncontroller: Bad_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      Idle: { motion: ~ }\n" +
+            "    machines:\n      Sub:\n        states:\n          A: { motion: ~ }\n        default: A\n" +
+            "    entry:\n      - { to: Sub, mute: true }\n" +
+            "    default: Idle\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("mute", ex.Message);
+    }
+
+    // Tree fields are honored only on their own kind (build/decode); a misplaced one would silently erase
+    // through compile→decompile, so the parser refuses it rather than accept-and-drop.
+
+    [Test]
+    public void Normalized_On_NonDirect_Tree_Throws()
+    {
+        const string doc =
+            "schema: 1\ncontroller: T_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: { tree: 1d, param: P, normalized: true }\n    default: S\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("normalized", ex.Message);
+    }
+
+    [Test]
+    public void Param_On_Direct_Tree_Throws()
+    {
+        const string doc =
+            "schema: 1\ncontroller: T_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: { tree: direct, param: P }\n    default: S\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("param", ex.Message);
+    }
+
+    [Test]
+    public void ParamY_On_1D_Tree_Throws()
+    {
+        const string doc =
+            "schema: 1\ncontroller: T_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: { tree: 1d, param: P, paramY: P }\n    default: S\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("paramY", ex.Message);
+    }
+
+    [Test]
+    public void CanTransitionToSelf_On_State_Transition_Throws()
+    {
+        // A state transition ignores canTransitionToSelf (only the AnyState ladder honors it). Accepting it
+        // silently would drop the field — fail loud instead (allowSelf now defaults false for state lists).
+        const string doc =
+            "schema: 1\ncontroller: Bad_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n" +
+            "  - name: L\n" +
+            "    states:\n" +
+            "      Idle:\n        motion: ~\n        transitions:\n          - { to: Idle, canTransitionToSelf: true }\n" +
+            "    default: Idle\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("canTransitionToSelf", ex.Message);
+    }
+
+    [Test]
     public void Duplicate_State_Key_Throws()
     {
         const string doc = @"schema: 1

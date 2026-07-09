@@ -11,6 +11,11 @@ using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
 using Ryan6Vrc.AgentTools.Editor;
 using Driver = VRC.SDKBase.VRC_AvatarParameterDriver;
+using TrackingType = VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType;
+using PlayableLayer = VRC.SDKBase.VRC_PlayableLayerControl.BlendableLayer;
+using LayerCtrlLayer = VRC.SDKBase.VRC_AnimatorLayerControl.BlendableLayer;
+using AudioOrder = VRC.SDKBase.VRC_AnimatorPlayAudio.Order;
+using AudioApply = VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
@@ -49,6 +54,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public List<AnimationClip> ClipList = new List<AnimationClip>();
             public List<BlendTree> Trees = new List<BlendTree>();
             public VRCExpressionParameters Params; // null only when every declared param is excluded (built-in / scratch)
+            // Motion refs that carried the `unresolved: true` marker and did NOT resolve — emitted as a null
+            // motion (a clean-empty state) instead of a fail-loud throw. Each entry names the owning STATE and
+            // the verbatim GUID so a compile advisory can preserve the round-trip note. A BARE broken ref (no
+            // marker) is never recorded here — it still throws EmitException.
+            public List<(string state, string guid)> UnresolvedRefs = new List<(string state, string guid)>();
         }
 
         // Fail-loud emission error, named so a coordinator/log points straight at the offending construct.
@@ -342,50 +352,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     };
                     AssetDatabase.AddObjectToAsset(sm, _controller);
 
-                    var byName = new Dictionary<string, AnimatorState>();
-                    var states = layer.Root.States;
-                    for (int i = 0; i < states.Count; i++)
-                    {
-                        var s = states[i];
-                        var pos = new Vector3(300f, 60f * i, 0f); // fixed grid keyed by document order
-                        var ast = sm.AddState(s.Name, pos);
-                        ast.writeDefaultValues = s.WriteDefaults ?? layer.WriteDefaults ?? _doc.Defaults.WriteDefaults;
-                        ast.speed = s.Speed;
-                        if (!string.IsNullOrEmpty(s.SpeedParam)) { ast.speedParameterActive = true; ast.speedParameter = s.SpeedParam; }
-                        if (!string.IsNullOrEmpty(s.MotionTimeParam)) { ast.timeParameterActive = true; ast.timeParameter = s.MotionTimeParam; }
-                        ast.mirror = s.Mirror;
-                        if (s.Motion != null) ast.motion = BuildMotion(s.Motion, s.Name + "_BlendTree");
-                        EmitBehaviours(s.Behaviours, t => ast.AddStateMachineBehaviour(t));
-                        byName[s.Name] = ast;
-                    }
-
-                    if (!string.IsNullOrEmpty(layer.Root.DefaultState))
-                    {
-                        if (byName.TryGetValue(layer.Root.DefaultState, out var def)) sm.defaultState = def;
-                        else throw new EmitException($"layer '{layer.Name}': default state '{layer.Root.DefaultState}' is not a state in this machine");
-                    }
-
-                    // State transition ladders (ordered per source state = first-match order).
-                    for (int i = 0; i < states.Count; i++)
-                        foreach (var t in states[i].Transitions)
-                            ConfigureStateTransition(MakeStateTransition(byName[states[i].Name], t, byName), t);
-
-                    // AnyState ladder.
-                    foreach (var t in layer.Root.AnyLadder)
-                    {
-                        var atr = sm.AddAnyStateTransition(ResolveTargetState(t, byName));
-                        atr.canTransitionToSelf = t.CanTransitionToSelf;
-                        ConfigureStateTransition(atr, t);
-                    }
-
-                    // Entry ladder (no duration / exit-time — conditions only).
-                    foreach (var t in layer.Root.EntryLadder)
-                    {
-                        var etr = sm.AddEntryTransition(ResolveTargetState(t, byName));
-                        foreach (var c in t.When) etr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param);
-                    }
-
-                    EmitBehaviours(layer.Root.Behaviours, t => sm.AddStateMachineBehaviour(t));
+                    // Pass 1: emit states + sub-machines (arbitrary depth), building a tree of per-machine
+                    // scopes (each holds only its OWN direct states + direct sub-machines). Target resolution
+                    // is scoped, NOT global: Unity scopes state names per state machine, and the schema lets
+                    // the SAME name recur in different machines — a layer-global index would silently mis-wire.
+                    var rootScope = EmitMachine(layer, layer.Root, sm);
+                    // Pass 2: wire defaults + all transitions, resolving each target in its own machine's scope
+                    // (bare names) or by walking a slash-qualified path from the layer root (cross-machine).
+                    WireMachine(layer, layer.Root, rootScope, rootScope);
 
                     var acLayer = new AnimatorControllerLayer
                     {
@@ -414,23 +388,185 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _controller.layers = layers.ToArray();
             }
 
-            private AnimatorState ResolveTargetState(Transition t, Dictionary<string, AnimatorState> byName)
+            // One machine's resolution scope: the emitted state machine plus ONLY its direct states and direct
+            // sub-machines (each sub keeps its own MachineScope). Because Unity scopes state names per machine
+            // and the schema permits a name to recur across machines, resolution is per-scope — never a single
+            // layer-global name dictionary (that would last-write-win and silently mis-wire, e.g. GoLoco's
+            // 180 sub-machines with reused state names).
+            private sealed class MachineScope
             {
-                if (t.ToExit || string.IsNullOrEmpty(t.To))
-                    throw new EmitException("entry/any ladder transition has no target state (Exit is not a valid target there)");
-                if (!byName.TryGetValue(t.To, out var to))
-                    throw new EmitException($"transition target state '{t.To}' not found in layer");
-                return to;
+                public AnimatorStateMachine Target;
+                public readonly Dictionary<string, AnimatorState> States = new Dictionary<string, AnimatorState>();
+                public readonly Dictionary<string, MachineScope> Subs = new Dictionary<string, MachineScope>();
             }
 
-            private AnimatorStateTransition MakeStateTransition(AnimatorState from, Transition t, Dictionary<string, AnimatorState> byName)
+            // Pass 1 — emit this machine's states + child sub-machines (recursing), returning its scope. NO
+            // transitions here: a target may name something in a sibling/child machine not yet emitted, so all
+            // wiring waits for pass 2 (WireMachine) once the whole scope tree exists.
+            private MachineScope EmitMachine(Layer layer, StateMachine model, AnimatorStateMachine target)
             {
-                if (t.ToExit) return from.AddExitTransition();
-                if (string.IsNullOrEmpty(t.To))
-                    throw new EmitException($"transition from '{from.name}' has neither a target nor ToExit");
-                if (!byName.TryGetValue(t.To, out var to))
-                    throw new EmitException($"transition target state '{t.To}' not found in layer");
-                return from.AddTransition(to);
+                var scope = new MachineScope { Target = target };
+                var states = model.States;
+                for (int i = 0; i < states.Count; i++)
+                {
+                    var s = states[i];
+                    var pos = new Vector3(300f, 60f * i, 0f); // fixed grid keyed by document order
+                    var ast = target.AddState(s.Name, pos);
+                    ast.writeDefaultValues = s.WriteDefaults ?? layer.WriteDefaults ?? _doc.Defaults.WriteDefaults;
+                    ast.speed = s.Speed;
+                    if (!string.IsNullOrEmpty(s.SpeedParam)) { ast.speedParameterActive = true; ast.speedParameter = s.SpeedParam; }
+                    if (!string.IsNullOrEmpty(s.MotionTimeParam)) { ast.timeParameterActive = true; ast.timeParameter = s.MotionTimeParam; }
+                    ast.mirror = s.Mirror;
+                    if (s.Motion != null) ast.motion = BuildMotion(s.Motion, s.Name + "_BlendTree", s.Name);
+                    EmitBehaviours(s.Behaviours, t => ast.AddStateMachineBehaviour(t));
+                    scope.States[s.Name] = ast;
+                }
+
+                var machines = model.Machines;
+                for (int i = 0; i < machines.Count; i++)
+                {
+                    var sub = machines[i];
+                    var pos = new Vector3(600f, 60f * i, 0f); // sub-machines to the right of the state grid
+                    var childSm = target.AddStateMachine(sub.Name, pos);
+                    childSm.hideFlags = HideFlags.HideInHierarchy;
+                    scope.Subs[sub.Name] = EmitMachine(layer, sub.Machine, childSm);
+                }
+
+                // A state and a sub-machine of the same name are both addressable by bare name, but ResolveName
+                // (and the default lookup) resolve states first — the sub-machine would be unreachable and a
+                // `default:` ambiguous. Fail loud on the ambiguous document rather than silently favour the state.
+                foreach (var subName in scope.Subs.Keys)
+                    if (scope.States.ContainsKey(subName))
+                        throw new EmitException($"machine '{target.name}': a state and a sub-machine are both named '{subName}' — a bare target or default can't address both (states resolve first)");
+
+                EmitBehaviours(model.Behaviours, t => target.AddStateMachineBehaviour(t));
+                return scope;
+            }
+
+            // Pass 2 — wire default + transitions for this machine (resolving in its OWN scope + qualified paths
+            // from `root`), then recurse into child sub-machines.
+            private void WireMachine(Layer layer, StateMachine model, MachineScope scope, MachineScope root)
+            {
+                var target = scope.Target;
+
+                // default resolves in THIS machine's LOCAL scope only — a machine's default is one of its own
+                // direct states or direct sub-machines (Unity has no default into a foreign/nested machine). A
+                // state → defaultState; a sub-machine → an unconditional entry transition added AFTER the entry
+                // ladder (below) so it stays the last, catch-all entry.
+                // default is a bare LOCAL name (a direct state or sub-machine); unescape it before lookup.
+                bool defaultIsState = false;
+                string defaultName = string.IsNullOrEmpty(model.DefaultState) ? null : AddressPath.UnescapeSegment(model.DefaultState);
+                if (defaultName != null)
+                {
+                    if (scope.States.TryGetValue(defaultName, out var def)) { target.defaultState = def; defaultIsState = true; }
+                    else if (!scope.Subs.ContainsKey(defaultName))
+                        throw new EmitException($"machine '{target.name}': default '{model.DefaultState}' is neither a direct state nor a direct sub-machine of this machine");
+                }
+
+                // State transition ladders (ordered per source state = first-match order). `from` is THIS
+                // machine's own emitted state, never a global lookup (a same-named state in another machine
+                // would attach the transition to the wrong node).
+                foreach (var s in model.States)
+                {
+                    var from = scope.States[s.Name];
+                    foreach (var t in s.Transitions)
+                    {
+                        AnimatorStateTransition tr;
+                        if (t.ToExit) tr = from.AddExitTransition();
+                        else if (string.IsNullOrEmpty(t.To))
+                            throw new EmitException($"transition from '{from.name}' has neither a target nor ToExit");
+                        else tr = ResolveName(t.To, scope, root, target.name, out var toState, out var toSm)
+                            ? from.AddTransition(toState) : from.AddTransition(toSm);
+                        ConfigureStateTransition(tr, t);
+                    }
+                }
+
+                // AnyState ladder.
+                foreach (var t in model.AnyLadder)
+                {
+                    RequireTargetName(t, target.name);
+                    var atr = ResolveName(t.To, scope, root, target.name, out var toState, out var toSm)
+                        ? target.AddAnyStateTransition(toState) : target.AddAnyStateTransition(toSm);
+                    atr.canTransitionToSelf = t.CanTransitionToSelf;
+                    ConfigureStateTransition(atr, t);
+                }
+
+                // Entry ladder (no duration / exit-time — conditions only).
+                foreach (var t in model.EntryLadder)
+                {
+                    RequireTargetName(t, target.name);
+                    var etr = ResolveName(t.To, scope, root, target.name, out var toState, out var toSm)
+                        ? target.AddEntryTransition(toState) : target.AddEntryTransition(toSm);
+                    foreach (var c in t.When) etr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param);
+                }
+
+                // default → sub-machine: unconditional catch-all entry, added last so any conditional entry
+                // ladder above wins first (first-match order). NOTE: we set NO `defaultState` here — and when
+                // a machine has no direct states, Unity's AnimatorStateMachine.defaultState GETTER resolves
+                // THROUGH to the child machine's own default. So downstream lint/decompile must not read
+                // `defaultState` as a reliable "was a direct-state default set" probe; the entry transition is.
+                if (!defaultIsState && defaultName != null)
+                    target.AddEntryTransition(scope.Subs[defaultName].Target);
+
+                foreach (var sub in model.Machines)
+                    WireMachine(layer, sub.Machine, scope.Subs[sub.Name], root);
+            }
+
+            private static void RequireTargetName(Transition t, string fromMachine)
+            {
+                if (t.ToExit || string.IsNullOrEmpty(t.To))
+                    throw new EmitException($"entry/any ladder transition in machine '{fromMachine}' has no target (Exit is not a valid target there)");
+            }
+
+            // Resolve a transition target to a state (returns true) or a sub-machine (returns false). Three
+            // addressing forms, disjoint by shape: a BARE name (no '/') resolves ONLY in `scope` — the
+            // referencing machine's own direct states + direct sub-machines. A leading-'/' name is ABSOLUTE
+            // from the LAYER `root` (the only way to reach a TOP-LEVEL entity, whose root path is a single bare
+            // segment that would otherwise read as local). Any other slash-qualified name is a path from
+            // `root`. An unresolved target is fail-loud, naming the offender and the machine it was referenced
+            // from — NEVER a silent global fallback.
+            private bool ResolveName(string name, MachineScope scope, MachineScope root, string fromMachine,
+                out AnimatorState toState, out AnimatorStateMachine toSm)
+            {
+                toState = null; toSm = null;
+
+                if (name.Length > 0 && name[0] == '/')
+                    return ResolveFromRoot(name.Substring(1), root, fromMachine, name, out toState, out toSm);
+
+                // Split on UNescaped '/' — a single segment is a bare LOCAL name (its own '/' survives as '\/').
+                var segs = AddressPath.Split(name);
+                if (segs.Count == 1)
+                {
+                    string local = AddressPath.UnescapeSegment(segs[0]);
+                    if (scope.States.TryGetValue(local, out toState)) return true;
+                    if (scope.Subs.TryGetValue(local, out var sub)) { toSm = sub.Target; return false; }
+                    throw new EmitException($"transition target '{name}' not found in machine '{fromMachine}' — a bare name resolves only within its own machine; use a 'Sub/State' path or a '/Top' absolute address for a cross-machine target");
+                }
+
+                return ResolveFromRoot(name, root, fromMachine, name, out toState, out toSm);
+            }
+
+            // Resolve a root-relative path: every non-final segment is a sub-machine, the final segment a state
+            // or a sub-machine. A single segment addresses a direct child of the layer root; an empty path (bare
+            // '/') addresses the layer root itself. Segments split on UNescaped '/' then unescape ('\/'->'/',
+            // '\\'->'\'). `display` is the original authored token (may carry a leading '/') for error messages.
+            private bool ResolveFromRoot(string path, MachineScope root, string fromMachine, string display,
+                out AnimatorState toState, out AnimatorStateMachine toSm)
+            {
+                toState = null; toSm = null;
+                if (path.Length == 0) { toSm = root.Target; return false; }
+                var segs = AddressPath.Split(path);
+                var cur = root;
+                for (int i = 0; i < segs.Count - 1; i++)
+                {
+                    string seg = AddressPath.UnescapeSegment(segs[i]);
+                    if (!cur.Subs.TryGetValue(seg, out cur))
+                        throw new EmitException($"transition target path '{display}' (from machine '{fromMachine}'): segment '{seg}' is not a sub-machine on the path from the layer root");
+                }
+                var leaf = AddressPath.UnescapeSegment(segs[segs.Count - 1]);
+                if (cur.States.TryGetValue(leaf, out toState)) return true;
+                if (cur.Subs.TryGetValue(leaf, out var subm)) { toSm = subm.Target; return false; }
+                throw new EmitException($"transition target path '{display}' (from machine '{fromMachine}'): final segment '{leaf}' is neither a state nor a sub-machine");
             }
 
             private void ConfigureStateTransition(AnimatorStateTransition tr, Transition t)
@@ -441,12 +577,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 tr.hasFixedDuration = t.FixedDuration ?? true;
                 tr.interruptionSource = MapInterruption(t.Interruption ?? _doc.Defaults.Interruption);
                 tr.orderedInterruption = t.OrderedInterruption ?? true;
+                tr.mute = t.Mute;
+                tr.solo = t.Solo;
                 foreach (var c in t.When) tr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param); // empty When = unconditional
             }
 
             // ----- motions / blend trees -----
 
-            private Motion BuildMotion(MotionRef mr, string treeName)
+            // stateContext names the OWNING state (threaded down through blend-tree children too) so an
+            // unresolved-marker guid ref can be recorded against its state for the compile advisory.
+            private Motion BuildMotion(MotionRef mr, string treeName, string stateContext)
             {
                 if (mr == null) return null;
                 if (mr.Clip != null)
@@ -464,10 +604,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (mr.RefGuid != null)
                 {
                     var m = ResolveGuidMotion(mr.RefGuid);
-                    if (m == null) throw new EmitException(GuidRefUnresolved(mr.RefGuid));
+                    if (m == null)
+                    {
+                        // A ref flagged `unresolved: true` is a KNOWN dangling handle (e.g. an asset absent from
+                        // this project) — leave the motion slot null (a clean-empty state) and record it for the
+                        // compile advisory, preserving the verbatim GUID for the round-trip note. Only a BARE
+                        // broken ref (no marker) is a hard error.
+                        if (mr.RefGuid.Unresolved)
+                        {
+                            // Record the OWNING state (threaded from EmitMachine through any blend-tree nesting),
+                            // not the synthetic tree name; the child index is deliberately omitted — the verbatim
+                            // guid in the advisory already localizes which ref within the state failed.
+                            _result.UnresolvedRefs.Add((stateContext, mr.RefGuid.Guid));
+                            return null;
+                        }
+                        throw new EmitException(GuidRefUnresolved(mr.RefGuid));
+                    }
                     return m;
                 }
-                if (mr.Tree != null) return BuildTree(mr.Tree, treeName);
+                if (mr.Tree != null) return BuildTree(mr.Tree, treeName, stateContext);
                 throw new EmitException("motion ref sets none of clip/ref/tree");
             }
 
@@ -494,19 +649,32 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private static string GuidRefUnresolved(GuidRef g)
                 => $"motion ref guid unresolved: {g.Guid}" + (g.FileID != 0 ? $" fileID:{g.FileID}" : "");
 
-            private BlendTree BuildTree(BlendTreeSpec spec, string name)
+            private BlendTree BuildTree(BlendTreeSpec spec, string name, string stateContext)
             {
                 var bt = new BlendTree { name = name, hideFlags = HideFlags.HideInHierarchy };
                 bt.blendType = MapTreeKind(spec.Kind);
+                // A fresh 1D tree defaults to useAutomaticThresholds=true, which makes Unity OVERWRITE our
+                // explicit per-child thresholds with even spacing (0, 1/n, …). Disable it BEFORE adding children
+                // so the authored thresholds stick. The schema stores threshold VALUES (what runtime uses), so
+                // an originally-automatic tree round-trips as manual with identical values — lossless in effect.
+                if (spec.Kind == TreeKind.OneD) bt.useAutomaticThresholds = false;
                 if (!string.IsNullOrEmpty(spec.Param)) bt.blendParameter = spec.Param;
                 if (!string.IsNullOrEmpty(spec.ParamY)) bt.blendParameterY = spec.ParamY;
+                // Direct-tree "Normalized Blend Values" — no typed API, so set the serialized field. Only when
+                // the document specifies it; otherwise leave Unity's construction default.
+                if (spec.Kind == TreeKind.Direct && spec.Normalized.HasValue)
+                    using (var so = new SerializedObject(bt))
+                    {
+                        so.FindProperty("m_NormalizedBlendValues").boolValue = spec.Normalized.Value;
+                        so.ApplyModifiedPropertiesWithoutUndo();
+                    }
                 AssetDatabase.AddObjectToAsset(bt, _controller);
                 _result.Trees.Add(bt);
 
                 for (int i = 0; i < spec.Children.Count; i++)
                 {
                     var child = spec.Children[i];
-                    var childMotion = BuildMotion(child.Motion, name + "_" + i);
+                    var childMotion = BuildMotion(child.Motion, name + "_" + i, stateContext);
                     switch (spec.Kind)
                     {
                         case TreeKind.OneD: bt.AddChild(childMotion, child.Threshold); break;
@@ -530,22 +698,49 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return bt;
             }
 
-            // ----- behaviours (driver fully; the other six kinds fail loud) -----
-
+            // ----- behaviours (all seven VRC SMB kinds) -----
+            // One encoder per kind, each mirroring the driver encoder's shape: materialise the concrete VRC
+            // SMB via `add(typeof(...))`, then a per-field switch that sets the SMB's fields and throws
+            // EmitException (named offender) on any unknown field.
+            //
+            // WRITE ↔ READ alignment: this side's field/channel NAMES mirror ControllerReport's read side so
+            // decode round-trips — but ControllerReport is a Markdown report, not a decoder: it renders enums
+            // via ToString() (PascalCase, e.g. `Animation`) whereas the emit tokens here are camelCase (e.g.
+            // `animation`). The enum-token casing is DEFINED HERE (the token→enum maps below), not inherited
+            // from the report. And the report only decodes 3 of 7 kinds (driver, tracking, locomotion); the
+            // other four — playableLayer, poseSpace, playAudio, layerControl — have NO read side yet, so their
+            // token surface here is the authority Task 5's decode must match, not a mirror of existing code.
             private void EmitBehaviours(List<Behaviour> behaviours, Func<Type, StateMachineBehaviour> add)
             {
                 if (behaviours == null) return;
                 foreach (var b in behaviours)
                 {
-                    if (b.Kind == "driver")
+                    switch (b.Kind)
                     {
-                        var drv = (VRCAvatarParameterDriver)add(typeof(VRCAvatarParameterDriver));
-                        PopulateDriver(drv, b.Fields);
-                    }
-                    else
-                    {
-                        throw new EmitException(
-                            $"behaviour kind '{b.Kind}' declared but emission not implemented in pair 1 — driver only; others land with pair 2 fixtures");
+                        case "driver":
+                            PopulateDriver((VRCAvatarParameterDriver)add(typeof(VRCAvatarParameterDriver)), b.Fields);
+                            break;
+                        case "tracking":
+                            PopulateTracking((VRCAnimatorTrackingControl)add(typeof(VRCAnimatorTrackingControl)), b.Fields);
+                            break;
+                        case "playableLayer":
+                            PopulatePlayableLayer((VRCPlayableLayerControl)add(typeof(VRCPlayableLayerControl)), b.Fields);
+                            break;
+                        case "locomotion":
+                            PopulateLocomotion((VRCAnimatorLocomotionControl)add(typeof(VRCAnimatorLocomotionControl)), b.Fields);
+                            break;
+                        case "poseSpace":
+                            PopulatePoseSpace((VRCAnimatorTemporaryPoseSpace)add(typeof(VRCAnimatorTemporaryPoseSpace)), b.Fields);
+                            break;
+                        case "playAudio":
+                            PopulatePlayAudio((VRCAnimatorPlayAudio)add(typeof(VRCAnimatorPlayAudio)), b.Fields);
+                            break;
+                        case "layerControl":
+                            PopulateLayerControl((VRCAnimatorLayerControl)add(typeof(VRCAnimatorLayerControl)), b.Fields);
+                            break;
+                        default:
+                            throw new EmitException(
+                                $"behaviour: unknown kind '{b.Kind}' (expected driver/tracking/playableLayer/locomotion/poseSpace/playAudio/layerControl)");
                     }
                 }
             }
@@ -557,22 +752,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     switch (kv.Key)
                     {
-                        case "localOnly":
+                        case DriverKeys.LocalOnly:
                             drv.localOnly = AsBool(kv.Value, "driver.localOnly");
                             break;
-                        case "set":
+                        case DriverKeys.Set:
                             foreach (var e in AsMap(kv.Value, "driver.set"))
                                 ps.Add(new Driver.Parameter { type = Driver.ChangeType.Set, name = e.Key, value = AsFloat(e.Value, "driver.set." + e.Key) });
                             break;
-                        case "add":
+                        case DriverKeys.Add:
                             foreach (var e in AsMap(kv.Value, "driver.add"))
                                 ps.Add(new Driver.Parameter { type = Driver.ChangeType.Add, name = e.Key, value = AsFloat(e.Value, "driver.add." + e.Key) });
                             break;
-                        case "copy":
+                        case DriverKeys.Copy:
                             foreach (var e in AsMap(kv.Value, "driver.copy"))
                                 ps.Add(BuildCopy(e.Key, e.Value));
                             break;
-                        case "random":
+                        case DriverKeys.Random:
                             foreach (var e in AsMap(kv.Value, "driver.random"))
                                 ps.Add(BuildRandom(e.Key, e.Value));
                             break;
@@ -594,11 +789,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     switch (kv.Key)
                     {
-                        case "source": p.source = AsString(kv.Value, "driver.copy." + dest + ".source"); break;
-                        case "sourceMin": p.sourceMin = AsFloat(kv.Value, "driver.copy." + dest + ".sourceMin"); range = true; break;
-                        case "sourceMax": p.sourceMax = AsFloat(kv.Value, "driver.copy." + dest + ".sourceMax"); range = true; break;
-                        case "destMin": p.destMin = AsFloat(kv.Value, "driver.copy." + dest + ".destMin"); range = true; break;
-                        case "destMax": p.destMax = AsFloat(kv.Value, "driver.copy." + dest + ".destMax"); range = true; break;
+                        case DriverKeys.Source: p.source = AsString(kv.Value, "driver.copy." + dest + ".source"); break;
+                        case DriverKeys.SourceMin: p.sourceMin = AsFloat(kv.Value, "driver.copy." + dest + ".sourceMin"); range = true; break;
+                        case DriverKeys.SourceMax: p.sourceMax = AsFloat(kv.Value, "driver.copy." + dest + ".sourceMax"); range = true; break;
+                        case DriverKeys.DestMin: p.destMin = AsFloat(kv.Value, "driver.copy." + dest + ".destMin"); range = true; break;
+                        case DriverKeys.DestMax: p.destMax = AsFloat(kv.Value, "driver.copy." + dest + ".destMax"); range = true; break;
                         default: throw new EmitException($"driver.copy.{dest}: unknown field '{kv.Key}'");
                     }
                 }
@@ -615,13 +810,132 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     switch (kv.Key)
                     {
-                        case "min": p.valueMin = AsFloat(kv.Value, "driver.random." + name + ".min"); break;
-                        case "max": p.valueMax = AsFloat(kv.Value, "driver.random." + name + ".max"); break;
-                        case "chance": p.chance = AsFloat(kv.Value, "driver.random." + name + ".chance"); break;
+                        case DriverKeys.Min: p.valueMin = AsFloat(kv.Value, "driver.random." + name + ".min"); break;
+                        case DriverKeys.Max: p.valueMax = AsFloat(kv.Value, "driver.random." + name + ".max"); break;
+                        case DriverKeys.Chance: p.chance = AsFloat(kv.Value, "driver.random." + name + ".chance"); break;
                         default: throw new EmitException($"driver.random.{name}: unknown field '{kv.Key}'");
                     }
                 }
                 return p;
+            }
+
+            // tracking: { <channel>: <state> } where channel is one of the ten VRC tracking channels and state
+            // is animation|tracking|noChange. Channel NAMES mirror ControllerReport.AppendTracking's channel
+            // enumeration; the enum-token casing (camelCase) is defined by TrackingTokens below, not by the
+            // report's PascalCase ToString() rendering. An untouched channel keeps its SDK default (NoChange).
+            private static void PopulateTracking(VRCAnimatorTrackingControl tc, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    var v = ParseEnumToken(kv.Value, TrackingTokens, "tracking." + kv.Key);
+                    switch (kv.Key)
+                    {
+                        case "head": tc.trackingHead = v; break;
+                        case "leftHand": tc.trackingLeftHand = v; break;
+                        case "rightHand": tc.trackingRightHand = v; break;
+                        case "hip": tc.trackingHip = v; break;
+                        case "leftFoot": tc.trackingLeftFoot = v; break;
+                        case "rightFoot": tc.trackingRightFoot = v; break;
+                        case "leftFingers": tc.trackingLeftFingers = v; break;
+                        case "rightFingers": tc.trackingRightFingers = v; break;
+                        case "eyes": tc.trackingEyes = v; break;
+                        case "mouth": tc.trackingMouth = v; break;
+                        default:
+                            throw new EmitException($"tracking: unknown channel '{kv.Key}' (expected head/leftHand/rightHand/hip/leftFoot/rightFoot/leftFingers/rightFingers/eyes/mouth)");
+                    }
+                }
+            }
+
+            // playableLayer: { layer: action|fx|gesture|additive, goalWeight: <f>, blendDuration: <f> }
+            private static void PopulatePlayableLayer(VRCPlayableLayerControl c, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    switch (kv.Key)
+                    {
+                        case "layer": c.layer = ParseEnumToken(kv.Value, PlayableLayerTokens, "playableLayer.layer"); break;
+                        case "goalWeight": c.goalWeight = AsFloat(kv.Value, "playableLayer.goalWeight"); break;
+                        case "blendDuration": c.blendDuration = AsFloat(kv.Value, "playableLayer.blendDuration"); break;
+                        default: throw new EmitException($"playableLayer: unknown field '{kv.Key}' (expected layer/goalWeight/blendDuration)");
+                    }
+                }
+            }
+
+            // locomotion: { disableLocomotion: <bool> }
+            private static void PopulateLocomotion(VRCAnimatorLocomotionControl c, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    switch (kv.Key)
+                    {
+                        case "disableLocomotion": c.disableLocomotion = AsBool(kv.Value, "locomotion.disableLocomotion"); break;
+                        default: throw new EmitException($"locomotion: unknown field '{kv.Key}' (expected disableLocomotion)");
+                    }
+                }
+            }
+
+            // poseSpace: { enterPoseSpace: <bool>, fixedDelay: <bool>, delayTime: <f> }
+            private static void PopulatePoseSpace(VRCAnimatorTemporaryPoseSpace c, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    switch (kv.Key)
+                    {
+                        case "enterPoseSpace": c.enterPoseSpace = AsBool(kv.Value, "poseSpace.enterPoseSpace"); break;
+                        case "fixedDelay": c.fixedDelay = AsBool(kv.Value, "poseSpace.fixedDelay"); break;
+                        case "delayTime": c.delayTime = AsFloat(kv.Value, "poseSpace.delayTime"); break;
+                        default: throw new EmitException($"poseSpace: unknown field '{kv.Key}' (expected enterPoseSpace/fixedDelay/delayTime)");
+                    }
+                }
+            }
+
+            // layerControl: { playable: action|fx|gesture|additive, layer: <int index>, goalWeight: <f>, blendDuration: <f> }.
+            // NOTE the SDK asymmetry vs playableLayer: here `playable` is the target playable enum and `layer` is
+            // the integer LAYER INDEX within it.
+            private static void PopulateLayerControl(VRCAnimatorLayerControl c, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    switch (kv.Key)
+                    {
+                        case "playable": c.playable = ParseEnumToken(kv.Value, LayerCtrlTokens, "layerControl.playable"); break;
+                        case "layer": c.layer = AsInt(kv.Value, "layerControl.layer"); break;
+                        case "goalWeight": c.goalWeight = AsFloat(kv.Value, "layerControl.goalWeight"); break;
+                        case "blendDuration": c.blendDuration = AsFloat(kv.Value, "layerControl.blendDuration"); break;
+                        default: throw new EmitException($"layerControl: unknown field '{kv.Key}' (expected playable/layer/goalWeight/blendDuration)");
+                    }
+                }
+            }
+
+            // playAudio: the VRCAnimatorPlayAudio serializable surface. The AudioSource itself is addressed by
+            // hierarchy path (sourcePath) — the SDK resolves the live Source from it at runtime; clips are asset
+            // paths. Volume/pitch are [min, max] ranges. ControllerReport does not yet decode this kind, so this
+            // token surface is the authority Task 5's decode must mirror.
+            private static void PopulatePlayAudio(VRCAnimatorPlayAudio c, Dictionary<string, object> fields)
+            {
+                foreach (var kv in fields)
+                {
+                    switch (kv.Key)
+                    {
+                        case PlayAudioKeys.SourcePath: c.SourcePath = AsString(kv.Value, "playAudio.sourcePath"); break;
+                        case PlayAudioKeys.PlaybackOrder: c.PlaybackOrder = ParseEnumToken(kv.Value, AudioOrderTokens, "playAudio.playbackOrder"); break;
+                        case PlayAudioKeys.Parameter: c.ParameterName = AsString(kv.Value, "playAudio.parameter"); break;
+                        case PlayAudioKeys.Volume: c.Volume = AsVector2(kv.Value, "playAudio.volume"); break;
+                        case PlayAudioKeys.VolumeApply: c.VolumeApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.volumeApply"); break;
+                        case PlayAudioKeys.Pitch: c.Pitch = AsVector2(kv.Value, "playAudio.pitch"); break;
+                        case PlayAudioKeys.PitchApply: c.PitchApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.pitchApply"); break;
+                        case PlayAudioKeys.Loop: c.Loop = AsBool(kv.Value, "playAudio.loop"); break;
+                        case PlayAudioKeys.LoopApply: c.LoopApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.loopApply"); break;
+                        case PlayAudioKeys.Clips: c.Clips = AsClips(kv.Value, "playAudio.clips"); break;
+                        case PlayAudioKeys.ClipsApply: c.ClipsApplySettings = ParseEnumToken(kv.Value, AudioApplyTokens, "playAudio.clipsApply"); break;
+                        case PlayAudioKeys.DelaySeconds: c.DelayInSeconds = AsFloat(kv.Value, "playAudio.delaySeconds"); break;
+                        case PlayAudioKeys.PlayOnEnter: c.PlayOnEnter = AsBool(kv.Value, "playAudio.playOnEnter"); break;
+                        case PlayAudioKeys.StopOnEnter: c.StopOnEnter = AsBool(kv.Value, "playAudio.stopOnEnter"); break;
+                        case PlayAudioKeys.PlayOnExit: c.PlayOnExit = AsBool(kv.Value, "playAudio.playOnExit"); break;
+                        case PlayAudioKeys.StopOnExit: c.StopOnExit = AsBool(kv.Value, "playAudio.stopOnExit"); break;
+                        default: throw new EmitException($"playAudio: unknown field '{kv.Key}' (expected sourcePath/playbackOrder/parameter/volume/volumeApply/pitch/pitchApply/loop/loopApply/clips/clipsApply/delaySeconds/playOnEnter/stopOnEnter/playOnExit/stopOnExit)");
+                    }
+                }
             }
 
             // ----- VRC expression parameters (in-memory; CompileController persists) -----
@@ -789,6 +1103,107 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             if (v is Dictionary<string, object> m) return m;
             throw new EmitException($"{ctx}: expected a mapping, got {(v == null ? "null" : v.GetType().Name)}");
+        }
+
+        private static int AsInt(object v, string ctx)
+        {
+            switch (v)
+            {
+                case long l: return (int)l;
+                case int i: return i;
+                // A non-integral double here is malformed input (e.g. layerControl.layer: 1.5) — fail loud
+                // rather than silently rounding it to a different layer index.
+                case double d:
+                    if (d != Math.Floor(d))
+                        throw new EmitException($"{ctx}: expected an integer, got non-integral {d.ToString(CultureInfo.InvariantCulture)}");
+                    return (int)d;
+                default: throw new EmitException($"{ctx}: expected an integer, got {(v == null ? "null" : v.GetType().Name)}");
+            }
+        }
+
+        // A [min, max] flow list → Vector2 (VRCAnimatorPlayAudio volume/pitch ranges).
+        private static Vector2 AsVector2(object v, string ctx)
+        {
+            if (!(v is List<object> list))
+                throw new EmitException($"{ctx}: expected a [min, max] list, got {(v == null ? "null" : v.GetType().Name)}");
+            if (list.Count != 2)
+                throw new EmitException($"{ctx}: expected exactly 2 numbers, got {list.Count}");
+            return new Vector2(AsFloat(list[0], ctx + "[0]"), AsFloat(list[1], ctx + "[1]"));
+        }
+
+        // A list of project asset paths → AudioClip[]. A path that doesn't resolve to a clip is fail-loud
+        // (consistent with the avatarMask / motion-ref path handling).
+        private static AudioClip[] AsClips(object v, string ctx)
+        {
+            if (!(v is List<object> list))
+                throw new EmitException($"{ctx}: expected a list of asset paths, got {(v == null ? "null" : v.GetType().Name)}");
+            var clips = new AudioClip[list.Count];
+            for (int i = 0; i < list.Count; i++)
+            {
+                string path = AsString(list[i], ctx + "[" + i + "]");
+                var clip = AssetDatabase.LoadAssetAtPath<AudioClip>(path);
+                if (clip == null) throw new EmitException($"{ctx}: audio clip not found at '{path}'");
+                clips[i] = clip;
+            }
+            return clips;
+        }
+
+        // Decode a schema token to its SDK enum via the kind's token map; an unknown token is fail-loud with
+        // the accepted set. Enum fields carry their truth in a token, not a raw number.
+        private static T ParseEnumToken<T>(object v, Dictionary<string, T> map, string ctx) where T : struct
+        {
+            string s = AsString(v, ctx);
+            if (map.TryGetValue(s, out var e)) return e;
+            throw new EmitException($"{ctx}: unknown value '{s}' (expected {string.Join("/", map.Keys)})");
+        }
+
+        // ----- schema-token → SDK-enum maps (the enum-valued behaviour fields) -----
+
+        // INTERNAL, so ControllerDecompile builds its reverse (enum→token) maps FROM these — one source of
+        // truth. A new SDK enum member added here is automatically decodable; a value present in neither
+        // direction is fail-loud on both sides (emit throws; decode refuses), never silently approximated.
+        internal static readonly Dictionary<string, TrackingType> TrackingTokens = new Dictionary<string, TrackingType>
+        {
+            { "noChange", TrackingType.NoChange }, { "tracking", TrackingType.Tracking }, { "animation", TrackingType.Animation },
+        };
+
+        internal static readonly Dictionary<string, PlayableLayer> PlayableLayerTokens = new Dictionary<string, PlayableLayer>
+        {
+            { "action", PlayableLayer.Action }, { "fx", PlayableLayer.FX }, { "gesture", PlayableLayer.Gesture }, { "additive", PlayableLayer.Additive },
+        };
+
+        internal static readonly Dictionary<string, LayerCtrlLayer> LayerCtrlTokens = new Dictionary<string, LayerCtrlLayer>
+        {
+            { "action", LayerCtrlLayer.Action }, { "fx", LayerCtrlLayer.FX }, { "gesture", LayerCtrlLayer.Gesture }, { "additive", LayerCtrlLayer.Additive },
+        };
+
+        internal static readonly Dictionary<string, AudioOrder> AudioOrderTokens = new Dictionary<string, AudioOrder>
+        {
+            { "random", AudioOrder.Random }, { "uniqueRandom", AudioOrder.UniqueRandom }, { "roundabout", AudioOrder.Roundabout }, { "parameter", AudioOrder.Parameter },
+        };
+
+        internal static readonly Dictionary<string, AudioApply> AudioApplyTokens = new Dictionary<string, AudioApply>
+        {
+            { "alwaysApply", AudioApply.AlwaysApply }, { "applyIfStopped", AudioApply.ApplyIfStopped }, { "neverApply", AudioApply.NeverApply },
+        };
+
+        // Field-name tokens for the two field-dense behaviour kinds — SHARED with ControllerDecompile so the
+        // encode case labels and the decode dictionary keys can never drift apart (a rename breaks both, and
+        // the compiler enforces it). Other kinds' field names are few + stable and stay inline.
+        internal static class DriverKeys
+        {
+            public const string LocalOnly = "localOnly", Set = "set", Add = "add", Copy = "copy", Random = "random";
+            public const string Source = "source", SourceMin = "sourceMin", SourceMax = "sourceMax", DestMin = "destMin", DestMax = "destMax";
+            public const string Min = "min", Max = "max", Chance = "chance";
+        }
+
+        internal static class PlayAudioKeys
+        {
+            public const string SourcePath = "sourcePath", PlaybackOrder = "playbackOrder", Parameter = "parameter";
+            public const string Volume = "volume", VolumeApply = "volumeApply", Pitch = "pitch", PitchApply = "pitchApply";
+            public const string Loop = "loop", LoopApply = "loopApply", Clips = "clips", ClipsApply = "clipsApply";
+            public const string DelaySeconds = "delaySeconds", PlayOnEnter = "playOnEnter", StopOnEnter = "stopOnEnter";
+            public const string PlayOnExit = "playOnExit", StopOnExit = "stopOnExit";
         }
 
         /// <summary>The provenance source hash — first 8 bytes of the MD5 of <paramref name="s"/>, hex.

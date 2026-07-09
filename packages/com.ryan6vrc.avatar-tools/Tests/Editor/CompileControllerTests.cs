@@ -1,9 +1,12 @@
 using System.IO;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 using Ryan6Vrc.AvatarTools.Editor;
 using UnityEditor;
 using UnityEditor.Animations;
+using UnityEngine;
+using UnityEngine.TestTools;
 
 // Behavioral tests for the CompileController door. These touch the filesystem (source YAML) and the
 // AssetDatabase (the emitted .controller). NOT run via MCP run_tests (it crashes the editor); run from the
@@ -70,6 +73,9 @@ public class CompileControllerTests
         File.WriteAllText(badSrc, AnimatorSchemaYamlTests.DebounceDoc.Replace("schema: 1", "schema: 2"));
 
         string outDir = TestRoot + "/out_bad";
+        // The door reports a refusal via Debug.LogError; declare it so the test framework doesn't count the
+        // intentional error log as a failure.
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] FAIL: validation failed"));
         string result = CompileController.Compile(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
@@ -97,6 +103,8 @@ public class CompileControllerTests
             "schema: 1\ncontroller: Debounce_Fx\nbasis: avatar-root\nrole: fx\n" +
             "parameters:\n  P: { type: float }\n" +
             "layers:\n  - name: L\n    states:\n      S:\n        transitions:\n          - { to: NoSuchState }\n    default: S\n");
+        // The failing recompile reports its refusal via Debug.LogError; declare it as expected.
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] FAIL: emit:"));
         string result = CompileController.Compile(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
@@ -121,5 +129,34 @@ public class CompileControllerTests
 
         Assert.IsNotEmpty(guid1, "controller has a GUID after the first compile");
         Assert.AreEqual(guid1, guid2, "recompile reuses the controller asset (stable GUID)");
+    }
+
+    // An `unresolved: true` motion ref must NOT fail the compile — it emits a null motion and the RunLog
+    // body carries an advisory naming the state + the verbatim GUID (round-trip note).
+    [Test]
+    public void Compile_With_Unresolved_Ref_Is_OK_And_Advises()
+    {
+        string src = TestRoot + "/Dangle_Fx.yaml";
+        File.WriteAllText(src,
+            "schema: 1\ncontroller: Dangle_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n" +
+            "      S: { motion: { ref: { guid: \"00000000000000000000000000000000\", unresolved: true } } }\n" +
+            "    default: S\n");
+
+        string outDir = TestRoot + "/out_unresolved";
+        string result = CompileController.Compile(src, outDir, whatIf: false);
+
+        StringAssert.Contains("=> OK", result);
+
+        const string marker = "| log=";
+        int i = result.IndexOf(marker, System.StringComparison.Ordinal);
+        Assert.Greater(i, -1, "result carries the RunLog path in-band");
+        string logPath = result.Substring(i + marker.Length).Trim();
+        Assert.IsTrue(File.Exists(logPath), "RunLog file exists at " + logPath);
+
+        string body = File.ReadAllText(logPath);
+        StringAssert.Contains("unresolved motion ref", body, "body carries the unresolved-ref advisory");
+        StringAssert.Contains("00000000000000000000000000000000", body, "advisory names the GUID");
+        StringAssert.Contains("`S`", body, "advisory names the state");
     }
 }

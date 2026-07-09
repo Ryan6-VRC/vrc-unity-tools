@@ -293,6 +293,330 @@ layers:
         Assert.IsTrue(r.Trees.Count >= 2, "parent + nested trees are tracked");
     }
 
+    // ---- Nested sub-machines ---------------------------------------------------------------------
+
+    [Test]
+    public void Emit_Nested_SubMachine_Produces_Child_StateMachine()
+    {
+        // Bare `to:`/`default:` resolve in their OWN machine's scope; a cross-machine target is a
+        // slash-qualified path from the layer root — Idle→A inside Sub is `Sub/A`. Entry `to: Sub` stays
+        // bare because Sub is in the root machine's own scope.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Nested_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    states:\n      Idle:\n        motion: ~\n        transitions:\n          - { to: Sub/A, when: [ P is true ] }\n" +
+            "    machines:\n      Sub:\n        states:\n          A: { motion: ~ }\n        default: A\n" +
+            "    entry:\n      - { to: Sub, when: [ P is true ] }\n" +
+            "    default: Idle\n", "test");
+        ControllerEmit.Build(doc, out var r);
+        var sm = r.Controller.layers[0].stateMachine;
+        Assert.AreEqual(1, sm.stateMachines.Length, "one child state machine emitted");
+        var sub = sm.stateMachines[0].stateMachine;
+        Assert.AreEqual("Sub", sub.name);
+        var a = sub.states.First(cs => cs.state.name == "A").state;
+        Assert.IsNotNull(a, "declared sub-machine state A is present");
+        // Idle's `Sub/A` path target resolves into the child machine's A state.
+        var idle = State(sm, "Idle");
+        Assert.IsTrue(idle.transitions.Any(t => t.destinationState == a), "Idle wires to Sub/A across the nesting");
+        // Entry `to: Sub` wires into the sub-machine.
+        Assert.AreEqual(1, sm.entryTransitions.Length);
+        Assert.AreEqual(sub, sm.entryTransitions[0].destinationStateMachine, "entry wires into the sub-machine");
+    }
+
+    [Test]
+    public void SubMachine_As_Default_Wires_Unconditional_Entry()
+    {
+        // `default:` naming a SUB-MACHINE (not a state) → an unconditional (no-condition) entry transition
+        // into that sub-machine, added after any entry ladder so it is the catch-all.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: SubDefault_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    machines:\n      Sub:\n        states:\n          A: { motion: ~ }\n        default: A\n" +
+            "    default: Sub\n", "test");
+        ControllerEmit.Build(doc, out var r);
+        var sm = r.Controller.layers[0].stateMachine;
+        var sub = sm.stateMachines[0].stateMachine;
+        // The mechanism is an unconditional entry transition into the sub-machine — NOT a defaultState we
+        // set. (Unity's defaultState getter resolves through to the child's own default when the root has no
+        // direct states, so it is not a reliable probe here; the entry transition is.)
+        Assert.AreEqual(0, sm.states.Length, "root machine has no direct states of its own");
+        Assert.AreEqual(1, sm.entryTransitions.Length, "one entry transition for the sub-machine default");
+        Assert.AreEqual(sub, sm.entryTransitions[0].destinationStateMachine);
+        Assert.AreEqual(0, sm.entryTransitions[0].conditions.Length, "the default entry is unconditional");
+    }
+
+    [Test]
+    public void Duplicate_State_Name_Across_Sibling_Machines_Wires_Each_Own_Transition()
+    {
+        // REGRESSION GUARD for the layer-global-index bug: two sibling sub-machines each declare a state "S"
+        // whose transition targets a DIFFERENT sibling-local state. Under a global bare-name index the
+        // last-emitted "S" would win and both transitions would attach to it / resolve to the wrong target.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Dup_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    machines:\n" +
+            "      M1:\n        states:\n          S:\n            motion: ~\n            transitions:\n              - { to: X, when: [ P is true ] }\n          X: { motion: ~ }\n        default: S\n" +
+            "      M2:\n        states:\n          S:\n            motion: ~\n            transitions:\n              - { to: Y, when: [ P is true ] }\n          Y: { motion: ~ }\n        default: S\n" +
+            "    default: M1\n", "test");
+        ControllerEmit.Build(doc, out var r);
+        var sm = r.Controller.layers[0].stateMachine;
+        var m1 = sm.stateMachines.First(cs => cs.stateMachine.name == "M1").stateMachine;
+        var m2 = sm.stateMachines.First(cs => cs.stateMachine.name == "M2").stateMachine;
+
+        var s1 = m1.states.First(cs => cs.state.name == "S").state;
+        var x = m1.states.First(cs => cs.state.name == "X").state;
+        var s2 = m2.states.First(cs => cs.state.name == "S").state;
+        var y = m2.states.First(cs => cs.state.name == "Y").state;
+
+        // M1's S is a DIFFERENT object than M2's S, and each carries exactly its own transition.
+        Assert.AreNotSame(s1, s2, "each machine has its own distinct S state");
+        Assert.AreEqual(1, s1.transitions.Length);
+        Assert.AreEqual(x, s1.transitions[0].destinationState, "M1's S wires to M1's X");
+        Assert.AreEqual(1, s2.transitions.Length);
+        Assert.AreEqual(y, s2.transitions[0].destinationState, "M2's S wires to M2's Y");
+    }
+
+    [Test]
+    public void Qualified_Path_Resolves_Into_Nested_SubMachine()
+    {
+        // A deep slash-qualified path `A/inner` from the layer root walks sub-machine A, then its state
+        // `inner`. Top-level state Idle → `A/inner`.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Path_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    states:\n      Idle:\n        motion: ~\n        transitions:\n          - { to: A/inner, when: [ P is true ] }\n" +
+            "    machines:\n      A:\n        states:\n          inner: { motion: ~ }\n        default: inner\n" +
+            "    default: Idle\n", "test");
+        ControllerEmit.Build(doc, out var r);
+        var sm = r.Controller.layers[0].stateMachine;
+        var a = sm.stateMachines.First(cs => cs.stateMachine.name == "A").stateMachine;
+        var inner = a.states.First(cs => cs.state.name == "inner").state;
+        var idle = State(sm, "Idle");
+        Assert.AreEqual(1, idle.transitions.Length);
+        Assert.AreEqual(inner, idle.transitions[0].destinationState, "Idle resolves A/inner into the nested machine");
+    }
+
+    // Fail-loud is the change's core value and nothing upstream backstops it — ResolveName's throws are the
+    // only guard against a mis-scoped/typo'd target. Pin both scope rules.
+
+    [Test]
+    public void Bare_Target_Does_Not_Leak_Across_Sibling_Scopes()
+    {
+        // Idle (root scope) targets bare `A`, which exists ONLY inside sub-machine Sub — a bare name must NOT
+        // reach across scopes (the cross-machine ref would need the qualified path `Sub/A`).
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadBare_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    states:\n      Idle:\n        motion: ~\n        transitions:\n          - { to: A, when: [ P is true ] }\n" +
+            "    machines:\n      Sub:\n        states:\n          A: { motion: ~ }\n        default: A\n" +
+            "    default: Idle\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("not found in machine", ex.Message);
+    }
+
+    [Test]
+    public void Qualified_Path_Through_A_State_Fails_Loud()
+    {
+        // `Idle/foo` — the intermediate segment `Idle` is a STATE, not a sub-machine, so the path cannot be
+        // walked.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadPath_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: { type: bool }\n" +
+            "layers:\n  - name: L\n" +
+            "    states:\n      Idle:\n        motion: ~\n        transitions:\n          - { to: Idle/foo, when: [ P is true ] }\n" +
+            "    default: Idle\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("is not a sub-machine", ex.Message);
+    }
+
+    // ---- Behaviours: the six non-driver VRC SMB kinds --------------------------------------------
+
+    private static AnimatorState SingleStateWithBehaviours(string kindLine)
+    {
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Bhv_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - " + kindLine + "\n" +
+            "    default: S\n", "test");
+        ControllerEmit.Build(doc, out var r);
+        return State(RootSm(r), "S");
+    }
+
+    [Test]
+    public void Emit_Tracking_Behaviour_Sets_Channels()
+    {
+        var st = SingleStateWithBehaviours("tracking: { head: animation, leftHand: tracking }");
+        var smb = st.behaviours[0] as VRCAnimatorTrackingControl;
+        Assert.IsNotNull(smb, "tracking SMB emitted");
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.Animation, smb.trackingHead);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.Tracking, smb.trackingLeftHand);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.NoChange, smb.trackingRightHand,
+            "an unmentioned channel keeps the SDK default (NoChange)");
+    }
+
+    [Test]
+    public void Emit_PlayableLayer_Behaviour_Sets_Layer_And_Weight()
+    {
+        var st = SingleStateWithBehaviours("playableLayer: { layer: fx, goalWeight: 1, blendDuration: 0.25 }");
+        var smb = st.behaviours[0] as VRCPlayableLayerControl;
+        Assert.IsNotNull(smb, "playableLayer SMB emitted");
+        Assert.AreEqual(VRC.SDKBase.VRC_PlayableLayerControl.BlendableLayer.FX, smb.layer);
+        Assert.AreEqual(1f, smb.goalWeight, 1e-6f);
+        Assert.AreEqual(0.25f, smb.blendDuration, 1e-6f);
+    }
+
+    [Test]
+    public void Emit_Locomotion_Behaviour_Sets_Disable()
+    {
+        var st = SingleStateWithBehaviours("locomotion: { disableLocomotion: true }");
+        var smb = st.behaviours[0] as VRCAnimatorLocomotionControl;
+        Assert.IsNotNull(smb, "locomotion SMB emitted");
+        Assert.IsTrue(smb.disableLocomotion);
+    }
+
+    [Test]
+    public void Emit_PoseSpace_Behaviour_Sets_Fields()
+    {
+        var st = SingleStateWithBehaviours("poseSpace: { enterPoseSpace: true, delayTime: 0.5 }");
+        var smb = st.behaviours[0] as VRCAnimatorTemporaryPoseSpace;
+        Assert.IsNotNull(smb, "poseSpace SMB emitted");
+        Assert.IsTrue(smb.enterPoseSpace);
+        Assert.AreEqual(0.5f, smb.delayTime, 1e-6f);
+    }
+
+    [Test]
+    public void Emit_LayerControl_Behaviour_Sets_Playable_LayerIndex_And_Weight()
+    {
+        var st = SingleStateWithBehaviours("layerControl: { playable: gesture, layer: 3, goalWeight: 0.5, blendDuration: 0.1 }");
+        var smb = st.behaviours[0] as VRCAnimatorLayerControl;
+        Assert.IsNotNull(smb, "layerControl SMB emitted");
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorLayerControl.BlendableLayer.Gesture, smb.playable);
+        Assert.AreEqual(3, smb.layer, "the integer layer index");
+        Assert.AreEqual(0.5f, smb.goalWeight, 1e-6f);
+        Assert.AreEqual(0.1f, smb.blendDuration, 1e-6f);
+    }
+
+    [Test]
+    public void State_And_SubMachine_Same_Name_Fails_Loud()
+    {
+        // A state X and a sub-machine X in one machine: a bare target/default resolves states first, so the
+        // sub-machine is unaddressable — the ambiguous document must fail loud, not silently favour the state.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: CrossKind_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n" +
+            "    states:\n      X: { motion: ~ }\n" +
+            "    machines:\n      X:\n        states:\n          A: { motion: ~ }\n        default: A\n" +
+            "    default: X\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("both named 'X'", ex.Message);
+    }
+
+    [Test]
+    public void LayerControl_NonIntegral_Layer_Fails_Loud()
+    {
+        // AsInt must not silently round a non-integral layer index to a different layer.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadLayer_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - layerControl: { playable: fx, layer: 1.5 }\n" +
+            "    default: S\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("layerControl.layer", ex.Message);
+        StringAssert.Contains("non-integral", ex.Message);
+    }
+
+    [Test]
+    public void Emit_PlayAudio_Behaviour_Sets_Order_Flags_Range_And_ApplySettings()
+    {
+        var st = SingleStateWithBehaviours(
+            "playAudio: { sourcePath: Audio/Src, playbackOrder: uniqueRandom, parameter: Idx, " +
+            "volume: [ 0.8, 1.0 ], volumeApply: neverApply, pitch: [ 1, 1 ], pitchApply: alwaysApply, " +
+            "loop: true, loopApply: applyIfStopped, clipsApply: alwaysApply, delaySeconds: 0.1, " +
+            "playOnEnter: true, stopOnEnter: true, playOnExit: true, stopOnExit: true }");
+        var smb = st.behaviours[0] as VRCAnimatorPlayAudio;
+        Assert.IsNotNull(smb, "playAudio SMB emitted");
+        Assert.AreEqual("Audio/Src", smb.SourcePath);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.Order.UniqueRandom, smb.PlaybackOrder);
+        Assert.AreEqual("Idx", smb.ParameterName);
+        Assert.AreEqual(0.8f, smb.Volume.x, 1e-6f);
+        Assert.AreEqual(1.0f, smb.Volume.y, 1e-6f);
+        Assert.AreEqual(1f, smb.Pitch.x, 1e-6f);
+        Assert.AreEqual(1f, smb.Pitch.y, 1e-6f);
+        // Each ApplySettings site decodes its token (the enum map's 3 members × 4 sites).
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.NeverApply, smb.VolumeApplySettings);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.AlwaysApply, smb.PitchApplySettings);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.ApplyIfStopped, smb.LoopApplySettings);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.AlwaysApply, smb.ClipsApplySettings);
+        Assert.IsTrue(smb.Loop);
+        Assert.AreEqual(0.1f, smb.DelayInSeconds, 1e-6f);
+        Assert.IsTrue(smb.PlayOnEnter);
+        Assert.IsTrue(smb.StopOnEnter);
+        Assert.IsTrue(smb.PlayOnExit);
+        Assert.IsTrue(smb.StopOnExit);
+    }
+
+    [Test]
+    public void PlayAudio_Volume_Wrong_Arity_Fails_Loud()
+    {
+        // AsVector2 requires exactly [min, max]; a single-element list is fail-loud.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadVol_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - playAudio: { volume: [ 0.8 ] }\n" +
+            "    default: S\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("playAudio.volume", ex.Message);
+        StringAssert.Contains("exactly 2", ex.Message);
+    }
+
+    [Test]
+    public void PlayAudio_Missing_Clip_Path_Fails_Loud()
+    {
+        // AsClips loads each path as an AudioClip; an unresolved path is fail-loud, naming the offending path.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadClip_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - playAudio: { clips: [ Assets/DoesNotExist_7c6b5a.wav ] }\n" +
+            "    default: S\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("Assets/DoesNotExist_7c6b5a.wav", ex.Message);
+        StringAssert.Contains("not found", ex.Message);
+    }
+
+    [Test]
+    public void Unknown_Behaviour_Field_In_Known_Kind_Fails_Loud()
+    {
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: BadField_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - tracking: { nose: animation }\n" +
+            "    default: S\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("nose", ex.Message);
+        StringAssert.Contains("unknown channel", ex.Message);
+    }
+
+    [Test]
+    public void Unknown_Behaviour_Kind_Fails_Loud()
+    {
+        // The parser accepts any single-key behaviour map; emit is the fail-loud gate on the kind.
+        var doc = new AnimDocument { Schema = 1, ControllerName = "BadKind_Fx" };
+        var layer = new Layer { Name = "L" };
+        var s = new State { Name = "S" };
+        s.Behaviours.Add(new Ryan6Vrc.AvatarTools.Editor.Behaviour { Kind = "teleport" });
+        layer.Root.States.Add(s);
+        layer.Root.DefaultState = "S";
+        doc.Layers.Add(layer);
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("teleport", ex.Message);
+        StringAssert.Contains("unknown kind", ex.Message);
+    }
+
     // ---- Determinism -----------------------------------------------------------------------------
 
     [Test]
@@ -316,5 +640,79 @@ layers:
             Assert.IsTrue(snap2.ContainsKey(kv.Key), "state " + kv.Key + " present in both builds");
             Assert.AreEqual(kv.Value, snap2[kv.Key], "state " + kv.Key + " keeps the same grid position");
         }
+    }
+
+    // ---- Unresolved motion refs (Task 4) ---------------------------------------------------------
+    // A ref flagged `unresolved: true` that does NOT resolve is tolerated: null motion + advisory record,
+    // not a throw. A bare broken ref (no marker) stays fatal. An all-zero GUID never resolves. NOTE the guid
+    // is QUOTED: an all-zero (all-digit) scalar parses as a YAML number, and the guid binder requires a string.
+
+    [Test]
+    public void Emit_Unresolved_Guid_Ref_Is_Null_Motion_Not_Throw()
+    {
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Dangle_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n" +
+            "      S: { motion: { ref: { guid: \"00000000000000000000000000000000\", unresolved: true } } }\n" +
+            "    default: S\n", "mem://dangle");
+
+        ControllerEmit.EmitResult r = null;
+        Assert.DoesNotThrow(() => ControllerEmit.Build(doc, out r));
+
+        var s = State(RootSm(r), "S");
+        Assert.IsNull(s.motion, "unresolved ref leaves the motion slot null");
+        Assert.AreEqual(1, r.UnresolvedRefs.Count, "the unresolved ref is recorded on the result");
+        Assert.AreEqual("S", r.UnresolvedRefs[0].state, "advisory names the owning state");
+        Assert.AreEqual("00000000000000000000000000000000", r.UnresolvedRefs[0].guid, "verbatim GUID preserved");
+    }
+
+    [Test]
+    public void Emit_Bare_Broken_Guid_Ref_Throws()
+    {
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: Dangle2_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n" +
+            "      S: { motion: { ref: { guid: \"00000000000000000000000000000000\" } } }\n" +
+            "    default: S\n", "mem://dangle2");
+
+        Assert.Throws<ControllerEmit.EmitException>(() => ControllerEmit.Build(doc, out _));
+    }
+
+    // A child of a blend tree can carry an unresolved ref too — the marker must be honored on the tree-child
+    // path (BuildTree → BuildMotion), and the advisory must attribute it to the OWNING STATE, not the
+    // synthetic tree name. Guards the stateContext threading a refactor could silently break.
+    [Test]
+    public void Emit_Unresolved_Ref_In_BlendTree_Child_Attributes_To_Owning_State()
+    {
+        const string yaml = @"schema: 1
+controller: DangleTree_Fx
+basis: avatar-root
+role: fx
+parameters:
+  Blend: float
+layers:
+  - name: L
+    states:
+      Owner:
+        motion:
+          tree: 1d
+          param: Blend
+          children:
+            - { ref: { guid: ""00000000000000000000000000000000"", unresolved: true }, threshold: 0 }
+    default: Owner
+";
+        var doc = AnimatorSchemaYaml.Parse(yaml, "mem://dangletree");
+
+        ControllerEmit.EmitResult r = null;
+        Assert.DoesNotThrow(() => ControllerEmit.Build(doc, out r));
+
+        var tree = State(RootSm(r), "Owner").motion as BlendTree;
+        Assert.IsNotNull(tree, "state motion is a blend tree");
+        Assert.AreEqual(1, tree.children.Length);
+        Assert.IsNull(tree.children[0].motion, "the unresolved child motion is null");
+
+        Assert.AreEqual(1, r.UnresolvedRefs.Count, "the child's unresolved ref is recorded");
+        Assert.AreEqual("Owner", r.UnresolvedRefs[0].state, "attributed to the OWNING state, not the tree name");
+        Assert.AreEqual("00000000000000000000000000000000", r.UnresolvedRefs[0].guid, "verbatim GUID preserved");
     }
 }

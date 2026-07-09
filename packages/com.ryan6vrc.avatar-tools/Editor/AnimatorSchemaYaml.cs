@@ -419,7 +419,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static SchemaException Unsupported(string name, string sym, int lineNo)
             => new SchemaException($"unsupported YAML {name} '{sym}' at line {lineNo}");
 
-        // Scalar type inference (unquoted, non-empty, already checked for forbidden leaders).
+        // Scalar type inference (unquoted, non-empty, already checked for forbidden leaders). This is the READ
+        // half of the round-trip contract: AnimatorSchemaEmit.InfersNonString mirrors these rules to decide
+        // which string scalars it must QUOTE (a token that would infer here to bool/number/null), and
+        // AnimatorSchemaEmit.NumFromFloat mirrors ToNumber's double↔float handling. A change here must move in
+        // lockstep with those — NeedsQuote_Agrees_With_Parser_InferScalar_Across_Token_Battery guards the drift.
         private static object InferScalar(string t)
         {
             if (t == "~") return null;
@@ -630,14 +634,58 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case "mask": layer.Mask = ToStr(kv.Value, "layer.mask"); break;
                         case "blend": layer.Blend = ParseBlend(ToStr(kv.Value, "layer.blend")); break;
                         case "writeDefaults": layer.WriteDefaults = ToBool(kv.Value, "layer.writeDefaults"); break;
-                        case "states": BindStates(layer.Root, ToMap(kv.Value, "layer.states")); break;
-                        case "default": layer.Root.DefaultState = ToStr(kv.Value, "layer.default"); break;
-                        case "behaviours": BindBehaviours(layer.Root.Behaviours, ToList(kv.Value, "layer.behaviours")); break;
-                        default: throw new SchemaException($"unknown layer field '{kv.Key}'");
+                        // Machine-body keys (states/machines/entry/any/default/behaviours) bind into the
+                        // layer's Root machine — the same surface a nested sub-machine carries.
+                        default:
+                            if (!BindMachineKey(layer.Root, kv.Key, kv.Value, "layer"))
+                                throw new SchemaException($"unknown layer field '{kv.Key}'");
+                            break;
                     }
                 }
                 doc.Layers.Add(layer);
             }
+        }
+
+        // Binds one machine-body key shared by a layer's Root machine and every nested sub-machine.
+        // Returns false (without consuming) if the key isn't a machine-body key, so the layer caller can
+        // treat it as an unknown-layer-field error and the sub-machine caller as an unknown-machine-field.
+        private static bool BindMachineKey(StateMachine sm, string key, object value, string ctx)
+        {
+            switch (key)
+            {
+                case "states": BindStates(sm, ToMap(value, $"{ctx}.states")); return true;
+                case "machines": BindMachines(sm, ToMap(value, $"{ctx}.machines")); return true;
+                case "entry": BindLadder(sm.EntryLadder, ToList(value, $"{ctx}.entry"), anyLadder: false); return true;
+                case "any": BindLadder(sm.AnyLadder, ToList(value, $"{ctx}.any"), anyLadder: true); return true;
+                case "default": sm.DefaultState = ToStr(value, $"{ctx}.default"); return true;
+                case "behaviours": BindBehaviours(sm.Behaviours, ToList(value, $"{ctx}.behaviours")); return true;
+                default: return false;
+            }
+        }
+
+        // A sub-machine body is a pure machine body (no layer-level keys) that recurses through the same
+        // key binder — nested sub-machines fall out for free.
+        private static void BindMachines(StateMachine parent, Dictionary<string, object> map)
+        {
+            // Duplicate sub-machine names are already refused by stage-1's per-mapping guard (line-numbered).
+            foreach (var kv in map)
+            {
+                string name = kv.Key;
+                var body = ToMap(kv.Value, $"machine '{name}'");
+                var sub = new SubMachine { Name = name };
+                foreach (var bk in body)
+                    if (!BindMachineKey(sub.Machine, bk.Key, bk.Value, $"machine '{name}'"))
+                        throw new SchemaException($"machine '{name}': unknown field '{bk.Key}'");
+                parent.Machines.Add(sub);
+            }
+        }
+
+        // Entry / AnyState ladders are ordered transition lists. Only the AnyState ladder carries the fields of
+        // a real state transition (canTransitionToSelf, mute, solo) — an entry transition honors none of them,
+        // so both are refused on the entry ladder (fail loud, mirroring the canTransitionToSelf precedent).
+        private static void BindLadder(List<Transition> into, List<object> list, bool anyLadder)
+        {
+            BindTransitions(into, list, allowSelf: anyLadder, allowMuteSolo: anyLadder);
         }
 
         private static LayerBlend ParseBlend(string v)
@@ -695,7 +743,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        private static void BindTransitions(List<Transition> into, List<object> list)
+        // allowSelf defaults FALSE so a state-transition list (which calls this without the flag) refuses
+        // canTransitionToSelf — a field only the AnyState ladder honors. The AnyState caller passes true.
+        // allowMuteSolo defaults TRUE: state and AnyState transitions honor mute/solo; only the entry ladder
+        // (which passes false) refuses them (the entry-emit path never reads them, so they'd silently drop).
+        private static void BindTransitions(List<Transition> into, List<object> list, bool allowSelf = false, bool allowMuteSolo = true)
         {
             foreach (var item in list)
             {
@@ -716,7 +768,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case "fixedDuration": t.FixedDuration = ToBool(kv.Value, "transition.fixedDuration"); break;
                         case "interruption": t.Interruption = ParseInterruption(ToStr(kv.Value, "transition.interruption")); break;
                         case "ordered": t.OrderedInterruption = ToBool(kv.Value, "transition.ordered"); break;
-                        case "canTransitionToSelf": t.CanTransitionToSelf = ToBool(kv.Value, "transition.canTransitionToSelf"); break;
+                        case "mute":
+                            if (!allowMuteSolo) throw new SchemaException("transition: 'mute' is not valid on an entry ladder");
+                            t.Mute = ToBool(kv.Value, "transition.mute");
+                            break;
+                        case "solo":
+                            if (!allowMuteSolo) throw new SchemaException("transition: 'solo' is not valid on an entry ladder");
+                            t.Solo = ToBool(kv.Value, "transition.solo");
+                            break;
+                        case "canTransitionToSelf":
+                            if (!allowSelf) throw new SchemaException("transition: 'canTransitionToSelf' is only valid on an AnyState ladder");
+                            t.CanTransitionToSelf = ToBool(kv.Value, "transition.canTransitionToSelf");
+                            break;
                         default: throw new SchemaException($"transition: unknown field '{kv.Key}'");
                     }
                 }
@@ -818,6 +881,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case "tree": break;   // the discriminator, already read
                     case "param": spec.Param = ToStr(kv.Value, $"{ctx} tree.param"); break;
                     case "paramY": spec.ParamY = ToStr(kv.Value, $"{ctx} tree.paramY"); break;
+                    case "normalized": spec.Normalized = ToBool(kv.Value, $"{ctx} tree.normalized"); break;
                     case "children":
                         foreach (var c in ToList(kv.Value, $"{ctx} tree.children"))
                             spec.Children.Add(BindTreeChild(ToMap(c, $"{ctx} tree child"), ctx));
@@ -829,6 +893,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     default: throw new SchemaException($"{ctx} tree: unknown field '{kv.Key}'");
                 }
             }
+            // Reject a field misplaced for this kind — build/decode honor each field only on the kinds below,
+            // so accepting it elsewhere would silently erase it through compile→decompile. Refuse instead (the
+            // parser already refuses unknown fields and per-context mute/solo/canTransitionToSelf).
+            bool twoD = spec.Kind == TreeKind.SimpleDirectional2D
+                     || spec.Kind == TreeKind.FreeformDirectional2D
+                     || spec.Kind == TreeKind.FreeformCartesian2D;
+            if (spec.Normalized.HasValue && spec.Kind != TreeKind.Direct)
+                throw new SchemaException($"{ctx} tree: 'normalized' is only valid on a direct tree");
+            if (spec.Param != null && spec.Kind == TreeKind.Direct)
+                throw new SchemaException($"{ctx} tree: 'param' is not valid on a direct tree (it uses per-child directWeight)");
+            if (spec.ParamY != null && !twoD)
+                throw new SchemaException($"{ctx} tree: 'paramY' is only valid on a 2D tree");
             return spec;
         }
 
@@ -837,25 +913,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var child = new TreeChild();
             bool hasClip = m.ContainsKey("clip"), hasRef = m.ContainsKey("ref"), hasTree = m.ContainsKey("tree");
             int n = (hasClip ? 1 : 0) + (hasRef ? 1 : 0) + (hasTree ? 1 : 0);
-            if (n == 0) throw new SchemaException($"{ctx} tree child: must set exactly one motion of clip/ref/tree");
             if (n > 1) throw new SchemaException($"{ctx} tree child: sets more than one motion of clip/ref/tree");
-            var mr = new MotionRef();
-            if (hasClip) mr.Clip = ToStr(m["clip"], $"{ctx} tree child clip");
-            else if (hasRef)
+            // n == 0 is a legal EMPTY child (an unassigned blend-tree slot) — Unity permits it, and it is the
+            // normalized form of a broken ref after the first compile nulls the motion. Leave Motion null.
+            if (n == 1)
             {
-                object rv = m["ref"];
-                if (rv is Dictionary<string, object> gm) mr.RefGuid = BindGuid(gm, ctx);
-                else mr.RefPath = ToStr(rv, $"{ctx} tree child ref");
+                var mr = new MotionRef();
+                if (hasClip) mr.Clip = ToStr(m["clip"], $"{ctx} tree child clip");
+                else if (hasRef)
+                {
+                    object rv = m["ref"];
+                    if (rv is Dictionary<string, object> gm) mr.RefGuid = BindGuid(gm, ctx);
+                    else mr.RefPath = ToStr(rv, $"{ctx} tree child ref");
+                }
+                else mr.Tree = BindTree(m, ctx);
+                child.Motion = mr;
             }
-            else mr.Tree = BindTree(m, ctx);
-            child.Motion = mr;
 
             foreach (var kv in m)
             {
                 switch (kv.Key)
                 {
                     case "clip": case "ref": case "tree": break;   // motion, handled above
-                    case "param": case "paramY": case "children": break; // consumed by nested tree motion
+                    case "param": case "paramY": case "children": case "normalized": break; // consumed by nested tree motion
                     case "threshold": child.Threshold = ToNumber(kv.Value, $"{ctx} tree child threshold"); break;
                     case "x": case "posX": child.PosX = ToNumber(kv.Value, $"{ctx} tree child posX"); break;
                     case "y": case "posY": child.PosY = ToNumber(kv.Value, $"{ctx} tree child posY"); break;

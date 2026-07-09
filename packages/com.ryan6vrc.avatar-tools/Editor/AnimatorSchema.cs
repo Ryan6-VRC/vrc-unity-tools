@@ -1,7 +1,49 @@
 using System.Collections.Generic;
+using System.Text;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
+    // Addressing-name escaping. A state/sub-machine NAME may legally contain the path separator '/' (or a
+    // literal '\'). In a transition-target / default PATH context, escape per SEGMENT so the separator stays
+    // unambiguous: '\' -> '\\', '/' -> '\/'. This lives in the BARE-SCALAR layer, BELOW YAML string-quoting:
+    // the decoder escapes here first; if the escaped value still needs YAML double-quoting, Quote doubles the
+    // '\' and the reader halves it, so the two escapings COMPOSE (no separate compound-hazard handling needed).
+    // The compiler splits a path on UNescaped '/' then unescapes each segment. Bare names with no unescaped
+    // '/' and the Task-2 'Sub/A' / leading-'/' forms are unaffected.
+    public static class AddressPath
+    {
+        public static string EscapeSegment(string name)
+            => name.Replace("\\", "\\\\").Replace("/", "\\/");
+
+        public static string UnescapeSegment(string seg)
+        {
+            var sb = new StringBuilder(seg.Length);
+            for (int i = 0; i < seg.Length; i++)
+            {
+                if (seg[i] == '\\' && i + 1 < seg.Length) sb.Append(seg[++i]);
+                else sb.Append(seg[i]);
+            }
+            return sb.ToString();
+        }
+
+        // Split on UNescaped '/' (a '/' not part of a '\x' escape pair). Segments keep their escapes; the
+        // caller unescapes each. A leading absolute-'/' anchor is the caller's concern (stripped first).
+        public static List<string> Split(string path)
+        {
+            var segs = new List<string>();
+            var cur = new StringBuilder();
+            for (int i = 0; i < path.Length; i++)
+            {
+                char c = path[i];
+                if (c == '\\' && i + 1 < path.Length) { cur.Append(c).Append(path[++i]); }
+                else if (c == '/') { segs.Add(cur.ToString()); cur.Clear(); }
+                else cur.Append(c);
+            }
+            segs.Add(cur.ToString());
+            return segs;
+        }
+    }
+
     // Typed model for the animator-write substrate. Plain POCOs (System.* only, no Unity API) so the
     // parser and later compiler stages can be unit-checked without the editor. Every type/field here is
     // the shared contract that AnimatorSchemaYaml (this task) and later ControllerEmit tasks reference
@@ -88,10 +130,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
     public sealed class Transition
     {
-        public string To;                       // target state/submachine name; null == "to Exit"
+        public string To;                       // bare == local; "Sub/State" == from layer root; "/Top" == absolute from root; null == "to Exit"
         public bool ToExit;
         public List<Condition> When = new List<Condition>();
         public bool CanTransitionToSelf;        // AnyState ladder only
+        public bool Mute; public bool Solo;     // AnimatorStateTransition editor flags (state + AnyState ladders)
         // null == inherit Defaults:
         public float? Duration; public float? ExitTime; public bool? FixedDuration;
         public TransitionInterruption? Interruption; public bool? OrderedInterruption;
@@ -113,6 +156,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public TreeKind Kind;
         public string Param;                    // blend param (X) - Direct uses per-child DirectWeight instead
         public string ParamY;                   // 2D only
+        public bool? Normalized;                // Direct only: the "Normalized Blend Values" runtime toggle
+                                                // (sum-to-1 vs raw additive). null ⇒ Unity's construction default.
         public List<TreeChild> Children = new List<TreeChild>();
     }
     public sealed class TreeChild
