@@ -14,7 +14,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// or a token that would break tokenization). System.* only (no Unity API), like the parser it inverts, so
     /// the codec pair is unit-checkable outside the editor.
     ///
-    /// DETERMINISTIC + CANONICAL — the Task-9 Decompile→Compile→Decompile fixpoint compares two serialized
+    /// DETERMINISTIC + CANONICAL — the Decompile→Compile→Decompile fixpoint compares two serialized
     /// strings for textual identity, so the SAME document must always render byte-identically:
     ///   - Fixed key order per construct; map/list order is the model's insertion order (already stable).
     ///   - '\n' line endings only (never Environment.NewLine), 2-space indent, no tabs.
@@ -106,7 +106,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (c.Curves.Count > 0)
                 {
-                    // Keyframed clips render in block form (the addendum's surface): one binding per line.
+                    // Keyframed clips render in block form: one binding per line.
                     L(sb, "  " + Key(c.Name) + ":");
                     if (c.Seconds.HasValue) L(sb, "    seconds: " + Num(c.Seconds.Value));
                     if (c.Sets.Count > 0) L(sb, "    set: " + FlowSets(c.Sets));
@@ -256,7 +256,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return "{ " + string.Join(", ", parts) + " }";
         }
 
-        // The state's own blend tree renders in block form (the addendum's human-facing surface); nested child
+        // The state's own blend tree renders in block form (the human-facing surface); nested child
         // trees render inline (flow) so recursion stays a single-line value.
         private static void EmitTreeBlock(StringBuilder sb, BlendTreeSpec spec, int indent)
         {

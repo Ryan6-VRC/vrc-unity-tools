@@ -642,7 +642,7 @@ layers:
         }
     }
 
-    // ---- Unresolved motion refs (Task 4) ---------------------------------------------------------
+    // ---- Unresolved motion refs ---------------------------------------------------------
     // A ref flagged `unresolved: true` that does NOT resolve is tolerated: null motion + advisory record,
     // not a throw. A bare broken ref (no marker) stays fatal. An all-zero GUID never resolves. NOTE the guid
     // is QUOTED: an all-zero (all-digit) scalar parses as a YAML number, and the guid binder requires a string.

@@ -67,15 +67,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public EmitException(string message) : base(message) { }
         }
 
-        // Back-compat door: emit to the scratch dir, hashing SourcePath for provenance (Task 4 tests + any
-        // caller that only wants a throwaway build). CompileController uses the 4-arg overload below.
+        // Convenience door: emit to the scratch dir, hashing SourcePath for provenance (throwaway builds).
+        // CompileController uses the 4-arg overload below.
         public static void Build(AnimDocument doc, out EmitResult result)
             => Build(doc, ScratchRoot, null, out result);
 
         /// <summary>Emit <paramref name="doc"/> into <paramref name="outDir"/> (an <c>Assets/…</c>-relative
         /// folder). <paramref name="sourceText"/>, when non-null, is the exact source-file text — its BYTES
         /// are hashed into the controller's provenance userData so a later compile can detect an out-of-band
-        /// edit (Task 5 threads it; null falls back to hashing <see cref="AnimDocument.SourcePath"/>).
+        /// edit (null falls back to hashing <see cref="AnimDocument.SourcePath"/>).
         /// IDEMPOTENT + GUID-STABLE: an existing controller at the target path is RESET IN PLACE (its
         /// sub-assets stripped and rebuilt) rather than deleted + recreated, so its GUID — and any external
         /// reference to it — survives a recompile.</summary>
@@ -144,7 +144,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 EmitParameters();
                 EmitClips();          // clips first: states/trees reference them by name
                 EmitLayers();
-                EmitVrcParameters();  // in-memory only; Task 5 persists
+                EmitVrcParameters();  // in-memory only; CompileController persists
 
                 EditorUtility.SetDirty(_controller);
                 AssetDatabase.SaveAssets();
@@ -352,10 +352,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     };
                     AssetDatabase.AddObjectToAsset(sm, _controller);
 
-                    // Pass 1: emit states + sub-machines (arbitrary depth), building a tree of per-machine
-                    // scopes (each holds only its OWN direct states + direct sub-machines). Target resolution
-                    // is scoped, NOT global: Unity scopes state names per state machine, and the schema lets
-                    // the SAME name recur in different machines — a layer-global index would silently mis-wire.
+                    // Pass 1: emit states + sub-machines (arbitrary depth), building the per-machine scope tree
+                    // (each scope holds only its OWN direct states + direct sub-machines; see MachineScope for
+                    // why target resolution is per-scope, not layer-global).
                     var rootScope = EmitMachine(layer, layer.Root, sm);
                     // Pass 2: wire defaults + all transitions, resolving each target in its own machine's scope
                     // (bare names) or by walking a slash-qualified path from the layer root (cross-machine).
@@ -699,17 +698,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // ----- behaviours (all seven VRC SMB kinds) -----
-            // One encoder per kind, each mirroring the driver encoder's shape: materialise the concrete VRC
-            // SMB via `add(typeof(...))`, then a per-field switch that sets the SMB's fields and throws
-            // EmitException (named offender) on any unknown field.
-            //
-            // WRITE ↔ READ alignment: this side's field/channel NAMES mirror ControllerReport's read side so
-            // decode round-trips — but ControllerReport is a Markdown report, not a decoder: it renders enums
-            // via ToString() (PascalCase, e.g. `Animation`) whereas the emit tokens here are camelCase (e.g.
-            // `animation`). The enum-token casing is DEFINED HERE (the token→enum maps below), not inherited
-            // from the report. And the report only decodes 3 of 7 kinds (driver, tracking, locomotion); the
-            // other four — playableLayer, poseSpace, playAudio, layerControl — have NO read side yet, so their
-            // token surface here is the authority Task 5's decode must match, not a mirror of existing code.
+            // One encoder per kind: materialise the concrete VRC SMB via `add(typeof(...))`, then a per-field
+            // switch that sets its fields and throws EmitException (named offender) on any unknown field.
+            // The enum-token casing is DEFINED HERE (the token→enum maps below) — camelCase (e.g. `animation`),
+            // NOT the PascalCase an enum ToString() (as in ControllerReport's Markdown) would give.
+            // ControllerDecompile builds its reverse (enum→token) maps from these, so this is the single source
+            // of truth for both directions.
             private void EmitBehaviours(List<Behaviour> behaviours, Func<Type, StateMachineBehaviour> add)
             {
                 if (behaviours == null) return;
@@ -819,10 +813,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return p;
             }
 
-            // tracking: { <channel>: <state> } where channel is one of the ten VRC tracking channels and state
-            // is animation|tracking|noChange. Channel NAMES mirror ControllerReport.AppendTracking's channel
-            // enumeration; the enum-token casing (camelCase) is defined by TrackingTokens below, not by the
-            // report's PascalCase ToString() rendering. An untouched channel keeps its SDK default (NoChange).
+            // tracking: { <channel>: <state> } — channel is one of the ten VRC tracking channels, state is
+            // animation|tracking|noChange (tokens defined by TrackingTokens below). An untouched channel keeps
+            // its SDK default (NoChange).
             private static void PopulateTracking(VRCAnimatorTrackingControl tc, Dictionary<string, object> fields)
             {
                 foreach (var kv in fields)
@@ -907,10 +900,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // playAudio: the VRCAnimatorPlayAudio serializable surface. The AudioSource itself is addressed by
-            // hierarchy path (sourcePath) — the SDK resolves the live Source from it at runtime; clips are asset
-            // paths. Volume/pitch are [min, max] ranges. ControllerReport does not yet decode this kind, so this
-            // token surface is the authority Task 5's decode must mirror.
+            // playAudio: the VRCAnimatorPlayAudio serializable surface. The AudioSource is addressed by
+            // hierarchy path (sourcePath) — the SDK resolves the live Source at runtime; clips are asset paths.
+            // Volume/pitch are [min, max] ranges.
             private static void PopulatePlayAudio(VRCAnimatorPlayAudio c, Dictionary<string, object> fields)
             {
                 foreach (var kv in fields)

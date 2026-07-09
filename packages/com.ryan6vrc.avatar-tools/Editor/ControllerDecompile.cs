@@ -28,7 +28,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <c>Unresolved</c> and is listed in <see cref="WalkResult.UnresolvedGuids"/>.
     ///
     /// SCOPE: produces the full document from an emitted/clean or imported controller. Import TOLERANCES —
-    /// mixed Write-Defaults hoisted to a modal layer policy + minority per-state overrides (Task 7), and an
+    /// mixed Write-Defaults hoisted to a modal layer policy + minority per-state overrides, and an
     /// empty <c>timeParameter</c> normalized to an unbound motion time with a Note — plus the full REFUSAL
     /// taxonomy: a construct that cannot be expressed in the schema (out-of-vocabulary or malformed input:
     /// whitespace-colliding sibling states, a null state machine, an empty inline clip, a null playAudio clip)
@@ -88,7 +88,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // The next dangling guid recorded against this owning object (a State or BlendTree), in the
             // object's own serialization order. "unknown" when the controller isn't a saved asset or the
-            // owner carries no recovered dangler (mirrors the pre-fix fallback).
+            // owner carries no recovered dangler.
             private string NextDanglingGuid(Object owner)
             {
                 if (owner != null
@@ -156,7 +156,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     Name = layer.name,
                     Weight = layer.defaultWeight,
                     Blend = layer.blendingMode == AnimatorLayerBlendingMode.Additive ? LayerBlend.Additive : LayerBlend.Override,
-                    WriteDefaults = null, // decoded per-state; never hoisted here (that is a Task-7 tolerance)
+                    WriteDefaults = null, // decoded per-state; never hoisted here
                 };
                 if (layer.avatarMask != null) model.Mask = AssetDatabase.GetAssetPath(layer.avatarMask);
 
@@ -182,7 +182,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // override on every majority state — leaving an explicit State.WriteDefaults only on the minority.
             // Re-emit (s.WriteDefaults ?? layer.WriteDefaults ?? Defaults) then reproduces the SAME per-state WD
             // mix. DETERMINISTIC: on a tie prefer true (trueCount >= falseCount). A uniform-WD layer hoists to a
-            // single policy with zero overrides — so it round-trips unchanged, and the Task-9 fixpoint holds.
+            // single policy with zero overrides — so it round-trips unchanged.
             private static void HoistWriteDefaults(Layer model)
             {
                 var states = new List<State>();
@@ -430,7 +430,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Each `*Aware` set names the scalar properties the decode path consumes, refuses, or deliberately
             // ignores as editor-cosmetic. A property here is NOT swept; everything else non-default is refused.
             // NOT listed (⇒ swept ⇒ refused when set): m_CycleOffset, m_IKOnFeet, m_Tag (state); m_TransitionOffset
-            // (transition) — the four this census was added to catch.
+            // (transition) — the four this census catches.
             //
             // SCOPE (what the census actually covers — the rest stays a hand-allowlist): the TOP-LEVEL scalar
             // fields of AnimatorState, state/any/entry transitions, BlendTree, and the seven VRC SMB kinds.
@@ -987,8 +987,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // A condition serializes as '<param> <op> <value>' split on whitespace inside a flow list, so a
-            // param carrying whitespace or a flow delimiter can't round-trip.
+            // True when the param can't survive the '<param> <op> <value>' condition grammar (whitespace or a
+            // flow delimiter); the refusal that consumes this is raised in DecodeConditions.
             private static bool ParamBreaksConditionGrammar(string param)
             {
                 foreach (char c in param)

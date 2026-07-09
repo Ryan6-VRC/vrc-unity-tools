@@ -183,7 +183,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // A multi-hop chain pays latency at every hop: a conditional hop resolves a frame later, and an
         // exit-time hop waits out its source state's clip. The binary codec walk (Start→Test0→…) advances
         // almost entirely through exit-time hops, so BOTH edge kinds must count or the advisory reads empty on
-        // the very fixture built to demonstrate it. Report the longest simple chain of FIRING transitions
+        // the codec chain above. Report the longest simple chain of FIRING transitions
         // (conditional, or exit-time — explicit or via the doc default); a dead transition (no condition + no
         // exit time) never fires and is excluded, as is to-Exit. Only genuine multi-hop chains (≥2 hops) surface.
         private static List<string> FrameLatencyAdvisories(AnimDocument doc)
