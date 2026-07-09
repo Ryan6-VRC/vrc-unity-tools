@@ -17,11 +17,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
     ///
     /// Call <see cref="Report"/> from MCP execute_code or a menu item, passing the vendor
     /// avatar folder (e.g. "Assets/Vendor/Avatars/Chocolat"). It writes a JSON RunLog to
-    /// Assets/Agent/RunLogs/ and returns a one-line PASS/FAIL summary ending with that RunLog
-    /// path (<c>… => RESULT | log=&lt;path&gt;</c>).
+    /// Assets/Agent/RunLogs/ and returns a one-line descriptive summary ending with that RunLog
+    /// path (<c>… => OK | log=&lt;path&gt;</c>).
     ///
-    /// PASS = report completed and found ≥1 FBX and ≥1 prefab.
-    /// FAIL = unreadable or empty package (not a meaningful avatar folder).
+    /// This is a pure descriptive digest — it emits no PASS/FAIL verdict. An empty package
+    /// (fbx=0 prefab=0) is a fact the digest states, not a failure. Only bad input (an invalid
+    /// folder) or an exception mid-scan is an ERROR — the digest refuses and names the problem.
     ///
     /// FBX mesh data is read via AssetDatabase.LoadAssetAtPath (no scene involvement).
     /// Prefab inspection uses PrefabUtility.LoadPrefabContents / UnloadPrefabContents
@@ -34,8 +35,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>
         /// Inspect <paramref name="vendorFolder"/> and emit a graph RunLog.
-        /// Returns a one-line PASS/FAIL summary ending with the RunLog path (<c>… => RESULT | log=&lt;path&gt;</c>);
-        /// also Debug.Log/LogError it and copies that path to the system clipboard.
+        /// Returns a one-line descriptive summary ending with the RunLog path (<c>… => OK | log=&lt;path&gt;</c>);
+        /// bad input or a mid-scan exception ends <c>=> ERROR</c>. Also Debug.Log/LogError it and copies
+        /// that path to the system clipboard.
         /// </summary>
         public static string Report(string vendorFolder)
         {
@@ -43,7 +45,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             if (string.IsNullOrEmpty(vendorFolder) || !AssetDatabase.IsValidFolder(vendorFolder))
             {
-                string err = "[ReportPackage] " + label + ": not a valid asset folder: " + vendorFolder + " => FAIL";
+                string err = "[ReportPackage] " + label + ": not a valid asset folder: " + vendorFolder
+                           + " — pass an existing folder under Assets/ => ERROR";
                 Debug.LogError(err);
                 return err;
             }
@@ -69,29 +72,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // 5. Head vs body flag (blendShapeCount heuristic)
                 ComputeHeadBody(data);
 
-                // 6. PASS/FAIL
-                bool pass = data.FbxEntries.Count >= 1 && data.PrefabCount >= 1;
-                data.Result = pass ? "PASS" : "FAIL";
+                // No content verdict: fbx/prefab counts are facts the digest states, not a gate.
+                // An empty package (fbx=0 prefab=0) is reported as-is, not a failure.
             }
             catch (Exception ex)
             {
-                // Never propagate — record the failure and still leave a RunLog trace.
-                data.Result = "FAIL";
+                // Never propagate — record the exception (the lone ERROR path) and still leave a RunLog trace.
                 data.Error = ex.Message;
             }
 
             string logPath = WriteRunLog(data, label);
 
+            // An exception mid-scan is the only ERROR the digest can hit here (bad input already
+            // returned above). Otherwise the summary is a verdict-free descriptive digest.
+            bool errored = data.Error != null;
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[ReportPackage] {0}: fbx={1} prefab={2} constraints={3} thirdParty={4} headGuess={5} bodyGuess={6} superset={7}{8}{9} => {10} | log={11}",
                 label, data.FbxEntries.Count, data.PrefabCount, data.Constraints,
                 data.ThirdPartyComponents, data.HeadMesh ?? "?", data.BodyMesh ?? "?",
                 data.SupersetFbx ?? "none",
                 data.LoadErrors > 0 ? " loadErrors=" + data.LoadErrors : "",
-                data.Error != null ? " error=" + data.Error : "",
-                data.Result, logPath);
+                errored ? " error=" + data.Error : "",
+                errored ? "ERROR" : "OK", logPath);
 
-            if (data.Result == "PASS") Debug.Log(summary); else Debug.LogError(summary);
+            if (errored) Debug.LogError(summary); else Debug.Log(summary);
             return summary;
         }
 
@@ -424,7 +428,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("  \"unityVersion\": ").Append(TransplantCore.Q(Application.unityVersion)).Append(",\n");
             sb.Append("  \"timestampUtc\": ").Append(TransplantCore.Q(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append(",\n");
             sb.Append("  \"target\": ").Append(TransplantCore.Q(data.Target)).Append(",\n");
-            sb.Append("  \"result\": ").Append(TransplantCore.Q(data.Result)).Append(",\n");
             sb.Append("  \"loadErrors\": ").Append(data.LoadErrors).Append(",\n");
             sb.Append("  \"error\": ").Append(TransplantCore.Q(data.Error)).Append(",\n");
             sb.Append("  \"fbxCount\": ").Append(data.FbxEntries.Count).Append(",\n");
@@ -490,7 +493,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private class GraphData
         {
             public string Target;
-            public string Result;
             public string Error;
             public int    LoadErrors;
             public int    PrefabCount;
