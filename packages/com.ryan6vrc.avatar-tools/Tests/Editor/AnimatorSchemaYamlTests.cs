@@ -245,6 +245,42 @@ parameters:
         StringAssert.Contains("mute", ex.Message);
     }
 
+    // Tree fields are honored only on their own kind (build/decode); a misplaced one would silently erase
+    // through compile→decompile, so the parser refuses it rather than accept-and-drop.
+
+    [Test]
+    public void Normalized_On_NonDirect_Tree_Throws()
+    {
+        const string doc =
+            "schema: 1\ncontroller: T_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: { tree: 1d, param: P, normalized: true }\n    default: S\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("normalized", ex.Message);
+    }
+
+    [Test]
+    public void Param_On_Direct_Tree_Throws()
+    {
+        const string doc =
+            "schema: 1\ncontroller: T_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: { tree: direct, param: P }\n    default: S\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("param", ex.Message);
+    }
+
+    [Test]
+    public void ParamY_On_1D_Tree_Throws()
+    {
+        const string doc =
+            "schema: 1\ncontroller: T_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: { tree: 1d, param: P, paramY: P }\n    default: S\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("paramY", ex.Message);
+    }
+
     [Test]
     public void CanTransitionToSelf_On_State_Transition_Throws()
     {

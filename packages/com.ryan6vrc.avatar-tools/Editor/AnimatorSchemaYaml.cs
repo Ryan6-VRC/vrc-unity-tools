@@ -893,6 +893,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     default: throw new SchemaException($"{ctx} tree: unknown field '{kv.Key}'");
                 }
             }
+            // Reject a field misplaced for this kind — build/decode honor each field only on the kinds below,
+            // so accepting it elsewhere would silently erase it through compile→decompile. Refuse instead (the
+            // parser already refuses unknown fields and per-context mute/solo/canTransitionToSelf).
+            bool twoD = spec.Kind == TreeKind.SimpleDirectional2D
+                     || spec.Kind == TreeKind.FreeformDirectional2D
+                     || spec.Kind == TreeKind.FreeformCartesian2D;
+            if (spec.Normalized.HasValue && spec.Kind != TreeKind.Direct)
+                throw new SchemaException($"{ctx} tree: 'normalized' is only valid on a direct tree");
+            if (spec.Param != null && spec.Kind == TreeKind.Direct)
+                throw new SchemaException($"{ctx} tree: 'param' is not valid on a direct tree (it uses per-child directWeight)");
+            if (spec.ParamY != null && !twoD)
+                throw new SchemaException($"{ctx} tree: 'paramY' is only valid on a 2D tree");
             return spec;
         }
 
