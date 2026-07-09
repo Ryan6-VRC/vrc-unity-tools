@@ -89,6 +89,34 @@ layers:
     }
 
     [Test]
+    public void Validate_Rejects_NonCanonical_Layout_Key()
+    {
+        // A state named "A/B" whose layout key is written LITERALLY ("A/B") instead of canonically escaped
+        // ("A\/B"). It resolves to a real member (so dangling-layout doesn't fire) but would MISS emit's
+        // EscapeSegment lookup and silently grid-drop the coordinate — must fail loud at validation instead.
+        var src = @"
+schema: 1
+controller: NonCanon_Fx
+basis: avatar-root
+role: fx
+parameters: { Flag: bool }
+layers:
+  - name: L
+    states:
+      ""A/B"": { motion: ~, transitions: [ { to: ""A\\/B"", when: [ Flag is true ], exitTime: 1.0 } ] }
+    default: ""A\\/B""
+    layout:
+      nodes: { ""A/B"": [123, 456] }
+";
+        var doc = AnimatorSchemaYaml.Parse(src, "noncanon");
+        var errors = SchemaValidation.Validate(doc);
+        Assert.IsTrue(errors.Exists(e => e.Contains("unescaped-layout") && e.Contains("A\\/B")),
+            "non-canonical layout key flagged with canonical suggestion: " + string.Join(" | ", errors));
+        Assert.IsFalse(errors.Exists(e => e.Contains("dangling-layout")),
+            "resolves to a real member, so it's unescaped-layout not dangling-layout: " + string.Join(" | ", errors));
+    }
+
+    [Test]
     public void Compile_Honors_Listed_And_Grids_Omitted()
     {
         // Author only Idle; Go is omitted from nodes -> grid slot 1.
