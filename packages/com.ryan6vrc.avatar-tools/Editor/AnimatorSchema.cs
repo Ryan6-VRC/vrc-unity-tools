@@ -9,7 +9,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // the decoder escapes here first; if the escaped value still needs YAML double-quoting, Quote doubles the
     // '\' and the reader halves it, so the two escapings COMPOSE (no separate compound-hazard handling needed).
     // The compiler splits a path on UNescaped '/' then unescapes each segment. Bare names with no unescaped
-    // '/' and the Task-2 'Sub/A' / leading-'/' forms are unaffected.
+    // '/' and the 'Sub/A' / leading-'/' forms are unaffected.
     public static class AddressPath
     {
         public static string EscapeSegment(string name)
@@ -46,8 +46,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
     // Typed model for the animator-write substrate. Plain POCOs (System.* only, no Unity API) so the
     // parser and later compiler stages can be unit-checked without the editor. Every type/field here is
-    // the shared contract that AnimatorSchemaYaml (this task) and later ControllerEmit tasks reference
-    // verbatim — do not rename.
+    // the shared contract that AnimatorSchemaYaml and ControllerEmit reference verbatim — do not rename.
     public enum BindingBasis { AvatarRoot, MountRoot }
     public enum ControllerRole { Fx, BaseFx, Gesture, Action, Sitting, TPose, IkPose, Additive, Base }
     public enum AnimParamType { Bool, Int, Float }

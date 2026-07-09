@@ -29,7 +29,7 @@ using UnityEngine.TestTools;
 //     represent. For GoLocoBaseFullPoses (597 states / 180 sub-machines / 787 trees) that raw→owned step is
 //     PROVEN here to normalize EXACTLY two benign, documented categories and nothing the substrate models:
 //       (1) 4 genuinely-broken VENDOR motion refs (missing clip assets in this GoGo copy) — decoded
-//           `unresolved:true` (Task 6) then compiled to a null motion slot (Task 4): the acknowledged
+//           `unresolved:true` then compiled to a null motion slot: the acknowledged
 //           unresolved-ref degradation, and
 //       (2) 1 Unity resolve-through defaultState (the getter resolves through a state-less machine to a
 //           nested default — not an authored field; see ControllerDecompile) canonicalized to an explicit

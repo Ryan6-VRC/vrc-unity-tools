@@ -159,7 +159,7 @@ public class ControllerDecompileTests
     {
         // Emit a controller whose tree child references a real external clip, then delete that clip so the
         // child's m_Motion becomes a dangling guid ref (an imported-controller reality). Walk must decode it
-        // to GuidRef{Unresolved} + list the guid — NOT silently drop it (the pre-fix bug) — and re-emitting
+        // to GuidRef{Unresolved} + list the guid — NOT silently drop it — and re-emitting
         // the decoded doc must round-trip the unresolved marker (ControllerEmit tolerates it as a null motion).
         if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");
         if (!AssetDatabase.IsValidFolder("Assets/Agent/Scratch")) AssetDatabase.CreateFolder("Assets/Agent", "Scratch");
@@ -310,7 +310,7 @@ public class ControllerDecompileTests
         Assert.IsFalse(c2.Seconds.HasValue, "a plain Set clip (MinClipLength) does not gain a spurious seconds");
     }
 
-    // ---- Task 7 item 1: mixed WD hoists to a modal layer policy + minority overrides, re-emits the same mix --
+    // ---- mixed WD hoists to a modal layer policy + minority overrides, re-emits the same mix --
 
     [Test]
     public void Walk_MixedWD_Hoists_Modal_Policy_And_ReEmits_Same_Mix()
@@ -339,7 +339,7 @@ public class ControllerDecompileTests
         Assert.IsFalse(FirstState(r2, "B").writeDefaultValues, "B re-emits WD false (from its override)");
     }
 
-    // ---- Task 7 item 1 / acceptance #5: a uniform-WD layer hoists to a policy with ZERO overrides ------------
+    // ---- a uniform-WD layer hoists to a policy with ZERO overrides ------------
 
     [Test]
     public void Walk_UniformWD_Hoists_Policy_With_No_Overrides()
@@ -362,7 +362,7 @@ public class ControllerDecompileTests
         Assert.IsFalse(FirstState(r2, "B").writeDefaultValues);
     }
 
-    // ---- Task 7 item 2: timeParameterActive + empty timeParameter -> unbound motion time + a Note ------------
+    // ---- timeParameterActive + empty timeParameter -> unbound motion time + a Note ------------
 
     [Test]
     public void Walk_Empty_TimeParameter_Normalizes_To_Null_With_Note()
@@ -400,7 +400,7 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- Task 7 item 3: sibling states differing only by trailing whitespace -> a located Refusal ------------
+    // ---- sibling states differing only by trailing whitespace -> a located Refusal ------------
 
     [Test]
     public void Walk_Whitespace_Sibling_States_Refuse_Naming_Both()
@@ -421,7 +421,7 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- Task 7 item 4a: a layer with a null state machine -> a located Refusal (not an NRE) -----------------
+    // ---- a layer with a null state machine -> a located Refusal (not an NRE) -----------------
 
     [Test]
     public void Walk_Null_StateMachine_Refuses()
@@ -434,7 +434,7 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- Task 7 item 4b: an empty inline clip (zero bindings) -> a located Refusal (not silently empty) ------
+    // ---- an empty inline clip (zero bindings) -> a located Refusal (not silently empty) ------
 
     [Test]
     public void Walk_Empty_Inline_Clip_Refuses()
@@ -451,7 +451,7 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- Task 7 item 4c: a null playAudio clip entry -> a located Refusal (not an NRE) -----------------------
+    // ---- a null playAudio clip entry -> a located Refusal (not an NRE) -----------------------
 
     [Test]
     public void Walk_Null_PlayAudio_Clip_Refuses()
@@ -852,7 +852,7 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- Review-6 #1 (BLOCKER): a Direct tree's Normalized Blend Values round-trips (not swept-away) --------
+    // ---- a Direct tree's Normalized Blend Values round-trips (not swept-away) --------
 
     [Test]
     public void Walk_Direct_Tree_NormalizedBlendValues_RoundTrips()
@@ -876,7 +876,7 @@ public class ControllerDecompileTests
         Assert.AreEqual(false, t2.Normalized.Value, "the explicit normalized value round-trips (would else reset to the construction default)");
     }
 
-    // ---- Review-6 #2: an unknown driver ChangeType -> refusal (no longer dropped from all four buckets) ------
+    // ---- an unknown driver ChangeType -> refusal (not dropped from all four buckets) ------
 
     [Test]
     public void Walk_Driver_Unknown_ChangeType_Refuses()
@@ -900,7 +900,7 @@ public class ControllerDecompileTests
             "an unknown driver ChangeType -> located refusal");
     }
 
-    // ---- Review-6 #3: an unknown AnimatorConditionMode -> refusal (no longer approximated as Is-true) --------
+    // ---- an unknown AnimatorConditionMode -> refusal (not approximated as Is-true) --------
 
     [Test]
     public void Walk_Unknown_ConditionMode_Refuses()

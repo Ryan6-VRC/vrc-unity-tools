@@ -8,7 +8,7 @@ using UnityEngine;
 
 // Generative round-trip tests for AnimatorSchemaEmit — the AnimDocument -> YAML write-back. The parser is the
 // spec: Parse(Serialize(doc)) must reproduce doc for every construct, and Serialize must be idempotent through
-// a parse (the Task-9 textual fixpoint). Most tests are pure (Parse only, System.*); the emit->Walk->Serialize
+// a parse (the textual fixpoint). Most tests are pure (Parse only, System.*); the emit->Walk->Serialize
 // ->Parse ones touch the AssetDatabase (they build + decompile a real controller). Run headless via
 // tools/run-editmode-tests.ps1 (or the Test Runner window / CI); not via MCP run_tests — wrong venue
 // (live editor). See docs/verify.md.
@@ -381,7 +381,7 @@ public class AnimatorSchemaEmitTests
     // Both are private, so this observes them through the public surface: InferScalar's result via the
     // runtime type a reserved (`_`-prefixed) key binds to, and the quote decision via whether Serialize
     // wraps the token when it sits in a scalar value position (the controller name). Catches silent drift
-    // a comment can't (the Task-5 token-map failure mode).
+    // a comment can't (the token-map failure mode).
     [Test]
     public void NeedsQuote_Agrees_With_Parser_InferScalar_Across_Token_Battery()
     {

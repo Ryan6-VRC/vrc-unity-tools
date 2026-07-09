@@ -593,8 +593,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             : ToNumber(kv.Value, $"parameter '{name}' default");
                         break;
                     case "aap": spec.Aap = ToBool(kv.Value, $"parameter '{name}' aap"); break;
-                    // scratch == internal/working param: still a real animator param, but excluded from the
-                    // emitted VRCExpressionParameters legibility asset.
                     case "scratch": spec.Scratch = ToBool(kv.Value, $"parameter '{name}' scratch"); break;
                     case "vrc": spec.Vrc = BindVrc(ToMap(kv.Value, $"parameter '{name}' vrc"), name); break;
                     default: throw new SchemaException($"parameter '{name}': unknown field '{kv.Key}'");
@@ -949,8 +947,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return child;
         }
 
-        // Canonical pinned tree-kind tokens (case-sensitive) — these are the exact surface Task 8's
-        // blend-tree exercises author. No alternates.
+        // Canonical pinned tree-kind tokens (case-sensitive). No alternates.
         private static TreeKind ParseTreeKind(string v)
         {
             switch (v)
