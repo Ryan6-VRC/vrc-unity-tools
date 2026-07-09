@@ -3,7 +3,8 @@ using NUnit.Framework;
 using Ryan6Vrc.AvatarTools.Editor;
 
 // Behavioral tests for SchemaValidation. Pure C# over the System.*-only model — no scene, no VRC SDK.
-// NOT run via MCP run_tests (it crashes the editor); run from the Unity Test Runner window or CI.
+// Run headless via tools/run-editmode-tests.ps1 (or the Test Runner window / CI); not via MCP
+// run_tests — wrong venue (live editor). See docs/verify.md.
 public class SchemaValidationTests
 {
     // One layer with one state carrying one transition-condition — the minimal vehicle for op/type rules.

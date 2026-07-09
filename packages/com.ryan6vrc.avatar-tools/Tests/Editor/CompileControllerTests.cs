@@ -9,8 +9,9 @@ using UnityEngine;
 using UnityEngine.TestTools;
 
 // Behavioral tests for the CompileController door. These touch the filesystem (source YAML) and the
-// AssetDatabase (the emitted .controller). NOT run via MCP run_tests (it crashes the editor); run from the
-// Unity Test Runner window or CI. SetUp writes the debounce source; TearDown removes the whole test tree.
+// AssetDatabase (the emitted .controller). Run headless via tools/run-editmode-tests.ps1 (or the Test
+// Runner window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
+// SetUp writes the debounce source; TearDown removes the whole test tree.
 public class CompileControllerTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/cc_tests";

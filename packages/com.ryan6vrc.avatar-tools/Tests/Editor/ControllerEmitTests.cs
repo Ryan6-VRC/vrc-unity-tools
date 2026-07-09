@@ -9,9 +9,9 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 using Driver = VRC.SDKBase.VRC_AvatarParameterDriver;
 
 // Behavioral tests for ControllerEmit. These DO touch the AssetDatabase (emission persists the controller
-// to a scratch path so sub-asset APIs — AddStateMachineBehaviour, embedded clips/trees — work). NOT run via
-// MCP run_tests (it crashes the editor); run from the Unity Test Runner window or CI. TearDown removes the
-// scratch folder each run.
+// to a scratch path so sub-asset APIs — AddStateMachineBehaviour, embedded clips/trees — work). Run
+// headless via tools/run-editmode-tests.ps1 (or the Test Runner window / CI); not via MCP run_tests —
+// wrong venue (live editor). See docs/verify.md. TearDown removes the scratch folder each run.
 public class ControllerEmitTests
 {
     private const string ScratchFolder = "Assets/Agent/Scratch/emit";
