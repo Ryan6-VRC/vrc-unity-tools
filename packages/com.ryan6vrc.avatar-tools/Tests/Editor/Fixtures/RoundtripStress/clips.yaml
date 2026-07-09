@@ -1,0 +1,46 @@
+# covers: three clip forms (seconds carrier / constant set / keyframed curves); binding forms
+#         (declared-param AAP, scene .enabled, blendShape, material sub-property); resolved ref:;
+#         state speedParam + motionTimeParam; authored mixed Write-Defaults. States chained so all reach.
+schema: 1
+controller: Clips_Fx
+basis: avatar-root
+role: fx
+defaults:
+  writeDefaults: on
+parameters:
+  Out:   { type: float, aap: true }
+  Speed: { type: float, default: 1.0 }
+  MTime: { type: float, default: 0.0 }
+layers:
+  - name: Clips
+    states:
+      Carrier:
+        motion: { clip: timer }
+        speedParam: Speed
+        transitions: [ { to: Const, when: [], exitTime: 1.0 } ]
+      Const:
+        writeDefaults: off                       # minority override -> mixed WD in this layer
+        motion: { clip: hold }
+        transitions: [ { to: Scene, when: [], exitTime: 1.0 } ]
+      Scene:
+        motion: { clip: scene }
+        transitions: [ { to: Curve, when: [], exitTime: 1.0 } ]
+      Curve:
+        motion: { clip: fade }
+        motionTimeParam: MTime
+        transitions: [ { to: RefState, when: [], exitTime: 1.0 } ]
+      RefState:
+        motion: { ref: "Packages/com.ryan6vrc.avatar-tools/Tests/Editor/Fixtures/RoundtripStress/StressMotion.anim" }
+        transitions: [ { to: Carrier, when: [], exitTime: 1.0 } ]
+    default: Carrier
+clips:
+  timer: { seconds: 0.2 }
+  hold:  { set: { Out: 1.0 } }
+  scene:
+    set:
+      "Prop/Renderer.enabled": 1
+      "Body/SkinnedMeshRenderer.blendShape.Smile": 100
+      "Hat/MeshRenderer.material._Color.r": 0.5
+  fade:
+    length: 0.5
+    curves: { "Head/Light.intensity": [ [0, 0], [0.5, 3] ] }

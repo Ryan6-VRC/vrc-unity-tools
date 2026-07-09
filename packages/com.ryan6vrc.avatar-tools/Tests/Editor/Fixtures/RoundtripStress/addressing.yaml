@@ -1,0 +1,47 @@
+# covers: deep sub-machine nesting; all four cross-machine address forms; slash-in-name state;
+#         entry/any ladders + canTransitionToSelf; transition scalars (fixedDuration/ordered/mute/
+#         solo/interruption); int param + equals/notEqual; layer weight/blend/mask; hand layout.
+schema: 1
+controller: Addressing_Fx
+basis: avatar-root
+role: fx
+defaults:
+  writeDefaults: on
+  transition: { duration: 0, exitTime: none, interruption: none }
+parameters:
+  g: bool
+  n: { type: int, default: 0 }
+layers:
+  - name: Addr
+    weight: 0.5
+    blend: additive
+    mask: "Packages/com.ryan6vrc.avatar-tools/Tests/Editor/Fixtures/RoundtripStress/Stress.mask"
+    machines:
+      Sub:
+        states:
+          "Foo/Bar":
+            motion: ~
+            transitions:
+              - { to: /Top, when: [ g is true ] }             # absolute address
+          Ready:
+            motion: ~
+            transitions:
+              - { to: "Foo\\/Bar", when: [ n equals 1 ], fixedDuration: false, mute: true }  # escaped local
+        entry: [ { to: Ready, when: [ g is true ] } ]
+        any:   [ { to: Ready, when: [ g is false ], canTransitionToSelf: false } ]
+        default: Ready
+        layout:
+          nodes: { Ready: [300, 60] }
+          parent: [60, -60]
+    states:
+      Top:
+        motion: ~
+        transitions:
+          - { to: Sub/Ready, when: [ n notEqual 0 ], ordered: false, solo: true, interruption: source }
+          - { to: "Sub/Foo\\/Bar", when: [ n equals 3 ] }    # cross-machine escaped slash-name
+          - { to: Sub, when: [ g is true ] }                  # bare local sub-machine
+          - { to: /, when: [ n equals 2 ] }                   # bare / -> layer root
+    default: Top
+    layout:
+      nodes: { Top: [720, 40], Sub: [900, 200] }
+      entry: [60, 40]

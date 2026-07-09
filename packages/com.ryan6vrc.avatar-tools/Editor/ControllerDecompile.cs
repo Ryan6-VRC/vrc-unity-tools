@@ -188,7 +188,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Re-emit (s.WriteDefaults ?? layer.WriteDefaults ?? Defaults) then reproduces the SAME per-state WD
             // mix. DETERMINISTIC: on a tie prefer true (trueCount >= falseCount). A uniform-WD layer hoists to a
             // single policy with zero overrides — so it round-trips unchanged.
-            private static void HoistWriteDefaults(Layer model)
+            private void HoistWriteDefaults(Layer model)
             {
                 var states = new List<State>();
                 model.Root.CollectStates(states);
@@ -200,6 +200,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 model.WriteDefaults = policy;
                 foreach (var s in states)
                     if (s.WriteDefaults == policy) s.WriteDefaults = null; // majority inherits the layer policy
+
+                // A genuinely mixed layer (both WD values present) had its per-state split normalized to a single
+                // modal policy + minority overrides — an applied import tolerance. Record it in _notes.tolerances,
+                // mirroring the timeParameterActive note (a uniform-WD layer applied no tolerance, so no note).
+                if (trueCount > 0 && falseCount > 0)
+                    _result.Notes.Add($"layer '{model.Name}': mixed Write Defaults normalized to modal policy (writeDefaults: {(policy ? "true" : "false")})");
             }
 
             // Map every state/sub-machine of the layer to its owning machine + path-from-root, so a transition
@@ -1105,7 +1111,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var b = new Behaviour { Kind = "playAudio" };
                 b.Fields[ControllerEmit.PlayAudioKeys.SourcePath] = c.SourcePath;
                 b.Fields[ControllerEmit.PlayAudioKeys.PlaybackOrder] = Token(AudioOrderRev, c.PlaybackOrder, loc + " playAudio.playbackOrder");
-                b.Fields[ControllerEmit.PlayAudioKeys.Parameter] = c.ParameterName;
+                // An unset/empty audio-source parameter is meaningless; omit the key (like Clips below) so it
+                // round-trips — emitting parameter: <null> would make CompileController refuse the re-compile.
+                if (!string.IsNullOrEmpty(c.ParameterName))
+                    b.Fields[ControllerEmit.PlayAudioKeys.Parameter] = c.ParameterName;
                 b.Fields[ControllerEmit.PlayAudioKeys.Volume] = new List<object> { c.Volume.x, c.Volume.y };
                 b.Fields[ControllerEmit.PlayAudioKeys.VolumeApply] = Token(AudioApplyRev, c.VolumeApplySettings, loc + " playAudio.volumeApply");
                 b.Fields[ControllerEmit.PlayAudioKeys.Pitch] = new List<object> { c.Pitch.x, c.Pitch.y };
