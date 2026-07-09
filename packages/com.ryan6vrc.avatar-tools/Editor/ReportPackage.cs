@@ -36,8 +36,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>
         /// Inspect <paramref name="vendorFolder"/> and emit a graph RunLog.
         /// Returns a one-line descriptive summary ending with the RunLog path (<c>… => OK | log=&lt;path&gt;</c>);
-        /// bad input or a mid-scan exception ends <c>=> ERROR</c>. Also Debug.Log/LogError it and copies
-        /// that path to the system clipboard.
+        /// bad input or a mid-scan exception ends <c>=> ERROR</c>. Also Debug.Log/LogError it.
         /// </summary>
         public static string Report(string vendorFolder)
         {
@@ -484,7 +483,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var path = TransplantCore.RunLogDir + "/graph_" + TransplantCore.Sanitize(label) + "_" + stamp + ".json";
             File.WriteAllText(path, sb.ToString());
             AssetDatabase.Refresh();
-            EditorGUIUtility.systemCopyBuffer = path;
             return path;
         }
 

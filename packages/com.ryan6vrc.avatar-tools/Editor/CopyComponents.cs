@@ -769,7 +769,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Both paths consume the SAME <see cref="CopyPlan"/> object, so preview and execution cannot
         /// diverge. Returns a one-line PASS/FAIL summary ending with the RunLog path
         /// (<c>… => RESULT | log=&lt;path&gt;</c>); also Debug.Log/LogError's it and writes a
-        /// <c>copy-components</c> RunLog (that path also copied to the clipboard).
+        /// <c>copy-components</c> RunLog.
         ///
         /// PASS/FAIL contract:
         ///   - A flagged-missing HOST is PASS — surfaced as a prominent named list the operator iterates.

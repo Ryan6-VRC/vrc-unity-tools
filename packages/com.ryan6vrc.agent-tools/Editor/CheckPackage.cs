@@ -238,7 +238,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             var path = $"{RunLogDir}/verify_{Sanitize(label)}_{stamp}.json";
             File.WriteAllText(path, sb.ToString());
             AssetDatabase.Refresh();
-            EditorGUIUtility.systemCopyBuffer = path;
             return path;
         }
 
