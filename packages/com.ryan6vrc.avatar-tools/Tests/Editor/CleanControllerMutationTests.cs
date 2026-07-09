@@ -175,6 +175,14 @@ public class CleanControllerMutationTests
         StringAssert.Contains("=> PASS", preview);
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<AnimatorController>(Root + "/Src_Clean.controller"), "no asset created");
         Assert.IsTrue(d.baseAnimationLayers[0].isDefault, "descriptor untouched (still default)");
+        // whatIf must create NO side-effect assets and leave the descriptor's expression wiring untouched —
+        // checking only the controller + isDefault would let a whatIf that wrongly minted the empty assets
+        // or flipped customExpressions slip through.
+        Assert.IsNull(AssetDatabase.LoadAssetAtPath<VRC.SDK3.Avatars.ScriptableObjects.VRCExpressionParameters>(Root + "/VRCExpressionParameters_Empty.asset"), "whatIf created no params asset");
+        Assert.IsNull(AssetDatabase.LoadAssetAtPath<VRC.SDK3.Avatars.ScriptableObjects.VRCExpressionsMenu>(Root + "/VRCExpressionsMenu_Empty.asset"), "whatIf created no menu asset");
+        Assert.IsFalse(d.customExpressions, "whatIf must not flip customExpressions");
+        Assert.IsNull(d.expressionParameters, "whatIf must not wire params");
+        Assert.IsNull(d.expressionsMenu, "whatIf must not wire menu");
     }
 
     [Test]

@@ -128,7 +128,9 @@ public class RepathClipsTests
         var ctrl = BuildWithClip(cp, clip, "Old/Path");
         string s = RepathClips.Run(ctrl, new[] { "Old/Path" }, new[] { "New/Path" });
         StringAssert.Contains("=> PASS", s);
-        Assert.AreEqual(0, AnimatorTestHelpers.CountOrZero(s, "writeLandedFailures"));
+        // strict Count (not CountOrZero): the write path emits writeLandedFailures unconditionally
+        // (RepathClips.cs), so a refactor that dropped the token must fail loud, not silently weaken this.
+        Assert.AreEqual(0, AnimatorTestHelpers.Count(s, "writeLandedFailures"));
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(clip, "New/Path"));
         Assert.IsFalse(AnimatorTestHelpers.ClipHasBinding(clip, "Old/Path"));
     }
@@ -149,7 +151,7 @@ public class RepathClipsTests
 
         string s = RepathClips.Run(ctrl, new[] { "Old/Path" }, new[] { "New/Path" });
         StringAssert.Contains("=> PASS", s);
-        Assert.AreEqual(0, AnimatorTestHelpers.CountOrZero(s, "writeLandedFailures"),
+        Assert.AreEqual(0, AnimatorTestHelpers.Count(s, "writeLandedFailures"),
             "objref content read-back (ObjCurvesEqual) landed");
         Assert.IsTrue(ClipHasObjRefBinding(clip, "New/Path"), "objref binding moved to New/Path");
         Assert.IsFalse(ClipHasObjRefBinding(clip, "Old/Path"), "objref binding gone from Old/Path");
