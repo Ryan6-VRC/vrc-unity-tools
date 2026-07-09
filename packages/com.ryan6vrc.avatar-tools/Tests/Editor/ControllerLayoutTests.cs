@@ -190,4 +190,81 @@ layers:
         StringAssert.Contains("[111, 222]", yaml);
         Assert.IsFalse(yaml.Contains("parent:"), "no parent authored -> not emitted");
     }
+
+    // Full round-trip fixpoint: an arranged controller (nested sub-machine + a non-integer drag, every
+    // capture path exercised) Decompile->Serialize->Parse->Compile back to the SAME positions, and a second
+    // decompile is textually identical. Assertions compare against the DRAGGED values, not merely yaml
+    // self-consistency — a lossy float format would self-stabilize on the second pass yet still have thrown
+    // away the human's arrangement on the first.
+    [Test]
+    public void Layout_Roundtrip_Fixpoint_Nested_And_NonInteger()
+    {
+        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
+        ControllerEmit.Build(doc, out var res);
+        var controller = res.Controller;
+        var root = controller.layers[0].stateMachine;
+
+        // A NESTED sub-machine with a state inside it — its own specials (incl. parent) exercise the
+        // isRoot:false capture path.
+        var child = root.AddStateMachine("Sub", ControllerEmit.GridSub(0));
+        child.AddState("SubState", ControllerEmit.GridState(0));
+
+        // --- Drag every node kind off its grid/constant default ---
+        // (a) a ROOT state -> a NON-INTEGER coord (proves R-format float preservation).
+        var idlePos = new Vector3(287.34f, 154.9f, 0);
+        MoveState(root, "Idle", idlePos);
+
+        // (b) the SUB-MACHINE NODE's position in the root (ChildAnimatorStateMachine is a struct -> copy-back).
+        var subNodePos = new Vector3(615.5f, 42.25f, 0);
+        int subIdx = System.Array.FindIndex(root.stateMachines, c => c.stateMachine.name == "Sub");
+        var subs = root.stateMachines;
+        subs[subIdx].position = subNodePos;
+        root.stateMachines = subs;
+
+        // (c) the root's special nodes -> distinct off-constant values.
+        var rootEntry = new Vector3(12, 34, 0);
+        var rootAny   = new Vector3(56, 78, 0);
+        var rootExit  = new Vector3(90, 11, 0);
+        root.entryPosition    = rootEntry;
+        root.anyStatePosition = rootAny;
+        root.exitPosition     = rootExit;
+
+        // (d) the NESTED machine's own special nodes -> distinct values, incl. parentStateMachinePosition.
+        var childEntry  = new Vector3(5, 6, 0);
+        var childExit   = new Vector3(7, 8, 0);
+        var childParent = new Vector3(9, 10, 0);
+        child.entryPosition              = childEntry;
+        child.exitPosition               = childExit;
+        child.parentStateMachinePosition = childParent;
+
+        EditorUtility.SetDirty(root);
+        EditorUtility.SetDirty(child);
+        AssetDatabase.SaveAssets();
+
+        // --- Fixpoint: Decompile -> Serialize -> Parse -> Compile ---
+        var yaml1 = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(controller).Doc);
+        var doc2 = AnimatorSchemaYaml.Parse(yaml1, "roundtrip");
+        ControllerEmit.Build(doc2, out var res2);
+        var root2 = res2.Controller.layers[0].stateMachine;
+
+        // Assert the DRAGGED values survived exactly (Vector3 Assert.AreEqual is per-component exact).
+        var idle2 = System.Array.Find(root2.states, cs => cs.state.name == "Idle");
+        Assert.AreEqual(idlePos, idle2.position, "root state's non-integer position survived exactly");
+
+        int subIdx2 = System.Array.FindIndex(root2.stateMachines, c => c.stateMachine.name == "Sub");
+        Assert.AreEqual(subNodePos, root2.stateMachines[subIdx2].position, "sub-machine node position survived");
+
+        Assert.AreEqual(rootEntry, root2.entryPosition,    "root entry position survived");
+        Assert.AreEqual(rootAny,   root2.anyStatePosition, "root any position survived");
+        Assert.AreEqual(rootExit,  root2.exitPosition,     "root exit position survived");
+
+        var child2 = root2.stateMachines[subIdx2].stateMachine;
+        Assert.AreEqual(childEntry,  child2.entryPosition,              "nested entry position survived");
+        Assert.AreEqual(childExit,   child2.exitPosition,               "nested exit position survived");
+        Assert.AreEqual(childParent, child2.parentStateMachinePosition, "nested parentStateMachinePosition survived (isRoot:false path)");
+
+        // Textual fixpoint: a second decompile of the recompiled controller is byte-identical.
+        var yaml2 = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(res2.Controller).Doc);
+        Assert.AreEqual(yaml1, yaml2, "second decompile is textually identical (fixpoint reached)");
+    }
 }

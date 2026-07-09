@@ -323,6 +323,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return l;
             }
 
+            // The omit-decision compares special-node positions (entry/any/exit, and parent for sub-machines) against
+            // the tool-owned constants, so a never-arranged machine stays layout-free. This assumes opening a controller
+            // in Unity's Animator window does NOT perturb those positions off the constants (Unity serializes node
+            // positions to persist them, so it shouldn't). That was NOT empirically verified — no live Editor was
+            // available. If an opened-but-unedited controller is ever observed to sprout a layout block, the fix is to
+            // drop the three special-node comparisons below (grid-on-states/subs only); CaptureLayout still records the
+            // special positions whenever a block is emitted for state/sub reasons.
             private static bool IsDefaultLayout(AnimatorStateMachine sm, bool isRoot)
             {
                 int i = 0;
