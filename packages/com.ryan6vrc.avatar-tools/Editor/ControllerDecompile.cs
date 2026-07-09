@@ -413,7 +413,99 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var t in ast.transitions)
                     st.Transitions.Add(DecodeStateTransition(t, owner, "state '" + ast.name + "'"));
 
+                CompletenessSweep(ast, StateAware, "state", "'" + ast.name + "'");
                 return st;
+            }
+
+            // ----- decode completeness census (make the decoder witness its own coverage) -----
+            //
+            // The decoders above are a hand-maintained allowlist: a Unity field they don't explicitly bind (or
+            // refuse) is SILENTLY dropped on import — the recurring silent-loss family. The census inverts that:
+            // it sweeps every serialized property of a decoded object and REFUSES any non-default one the decode
+            // path does not account for. So a behaviour-affecting field the decoder forgot — or one a future SDK
+            // adds — fails loud until someone consciously classifies it (consume it, or list it below), instead
+            // of dropping on omission. Complex/collection properties (arrays, structs, vectors) are left to the
+            // recursive decoders; the sweep judges only the scalar leaf types it can compare to a default.
+            //
+            // Each `*Aware` set names the scalar properties the decode path consumes, refuses, or deliberately
+            // ignores as editor-cosmetic. A property here is NOT swept; everything else non-default is refused.
+            // NOT listed (⇒ swept ⇒ refused when set): m_CycleOffset, m_IKOnFeet, m_Tag (state); m_TransitionOffset
+            // (transition) — the four this census was added to catch.
+
+            private static readonly HashSet<string> UniversalIgnore = new HashSet<string>
+            {
+                "m_ObjectHideFlags", "m_CorrespondingSourceObject", "m_PrefabInstance", "m_PrefabAsset",
+                "m_PrefabInternal", "m_GameObject", "m_Enabled", "m_EditorHideFlags", "m_Script",
+                "m_EditorClassIdentifier", "m_Name",
+            };
+
+            private static readonly HashSet<string> StateAware = new HashSet<string>
+            {
+                "m_Speed", "m_Motion", "m_Transitions", "m_WriteDefaultValues", "m_Mirror",
+                "m_SpeedParameterActive", "m_MirrorParameterActive", "m_CycleOffsetParameterActive",
+                "m_TimeParameterActive", "m_SpeedParameter", "m_MirrorParameter", "m_CycleOffsetParameter",
+                "m_TimeParameter", "m_StateMachineBehaviours", "m_Position",
+            };
+
+            private static readonly HashSet<string> StateTransitionAware = new HashSet<string>
+            {
+                "m_Conditions", "m_DstState", "m_DstStateMachine", "m_TransitionDuration", "m_ExitTime",
+                "m_HasExitTime", "m_HasFixedDuration", "m_InterruptionSource", "m_OrderedInterruption",
+                "m_Mute", "m_Solo", "m_CanTransitionToSelf", "m_IsExit",
+            };
+
+            private static readonly HashSet<string> EntryTransitionAware = new HashSet<string>
+            {
+                "m_Conditions", "m_DstState", "m_DstStateMachine", "m_IsExit", "m_Mute", "m_Solo",
+            };
+
+            private static readonly HashSet<string> BlendTreeAware = new HashSet<string>
+            {
+                "m_BlendType", "m_BlendParameter", "m_BlendParameterY", "m_Childs",
+                "m_MinThreshold", "m_MaxThreshold", "m_UseAutomaticThresholds", "m_NormalizedBlendValues",
+            };
+
+            private void CompletenessSweep(Object o, HashSet<string> aware, string kind, string loc)
+            {
+                if (o == null) return;
+                using (var so = new SerializedObject(o))
+                {
+                    var it = so.GetIterator();
+                    for (bool ok = it.Next(true); ok; ok = it.Next(false)) // Next (not NextVisible) — hidden fields count too
+                    {
+                        if (it.depth != 0) continue; // top-level scalars only; collections are the decoders' job
+                        string n = it.name;
+                        if (UniversalIgnore.Contains(n) || aware.Contains(n)) continue;
+                        if (NonDefaultScalar(it, out string shown))
+                            _result.Refusals.Add($"{kind} {loc}: field '{Strip(n)}'{shown} is out of vocabulary — no schema field binds it (silently dropped)");
+                    }
+                }
+            }
+
+            private static string Strip(string n) => n.StartsWith("m_") ? n.Substring(2) : n;
+
+            // True when a scalar leaf property differs from its type's default; `shown` is a value hint for the
+            // refusal. Non-scalar / unknown types return false (left to the recursive decoders) so the sweep
+            // never false-positives on an array, vector, or struct it does not model.
+            private static bool NonDefaultScalar(SerializedProperty p, out string shown)
+            {
+                shown = "";
+                switch (p.propertyType)
+                {
+                    case SerializedPropertyType.Boolean: return p.boolValue;
+                    case SerializedPropertyType.Integer:
+                        if (p.intValue != 0) { shown = $" ({p.intValue})"; return true; } return false;
+                    case SerializedPropertyType.Float:
+                        if (Mathf.Abs(p.floatValue) > 1e-6f) { shown = $" ({p.floatValue})"; return true; } return false;
+                    case SerializedPropertyType.String:
+                        if (!string.IsNullOrEmpty(p.stringValue)) { shown = $" ('{p.stringValue}')"; return true; } return false;
+                    case SerializedPropertyType.Enum:
+                        if (p.enumValueIndex != 0) { shown = $" ({p.enumValueIndex})"; return true; } return false;
+                    case SerializedPropertyType.ObjectReference:
+                        return p.objectReferenceValue != null || p.objectReferenceInstanceIDValue != 0;
+                    default:
+                        return false; // vectors / generic structs / arrays — not the sweep's concern
+                }
             }
 
             // A null motion slot that still carries a serialized object reference (instanceID != 0) is a
@@ -443,6 +535,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 tr.Interruption = t.interruptionSource == TransitionInterruptionSource.None
                     ? (TransitionInterruption?)null : MapInterruption(t.interruptionSource, loc);
                 tr.OrderedInterruption = t.orderedInterruption ? (bool?)null : false;
+                CompletenessSweep(t, StateTransitionAware, "transition from", loc);
                 return tr;
             }
 
@@ -457,6 +550,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     _result.Refusals.Add($"transition from {loc}: entry transition carries mute/solo, which the entry ladder cannot express");
                 SetTarget(tr, t, srcSm, loc);
                 tr.When = DecodeConditions(t.conditions, loc);
+                CompletenessSweep(t, EntryTransitionAware, "transition from", loc);
                 return tr;
             }
 
@@ -612,6 +706,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         spec.Children.Add(tc);
                     }
                 }
+                CompletenessSweep(bt, BlendTreeAware, "blend tree", loc);
                 return spec;
             }
 

@@ -778,6 +778,79 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
+    // ---- Review-5: the decode completeness census refuses non-default unconsumed fields -------------------
+
+    [Test]
+    public void Walk_State_CycleOffset_Refuses()
+    {
+        var c = new AnimatorController { name = "CycleOff_Fx" };
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        st.cycleOffset = 0.5f;
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("CycleOffset") && r.Contains("'S'")),
+            "a non-default state cycleOffset -> census refusal");
+        Object.DestroyImmediate(c);
+    }
+
+    [Test]
+    public void Walk_State_IkOnFeet_Refuses()
+    {
+        var c = new AnimatorController { name = "IkFeet_Fx" };
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        st.iKOnFeet = true;
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("IKOnFeet") && r.Contains("'S'")),
+            "a state with foot IK (iKOnFeet) -> census refusal");
+        Object.DestroyImmediate(c);
+    }
+
+    [Test]
+    public void Walk_State_Tag_Refuses()
+    {
+        var c = new AnimatorController { name = "Tag_Fx" };
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        st.tag = "MyTag";
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("'MyTag'")),
+            "a state carrying a tag -> census refusal");
+        Object.DestroyImmediate(c);
+    }
+
+    [Test]
+    public void Walk_Transition_Offset_Refuses()
+    {
+        var c = new AnimatorController { name = "TransOff_Fx" };
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        var s = sm.AddState("S");
+        var t = sm.AddState("T");
+        var tr = s.AddTransition(t);
+        tr.offset = 0.3f;
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("Offset") && r.Contains("state 'S'")),
+            "a non-default transition offset -> census refusal");
+        Object.DestroyImmediate(c);
+    }
+
+    [Test]
+    public void Walk_Plain_State_And_Transition_No_Census_Refusals()
+    {
+        // The census must not false-positive on a controller whose only non-defaults are consumed fields.
+        var c = new AnimatorController { name = "Plain_Fx" };
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        var s = sm.AddState("S");
+        var t = sm.AddState("T");
+        s.AddTransition(t);
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsFalse(w.Refusals.Any(r => r.Contains("no schema field binds it")),
+            "a plain state/transition triggers no census refusal");
+        Object.DestroyImmediate(c);
+    }
+
     private static void EnsureScratch()
     {
         if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");
