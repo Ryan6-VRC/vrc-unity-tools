@@ -1,0 +1,56 @@
+# covers: all five blend-tree kinds nested; directWeight/normalized/timeScale(neg)/paramY;
+#         1D threshold + 2D x/y; tree-child mirror + cycleOffset; state speed + mirror.
+schema: 1
+controller: Blendtrees_Fx
+basis: avatar-root
+role: fx
+defaults:
+  writeDefaults: on
+parameters:
+  BlendX: { type: float, default: 0.0 }
+  BlendY: { type: float, default: 0.0 }
+  Dir:    { type: float, default: 0.5 }
+  W1:     { type: float, default: 0.5 }
+  W2:     { type: float, default: 0.5 }
+  Out:    { type: float, aap: true }
+layers:
+  - name: Trees
+    states:
+      All:
+        speed: 1.5
+        mirror: true
+        motion:
+          tree: direct
+          normalized: false
+          children:
+            - directWeight: W1
+              tree: 1d
+              param: Dir
+              children:
+                - { clip: aap_min, threshold: 0.0 }
+                - { clip: aap_max, threshold: 1.0, timeScale: -1.0 }
+            - directWeight: W2
+              tree: simpleDirectional2d
+              param: BlendX
+              paramY: BlendY
+              children:
+                - { clip: aap_min, x: -1.0, y: 0.0 }
+                - { clip: aap_max, x: 1.0, y: 0.0, mirror: true }
+            - directWeight: W1
+              tree: freeformDirectional2d
+              param: BlendX
+              paramY: BlendY
+              children:
+                - { clip: aap_min, x: 0.0, y: -1.0 }
+                - { clip: aap_max, x: 0.0, y: 1.0, cycleOffset: 0.25 }
+            - directWeight: W2
+              tree: freeformCartesian2d
+              param: BlendX
+              paramY: BlendY
+              children:
+                - { clip: aap_min, x: 0.0, y: 0.0 }
+                - { clip: aap_max, x: 1.0, y: 1.0 }
+    default: All
+clips:
+  aap_min: { set: { Out: 0.0 } }
+  aap_max: { set: { Out: 1.0 } }
