@@ -657,8 +657,40 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 case "any": BindLadder(sm.AnyLadder, ToList(value, $"{ctx}.any"), anyLadder: true); return true;
                 case "default": sm.DefaultState = ToStr(value, $"{ctx}.default"); return true;
                 case "behaviours": BindBehaviours(sm.Behaviours, ToList(value, $"{ctx}.behaviours")); return true;
+                case "layout": BindLayout(sm, ToMap(value, $"{ctx}.layout"), ctx); return true;
                 default: return false;
             }
+        }
+
+        private static void BindLayout(StateMachine sm, Dictionary<string, object> map, string ctx)
+        {
+            var layout = new MachineLayout();
+            foreach (var kv in map)
+            {
+                switch (kv.Key)
+                {
+                    case "nodes":
+                        foreach (var nk in ToMap(kv.Value, $"{ctx}.layout.nodes"))
+                            layout.Nodes[nk.Key] = ToCoord(nk.Value, $"{ctx}.layout.nodes.{nk.Key}");
+                        break;
+                    case "entry":  layout.Entry  = ToCoord(kv.Value, $"{ctx}.layout.entry"); break;
+                    case "any":    layout.Any    = ToCoord(kv.Value, $"{ctx}.layout.any"); break;
+                    case "exit":   layout.Exit   = ToCoord(kv.Value, $"{ctx}.layout.exit"); break;
+                    case "parent": layout.Parent = ToCoord(kv.Value, $"{ctx}.layout.parent"); break;
+                    default: throw new SchemaException($"{ctx}.layout: unknown field '{kv.Key}'");
+                }
+            }
+            sm.Layout = layout;
+        }
+
+        // A coordinate is a flow list of exactly two numbers -> float[2]. Malformed shape fails by context;
+        // a non-numeric element fails through ToNumber's own named throw.
+        private static float[] ToCoord(object value, string ctx)
+        {
+            var list = ToList(value, ctx);
+            if (list.Count != 2)
+                throw new SchemaException($"{ctx}: coordinate must be [x, y] (two numbers), got {list.Count}");
+            return new[] { ToNumber(list[0], ctx), ToNumber(list[1], ctx) };
         }
 
         // A sub-machine body is a pure machine body (no layer-level keys) that recurses through the same

@@ -82,6 +82,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             foreach (var sub in sm.Machines)
                 if (sub != null && sub.Machine != null) WalkMachine(sub.Machine, layer, paramTypes, clips, errors);
+
+            if (sm.Layout != null)
+                foreach (var key in sm.Layout.Nodes.Keys)
+                {
+                    var raw = AddressPath.UnescapeSegment(key);
+                    if (!MachineHasMember(sm, raw))
+                        errors.Add($"# dangling-layout: layer '{layer}' layout node '{key}' names no state or submachine of its machine (at layer '{layer}')");
+                }
         }
 
         // Rule 3 — operator must be legal for the declared parameter type.
