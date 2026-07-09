@@ -1,0 +1,37 @@
+# covers: all seven VRC SMB kinds + camelCase enum tokens; driver set/add/copy/random; playAudio surface.
+schema: 1
+controller: Behaviours_Fx
+basis: avatar-root
+role: fx
+defaults:
+  writeDefaults: on
+parameters:
+  Work: { type: float, default: 0.0 }
+  Src:  { type: float, default: 0.0 }
+  Roll: { type: float, default: 0.0 }
+  bit0: bool
+layers:
+  - name: SMB
+    states:
+      Idle:
+        motion: ~
+        behaviours:
+          - driver:
+              localOnly: false
+              set:    { bit0: 1 }
+              add:    { Work: -0.5 }
+              copy:   { Roll: Src }
+              random: { Work: { min: 0, max: 1, chance: 0.5 } }
+          - tracking: { head: tracking, leftHand: animation, eyes: noChange }
+          - playableLayer: { layer: fx, goalWeight: 1, blendDuration: 0.25 }
+          - locomotion: { disableLocomotion: true }
+          - poseSpace: { enterPoseSpace: true, fixedDelay: true, delayTime: 0 }
+          - layerControl: { playable: fx, layer: 3, goalWeight: 1, blendDuration: 0.1 }
+          - playAudio:
+              sourcePath: "Head/Voice"
+              parameter: ""
+              volume: [ 1, 1 ]
+              playbackOrder: roundabout
+              volumeApply: alwaysApply
+              playOnEnter: true
+    default: Idle

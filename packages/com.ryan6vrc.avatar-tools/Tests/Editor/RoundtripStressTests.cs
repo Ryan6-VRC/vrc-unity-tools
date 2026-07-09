@@ -35,6 +35,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
         // The `name` argument MUST equal the fixture's `controller:` value (CompileTo loads <name>.controller).
         [TestCase("blendtrees.yaml", "Blendtrees_Fx")]
         [TestCase("addressing.yaml", "Addressing_Fx")]
+        [TestCase("behaviours.yaml", "Behaviours_Fx")]
         public void Fixpoint_AuthoredYaml(string fixture, string name)
         {
             string yaml = FixpointOracle.ReadPackageText(FixDir + "/" + fixture);
