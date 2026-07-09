@@ -227,7 +227,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // Seconds-only clip → inert carrier that ONLY gives the clip a genuine length. Bind a flat
                     // curve on a scratch ANIMATOR parameter (path="", typeof(Animator)) — NOT a non-existent
                     // GameObject path. An animator-property binding resolves against any avatar root (the root
-                    // always carries an Animator), so AnimatorLint's broken-binding rule stays clean when the
+                    // always carries an Animator), so CheckAnimator's broken-binding rule stays clean when the
                     // emitted controller is linted against a real avatar; a fake GO path would false-FAIL it.
                     if (!spec.Seconds.HasValue)
                         throw new EmitException(

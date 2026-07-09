@@ -14,7 +14,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// Read-only markdown DIGEST of an <see cref="AnimatorController"/> for the AI-assisted VRChat
     /// workflow — the semantic decode a coding agent needs to reason about an animator without opening
     /// the graph window. Walks parameters, layers (with the Write-Defaults ON/OFF/MIXED signal
-    /// AnimatorLint flags), every state (recursing sub-state-machines at any depth), the first-match
+    /// CheckAnimator flags), every state (recursing sub-state-machines at any depth), the first-match
     /// transition ladder with real parameter names, blend trees, and — the highest-value surface —
     /// VRC state-machine behaviours decoded typed (parameter drivers, tracking control, locomotion).
     ///

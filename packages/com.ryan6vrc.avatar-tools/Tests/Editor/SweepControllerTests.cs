@@ -41,10 +41,10 @@ public class SweepControllerTests
         _createdVendor = false;
     }
 
-    // ── Test 1: hidden-orphan removal (the whole point) + AnimatorLint advises it ──────────────────
+    // ── Test 1: hidden-orphan removal (the whole point) + CheckAnimator advises it ──────────────────
 
     [Test]
-    public void Hidden_orphan_removed_and_AnimatorLint_advises_it()
+    public void Hidden_orphan_removed_and_CheckAnimator_advises_it()
     {
         string path = Root + "/Hidden.controller";
         var ctrl = AnimatorController.CreateAnimatorControllerAtPath(path);
@@ -53,10 +53,10 @@ public class SweepControllerTests
         var hidden = AddOrphan<AnimatorState>(ctrl, "HID_Orphan", hide: true);
         Save(ctrl, path);
 
-        // AnimatorLint (post companion fix) must advise the hidden orphan — the detect half of the handoff.
-        var lintOrphans = AnimatorLintOrphanTokens(ctrl, path);
+        // CheckAnimator (post companion fix) must advise the hidden orphan — the detect half of the handoff.
+        var lintOrphans = CheckAnimatorOrphanTokens(ctrl, path);
         Assert.Contains("AnimatorState 'HID_Orphan'", lintOrphans,
-            "AnimatorLint must advise the HideInHierarchy orphan (regression: a reintroduced IsSubAsset gate hides it)");
+            "CheckAnimator must advise the HideInHierarchy orphan (regression: a reintroduced IsSubAsset gate hides it)");
 
         string summary = SweepController.Sweep(ctrl, false, false);
         Assert.GreaterOrEqual(AnimatorTestHelpers.Count(summary, "removed"), 1);
@@ -214,10 +214,10 @@ public class SweepControllerTests
         StringAssert.Contains("=> PASS", again);
     }
 
-    // ── Test 8: differential oracle vs AnimatorLint ───────────────────────────────────────────────
+    // ── Test 8: differential oracle vs CheckAnimator ───────────────────────────────────────────────
 
     [Test]
-    public void Differential_oracle_holds_against_AnimatorLint()
+    public void Differential_oracle_holds_against_CheckAnimator()
     {
         string path = Root + "/Oracle.controller";
         var ctrl = BuildMixedFixture(path); // reachable A/B + dead-end + hidden orphan + orphan BT + truly-orphan T
@@ -225,18 +225,18 @@ public class SweepControllerTests
         string preview = SweepController.Sweep(ctrl, false, true);
         var sweep = new HashSet<string>(AnimatorTestHelpers.Notes(preview));
         int deadEnds = AnimatorTestHelpers.Count(preview, "deadEndTransitions");
-        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("\\[AnimatorLint\\]"));
-        var lint = new HashSet<string>(AnimatorLintOrphanTokens(ctrl, path));
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("\\[CheckAnimator\\]"));
+        var lint = new HashSet<string>(CheckAnimatorOrphanTokens(ctrl, path));
 
-        // Oracle: {would-remove} − {dead-ends} == {AnimatorLint orphan advisories}. Realized as:
-        //  (a) every advisory is a would-remove (AnimatorLint ⊆ Sweep),
-        //  (b) the would-removes AnimatorLint omits are exactly the dead-ends: |Sweep − Lint| == deadEnds,
+        // Oracle: {would-remove} − {dead-ends} == {CheckAnimator orphan advisories}. Realized as:
+        //  (a) every advisory is a would-remove (CheckAnimator ⊆ Sweep),
+        //  (b) the would-removes CheckAnimator omits are exactly the dead-ends: |Sweep − Lint| == deadEnds,
         //      and each is transition-typed. The fixture names its truly-orphan transition so the only
         //      empty-named transition token is the dead-end (no token collision).
-        foreach (var l in lint) Assert.IsTrue(sweep.Contains(l), "AnimatorLint advisory not in would-remove: " + l);
+        foreach (var l in lint) Assert.IsTrue(sweep.Contains(l), "CheckAnimator advisory not in would-remove: " + l);
         var extra = new List<string>();
         foreach (var s in sweep) if (!lint.Contains(s)) extra.Add(s);
-        Assert.AreEqual(deadEnds, extra.Count, "Sweep − AnimatorLint must be exactly the dead-end set");
+        Assert.AreEqual(deadEnds, extra.Count, "Sweep − CheckAnimator must be exactly the dead-end set");
         foreach (var e in extra)
             StringAssert.StartsWith("AnimatorStateTransition", e, "the extra members are dead-end transitions");
     }
@@ -348,11 +348,11 @@ public class SweepControllerTests
         return false;
     }
 
-    // Run the (fixed) AnimatorLint and parse its markdown RunLog for orphanSubAsset "Type 'name'" tokens.
-    static List<string> AnimatorLintOrphanTokens(AnimatorController ctrl, string path)
+    // Run the (fixed) CheckAnimator and parse its markdown RunLog for orphanSubAsset "Type 'name'" tokens.
+    static List<string> CheckAnimatorOrphanTokens(AnimatorController ctrl, string path)
     {
         var tokens = new List<string>();
-        string ret = AnimatorLint.Lint(ctrl, "explicit", null, null, null);
+        string ret = CheckAnimator.Lint(ctrl, "explicit", null, null, null);
         int li = ret.IndexOf("log=");
         if (li < 0) return tokens;
         string rel = ret.Substring(li + 4).Trim();

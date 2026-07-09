@@ -7,8 +7,8 @@ using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 
 // Exercises the extracted ControllerRules.Run door directly on an IN-MEMORY (unsaved) controller — the shape
-// a future compiler hands it, with no AnimatorLint basis resolution and no asset I/O. The saved-asset surface
-// (and the byte-identical Emit rendering) is already characterized end-to-end by AnimatorLintRefactorTests
+// a future compiler hands it, with no CheckAnimator basis resolution and no asset I/O. The saved-asset surface
+// (and the byte-identical Emit rendering) is already characterized end-to-end by CheckAnimatorRefactorTests
 // through the Lint door; this pins only the raw Run contract, including the roots-empty broken-binding skip
 // the compiler relies on.
 public class ControllerRulesTests

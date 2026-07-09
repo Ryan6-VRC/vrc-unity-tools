@@ -7,16 +7,16 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 
-// Characterization guard for the AnimatorLint extraction refactor (T1). There were no prior AnimatorLint
+// Characterization guard for the CheckAnimator extraction refactor (T1). There were no prior CheckAnimator
 // tests — this pins the observable end-to-end contract (summary tokens + verdict) through the extracted
 // CollectUnresolvedBindings path, so a behavior drift in the shared helper is caught. Explicit basis keeps
 // broken-binding at error-tier, so one unresolved binding must FAIL.
 //
-// AnimatorLint.Lint resolves scene paths against the ACTIVE scene (its internal FindByHierarchyPath), which
+// CheckAnimator.Lint resolves scene paths against the ACTIVE scene (its internal FindByHierarchyPath), which
 // no preview scene can stand in for — so the fixtures live in the active scene and are torn down in place.
 // Nothing is saved: Ryan's real scene file is never written, and the temp controller/clip + emitted RunLog
 // are deleted in TearDown.
-public class AnimatorLintRefactorTests
+public class CheckAnimatorRefactorTests
 {
     private const string TmpDir = "Assets/AgentLintRefactorTmp";
     private const string AssetPath = TmpDir + "/RefactorTest.controller";
@@ -67,7 +67,7 @@ public class AnimatorLintRefactorTests
         // Emit logs the FAIL verdict via Debug.LogError; that is expected output, not a test failure.
         LogAssert.ignoreFailingMessages = true;
 
-        var result = AnimatorLint.Lint(controller, "explicit", null, AvatarName, AvatarName);
+        var result = CheckAnimator.Lint(controller, "explicit", null, AvatarName, AvatarName);
         _logPath = ExtractLogPath(result);
 
         StringAssert.Contains("brokenBinding=1", result,
@@ -79,10 +79,10 @@ public class AnimatorLintRefactorTests
     }
 
     // basis=auto BUG-FIX (not merely visibility): under a VRCFury FullController with rewriteBindings,
-    // AnimatorLint must apply those rules before resolving, so the (demoted) broken-binding COUNT is
+    // CheckAnimator must apply those rules before resolving, so the (demoted) broken-binding COUNT is
     // truthful. Without the fix, a path a declared rule relocates reads as unresolvable and inflates the
     // count with false sample offenders — the RemyDoll_Fx ~66-false-positive case, at unit scale. Verdict
-    // stays PASS (auto still demotes — the D1 error-tier decision is AvatarLint's charter, not imported here).
+    // stays PASS (auto still demotes — the D1 error-tier decision is CheckAvatar's charter, not imported here).
     [Test]
     public void AutoBasis_vrcfRewriteBindings_countIsTruthful()
     {
@@ -108,7 +108,7 @@ public class AnimatorLintRefactorTests
         AddVrcfFullControllerWithRewrite(prop, controller, ("Armature", "Nested/Armature", false));
 
         LogAssert.ignoreFailingMessages = true;
-        var result = AnimatorLint.Lint(controller, "auto", AvatarName + "/Prop");
+        var result = CheckAnimator.Lint(controller, "auto", AvatarName + "/Prop");
         _logPath = ExtractLogPath(result);
 
         StringAssert.Contains("brokenBinding=1", result,

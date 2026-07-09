@@ -14,7 +14,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
     /// Read-only markdown TOPOLOGY digest of a gimmick subtree — the SPACE-dimension companion to the
-    /// H report family's TIME dimension (ReportController / ReportClip / AnimatorLint). Walks a chosen
+    /// H report family's TIME dimension (ReportController / ReportClip / CheckAnimator). Walks a chosen
     /// subtree and renders, as factual tables, its VRC contacts, physbones (+ colliders), constraints
     /// (as a constrained→source edge-list with weights, affected-axis mask, and TargetTransform
     /// indirection made explicit), and its VRCFury AUTHORING inventory — plus a short Observations index

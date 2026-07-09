@@ -7,7 +7,7 @@
 // TransplantCore's guard/RunLog/whatIf shell, with DreadScripts' threading
 // (Task/ConcurrentBag/CancellationTokenSource) dropped to a synchronous walk and its EditorWindow shell
 // dropped for the house execute_code door. The reachability walk itself mirrors the synced-layer-correct
-// traversal of Ryan6Vrc.AgentTools.Editor.AnimatorLint.RuleOrphanSubAsset (the read-only detector this
+// traversal of Ryan6Vrc.AgentTools.Editor.CheckAnimator.RuleOrphanSubAsset (the read-only detector this
 // tool is the mutating other half of). This file does NOT depend on or call the source package.
 //
 // DreadScripts ControllerCleaner © Dreadrith, rehosted by VRLabs — MIT License
@@ -25,7 +25,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
     /// Sweeps an <see cref="AnimatorController"/>'s orphaned sub-assets — the mutating other half of the
-    /// read-only <see cref="AnimatorLint"/>. It (1) DESTROYS every controller sub-asset of the five
+    /// read-only <see cref="CheckAnimator"/>. It (1) DESTROYS every controller sub-asset of the five
     /// animator types (<see cref="AnimatorStateMachine"/> / <see cref="AnimatorState"/> /
     /// <see cref="BlendTree"/> / <see cref="StateMachineBehaviour"/> / <see cref="AnimatorTransitionBase"/>)
     /// that the reachability walk does not reach, (2) treats a non-null but dead-end transition (resolves
@@ -33,14 +33,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// unreachable and removes it too, and (3) compacts the null transition slots left behind. Mutates the
     /// <c>.controller</c> in place; the door is the static <see cref="Sweep"/> call (no menu).
     ///
-    /// <para>The walk mirrors <c>AnimatorLint.RuleOrphanSubAsset</c>: synced-layer-correct (a synced
+    /// <para>The walk mirrors <c>CheckAnimator.RuleOrphanSubAsset</c>: synced-layer-correct (a synced
     /// layer's per-state OVERRIDE motions/behaviours via <see cref="AnimatorControllerLayer.GetOverrideMotion"/>
     /// / <c>GetOverrideBehaviours</c> are marked, so an override BlendTree is never false-swept), and
     /// <c>is</c>-based type matching (so VRC <see cref="StateMachineBehaviour"/> subclasses are covered).
     /// The two walks are deliberately allowed to diverge — this one's transition-marking is dead-end-aware,
-    /// AnimatorLint's is not — and are kept honest by the differential-oracle test, not by sharing code.</para>
+    /// CheckAnimator's is not — and are kept honest by the differential-oracle test, not by sharing code.</para>
     ///
-    /// <para><b>KNOWN SMB BOUND (load-bearing for a remover, inherited from AnimatorLint).</b>
+    /// <para><b>KNOWN SMB BOUND (load-bearing for a remover, inherited from CheckAnimator).</b>
     /// StateMachineBehaviours are marked reachable, but their serialized references are NOT followed. If
     /// some exotic SMB held a controller sub-asset reference, this walk would not see it and could sweep a
     /// live sub-asset. No standard VRC/Unity SMB holds a controller sub-asset ref, so a full
@@ -183,7 +183,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // and AssetDatabase.IsSubAsset returns FALSE for the HideInHierarchy animator sub-objects a
                 // controller is made of — which is what real orphans are. Verified live against 67 real-world
                 // controllers: of the orphan objects, ~97% were hidden (0 satisfied IsSubAsset). Gating on
-                // IsSubAsset (as a naive mirror of AnimatorLint's old predicate did) would leave the actual
+                // IsSubAsset (as a naive mirror of CheckAnimator's old predicate did) would leave the actual
                 // bloat behind. o != controller + the five-type filter + !reachable is the real gate.
                 // Two views of the same set: the List preserves discovery order for the auditable `notes`,
                 // the HashSet gives O(1) Contains for the slot-compaction predicate (CountObsoleteSlots).
