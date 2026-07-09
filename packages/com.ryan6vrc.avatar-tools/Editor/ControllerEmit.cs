@@ -329,13 +329,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // Most animatable components live in Transform's assembly (UnityEngine.CoreModule).
                 var t = typeof(Transform).Assembly.GetType("UnityEngine." + typeName);
                 if (t != null) return t;
-                // Fallback: any loaded UnityEngine.Object type whose simple name matches.
+                // Fallback: a `UnityEngine.<typeName>` type in any other loaded module assembly (e.g.
+                // UnityEngine.AudioSource in AudioModule). This resolves ONLY the UnityEngine namespace.
                 foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                 {
                     var byNs = asm.GetType("UnityEngine." + typeName);
                     if (byNs != null) return byNs;
                 }
-                throw new EmitException($"clip binding component type '{typeName}' could not be resolved to a UnityEngine type");
+                // SCOPE (kickoff item V, gap 1 — decided intentional, NOT a resolver bug): inline clip bindings
+                // resolve UnityEngine-namespace component types only. That is the entire authored surface
+                // (Renderer/SkinnedMeshRenderer/MeshRenderer/Light/Transform/GameObject + material & blendShape
+                // sub-properties — docs/animator-schema.md §clips). A UI or VRC-SDK component (e.g.
+                // UnityEngine.UI.Image, whose simple name is not under `UnityEngine.`) is deliberately out of
+                // scope; do not broaden this lookup on speculation. If a real need appears, widen here AND
+                // document it in the schema — never one silently.
+                throw new EmitException($"clip binding component type '{typeName}' could not be resolved to a "
+                    + "UnityEngine-namespace component — inline bindings resolve UnityEngine component types only "
+                    + "(UI / VRC-SDK components are out of scope); check the type name or bind a supported UnityEngine component");
             }
 
             // ----- layers / states / transitions -----
