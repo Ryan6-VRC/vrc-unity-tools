@@ -228,5 +228,40 @@ namespace Ryan6Vrc.AvatarTools.Tests
                 var a = sm.AddState("A"); var b = sm.AddState("B");
                 a.AddTransition(b).AddCondition(AnimatorConditionMode.If, 0, "a,b");
             }, "a,b");
+
+        // ── Arm C: import-tolerance coverage (decode-side normalization, neither clean nor refusal) ──
+        [Test]
+        public void Tolerance_MixedWriteDefaults_HoistsToModal()
+        {
+            var rc = AnimatorController.CreateAnimatorControllerAtPath(TestRoot + "/MixedWD_Fx.controller");
+            var sm = rc.layers[0].stateMachine;
+            foreach (var n in new[] { "A", "B", "C" }) sm.AddState(n).writeDefaultValues = true;  // majority on
+            sm.AddState("D").writeDefaultValues = false;                                            // minority off
+            AssetDatabase.SaveAssets();
+
+            var w = ControllerDecompile.Walk(rc);
+            Assert.IsEmpty(w.Refusals, "mixed WD is tolerated, not refused");
+            string yaml = AnimatorSchemaEmit.Serialize(w.Doc);
+            StringAssert.Contains("writeDefaults: false", yaml, "the minority state keeps an explicit override");
+            Assert.IsTrue(w.Notes.Exists(n => n.ToLower().Contains("write default")),
+                "the mixed-WD tolerance is recorded in Notes");
+        }
+
+        [Test]
+        public void Tolerance_EmptyTimeParameter_NormalizesToUnboundMotionTime()
+        {
+            var rc = AnimatorController.CreateAnimatorControllerAtPath(TestRoot + "/EmptyTP_Fx.controller");
+            var s = rc.layers[0].stateMachine.AddState("S");
+            s.timeParameterActive = true;
+            s.timeParameter = "";                    // active but empty -> the vendor-Gesture tolerance
+            AssetDatabase.SaveAssets();
+
+            var w = ControllerDecompile.Walk(rc);
+            Assert.IsEmpty(w.Refusals, "empty timeParameter is tolerated, not refused");
+            string yaml = AnimatorSchemaEmit.Serialize(w.Doc);
+            StringAssert.DoesNotContain("motionTimeParam", yaml, "normalized to unbound motion time");
+            Assert.IsTrue(w.Notes.Exists(n => n.ToLower().Contains("time")),
+                "the timeParameter tolerance is recorded in Notes");
+        }
     }
 }
