@@ -82,7 +82,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // The addressable-specifics surface the agent reads via read_console. Family grammar: prefix
-        // [PlayGate], verdict token => FAIL (matching [GimmickReport] … => OK). Tone model: the run_tests
+        // [PlayGate], verdict token => FAIL (matching [ReportGimmick] … => OK). Tone model: the run_tests
         // deny reason — a refusal that names its own fix.
         private static void EmitConsole(PlayGateCore.PlayGateResult result)
         {

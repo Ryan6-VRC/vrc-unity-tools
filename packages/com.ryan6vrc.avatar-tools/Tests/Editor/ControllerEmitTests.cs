@@ -78,7 +78,7 @@ public class ControllerEmitTests
         var bindings = AnimationUtility.GetCurveBindings(timer);
         Assert.AreEqual(1, bindings.Length, "exactly one carrier curve");
         // The carrier animates a scratch ANIMATOR parameter (path="", type=Animator), NOT a fake GameObject
-        // path — an animator-property binding resolves against any avatar root, so AnimatorLint's broken-binding
+        // path — an animator-property binding resolves against any avatar root, so CheckAnimator's broken-binding
         // rule stays clean when the emitted controller is linted against a real avatar.
         Assert.AreEqual("", bindings[0].path, "animator-param carrier, not a scene path");
         Assert.AreEqual(typeof(Animator), bindings[0].type);

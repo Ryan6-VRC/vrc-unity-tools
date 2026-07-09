@@ -2,7 +2,7 @@
   "name": "com.ryan6vrc.avatar-tools",
   "version": "0.1.0",
   "displayName": "Ryan6VRC Avatar Tools",
-  "description": "Agent-callable build tools for making owned, editable copies of vendor VRChat avatars: package graph + composable transplant tools (materials, rig, descriptor, dynamics, FX), plus clip/material editor utilities (expression-clip normalize, HSVG split, material remap, duplicate+constrain).",
+  "description": "Agent-callable build tools for making owned, editable copies of vendor VRChat avatars: package graph + composable transplant tools (materials, rig, descriptor, dynamics, FX), plus clip/material editor utilities (expression-clip normalize, material remap, constrained-duplicate).",
   "unity": "2022.3",
   "author": { "name": "Ryan6-VRC" },
   "license": "MIT",

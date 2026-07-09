@@ -7,7 +7,7 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 using UnityEngine.SceneManagement;
-using static Ryan6Vrc.AgentTools.Editor.AnimatorLint; // FrameKind / FrameResult / TryMaFrame / TryVrcfFrame / CollectUnresolvedBindings
+using static Ryan6Vrc.AgentTools.Editor.CheckAnimator; // FrameKind / FrameResult / TryMaFrame / TryVrcfFrame / CollectUnresolvedBindings
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
@@ -30,7 +30,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// finding (bad input alone bare-FAILs). No computed near-miss/absent/N-of-M heuristic: the tool names
     /// offenders and their class; the compose agent applies discretion (broken refs are often intentional).
     ///
-    /// Clip-binding detection REUSES <see cref="AnimatorLint"/>'s frame-detection + binding-walk +
+    /// Clip-binding detection REUSES <see cref="CheckAnimator"/>'s frame-detection + binding-walk +
     /// humanoid-curve-skip (called, not re-expressed) with the build-rewrite demotion flipped off. The
     /// surface enumeration, the VRCF ancestor-walk, and the fail-loud frame guards are net-new here.
     ///
@@ -38,7 +38,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// but its own RunLog. NEVER throws: every reflective hop is guarded and degrades with a loud warning.
     /// </summary>
     [AgentTool]
-    public static class AvatarLint
+    public static class CheckAvatar
     {
         private const string MaObjRefTypeName = "nadena.dev.modular_avatar.core.AvatarObjectReference";
         private const string MaAvatarRootSentinel = "$$$AVATAR_ROOT$$$"; // AvatarObjectReference.AVATAR_ROOT
@@ -51,7 +51,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             "expecting a post-merge location) are not distinguished, and an unresolved binding there may be " +
             "intentional. Build-time object *deletions* (as opposed to moves) are also not visible here.";
 
-        // Two in-scene-unresolved patterns AvatarLint surfaces honestly but does NOT auto-fix — commonly
+        // Two in-scene-unresolved patterns CheckAvatar surfaces honestly but does NOT auto-fix — commonly
         // intentional, left to model discretion (spec §Known limitations). Stated on every run.
         private const string DiscretionLimitsLine =
             "Known limitations, left to model discretion (not auto-resolved): (1) an Armature-Link-relocated bone " +
@@ -83,9 +83,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Classify the MA-scene-ref and clip-binding reference breaks on the in-scene avatar at
         /// <paramref name="avatarRoot"/> (a scene hierarchy path, else numeric instance id, else name —
-        /// mirrors AvatarGrab's target resolution). Returns a one-line summary; a real run ends with the
+        /// mirrors RenderAvatar's target resolution). Returns a one-line summary; a real run ends with the
         /// RunLog path in-band (<c>… =&gt; PASS|CLASSIFY | log=&lt;path&gt;</c>). Bad input (root not found /
-        /// no VRCAvatarDescriptor) is a bare <c>[AvatarLint] FAIL: …</c> with no trailer.</summary>
+        /// no VRCAvatarDescriptor) is a bare <c>[CheckAvatar] FAIL: …</c> with no trailer.</summary>
         public static string Inspect(string avatarRoot)
         {
             var avatarGO = Resolve(avatarRoot);
@@ -151,7 +151,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 ScanSceneRefs(c, avatarGO, rep);
             }
 
-            // ---- Clip-binding classification (reuse AnimatorLint's walk, demotion off) -----------------
+            // ---- Clip-binding classification (reuse CheckAnimator's walk, demotion off) -----------------
             // Dedup per unique (controller, clip, binding path, binding type): one authored curve expands to
             // several component curves (a Transform's position x/y/z, a rotation's quaternion) that share a
             // path+type, and a controller shared across frames is walked once per frame — all the same break.
@@ -233,10 +233,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         // bindings (never drops it), so an unreflected frame field can't yield a false PASS.
         private static void SurfaceUnreflected(Component c, string anchor, Report rep)
         {
-            string msg = "[AvatarLint] frame field '" + anchor + "' on " + c.GetType().Name + " @ " + PathOf(c.gameObject)
+            string msg = "[CheckAvatar] frame field '" + anchor + "' on " + c.GetType().Name + " @ " + PathOf(c.gameObject)
                        + " did not reflect — surfacing the merged animator anyway (not dropped); its frame is best-effort.";
             Debug.LogWarning(msg);
-            rep.Notes.Add("fail-loud (R-H): " + msg.Substring("[AvatarLint] ".Length));
+            rep.Notes.Add("fail-loud (R-H): " + msg.Substring("[CheckAvatar] ".Length));
         }
 
         // R-K: iff a Relative MA's relativePathRoot is SET (non-empty referencePath) yet does not resolve,
@@ -265,7 +265,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // Walk serialized properties generically (precedent: RemapReferencesByPath). A property carrying both
         // a referencePath(string) child and a targetObject(objref) child is an AvatarObjectReference. Only a
-        // SET ref (non-empty referencePath — MA treats an empty path as "unset", exactly like ImportVerify's
+        // SET ref (non-empty referencePath — MA treats an empty path as "unset", exactly like CheckPackage's
         // clean-zero) is validated; unset refs are the intentional-empty case and never counted.
         private static void ScanSceneRefs(Component c, GameObject avatarGO, Report rep)
         {
@@ -349,7 +349,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             else if (reason == null) reason = "boxedValue was null";
 
             // ---- Guarded self-resolve from the children already located --------------------------------
-            Debug.LogWarning("[AvatarLint] scene-ref resolve degraded on " + PathOf(host.gameObject)
+            Debug.LogWarning("[CheckAvatar] scene-ref resolve degraded on " + PathOf(host.gameObject)
                            + " (" + reason + ") — self-resolving from serialized children (targetObject-first, then referencePath).");
 
             var targetGO = targetChild != null ? targetChild.objectReferenceValue as GameObject : null;
@@ -359,14 +359,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             return avatarGO.transform.Find(refPath) != null;
         }
 
-        // ── Clip-binding walk (REUSE — AnimatorLint.CollectUnresolvedBindings, demotion off) ────────────
-        // The demotion (BrokenBindingIsError = !buildRewrite) lives in AnimatorLint.Emit, NOT in the walk —
+        // ── Clip-binding walk (REUSE — CheckAnimator.CollectUnresolvedBindings, demotion off) ────────────
+        // The demotion (BrokenBindingIsError = !buildRewrite) lives in CheckAnimator.Emit, NOT in the walk —
         // CollectUnresolvedBindings returns raw unresolved pairs, so calling it directly IS the "demotion
         // off" behaviour: under D1 every unresolved-in-scene binding is a real, non-advisory clip-binding
         // offender (mapped to CLASSIFY, never FAIL).
         private static IEnumerable<(AnimationClip clip, EditorCurveBinding binding)> CollectUnresolvedBindingsCalled(
             AnimatorController controller, List<GameObject> roots, Func<string, string> pathRewrite)
-            => AnimatorLint.CollectUnresolvedBindings(controller, roots, pathRewrite);
+            => CheckAnimator.CollectUnresolvedBindings(controller, roots, pathRewrite);
 
         // VRChat SDK proxy animations (Packages/com.vrchat.*/…/ProxyAnim/proxy_*.anim) are humanoid-muscle
         // placeholders the SDK swaps at runtime; their bone-path bindings never resolve to a scene object and
@@ -387,13 +387,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             string result = (maSceneRef > 0 || clipBinding > 0) ? "CLASSIFY" : "PASS";
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[AvatarLint] {0}: maSceneRef={1} clipBinding={2} => {3}",
+                "[CheckAvatar] {0}: maSceneRef={1} clipBinding={2} => {3}",
                 rep.Root.name, maSceneRef, clipBinding, result);
 
             var sb = new StringBuilder();
-            sb.Append("# AvatarLint: ").Append(rep.Root.name).Append('\n');
+            sb.Append("# CheckAvatar: ").Append(rep.Root.name).Append('\n');
             sb.Append("root: `").Append(PathOf(rep.Root)).Append("`  \n\n");
-            sb.Append(summary.Substring("[AvatarLint] ".Length)).Append('\n');
+            sb.Append(summary.Substring("[CheckAvatar] ".Length)).Append('\n');
 
             sb.Append("\n## Counts\n\n");
             sb.Append("- maSceneRef: ").Append(maSceneRef).Append('\n');
@@ -429,12 +429,12 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static string Refuse(string why)
         {
-            string err = "[AvatarLint] FAIL: " + why;
+            string err = "[CheckAvatar] FAIL: " + why;
             Debug.LogError(err);
             return err;
         }
 
-        // ── Scene resolver (path → instance id → name; mirrors AvatarGrab.Resolve, kept local) ──────────
+        // ── Scene resolver (path → instance id → name; mirrors RenderAvatar.Resolve, kept local) ──────────
 
         private static GameObject Resolve(string target)
         {

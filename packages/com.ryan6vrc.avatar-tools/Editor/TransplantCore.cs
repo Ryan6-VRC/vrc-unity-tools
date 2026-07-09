@@ -10,7 +10,7 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// Shared engine for the component-transplant tools (CopyComponents / RelocateComponents /
+    /// Shared engine for the component-transplant tools (CopyComponents / MoveComponents /
     /// GraftHierarchy). Tool-agnostic primitives only: type-name resolution, the session identity
     /// maps (<see cref="SessionMap"/>), the depth-N transforms-only scaffold builder
     /// (<see cref="ScaffoldBuilder"/>), and the shared RunLog/whatIf helpers. The deep-tier VRC
@@ -189,7 +189,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Write the RunLog, build the one-line summary with the RunLog path folded onto its tail,
         /// log it at the right severity (PASS → Log, else LogError), and return the summary. The
         /// single tail every transplant tool's Run funnels through — hoisted out of the three
-        /// byte-identical local copies (CopyComponents / RelocateComponents / GraftHierarchy).
+        /// byte-identical local copies (CopyComponents / MoveComponents / GraftHierarchy).
         /// </summary>
         public static string Finish(TransplantRunLog log, string label)
         {

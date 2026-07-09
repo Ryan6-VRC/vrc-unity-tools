@@ -55,7 +55,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     }
 
     /// <summary>
-    /// Third transplant tool (sibling to <see cref="CopyComponents"/> / <see cref="RelocateComponents"/>):
+    /// Third transplant tool (sibling to <see cref="CopyComponents"/> / <see cref="MoveComponents"/>):
     /// copies named GameObject SUBTREES WHOLESALE — the full structure plus ALL components on every GO —
     /// from a vendor source into our instance, remapped against the reach root. This is how an operator
     /// pulls an outfit's authoring tree / menu without listing every GameObject.

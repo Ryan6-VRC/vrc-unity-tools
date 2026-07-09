@@ -12,7 +12,7 @@ using Ryan6Vrc.AgentTools.Editor;
 // installed types, resolved by name via reflection AddComponent — the same path the core detects them on.
 // No synthetic stand-in matching a hazard's FullName exists: such a stub (equal to a possibly-wrong const)
 // is exactly what let the emulator rule go dead-but-green once, so the emulator tests must drive the real
-// type. The fail-closed reflection degradation is instead covered directly via GimmickReport.ReadBoolMember
+// type. The fail-closed reflection degradation is instead covered directly via ReportGimmick.ReadBoolMember
 // (a same-FullName-but-fieldless stub would reintroduce that masking risk and make Resolve ambiguous).
 
 public class PlayGateCoreTests
@@ -263,7 +263,7 @@ public class PlayGateCoreTests
     }
 
     // ── Fail-closed reflection degradation (the emulator-field safety property) ──────────────────────
-    // Drives GimmickReport.ReadBoolMember directly: a missing member returns null, which is what routes
+    // Drives ReportGimmick.ReadBoolMember directly: a missing member returns null, which is what routes
     // CheckEmulatorConfig into its loud "field(s) not reflectable" block. (Testing the integration branch
     // would need a stub with the emulator's exact FullName but no fields — the masking anti-pattern.)
 
@@ -273,14 +273,14 @@ public class PlayGateCoreTests
     public void ReadBoolMember_reads_present_bool_field()
     {
         var o = new BoolProbe();
-        Assert.AreEqual(true, GimmickReport.ReadBoolMember(o, o.GetType(), "Flag"));
+        Assert.AreEqual(true, ReportGimmick.ReadBoolMember(o, o.GetType(), "Flag"));
     }
 
     [Test]
     public void ReadBoolMember_returns_null_for_missing_member()
     {
         var o = new BoolProbe();
-        Assert.IsNull(GimmickReport.ReadBoolMember(o, o.GetType(), "NoSuchMember"));
+        Assert.IsNull(ReportGimmick.ReadBoolMember(o, o.GetType(), "NoSuchMember"));
     }
 
     // ── OverlaySummaryLine (deterministic, no text-width measurement) ────────────────────────────────
