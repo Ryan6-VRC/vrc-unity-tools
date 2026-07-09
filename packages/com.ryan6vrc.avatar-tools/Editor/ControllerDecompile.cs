@@ -319,7 +319,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 DetectExactDuplicates(sm.states.Where(x => x.state != null).Select(x => x.state.name), "state", sm);
                 DetectExactDuplicates(sm.stateMachines.Where(x => x.stateMachine != null).Select(x => x.stateMachine.name), "sub-machine", sm);
+                DetectCrossKindCollisions(sm);
                 DetectWhitespaceCollisions(sm);
+            }
+
+            // A direct state and a direct sub-machine may share a name (separate Unity collections). A bare
+            // target or `default:` addresses by name, and ResolveName resolves states before sub-machines — so
+            // a transition to the sub-machine would silently rewire to the state on recompile. Refuse (located).
+            private void DetectCrossKindCollisions(AnimatorStateMachine sm)
+            {
+                var stateNames = new HashSet<string>(sm.states.Where(x => x.state != null).Select(x => x.state.name));
+                foreach (var child in sm.stateMachines)
+                    if (child.stateMachine != null && stateNames.Contains(child.stateMachine.name))
+                        _result.Refusals.Add(
+                            $"state-machine '{PathLabel(sm)}': a direct state and a direct sub-machine are both named " +
+                            $"'{child.stateMachine.name}' — a bare target or default can't disambiguate them (states resolve first)");
             }
 
             private void DetectExactDuplicates(IEnumerable<string> rawNames, string kind, AnimatorStateMachine sm)
@@ -436,6 +450,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 var tr = new Transition();
                 string loc = "Entry in '" + PathLabel(srcSm) + "'";
+                // The entry ladder cannot express mute/solo (the parser refuses them there, and the emit path
+                // never reads them) — an entry transition carrying either would be a silent drop. Refuse it,
+                // the read-side mirror of the parser's entry mute/solo refusal.
+                if (t.mute || t.solo)
+                    _result.Refusals.Add($"transition from {loc}: entry transition carries mute/solo, which the entry ladder cannot express");
                 SetTarget(tr, t, srcSm, loc);
                 tr.When = DecodeConditions(t.conditions, loc);
                 return tr;

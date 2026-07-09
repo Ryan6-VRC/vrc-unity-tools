@@ -745,6 +745,39 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
+    // ---- Review-3 B: a direct state and direct sub-machine sharing a name -> a located refusal ------------
+
+    [Test]
+    public void Walk_State_And_SubMachine_Same_Name_Refuse()
+    {
+        var c = new AnimatorController { name = "CrossKind_Fx" };
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        sm.AddState("X");
+        sm.AddStateMachine("X"); // a sub-machine sharing the state's name (separate Unity collections)
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("both named") && r.Contains("'X'")),
+            "a state and a sub-machine of the same name -> located refusal");
+        Object.DestroyImmediate(c);
+    }
+
+    // ---- Review-3 C: a vendor entry transition carrying mute/solo -> a located refusal (read-side #3) ------
+
+    [Test]
+    public void Walk_Entry_Transition_With_Mute_Refuses()
+    {
+        var c = new AnimatorController { name = "EntryMute_Fx" };
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        var s = sm.AddState("S");
+        var et = sm.AddEntryTransition(s); // entry to a STATE = a ladder rung (not the sub-machine-default split)
+        et.mute = true;
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("entry transition carries mute/solo")),
+            "an entry transition with mute -> located refusal");
+        Object.DestroyImmediate(c);
+    }
+
     private static void EnsureScratch()
     {
         if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");

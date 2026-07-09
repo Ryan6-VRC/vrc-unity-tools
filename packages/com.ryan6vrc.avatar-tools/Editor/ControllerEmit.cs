@@ -432,6 +432,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     scope.Subs[sub.Name] = EmitMachine(layer, sub.Machine, childSm);
                 }
 
+                // A state and a sub-machine of the same name are both addressable by bare name, but ResolveName
+                // (and the default lookup) resolve states first — the sub-machine would be unreachable and a
+                // `default:` ambiguous. Fail loud on the ambiguous document rather than silently favour the state.
+                foreach (var subName in scope.Subs.Keys)
+                    if (scope.States.ContainsKey(subName))
+                        throw new EmitException($"machine '{target.name}': a state and a sub-machine are both named '{subName}' — a bare target or default can't address both (states resolve first)");
+
                 EmitBehaviours(model.Behaviours, t => target.AddStateMachineBehaviour(t));
                 return scope;
             }

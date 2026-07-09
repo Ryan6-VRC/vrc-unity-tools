@@ -35,7 +35,11 @@ using UnityEngine.TestTools;
 //           nested default — not an authored field; see ControllerDecompile) canonicalized to an explicit
 //           representable default.
 //     Every other byte is identical and NO authored default changes — the diff-category assertions below
-//     prove it. GoLoco is in the passing [TestCase] set via the stabilized form.
+//     prove it. Separately, the RAW C0 decode carries 3 entry-transition mute/solo refusals (editor debug
+//     residue the entry ladder can't express); they never reach the YAML (entry transitions don't emit
+//     mute/solo), so they are NOT a raw→owned byte diff — they are why the raw vendor decode is not
+//     refusal-free (the door refuses it), while the OWNED form is. GoLoco is in the passing [TestCase] set
+//     via the stabilized form.
 //
 // NOT run via MCP run_tests (it crashes the editor); run from the Test Runner window or batchmode CI. The
 // fixpoint fixtures live in the Plum-Remy project; in a project lacking them the case self-Ignores.
@@ -58,8 +62,19 @@ public class FixpointAcceptanceTests
         AssetDatabase.Refresh();
     }
 
-    private static string Decode(AnimatorController c)
-        => AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(c).Doc);
+    // The oracle must witness the fail-loud behaviour too: a refusal is a SIBLING of Doc, so serializing Doc
+    // alone would let a silently-dropped construct round-trip green while the real DecompileController door
+    // returns FAIL on the same controller. So the OWNED form (C1 onward) and every CLEAN fixture must decode
+    // refusal-free. requireClean is relaxed ONLY for a raw VENDOR (stabilized) C0 — a raw controller may carry
+    // out-of-vocabulary cruft the first compile normalizes away (e.g. GoLoco's editor mute/solo on 3 entry
+    // transitions; see the raw→owned categories above), and the door correctly refuses that raw input.
+    private static string Decode(AnimatorController c, bool requireClean = true)
+    {
+        var w = ControllerDecompile.Walk(c);
+        if (requireClean)
+            Assert.IsEmpty(w.Refusals, "fixpoint decode must be refusal-free — got: " + string.Join(" | ", w.Refusals));
+        return AnimatorSchemaEmit.Serialize(w.Doc);
+    }
 
     // Write yaml to a temp file, compile into a fresh sub-folder, return the loaded controller.
     private AnimatorController CompileTo(string yaml, string name, string tag)
@@ -88,7 +103,9 @@ public class FixpointAcceptanceTests
         var c0 = AssetDatabase.LoadAssetAtPath<AnimatorController>(fixturePath);
         if (c0 == null) Assert.Ignore("fixture not present in this project: " + fixturePath);
 
-        string yamlA = Decode(c0);           // raw vendor decompile
+        // Raw C0: a clean fixture must decode refusal-free; a raw vendor (stabilized) fixture may carry
+        // refusals the first compile normalizes (GoLoco's 3 entry mute/solo). The OWNED forms below always must.
+        string yamlA = Decode(c0, requireClean: clean); // raw vendor decompile
         var c1 = CompileTo(yamlA, name, "c1"); // own it once
         string yamlB = Decode(c1);           // the owned form
 

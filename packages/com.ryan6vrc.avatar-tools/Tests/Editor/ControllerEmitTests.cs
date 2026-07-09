@@ -502,6 +502,21 @@ layers:
     }
 
     [Test]
+    public void State_And_SubMachine_Same_Name_Fails_Loud()
+    {
+        // A state X and a sub-machine X in one machine: a bare target/default resolves states first, so the
+        // sub-machine is unaddressable — the ambiguous document must fail loud, not silently favour the state.
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: CrossKind_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n" +
+            "    states:\n      X: { motion: ~ }\n" +
+            "    machines:\n      X:\n        states:\n          A: { motion: ~ }\n        default: A\n" +
+            "    default: X\n", "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("both named 'X'", ex.Message);
+    }
+
+    [Test]
     public void LayerControl_NonIntegral_Layer_Fails_Loud()
     {
         // AsInt must not silently round a non-integral layer index to a different layer.
