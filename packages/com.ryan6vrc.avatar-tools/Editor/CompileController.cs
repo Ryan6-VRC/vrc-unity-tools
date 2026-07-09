@@ -95,14 +95,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string emitDir = whatIf ? tempFolder : cleanOut;
             string paramsPath = emitDir + "/" + name + "_Parameters.asset";
 
+            // Folders under outDir that this compile will create (emit's EnsureFolder makes them). Captured
+            // BEFORE emit so a failed FRESH compile can roll them back — the "nothing written on failure"
+            // contract covers folders too. Only ever these provably-new folders, and only when empty.
+            List<string> newFolders = whatIf ? null : NewFolders(cleanOut);
+
             // ── Out-of-band drift warning (real compile only, when an existing compiled asset is present) ─
             if (!whatIf) WarnIfOutOfBand(finalPath, text);
 
             // ── 4b. Emit into the target (real outDir, or the whatIf temp) ────────────────────────────
             ControllerEmit.EmitResult built;
             try { ControllerEmit.Build(doc, emitDir, text, out built); }
-            catch (ControllerEmit.EmitException ee) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted); return Fail("emit: " + ee.Message); }
-            catch (Exception e) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted); return Fail("emit: " + e.GetType().Name + ": " + e.Message); }
+            catch (ControllerEmit.EmitException ee) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders); return Fail("emit: " + ee.Message); }
+            catch (Exception e) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders); return Fail("emit: " + e.GetType().Name + ": " + e.Message); }
 
             // Persist the VRCExpressionParameters side-asset (ControllerEmit builds it in-memory only). REUSE an
             // existing asset IN PLACE — overwrite its parameters, never delete+recreate — so its GUID survives a
@@ -123,7 +128,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
             if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
             {
-                CleanupAfterLint(whatIf, tempFolder, finalPath, paramsPath, controllerPreExisted, paramsPreExisted);
+                CleanupAfterLint(whatIf, tempFolder, finalPath, paramsPath, controllerPreExisted, paramsPreExisted, newFolders);
                 string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
                 return Fail("post-emit graph lint (" + lint.Errors.Count + "): " + offenders);
             }
@@ -150,10 +155,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // ── Out-of-band edit detection ───────────────────────────────────────────────────────────────
-        // Before clobbering an EXISTING compiled controller, compare the srchash stamped in its provenance
-        // (the source that produced it) against the current source's hash. A mismatch means the on-disk
-        // controller no longer corresponds to the source we are compiling — it was compiled from a different
-        // source or hand-edited out of band. Best-effort: WARN and proceed, never block.
+        // Before clobbering an EXISTING controller at the target path, WARN if it does not correspond to the
+        // source we are about to compile — the recompile strips it in place. Two clobber cases, both warned:
+        //   (a) NO provenance marker → hand-authored, or produced by another tool. The highest-value case:
+        //       there is no srchash to compare, and any overwrite discards those edits.
+        //   (b) provenance present but its srchash differs from the current source → compiled from a
+        //       different source / hand-edited out of band since.
+        // Best-effort: WARN and proceed, never block.
         private static void WarnIfOutOfBand(string finalPath, string sourceText)
         {
             var existing = AssetDatabase.LoadAssetAtPath<AnimatorController>(finalPath);
@@ -161,7 +169,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var importer = AssetImporter.GetAtPath(finalPath);
             string ud = importer != null ? importer.userData : null;
             if (string.IsNullOrEmpty(ud) || ud.IndexOf("compiled-from:", StringComparison.Ordinal) < 0)
-                return; // not compiled by us (no provenance) — no drift to assert
+            {
+                Debug.LogWarning("[CompileController] overwriting '" + finalPath + "': the on-disk controller carries no "
+                    + "compile provenance — it was hand-authored or produced by another tool. This recompile strips it "
+                    + "in place and replaces it from the YAML source; any manual edits will be lost.");
+                return;
+            }
             string stored = ExtractField(ud, "srchash:");
             string current = ControllerEmit.SourceHash(sourceText ?? "");
             if (!string.IsNullOrEmpty(stored) && stored != current)
@@ -192,10 +205,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             bool defaultExitTime = doc.Defaults.TransitionHasExitTime;
             foreach (var layer in doc.Layers)
             {
-                var (chain, overBudget) = LongestFiringChain(layer, defaultExitTime);
-                if (overBudget)
+                var (chain, skipReason) = LongestFiringChain(layer, defaultExitTime);
+                if (skipReason != null)
                     lines.Add("layer '" + (layer.Name ?? "(unnamed)")
-                        + "' frame-latency advisory skipped — transition graph too dense to bound cheaply");
+                        + "' frame-latency advisory skipped — " + skipReason);
                 else if (chain != null && chain.Count >= 3)
                     lines.Add("layer '" + (layer.Name ?? "(unnamed)") + "' chain '" + string.Join("→", chain)
                         + "' is " + (chain.Count - 1) + " hops of latency (each conditional hop ~1 frame; an "
@@ -204,13 +217,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return lines;
         }
 
-        // Returns (longest firing chain, overBudget). overBudget=true means the DFS hit its step budget and the
-        // result is not trustworthy — the caller surfaces that rather than a possibly-wrong chain.
-        private static (List<string> chain, bool overBudget) LongestFiringChain(Layer layer, bool defaultExitTime)
+        // Returns (longest firing chain, skipReason). A non-null skipReason means the advisory could not be
+        // computed cheaply and the caller must SURFACE that omission (fail-loud) rather than emit nothing —
+        // either bound is a fail-loud "skipped" note, never a silent empty. An empty layer is not a skip:
+        // it returns (null, null) so nothing is said. chain is meaningful only when skipReason is null.
+        private static (List<string> chain, string skipReason) LongestFiringChain(Layer layer, bool defaultExitTime)
         {
             var states = new List<State>();
             layer.Root.CollectStates(states);
-            if (states.Count == 0 || states.Count > 128) return (null, false); // pathological-size guard
+            if (states.Count == 0) return (null, null);        // empty layer — nothing to advise
+            if (states.Count > 128)                            // node-count guard (longest-path is NP-hard)
+                return (null, "layer has " + states.Count + " states (>128) — too many to bound cheaply");
             var names = new HashSet<string>(states.Select(s => s.Name));
 
             var adj = new Dictionary<string, List<string>>();
@@ -247,7 +264,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 cur.RemoveAt(cur.Count - 1); onPath.Remove(node);
             }
             foreach (var s in states) { Dfs(s.Name); if (overBudget) break; }
-            return overBudget ? (null, true) : (best, false);
+            return overBudget ? (null, "transition graph too dense to bound cheaply") : (best, null);
         }
 
         // ── Advisory: AAP / driver isolation ─────────────────────────────────────────────────────────
@@ -385,10 +402,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // the just-created partial. An overwrite never reaches here mid-strip — ProofCompile clears the emit in
         // a temp before the prior controller is touched — so a pre-existing controller is left intact; the guard
         // is belt-and-suspenders.
-        private static void CleanupAfterEmit(bool whatIf, string tempFolder, string finalPath, bool controllerPreExisted)
+        private static void CleanupAfterEmit(bool whatIf, string tempFolder, string finalPath, bool controllerPreExisted,
+            List<string> newFolders)
         {
             if (whatIf) { if (tempFolder != null && AssetDatabase.IsValidFolder(tempFolder)) AssetDatabase.DeleteAsset(tempFolder); return; }
-            if (!controllerPreExisted) AssetDatabase.DeleteAsset(finalPath);
+            if (!controllerPreExisted) { AssetDatabase.DeleteAsset(finalPath); DeleteEmptyNewFolders(newFolders); }
         }
 
         // Post-emit lint failed after a successful emit — roll back so nothing that fails lint reaches outDir.
@@ -396,11 +414,45 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // guards make the atomicity local rather than resting on that cross-function invariant: delete ONLY a
         // freshly-created controller / params asset, never one that pre-existed the compile.
         private static void CleanupAfterLint(bool whatIf, string tempFolder, string finalPath, string paramsPath,
-            bool controllerPreExisted, bool paramsPreExisted)
+            bool controllerPreExisted, bool paramsPreExisted, List<string> newFolders)
         {
             if (whatIf) { if (tempFolder != null && AssetDatabase.IsValidFolder(tempFolder)) AssetDatabase.DeleteAsset(tempFolder); return; }
             if (!controllerPreExisted) AssetDatabase.DeleteAsset(finalPath);
             if (!paramsPreExisted && !string.IsNullOrEmpty(paramsPath)) AssetDatabase.DeleteAsset(paramsPath);
+            // Roll folders back only when nothing we created pre-existed — an overwrite keeps the folder (its
+            // prior controller lives there); a fresh compile that just deleted its only assets can shed them.
+            if (!controllerPreExisted) DeleteEmptyNewFolders(newFolders);
+        }
+
+        // The folders under `dir` (an Assets/-relative path) that do NOT yet exist — the ones a fresh emit's
+        // EnsureFolder will create. Deepest-LAST so rollback deletes in reverse. Empty when dir already exists.
+        private static List<string> NewFolders(string dir)
+        {
+            var missing = new List<string>();
+            var parts = dir.Split('/');
+            string cur = parts.Length > 0 ? parts[0] : dir; // "Assets"
+            for (int i = 1; i < parts.Length; i++)
+            {
+                cur = cur + "/" + parts[i];
+                if (!AssetDatabase.IsValidFolder(cur)) missing.Add(cur);
+            }
+            return missing;
+        }
+
+        // Delete the given provably-new folders (deepest-first) IFF each is empty — the rollback for a failed
+        // fresh compile. Guarded on emptiness so a folder that unexpectedly holds anything is never swept; only
+        // folders this compile created are ever passed in.
+        private static void DeleteEmptyNewFolders(List<string> newFolders)
+        {
+            if (newFolders == null) return;
+            for (int i = newFolders.Count - 1; i >= 0; i--)
+            {
+                string f = newFolders[i];
+                if (!AssetDatabase.IsValidFolder(f)) continue;
+                string abs = Path.GetFullPath(f);
+                if (Directory.Exists(abs) && Directory.GetFileSystemEntries(abs).Length == 0)
+                    AssetDatabase.DeleteAsset(f);
+            }
         }
 
         private static string Fail(string why)
