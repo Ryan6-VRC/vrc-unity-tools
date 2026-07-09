@@ -431,7 +431,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             File.WriteAllText(path, w.ToString());
             AssetDatabase.Refresh();
             Debug.Log($"[AgentInspector] snapshot {baseName} => OK | log={path}");
-            EditorGUIUtility.systemCopyBuffer = path; // path also on clipboard for human convenience
             return path;
         }
 

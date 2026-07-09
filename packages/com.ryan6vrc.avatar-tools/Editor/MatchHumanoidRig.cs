@@ -330,7 +330,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var path = TransplantCore.RunLogDir + "/verify_" + TransplantCore.Sanitize(label) + "_" + stamp + ".json";
                     File.WriteAllText(path, sb.ToString());
                     AssetDatabase.Refresh();
-                    EditorGUIUtility.systemCopyBuffer = path;
                     return path;
                 }
                 catch (Exception ex)
@@ -430,7 +429,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     + "}";
                 File.WriteAllText(path, content);
                 AssetDatabase.Refresh();
-                EditorGUIUtility.systemCopyBuffer = path;
                 logPath = path;
             }
             catch (Exception ex)
@@ -492,7 +490,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var path = TransplantCore.RunLogDir + "/verify_" + TransplantCore.Sanitize(label) + "_" + stamp + ".json";
                 File.WriteAllText(path, sb.ToString());
                 AssetDatabase.Refresh();
-                EditorGUIUtility.systemCopyBuffer = path;
                 return path;
             }
             catch (Exception ex)

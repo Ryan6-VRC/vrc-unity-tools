@@ -24,7 +24,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// Body-agnostic artifact writer the family's non-transplant emitters converge on. Writes
         /// <paramref name="body"/> verbatim (the caller's full artifact text, markdown or JSON) to
         /// <paramref name="dir"/> under a <see cref="Sanitize"/>d-<paramref name="label"/> + timestamp +
-        /// <paramref name="ext"/> filename; refreshes the AssetDatabase; copies the path to the clipboard;
+        /// <paramref name="ext"/> filename; refreshes the AssetDatabase;
         /// and on success returns <paramref name="summary"/> with the in-band trailer appended
         /// (<c>summary + " | log=" + path</c>). <paramref name="summary"/> is the one-line verdict WITHOUT
         /// the trailer (ends <c>=&gt; RESULT</c>). On write failure returns a bare-FAIL summary with NO
@@ -41,7 +41,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var path = dir + "/" + Sanitize(label) + "_" + stamp + ext;
                 File.WriteAllText(path, body);
                 AssetDatabase.Refresh();
-                EditorGUIUtility.systemCopyBuffer = path; // path also on clipboard for human convenience
                 return summary + " | log=" + path;
             }
             catch (Exception e)

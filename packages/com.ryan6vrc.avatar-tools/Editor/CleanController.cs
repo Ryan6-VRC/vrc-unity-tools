@@ -47,7 +47,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// create empty VRCExpressionParameters + VRCExpressionsMenu, and wire them into
         /// <paramref name="ownedRoot"/>'s VRCAvatarDescriptor.
         /// Returns a one-line PASS/FAIL summary ending with the RunLog path (<c>… => RESULT | log=&lt;path&gt;</c>);
-        /// also Debug.Log/LogError it and copies that path to the system clipboard.
+        /// also Debug.Log/LogError it.
         /// </summary>
         /// <param name="sourceFx">Vendor FX controller to base the clean one on.</param>
         /// <param name="ownedRoot">Our avatar root in the scene (has VRCAvatarDescriptor).</param>
@@ -728,7 +728,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var path  = TransplantCore.RunLogDir + "/clean-controller_" + label + "_" + stamp + ".json";
             File.WriteAllText(path, sb.ToString());
             AssetDatabase.Refresh();
-            EditorGUIUtility.systemCopyBuffer = path;
             return path;
         }
 

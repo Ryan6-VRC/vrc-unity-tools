@@ -34,7 +34,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Copy materials from <paramref name="source"/> onto <paramref name="ownedRoot"/>
         /// by renderer name, then normalize bounds and probe-anchor on every SMR (ensure, not clobber — see the type summary).
         /// Returns a one-line PASS/FAIL summary ending with the RunLog path (<c>… => RESULT | log=&lt;path&gt;</c>);
-        /// also Debug.Log/LogError it and copies that path to the system clipboard.
+        /// also Debug.Log/LogError it.
         /// </summary>
         /// <param name="ownedRoot">Our owned avatar root in the scene (has an Animator with a humanoid avatar).</param>
         /// <param name="source">The vendor's dressed source to copy materials FROM (scene GO or prefab).</param>
@@ -501,7 +501,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var path  = TransplantCore.RunLogDir + "/conform-renderers_" + label + "_" + stamp + ".json";
             File.WriteAllText(path, sb.ToString());
             AssetDatabase.Refresh();
-            EditorGUIUtility.systemCopyBuffer = path;
             return path;
         }
 

@@ -166,8 +166,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>
         /// Recompute <paramref name="ownedRoot"/>'s descriptor-local <c>ViewPosition</c> from
         /// <paramref name="referenceRoot"/>'s known-good viewpoint + both rigs' eyes/head. Returns a one-line
-        /// PASS/FAIL summary ending with the RunLog path; also Debug.Log/LogError's it and copies the path to
-        /// the clipboard.
+        /// PASS/FAIL summary ending with the RunLog path; also Debug.Log/LogError's it.
         /// </summary>
         /// <param name="ownedRoot">Our owned avatar root (its VRCAvatarDescriptor's ViewPosition is written).</param>
         /// <param name="referenceRoot">REQUIRED known-good baseline (vendor source, or the pre-reshape prior

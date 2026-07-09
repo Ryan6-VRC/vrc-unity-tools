@@ -117,8 +117,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>
         /// Write <paramref name="log"/> as JSON to <see cref="RunLogDir"/> (the package's RunLog
-        /// envelope shape, with <c>kind</c> a parameter), refresh the asset DB, copy the path to the
-        /// system clipboard, and return it. <paramref name="label"/> is sanitized into the file name.
+        /// envelope shape, with <c>kind</c> a parameter), refresh the asset DB, and return the path.
+        /// <paramref name="label"/> is sanitized into the file name.
         /// </summary>
         public static string WriteRunLog(TransplantRunLog log, string label)
         {
@@ -149,7 +149,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var path = RunLogDir + "/" + Sanitize(log.kind) + "_" + Sanitize(label) + "_" + stamp + ".json";
             File.WriteAllText(path, sb.ToString());
             AssetDatabase.Refresh();
-            EditorGUIUtility.systemCopyBuffer = path;
             return path;
         }
 

@@ -36,7 +36,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Transplant the VRCAvatarDescriptor from <paramref name="vendorSource"/> onto
         /// <paramref name="ownedRoot"/>, remapping all scene refs to our hierarchy.
         /// Returns a one-line PASS/FAIL summary ending with the RunLog path (<c>… => RESULT | log=&lt;path&gt;</c>);
-        /// also Debug.Log/LogError it and copies that path to the system clipboard.
+        /// also Debug.Log/LogError it.
         /// </summary>
         /// <param name="ownedRoot">Our owned avatar root in the scene (Animator already configured).</param>
         /// <param name="vendorSource">The vendor's dressed source carrying the VRCAvatarDescriptor to copy.</param>
@@ -557,7 +557,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var path  = TransplantCore.RunLogDir + "/copy-descriptor_" + label + "_" + stamp + ".json";
             File.WriteAllText(path, sb.ToString());
             AssetDatabase.Refresh();
-            EditorGUIUtility.systemCopyBuffer = path;
             return path;
         }
 
@@ -603,7 +602,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var path  = TransplantCore.RunLogDir + "/copy-descriptor_" + label + "_" + stamp + ".json";
             File.WriteAllText(path, sb.ToString());
             AssetDatabase.Refresh();
-            EditorGUIUtility.systemCopyBuffer = path;
             return path;
         }
 
