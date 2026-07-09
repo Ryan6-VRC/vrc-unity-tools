@@ -114,4 +114,80 @@ layers:
         Assert.AreEqual(ControllerEmit.SpecialAny,   sm.anyStatePosition);
         Assert.AreEqual(ControllerEmit.SpecialExit,  sm.exitPosition);
     }
+
+    // Move a state off-grid in a persisted controller (ChildAnimatorState is a struct -> edit a copy, write
+    // the whole array back), then save.
+    private static void MoveState(AnimatorStateMachine sm, string name, Vector3 to)
+    {
+        var arr = sm.states;
+        for (int i = 0; i < arr.Length; i++)
+            if (arr[i].state.name == name) { arr[i].position = to; }
+        sm.states = arr;
+        EditorUtility.SetDirty(sm);
+        AssetDatabase.SaveAssets();
+    }
+
+    [Test]
+    public void Decompile_Emits_Layout_For_Arranged_Controller()
+    {
+        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
+        ControllerEmit.Build(doc, out var res);
+        var sm = res.Controller.layers[0].stateMachine;
+        MoveState(sm, sm.states[0].state.name, new Vector3(777, 888, 0));
+
+        var w = ControllerDecompile.Walk(res.Controller);
+        var layout = w.Doc.Layers[0].Root.Layout;
+        Assert.IsNotNull(layout, "arranged controller emits a layout block");
+        Assert.AreEqual(new[] { 777f, 888f }, layout.Nodes[AddressPath.EscapeSegment(sm.states[0].state.name)]);
+    }
+
+    [Test]
+    public void Decompile_Omits_Layout_For_Grid_Controller()
+    {
+        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
+        ControllerEmit.Build(doc, out var res);
+        var w = ControllerDecompile.Walk(res.Controller);
+        Assert.IsNull(w.Doc.Layers[0].Root.Layout, "never-arranged controller stays layout-free");
+    }
+
+    [Test]
+    public void Escaped_Node_Name_Roundtrips()
+    {
+        // A state whose name contains '/'. The states: key is RAW ("A/B" -> State.Name). Every ESCAPED
+        // reference (transition target, default, layout node key) is the address form the producers emit:
+        // EscapeSegment gives "A\/B", and double-quoted YAML needs the backslash doubled ("A\\/B") because
+        // the reader halves \\ -> \ (an unknown \/ would instead drop the backslash). This is exactly what
+        // ControllerDecompile + AnimatorSchemaEmit round-trip.
+        var src = @"
+schema: 1
+controller: Esc_Fx
+basis: avatar-root
+role: fx
+parameters: { Flag: bool }
+layers:
+  - name: L
+    states:
+      ""A/B"": { motion: ~, transitions: [ { to: ""A\\/B"", when: [ Flag is true ], exitTime: 1.0 } ] }
+    default: ""A\\/B""
+    layout:
+      nodes: { ""A\\/B"": [123, 456] }
+";
+        var doc = AnimatorSchemaYaml.Parse(src, "esc");
+        Assert.IsEmpty(SchemaValidation.Validate(doc).FindAll(e => e.Contains("dangling-layout")));
+        ControllerEmit.Build(doc, out var res);
+        var cs = res.Controller.layers[0].stateMachine.states[0];
+        Assert.AreEqual("A/B", cs.state.name);
+        Assert.AreEqual(new Vector3(123, 456, 0), cs.position, "escaped-name node placed");
+    }
+
+    [Test]
+    public void Serialize_Renders_Layout_Flow_And_RFormat()
+    {
+        var doc = AnimatorSchemaYaml.Parse(LayoutDoc, "test");
+        var yaml = AnimatorSchemaEmit.Serialize(doc);
+        StringAssert.Contains("layout:", yaml);
+        StringAssert.Contains("nodes: {", yaml);       // flow form
+        StringAssert.Contains("[111, 222]", yaml);
+        Assert.IsFalse(yaml.Contains("parent:"), "no parent authored -> not emitted");
+    }
 }

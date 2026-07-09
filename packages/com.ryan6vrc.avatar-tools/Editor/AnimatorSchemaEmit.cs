@@ -196,7 +196,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var b in sm.Behaviours) L(sb, Sp(f + 2) + "- " + FlowBehaviour(b));
             }
             if (sm.DefaultState != null) L(sb, Sp(f) + "default: " + ScalarStr(sm.DefaultState));
+            if (sm.Layout != null) EmitLayout(sb, sm, f);
         }
+
+        // Emit nodes in States-then-Machines order (deterministic — Dictionary order is not contractual).
+        private static void EmitLayout(StringBuilder sb, StateMachine sm, int f)
+        {
+            var l = sm.Layout;
+            L(sb, Sp(f) + "layout:");
+            var parts = new List<string>();
+            foreach (var st in sm.States)
+                if (st != null && l.Nodes.TryGetValue(AddressPath.EscapeSegment(st.Name), out var xy))
+                    parts.Add(Key(AddressPath.EscapeSegment(st.Name)) + ": " + Coord(xy));
+            foreach (var sub in sm.Machines)
+                if (sub != null && l.Nodes.TryGetValue(AddressPath.EscapeSegment(sub.Name), out var xy))
+                    parts.Add(Key(AddressPath.EscapeSegment(sub.Name)) + ": " + Coord(xy));
+            if (parts.Count > 0) L(sb, Sp(f + 2) + "nodes: { " + string.Join(", ", parts) + " }");
+            if (l.Entry  != null) L(sb, Sp(f + 2) + "entry: "  + Coord(l.Entry));
+            if (l.Any    != null) L(sb, Sp(f + 2) + "any: "    + Coord(l.Any));
+            if (l.Exit   != null) L(sb, Sp(f + 2) + "exit: "   + Coord(l.Exit));
+            if (l.Parent != null) L(sb, Sp(f + 2) + "parent: " + Coord(l.Parent));
+        }
+
+        private static string Coord(float[] xy)
+            => "[" + Num(xy[0]) + ", " + Num(xy[1]) + "]";
 
         private static bool IsMachineEmpty(StateMachine sm)
             => sm.States.Count == 0 && sm.Machines.Count == 0 && sm.EntryLadder.Count == 0
