@@ -64,6 +64,17 @@ namespace Ryan6Vrc.AvatarTools.Tests
             StringAssert.Contains("[720, 40]", decoded, "the authored off-grid Top coordinate is preserved");
         }
 
+        // decode(C0)==decode(C1) proves stability, not correct VALUES for in-vocab constructs. Spot-check the
+        // highest-risk one: the negative timeScale on a blend-tree child (a sign-flip would round-trip green).
+        [Test]
+        public void Fixpoint_Blendtrees_PreservesNegativeTimeScale()
+        {
+            string yaml = FixpointOracle.ReadPackageText(FixDir + "/blendtrees.yaml");
+            var c0 = FixpointOracle.CompileTo(TestRoot, yaml, "Blendtrees_Fx", "c0");
+            string decoded = FixpointOracle.Decode(c0);
+            StringAssert.Contains("timeScale: -1", decoded, "the negative child timeScale survives decode (no sign flip)");
+        }
+
         // ── Arm B: programmatic refusal coverage ─────────────────────────────────────────────────
         // Each seeds ONE out-of-vocabulary construct; DecompileController must FAIL naming it and write no yaml.
         private void AssertRefuses(string tag, System.Action<AnimatorController> seed, string expectedToken)
@@ -160,15 +171,18 @@ namespace Ryan6Vrc.AvatarTools.Tests
         [Test] public void Refusal_InterleavedDriverOps() =>
             AssertRefuses("interleave", rc =>
             {
-                rc.AddParameter("p", AnimatorControllerParameterType.Float);
+                // Change-types interleave (Set,Add,Set buckets 0,1,0) but no (type,name) repeats — isolates the
+                // INTERLEAVE refusal from the DUPLICATE-operation refusal (both share the substring "driver").
+                rc.AddParameter("a", AnimatorControllerParameterType.Float);
+                rc.AddParameter("b", AnimatorControllerParameterType.Float);
                 var s = rc.layers[0].stateMachine.AddState("S");
                 var d = s.AddStateMachineBehaviour<VRC.SDK3.Avatars.Components.VRCAvatarParameterDriver>();
                 var Set = VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Set;
                 var Add = VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Add;
-                d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "p", type = Set });
-                d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "p", type = Add });
-                d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "p", type = Set });
-            }, "driver");
+                d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "a", type = Set });
+                d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "a", type = Add });
+                d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "b", type = Set });
+            }, "interleave");
 
         [Test] public void Refusal_IdenticalSiblingStates() =>
             AssertRefuses("dupstate", rc =>
@@ -205,11 +219,18 @@ namespace Ryan6Vrc.AvatarTools.Tests
         [Test] public void Refusal_TwoClipsOneName() =>
             AssertRefuses("dupclip", rc =>
             {
+                // Each clip carries a real binding so neither is empty — isolates the DISTINCT-clips-one-name
+                // refusal from the "no animatable content" refusal (an empty clip named "same" would trip that
+                // one first, and its message ALSO interpolates the clip name, so "same" alone doesn't discriminate).
                 var sm = rc.layers[0].stateMachine;
                 var a = sm.AddState("A"); var b = sm.AddState("B");
-                a.motion = new AnimationClip { name = "same" };
-                b.motion = new AnimationClip { name = "same" };
-            }, "same");
+                var clipA = new AnimationClip { name = "same" };
+                var clipB = new AnimationClip { name = "same" };
+                AnimatorTestHelpers.AddFloatCurve(clipA, "SomePath", typeof(UnityEngine.Transform), "m_LocalPosition.x", 1f);
+                AnimatorTestHelpers.AddFloatCurve(clipB, "SomePath", typeof(UnityEngine.Transform), "m_LocalPosition.x", 2f);
+                a.motion = clipA;
+                b.motion = clipB;
+            }, "DISTINCT embedded clips");
 
         [Test] public void Refusal_ConditionParamWhitespace() =>
             AssertRefuses("wsparam", rc =>
