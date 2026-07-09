@@ -4,6 +4,7 @@ using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
+using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 using Ryan6Vrc.AgentTools.Editor;
 
@@ -58,7 +59,7 @@ public class SweepControllerTests
             "AnimatorLint must advise the HideInHierarchy orphan (regression: a reintroduced IsSubAsset gate hides it)");
 
         string summary = SweepController.Sweep(ctrl, false, false);
-        Assert.GreaterOrEqual(Count(summary, "removed"), 1);
+        Assert.GreaterOrEqual(AnimatorTestHelpers.Count(summary, "removed"), 1);
         StringAssert.Contains("=> PASS", summary);
         Assert.IsFalse(HasSubObjectNamed(path, "HID_Orphan"),
             "hidden orphan must be gone (regression: a reintroduced IsSubAsset gate would leave it)");
@@ -83,8 +84,8 @@ public class SweepControllerTests
 
         string summary = SweepController.Sweep(ctrl, false, false);
         // removed = dead-end + truly-orphan transition = 2; deadEndTransitions counts ONLY the dead-end.
-        Assert.AreEqual(2, Count(summary, "removed"));
-        Assert.AreEqual(1, Count(summary, "deadEndTransitions"));
+        Assert.AreEqual(2, AnimatorTestHelpers.Count(summary, "removed"));
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(summary, "deadEndTransitions"));
         // The valid transitions survive: A keeps its to-state + exit transition.
         var a2 = FindState(ctrl, "A");
         Assert.AreEqual(2, a2.transitions.Length);
@@ -108,7 +109,7 @@ public class SweepControllerTests
 
         string summary = SweepController.Sweep(ctrl, false, false);
         // The shared source SM's one dead-end slot is counted ONCE, not once-per-referring-layer.
-        Assert.AreEqual(1, Count(summary, "slotsCompacted"));
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(summary, "slotsCompacted"));
         StringAssert.Contains("=> PASS", summary);
         // No null slot survives in the source SM's transition array.
         var a2 = FindState(ctrl, "A");
@@ -134,7 +135,7 @@ public class SweepControllerTests
         Assert.IsNotNull(ctrl.layers[1].GetOverrideMotion(FindState(ctrl, "A")), "fixture: override established");
 
         string summary = SweepController.Sweep(ctrl, false, false);
-        Assert.AreEqual(1, Count(summary, "removed"), "only the unrelated orphan is swept");
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(summary, "removed"), "only the unrelated orphan is swept");
         Assert.IsTrue(HasSubObjectNamed(path, "OverrideBT"),
             "a synced-layer override motion is reachable and must NOT be swept (the axis DreadScripts got wrong)");
         Assert.IsNotNull(ctrl.layers[1].GetOverrideMotion(FindState(ctrl, "A")), "override still set");
@@ -153,6 +154,7 @@ public class SweepControllerTests
         AddOrphan<AnimatorState>(ctrl, "VendorOrphan", hide: true);
         Save(ctrl, path);
 
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("read-only controller"));
         string fail = SweepController.Sweep(ctrl, false, false);
         StringAssert.Contains("=> FAIL", fail);
         StringAssert.Contains("read-only", fail);
@@ -160,6 +162,7 @@ public class SweepControllerTests
         Assert.IsTrue(HasSubObjectNamed(path, "VendorOrphan"), "nothing removed on a refused read-only sweep");
 
         // whatIf FAILs identically (preview == execute verdict).
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("read-only controller"));
         StringAssert.Contains("=> FAIL", SweepController.Sweep(ctrl, false, true));
 
         // force → PASS with a loud override note.
@@ -175,10 +178,12 @@ public class SweepControllerTests
     public void Unsaved_controller_is_refused()
     {
         var mem = new AnimatorController { name = "InMemory" };
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("not a saved asset"));
         string summary = SweepController.Sweep(mem, false, false);
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("not a saved asset", summary);
         // No force path — force still refuses.
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("not a saved asset"));
         StringAssert.Contains("=> FAIL", SweepController.Sweep(mem, true, false));
         Object.DestroyImmediate(mem);
     }
@@ -198,14 +203,14 @@ public class SweepControllerTests
         Assert.IsTrue(HasSubObjectNamed(path, "HID_Orphan"), "whatIf must not remove anything");
 
         string exec = SweepController.Sweep(ctrl, false, false);
-        Assert.AreEqual(Count(preview, "removed"), Count(exec, "removed"));
-        Assert.AreEqual(Count(preview, "deadEndTransitions"), Count(exec, "deadEndTransitions"));
-        Assert.AreEqual(Count(preview, "slotsCompacted"), Count(exec, "slotsCompacted"));
+        Assert.AreEqual(AnimatorTestHelpers.Count(preview, "removed"), AnimatorTestHelpers.Count(exec, "removed"));
+        Assert.AreEqual(AnimatorTestHelpers.Count(preview, "deadEndTransitions"), AnimatorTestHelpers.Count(exec, "deadEndTransitions"));
+        Assert.AreEqual(AnimatorTestHelpers.Count(preview, "slotsCompacted"), AnimatorTestHelpers.Count(exec, "slotsCompacted"));
 
         string again = SweepController.Sweep(ctrl, false, false);
-        Assert.AreEqual(0, Count(again, "removed"));
-        Assert.AreEqual(0, Count(again, "deadEndTransitions"));
-        Assert.AreEqual(0, Count(again, "slotsCompacted"));
+        Assert.AreEqual(0, AnimatorTestHelpers.Count(again, "removed"));
+        Assert.AreEqual(0, AnimatorTestHelpers.Count(again, "deadEndTransitions"));
+        Assert.AreEqual(0, AnimatorTestHelpers.Count(again, "slotsCompacted"));
         StringAssert.Contains("=> PASS", again);
     }
 
@@ -218,8 +223,9 @@ public class SweepControllerTests
         var ctrl = BuildMixedFixture(path); // reachable A/B + dead-end + hidden orphan + orphan BT + truly-orphan T
 
         string preview = SweepController.Sweep(ctrl, false, true);
-        var sweep = new HashSet<string>(Notes(preview));
-        int deadEnds = Count(preview, "deadEndTransitions");
+        var sweep = new HashSet<string>(AnimatorTestHelpers.Notes(preview));
+        int deadEnds = AnimatorTestHelpers.Count(preview, "deadEndTransitions");
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("\\[AnimatorLint\\]"));
         var lint = new HashSet<string>(AnimatorLintOrphanTokens(ctrl, path));
 
         // Oracle: {would-remove} − {dead-ends} == {AnimatorLint orphan advisories}. Realized as:
@@ -263,9 +269,9 @@ public class SweepControllerTests
 
         string summary = SweepController.Sweep(ctrl, false, false);
         // removed = dead-end SM→SM transition + orphan SMB; deadEndTransitions counts only the dead-end.
-        Assert.AreEqual(2, Count(summary, "removed"));
-        Assert.AreEqual(1, Count(summary, "deadEndTransitions"));
-        Assert.AreEqual(1, Count(summary, "slotsCompacted"));
+        Assert.AreEqual(2, AnimatorTestHelpers.Count(summary, "removed"));
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(summary, "deadEndTransitions"));
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(summary, "slotsCompacted"));
         StringAssert.Contains("=> PASS", summary);
 
         Assert.IsFalse(HasSubObjectNamed(path, "ORPHAN_SMB"), "orphan StateMachineBehaviour must be swept");
@@ -376,28 +382,4 @@ public class SweepControllerTests
         AssetDatabase.CreateFolder(parent, leaf);
     }
 
-    static int Count(string summary, string key)
-    {
-        int i = summary.IndexOf(key + "=");
-        Assert.GreaterOrEqual(i, 0, "count '" + key + "' missing in: " + summary);
-        i += key.Length + 1;
-        int j = i;
-        while (j < summary.Length && char.IsDigit(summary[j])) j++;
-        return int.Parse(summary.Substring(i, j - i));
-    }
-
-    static List<string> Notes(string summary)
-    {
-        var list = new List<string>();
-        int ni = summary.IndexOf("notes=[");
-        if (ni < 0) return list;
-        int e = summary.IndexOf("]", ni);
-        string body = summary.Substring(ni + 7, e - (ni + 7));
-        foreach (var p in body.Split(';'))
-        {
-            var s = p.Trim();
-            if (s.Length > 0) list.Add(s);
-        }
-        return list;
-    }
 }
