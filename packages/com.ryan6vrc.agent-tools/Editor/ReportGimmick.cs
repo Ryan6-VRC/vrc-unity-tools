@@ -14,7 +14,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
     /// Read-only markdown TOPOLOGY digest of a gimmick subtree — the SPACE-dimension companion to the
-    /// H report family's TIME dimension (ControllerReport / ClipReport / AnimatorLint). Walks a chosen
+    /// H report family's TIME dimension (ReportController / ReportClip / AnimatorLint). Walks a chosen
     /// subtree and renders, as factual tables, its VRC contacts, physbones (+ colliders), constraints
     /// (as a constrained→source edge-list with weights, affected-axis mask, and TargetTransform
     /// indirection made explicit), and its VRCFury AUTHORING inventory — plus a short Observations index
@@ -25,12 +25,12 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// Two seams are deliberately NOT crossed: it reports a contact/physbone's DECLARED `parameter`
     /// field but never traces it into an animator (H's domain), and it reports VRCFury features verbatim
     /// but predicts no bake output — no prefix rewrite, no sync-bit tally, no bake diff (J's domain).
-    /// No verdict, no heuristic/"suspected" tier: it is a digest like ControllerReport, not a lint.
+    /// No verdict, no heuristic/"suspected" tier: it is a digest like ReportController, not a lint.
     ///
     /// INSPECTION ONLY — never mutates. Emits one line carrying the artifact path in-band.
     /// </summary>
     [AgentTool]
-    public static class GimmickReport
+    public static class ReportGimmick
     {
         // ----- Agent entry point ------------------------------------------------------------------
 
@@ -61,7 +61,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (mb != null && mb.GetType().FullName == "VF.Model.VRCFury") fury.Add(mb);
 
             var body = new StringBuilder();
-            body.Append("# GimmickReport: ").Append(root.name).Append('\n');
+            body.Append("# ReportGimmick: ").Append(root.name).Append('\n');
             body.Append("root: `").Append(GetHierarchyPath(root.transform)).Append("`  \n");
             body.Append("_transform handles are full scene-root-absolute paths; under first-match resolution a duplicate-named sibling makes a handle non-unique (a pre-existing family caveat, surfaced here because the interior walk can hit duplicate-named bones)._\n");
 
@@ -77,7 +77,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var applyDuringUploadHosts = AppendVrcFury(body, fury);
             int obsCount = AppendObservations(body, constraints, applyDuringUploadHosts);
 
-            var summary = "[GimmickReport] " + root.name
+            var summary = "[ReportGimmick] " + root.name
                         + ": contacts=" + contactCount
                         + " physbones=" + physbones.Length
                         + " constraints=" + constraints.Length
@@ -340,7 +340,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return applyHosts;
         }
 
-        // Decode the FullController asset references (where H's ControllerReport picks up). Fail loud with
+        // Decode the FullController asset references (where H's ReportController picks up). Fail loud with
         // a `> note:` whenever an expected serialized array/wrapper is not resolvable — a skipped check
         // must never read as an honest zero.
         private static void AppendFullController(StringBuilder sb, SerializedProperty content, string hostPath)
@@ -486,7 +486,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static string Refuse(string why)
         {
-            string err = "[GimmickReport] FAIL: " + why;
+            string err = "[ReportGimmick] FAIL: " + why;
             Debug.LogError(err);
             return err;
         }

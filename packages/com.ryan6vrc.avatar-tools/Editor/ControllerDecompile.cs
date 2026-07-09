@@ -1197,7 +1197,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static bool Is2D(BlendTreeType t) =>
             t == BlendTreeType.SimpleDirectional2D || t == BlendTreeType.FreeformDirectional2D || t == BlendTreeType.FreeformCartesian2D;
 
-        // ----- dangling-motion GUID recovery (mirror of the ControllerReport/ControllerRules YAML parse) -----
+        // ----- dangling-motion GUID recovery (mirror of the ReportController/ControllerRules YAML parse) -----
 
         // Map each dangling motion guid to the local fileID of the serialized object that owns it (a State or a
         // BlendTree), in that object's own serialization order. A .controller text serializes each object as a

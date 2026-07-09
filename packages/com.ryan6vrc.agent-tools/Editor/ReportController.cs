@@ -27,10 +27,10 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// INSPECTION ONLY — never mutates. Emits one line carrying the artifact path in-band.
     /// </summary>
     [AgentTool]
-    public static class ControllerReport
+    public static class ReportController
     {
         // ----- Agent entry point (path-addressed load is one line at the call site:
-        //   ControllerReport.Report(AssetDatabase.LoadAssetAtPath<AnimatorController>(path)) ) -------
+        //   ReportController.Report(AssetDatabase.LoadAssetAtPath<AnimatorController>(path)) ) -------
 
         /// <summary>Digest <paramref name="controller"/> to markdown under Snapshots/. Returns a one-line
         /// summary ending with the artifact path in-band (<c>… =&gt; OK | log=&lt;path&gt;</c>); a null
@@ -39,7 +39,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             if (controller == null)
             {
-                const string err = "[ControllerReport] FAIL: controller not found";
+                const string err = "[ReportController] FAIL: controller not found";
                 Debug.LogError(err);
                 return err;
             }
@@ -55,7 +55,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // ---- Header ----
             string assetPath = AssetDatabase.GetAssetPath(controller);
-            sb.Append("# ControllerReport: ").Append(controller.name).Append('\n');
+            sb.Append("# ReportController: ").Append(controller.name).Append('\n');
             sb.Append("asset: `").Append(string.IsNullOrEmpty(assetPath) ? "(unsaved)" : assetPath).Append("`  \n");
             sb.Append("layers=").Append(layerCount).Append(" states=(see below) params=").Append(paramCount).Append('\n');
 
@@ -118,7 +118,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // ---- Summary + artifact ----
             var body = sb.ToString();
-            var summary = "[ControllerReport] " + controller.name + ": layers=" + layerCount
+            var summary = "[ReportController] " + controller.name + ": layers=" + layerCount
                         + " states=" + stateCount + " params=" + paramCount + " => OK";
             var result = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "controller_" + controller.name, summary, body, ".md");
             Debug.Log(result);

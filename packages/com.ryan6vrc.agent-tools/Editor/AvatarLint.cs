@@ -83,7 +83,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Classify the MA-scene-ref and clip-binding reference breaks on the in-scene avatar at
         /// <paramref name="avatarRoot"/> (a scene hierarchy path, else numeric instance id, else name —
-        /// mirrors AvatarGrab's target resolution). Returns a one-line summary; a real run ends with the
+        /// mirrors RenderAvatar's target resolution). Returns a one-line summary; a real run ends with the
         /// RunLog path in-band (<c>… =&gt; PASS|CLASSIFY | log=&lt;path&gt;</c>). Bad input (root not found /
         /// no VRCAvatarDescriptor) is a bare <c>[AvatarLint] FAIL: …</c> with no trailer.</summary>
         public static string Inspect(string avatarRoot)
@@ -434,7 +434,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return err;
         }
 
-        // ── Scene resolver (path → instance id → name; mirrors AvatarGrab.Resolve, kept local) ──────────
+        // ── Scene resolver (path → instance id → name; mirrors RenderAvatar.Resolve, kept local) ──────────
 
         private static GameObject Resolve(string target)
         {

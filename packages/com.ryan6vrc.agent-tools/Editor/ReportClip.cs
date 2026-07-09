@@ -20,27 +20,27 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// INSPECTION ONLY — never mutates the clip or project.
     /// </summary>
     [AgentTool]
-    public static class ClipReport
+    public static class ReportClip
     {
         // ----- Public API ---------------------------------------------------------------------
 
         /// <summary>Digest one clip. Returns a one-line summary ending with the artifact path in-band
-        /// (<c>… => OK | log=&lt;path&gt;</c>); a null clip is a bare <c>[ClipReport] FAIL: …</c> with no trailer.</summary>
+        /// (<c>… => OK | log=&lt;path&gt;</c>); a null clip is a bare <c>[ReportClip] FAIL: …</c> with no trailer.</summary>
         public static string Report(AnimationClip clip)
         {
             if (clip == null)
             {
-                const string err = "[ClipReport] FAIL: clip not found";
+                const string err = "[ReportClip] FAIL: clip not found";
                 Debug.LogError(err);
                 return err;
             }
 
             var body = new StringBuilder();
-            body.Append("# ClipReport: ").Append(clip.name).Append('\n');
+            body.Append("# ReportClip: ").Append(clip.name).Append('\n');
             body.Append("asset: ").Append(AssetDatabase.GetAssetPath(clip)).Append("\n\n");
             int bindings = RenderClip(clip, body);
 
-            string summary = "[ClipReport] " + clip.name + ": bindings=" + bindings + " => OK";
+            string summary = "[ReportClip] " + clip.name + ": bindings=" + bindings + " => OK";
             string result = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "clip_" + clip.name, summary, body.ToString(), ".md");
             Debug.Log(result);
             return result;
@@ -48,19 +48,19 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Digest every <c>.anim</c> under an asset folder into one artifact. Returns a one-line
         /// summary ending with the artifact path in-band; a bad-input early return is a bare
-        /// <c>[ClipReport] FAIL: …</c> with no trailer. An empty-but-valid folder is NOT skipped — it
+        /// <c>[ReportClip] FAIL: …</c> with no trailer. An empty-but-valid folder is NOT skipped — it
         /// writes a 0-clip artifact.</summary>
         public static string ReportFolder(string assetFolderPath)
         {
             if (string.IsNullOrEmpty(assetFolderPath) || !AssetDatabase.IsValidFolder(assetFolderPath))
             {
-                string err = "[ClipReport] FAIL: not a valid asset folder: " + assetFolderPath;
+                string err = "[ReportClip] FAIL: not a valid asset folder: " + assetFolderPath;
                 Debug.LogError(err);
                 return err;
             }
 
             var body = new StringBuilder();
-            body.Append("# ClipReport (folder): ").Append(assetFolderPath).Append("\n\n");
+            body.Append("# ReportClip (folder): ").Append(assetFolderPath).Append("\n\n");
 
             int clips = 0, bindings = 0;
             foreach (var guid in AssetDatabase.FindAssets("t:AnimationClip", new[] { assetFolderPath }))
@@ -76,7 +76,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             string leaf = RunLogFormat.Leaf(assetFolderPath);
-            string summary = "[ClipReport] " + leaf + " (folder, " + clips + " clips, " + bindings + " bindings) => OK";
+            string summary = "[ReportClip] " + leaf + " (folder, " + clips + " clips, " + bindings + " bindings) => OK";
             string result = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "clips_" + leaf, summary, body.ToString(), ".md");
             Debug.Log(result);
             return result;

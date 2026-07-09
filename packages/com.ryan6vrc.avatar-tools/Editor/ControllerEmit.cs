@@ -711,7 +711,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // One encoder per kind: materialise the concrete VRC SMB via `add(typeof(...))`, then a per-field
             // switch that sets its fields and throws EmitException (named offender) on any unknown field.
             // The enum-token casing is DEFINED HERE (the token→enum maps below) — camelCase (e.g. `animation`),
-            // NOT the PascalCase an enum ToString() (as in ControllerReport's Markdown) would give.
+            // NOT the PascalCase an enum ToString() (as in ReportController's Markdown) would give.
             // ControllerDecompile builds its reverse (enum→token) maps from these, so this is the single source
             // of truth for both directions.
             private void EmitBehaviours(List<Behaviour> behaviours, Func<Type, StateMachineBehaviour> add)
