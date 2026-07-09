@@ -12,8 +12,8 @@ using Ryan6Vrc.AgentTools.Editor;
 
 // Behavioral tests for SweepController. Each test builds a throwaway controller as an on-disk asset
 // under an owned scratch path (sub-assets only exist on a saved asset) and asserts on the returned
-// one-line summary + the post-sweep asset state. NOT run via MCP run_tests (it crashes the editor) —
-// run from the Unity Test Runner window or CI.
+// one-line summary + the post-sweep asset state. Run headless via tools/run-editmode-tests.ps1 (or
+// the Test Runner window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
 public class SweepControllerTests
 {
     const string Root = "Assets/Agent/Scratch/SweepTests_NUnit";

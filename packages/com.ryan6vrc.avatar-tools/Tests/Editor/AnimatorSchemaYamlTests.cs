@@ -2,8 +2,8 @@ using NUnit.Framework;
 using Ryan6Vrc.AvatarTools.Editor;
 
 // Behavioral tests for AnimatorSchemaYaml. The model + parser depend only on System.*, so these exercise
-// pure C# — no scene, no asset, no VRC SDK. NOT run via MCP run_tests (it crashes the editor); run from the
-// Unity Test Runner window or CI.
+// pure C# — no scene, no asset, no VRC SDK. Run headless via tools/run-editmode-tests.ps1 (or the Test
+// Runner window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
 public class AnimatorSchemaYamlTests
 {
     // The canonical debounce document. Later tasks reference AnimatorSchemaYamlTests.DebounceDoc verbatim.

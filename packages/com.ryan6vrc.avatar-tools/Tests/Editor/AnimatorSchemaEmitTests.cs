@@ -9,8 +9,9 @@ using UnityEngine;
 // Generative round-trip tests for AnimatorSchemaEmit — the AnimDocument -> YAML write-back. The parser is the
 // spec: Parse(Serialize(doc)) must reproduce doc for every construct, and Serialize must be idempotent through
 // a parse (the Task-9 textual fixpoint). Most tests are pure (Parse only, System.*); the emit->Walk->Serialize
-// ->Parse ones touch the AssetDatabase (they build + decompile a real controller). NOT run via MCP run_tests
-// (it crashes the editor); run from the Unity Test Runner window or CI.
+// ->Parse ones touch the AssetDatabase (they build + decompile a real controller). Run headless via
+// tools/run-editmode-tests.ps1 (or the Test Runner window / CI); not via MCP run_tests — wrong venue
+// (live editor). See docs/verify.md.
 public class AnimatorSchemaEmitTests
 {
     private const string ScratchFolder = "Assets/Agent/Scratch/emit";
