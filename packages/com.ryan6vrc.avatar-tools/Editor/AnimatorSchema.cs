@@ -114,6 +114,32 @@ namespace Ryan6Vrc.AvatarTools.Editor
     }
     public sealed class SubMachine { public string Name; public StateMachine Machine = new StateMachine(); }
 
+    // Schema-tree traversal shared by every consumer that flattens a layer's states across the whole
+    // sub-machine tree (WD hoist, state-count budget checks, RunLog summaries). One walk, so a new
+    // schema-tree consumer costs no fourth copy — the spec's one-edit-site health bar. Null-safe: skips a
+    // null state or sub-machine rather than throwing (a well-formed document has none; malformed input
+    // degrades instead of faulting).
+    public static class SchemaTree
+    {
+        // Every state under this machine, recursing sub-machines at any depth, appended to `into`.
+        public static void CollectStates(this StateMachine sm, List<State> into)
+        {
+            if (sm == null) return;
+            foreach (var s in sm.States) if (s != null) into.Add(s);
+            foreach (var sub in sm.Machines) if (sub != null && sub.Machine != null) sub.Machine.CollectStates(into);
+        }
+
+        // Count of the same traversal, without materializing the list.
+        public static int CountStates(this StateMachine sm)
+        {
+            if (sm == null) return 0;
+            int n = 0;
+            foreach (var s in sm.States) if (s != null) n++;
+            foreach (var sub in sm.Machines) if (sub != null && sub.Machine != null) n += sub.Machine.CountStates();
+            return n;
+        }
+    }
+
     public sealed class State
     {
         public string Name;

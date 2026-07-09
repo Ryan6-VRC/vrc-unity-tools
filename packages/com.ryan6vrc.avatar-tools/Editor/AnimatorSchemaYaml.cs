@@ -834,22 +834,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (n == 0) throw new SchemaException($"{ctx}: motion must set exactly one of clip/ref/tree");
             if (n > 1) throw new SchemaException($"{ctx}: motion sets more than one of clip/ref/tree");
 
+            // Caller-specific strictness stays here: a state's clip form is closed (no sibling keys).
+            if (hasClip && m.Count != 1) throw new SchemaException($"{ctx}: motion clip form takes only 'clip'");
+            return DecodeMotionRef(m, ctx, $"{ctx} motion.clip", $"{ctx} motion.ref");
+        }
+
+        // The clip/ref/tree → MotionRef dispatch shared by a state's `motion:` and a blend-tree child, called
+        // once the caller has established exactly one of clip/ref/tree is present. Only the dispatch is shared;
+        // each caller keeps its own presence rules (BindMotion: n==0 and a non-'clip' sibling are errors;
+        // BindTreeChild: n==0 is a legal empty slot). clipLabel/refLabel carry each caller's error context so
+        // diagnostics stay verbatim.
+        private static MotionRef DecodeMotionRef(Dictionary<string, object> m, string ctx, string clipLabel, string refLabel)
+        {
             var mr = new MotionRef();
-            if (hasClip)
-            {
-                if (m.Count != 1) throw new SchemaException($"{ctx}: motion clip form takes only 'clip'");
-                mr.Clip = ToStr(m["clip"], $"{ctx} motion.clip");
-            }
-            else if (hasRef)
+            if (m.ContainsKey("clip")) mr.Clip = ToStr(m["clip"], clipLabel);
+            else if (m.ContainsKey("ref"))
             {
                 object rv = m["ref"];
                 if (rv is Dictionary<string, object> gm) mr.RefGuid = BindGuid(gm, ctx);
-                else mr.RefPath = ToStr(rv, $"{ctx} motion.ref");
+                else mr.RefPath = ToStr(rv, refLabel);
             }
-            else
-            {
-                mr.Tree = BindTree(m, ctx);
-            }
+            else mr.Tree = BindTree(m, ctx);
             return mr;
         }
 
@@ -915,18 +920,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // n == 0 is a legal EMPTY child (an unassigned blend-tree slot) — Unity permits it, and it is the
             // normalized form of a broken ref after the first compile nulls the motion. Leave Motion null.
             if (n == 1)
-            {
-                var mr = new MotionRef();
-                if (hasClip) mr.Clip = ToStr(m["clip"], $"{ctx} tree child clip");
-                else if (hasRef)
-                {
-                    object rv = m["ref"];
-                    if (rv is Dictionary<string, object> gm) mr.RefGuid = BindGuid(gm, ctx);
-                    else mr.RefPath = ToStr(rv, $"{ctx} tree child ref");
-                }
-                else mr.Tree = BindTree(m, ctx);
-                child.Motion = mr;
-            }
+                child.Motion = DecodeMotionRef(m, ctx, $"{ctx} tree child clip", $"{ctx} tree child ref");
 
             foreach (var kv in m)
             {
