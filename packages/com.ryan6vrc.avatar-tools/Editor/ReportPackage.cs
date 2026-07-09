@@ -28,7 +28,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// in an isolated preview scene.
     /// </summary>
     [AgentTool]
-    public static class AvatarPackageGraph
+    public static class ReportPackage
     {
         // ── Public API ────────────────────────────────────────────────────────────────────────
 
@@ -43,7 +43,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             if (string.IsNullOrEmpty(vendorFolder) || !AssetDatabase.IsValidFolder(vendorFolder))
             {
-                string err = "[AvatarPackageGraph] " + label + ": not a valid asset folder: " + vendorFolder + " => FAIL";
+                string err = "[ReportPackage] " + label + ": not a valid asset folder: " + vendorFolder + " => FAIL";
                 Debug.LogError(err);
                 return err;
             }
@@ -83,7 +83,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string logPath = WriteRunLog(data, label);
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[AvatarPackageGraph] {0}: fbx={1} prefab={2} constraints={3} thirdParty={4} headGuess={5} bodyGuess={6} superset={7}{8}{9} => {10} | log={11}",
+                "[ReportPackage] {0}: fbx={1} prefab={2} constraints={3} thirdParty={4} headGuess={5} bodyGuess={6} superset={7}{8}{9} => {10} | log={11}",
                 label, data.FbxEntries.Count, data.PrefabCount, data.Constraints,
                 data.ThirdPartyComponents, data.HeadMesh ?? "?", data.BodyMesh ?? "?",
                 data.SupersetFbx ?? "none",
@@ -246,7 +246,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 catch (Exception e)
                 {
                     data.LoadErrors++;
-                    Debug.LogWarning("[AvatarPackageGraph] load failed: " + path + " — " + e.Message);
+                    Debug.LogWarning("[ReportPackage] load failed: " + path + " — " + e.Message);
                     continue;
                 }
                 try
@@ -278,7 +278,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 catch (Exception e)
                 {
                     data.LoadErrors++;
-                    Debug.LogWarning("[AvatarPackageGraph] inspect failed: " + path + " — " + e.Message);
+                    Debug.LogWarning("[ReportPackage] inspect failed: " + path + " — " + e.Message);
                 }
                 finally { PrefabUtility.UnloadPrefabContents(root); }
             }
@@ -341,7 +341,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 catch (Exception e)
                 {
                     data.LoadErrors++;
-                    Debug.LogWarning("[AvatarPackageGraph] load failed: " + path + " — " + e.Message);
+                    Debug.LogWarning("[ReportPackage] load failed: " + path + " — " + e.Message);
                     continue;
                 }
 
@@ -373,7 +373,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 catch (Exception e)
                 {
                     data.LoadErrors++;
-                    Debug.LogWarning("[AvatarPackageGraph] inspect failed: " + path + " — " + e.Message);
+                    Debug.LogWarning("[ReportPackage] inspect failed: " + path + " — " + e.Message);
                 }
                 finally
                 {
@@ -420,7 +420,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Directory.CreateDirectory(TransplantCore.RunLogDir);
             var sb = new StringBuilder();
             sb.Append("{\n");
-            sb.Append("  \"kind\": \"avatar-package-graph\",\n");
+            sb.Append("  \"kind\": \"report-package\",\n");
             sb.Append("  \"unityVersion\": ").Append(TransplantCore.Q(Application.unityVersion)).Append(",\n");
             sb.Append("  \"timestampUtc\": ").Append(TransplantCore.Q(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append(",\n");
             sb.Append("  \"target\": ").Append(TransplantCore.Q(data.Target)).Append(",\n");

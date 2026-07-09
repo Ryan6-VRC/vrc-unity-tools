@@ -19,7 +19,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// Scope: this proves the MUSCLE-copy and mapping-survival behavior. It does NOT prove the
     /// skeleton[]-from-our-model reproportion-safety — hips limits and the global muscle fields round-trip
     /// regardless of skeleton[], so this test would pass even on skeleton-less code. The skeleton[] /
-    /// reproportion behavior is verified by ReproportionFreshness (the live re-instance skeleton-freshness verification).
+    /// reproportion behavior is verified by CheckHumanoidRig (the live re-instance skeleton-freshness verification).
     /// </summary>
     public static class MatchHumanoidRigVerify
     {
