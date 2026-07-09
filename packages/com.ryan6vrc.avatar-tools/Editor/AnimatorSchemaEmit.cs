@@ -223,7 +223,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static bool IsMachineEmpty(StateMachine sm)
             => sm.States.Count == 0 && sm.Machines.Count == 0 && sm.EntryLadder.Count == 0
-               && sm.AnyLadder.Count == 0 && sm.Behaviours.Count == 0 && sm.DefaultState == null;
+               && sm.AnyLadder.Count == 0 && sm.Behaviours.Count == 0 && sm.DefaultState == null
+               && sm.Layout == null;
 
         private static void EmitState(StringBuilder sb, State st, int f)
         {

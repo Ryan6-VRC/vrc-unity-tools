@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 
-// The tool-owned layout constants/grid on ControllerEmit are internal (same-assembly Task 3 decompile
-// reads them as its baseline); the test assembly asserts against them too, so bridge them across.
+// The tool-owned layout constants/grid on ControllerEmit are internal. The separate test assembly
+// (Ryan6VRC.AvatarTools.Tests) asserts against those internal grid/constant members, so this IVT
+// grants it access; same-assembly code needs no IVT.
 [assembly: InternalsVisibleTo("Ryan6VRC.AvatarTools.Tests")]

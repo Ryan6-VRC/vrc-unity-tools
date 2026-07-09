@@ -150,6 +150,63 @@ layers:
         Assert.IsNull(w.Doc.Layers[0].Root.Layout, "never-arranged controller stays layout-free");
     }
 
+    // An otherwise-empty sub-machine whose special node was dragged off-constant carries a captured Layout.
+    // The emitter must not treat it as empty ({}) and drop that layout — its exitPosition must survive the
+    // Decompile->Serialize->Parse->Compile round-trip.
+    [Test]
+    public void Layout_Survives_On_Empty_Arranged_SubMachine()
+    {
+        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
+        ControllerEmit.Build(doc, out var res);
+        var controller = res.Controller;
+        var root = controller.layers[0].stateMachine;
+
+        // An EMPTY sub-machine (no states inside) whose exit node is dragged off its constant.
+        var child = root.AddStateMachine("Empty", ControllerEmit.GridSub(0));
+        child.exitPosition = new Vector3(9, 9, 0);
+        EditorUtility.SetDirty(root);
+        EditorUtility.SetDirty(child);
+        AssetDatabase.SaveAssets();
+
+        var yaml = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(controller).Doc);
+        var doc2 = AnimatorSchemaYaml.Parse(yaml, "roundtrip");
+        ControllerEmit.Build(doc2, out var res2);
+        var root2 = res2.Controller.layers[0].stateMachine;
+
+        int idx = System.Array.FindIndex(root2.stateMachines, c => c.stateMachine.name == "Empty");
+        Assert.GreaterOrEqual(idx, 0, "empty sub-machine survived the round-trip");
+        Assert.AreEqual(new Vector3(9, 9, 0), root2.stateMachines[idx].stateMachine.exitPosition,
+            "empty arranged sub-machine's exit position survived (layout not dropped as {})");
+    }
+
+    // A never-arranged nested controller (a sub-machine with a state, nothing dragged) emits NO layout block
+    // anywhere: the root machine and the nested machine both decode to a null Layout. Exercises the
+    // isRoot:false + parent==SpecialParent omit path.
+    [Test]
+    public void Decompile_Omits_Layout_For_Nested_Grid_Controller()
+    {
+        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
+        ControllerEmit.Build(doc, out var res);
+        var root = res.Controller.layers[0].stateMachine;
+
+        var child = root.AddStateMachine("Sub", ControllerEmit.GridSub(0));
+        child.AddState("SubState", ControllerEmit.GridState(0));
+        // Unity's AddStateMachine seeds its own default special-node positions; a genuinely never-arranged
+        // (compiled) machine has them at the tool constants. Pin them so nothing reads as "dragged".
+        child.entryPosition              = ControllerEmit.SpecialEntry;
+        child.anyStatePosition           = ControllerEmit.SpecialAny;
+        child.exitPosition               = ControllerEmit.SpecialExit;
+        child.parentStateMachinePosition = ControllerEmit.SpecialParent;
+        EditorUtility.SetDirty(root);
+        EditorUtility.SetDirty(child);
+        AssetDatabase.SaveAssets();
+
+        var w = ControllerDecompile.Walk(res.Controller);
+        Assert.IsNull(w.Doc.Layers[0].Root.Layout, "root machine stays layout-free when never arranged");
+        Assert.IsNull(w.Doc.Layers[0].Root.Machines[0].Machine.Layout,
+            "nested sub-machine stays layout-free when never arranged");
+    }
+
     [Test]
     public void Escaped_Node_Name_Roundtrips()
     {
