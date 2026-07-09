@@ -132,9 +132,11 @@ public class RemapReferencesByPathTests
     public void Resolves_basic_and_duplicate_siblings_by_indexed_path()
     {
         // Same fixture as the (removed) mutating test: a plain child and the 2nd of two duplicate-named
-        // "B" siblings. The orphan (a ref NOT under srcRoot) case moved out — Counterpart's "not under
-        // srcRoot ⇒ null" contract is not the same claim as Remap's "leave it untouched", so it can't be
-        // re-expressed read-only; see coverage-gaps.md.
+        // "B" siblings. KNOWN COVERAGE GAP: the orphan case (a ref NOT under srcRoot, which Remap leaves
+        // untouched) is intentionally dropped here and is NOT covered by any NUnit test — the read-only
+        // resolver returns null for an out-of-tree target, which cannot distinguish "leave unchanged"
+        // from "clear". That behavior is verified only when a real transplant runs on an avatar via
+        // execute_code (the operator's gate — see docs/verify.md).
         var src = MakeTree("SRC");
         var dst = MakeTree("DST");
         var a = src.transform.Find("A");
