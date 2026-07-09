@@ -231,6 +231,21 @@ parameters:
     }
 
     [Test]
+    public void Mute_On_Entry_Ladder_Throws()
+    {
+        // Entry transitions honor no mute/solo (the entry-emit path never reads them); accepting the field
+        // would silently drop it. Refuse it there, mirroring the canTransitionToSelf precedent.
+        const string doc =
+            "schema: 1\ncontroller: Bad_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n      Idle: { motion: ~ }\n" +
+            "    machines:\n      Sub:\n        states:\n          A: { motion: ~ }\n        default: A\n" +
+            "    entry:\n      - { to: Sub, mute: true }\n" +
+            "    default: Idle\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
+        StringAssert.Contains("mute", ex.Message);
+    }
+
+    [Test]
     public void CanTransitionToSelf_On_State_Transition_Throws()
     {
         // A state transition ignores canTransitionToSelf (only the AnyState ladder honors it). Accepting it

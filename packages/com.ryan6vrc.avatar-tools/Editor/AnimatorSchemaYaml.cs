@@ -680,11 +680,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // Entry / AnyState ladders are ordered transition lists; only the AnyState ladder may carry
-        // canTransitionToSelf (meaningless on entry, so refused there — fail loud).
+        // Entry / AnyState ladders are ordered transition lists. Only the AnyState ladder carries the fields of
+        // a real state transition (canTransitionToSelf, mute, solo) — an entry transition honors none of them,
+        // so both are refused on the entry ladder (fail loud, mirroring the canTransitionToSelf precedent).
         private static void BindLadder(List<Transition> into, List<object> list, bool anyLadder)
         {
-            BindTransitions(into, list, allowSelf: anyLadder);
+            BindTransitions(into, list, allowSelf: anyLadder, allowMuteSolo: anyLadder);
         }
 
         private static LayerBlend ParseBlend(string v)
@@ -744,7 +745,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // allowSelf defaults FALSE so a state-transition list (which calls this without the flag) refuses
         // canTransitionToSelf — a field only the AnyState ladder honors. The AnyState caller passes true.
-        private static void BindTransitions(List<Transition> into, List<object> list, bool allowSelf = false)
+        // allowMuteSolo defaults TRUE: state and AnyState transitions honor mute/solo; only the entry ladder
+        // (which passes false) refuses them (the entry-emit path never reads them, so they'd silently drop).
+        private static void BindTransitions(List<Transition> into, List<object> list, bool allowSelf = false, bool allowMuteSolo = true)
         {
             foreach (var item in list)
             {
@@ -765,8 +768,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case "fixedDuration": t.FixedDuration = ToBool(kv.Value, "transition.fixedDuration"); break;
                         case "interruption": t.Interruption = ParseInterruption(ToStr(kv.Value, "transition.interruption")); break;
                         case "ordered": t.OrderedInterruption = ToBool(kv.Value, "transition.ordered"); break;
-                        case "mute": t.Mute = ToBool(kv.Value, "transition.mute"); break;
-                        case "solo": t.Solo = ToBool(kv.Value, "transition.solo"); break;
+                        case "mute":
+                            if (!allowMuteSolo) throw new SchemaException("transition: 'mute' is not valid on an entry ladder");
+                            t.Mute = ToBool(kv.Value, "transition.mute");
+                            break;
+                        case "solo":
+                            if (!allowMuteSolo) throw new SchemaException("transition: 'solo' is not valid on an entry ladder");
+                            t.Solo = ToBool(kv.Value, "transition.solo");
+                            break;
                         case "canTransitionToSelf":
                             if (!allowSelf) throw new SchemaException("transition: 'canTransitionToSelf' is only valid on an AnyState ladder");
                             t.CanTransitionToSelf = ToBool(kv.Value, "transition.canTransitionToSelf");

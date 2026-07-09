@@ -670,6 +670,81 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
+    // ---- Review-2 #1: a sub-machine's OUTGOING (on-Exit) transition -> a located refusal ------------------
+
+    [Test]
+    public void Walk_SubMachine_Outgoing_Transition_Refuses()
+    {
+        var c = new AnimatorController { name = "SmTrans_Fx" };
+        c.AddLayer("L");
+        var root = c.layers[0].stateMachine;
+        var sub = root.AddStateMachine("Sub");
+        root.AddStateMachineExitTransition(sub); // a transition OUT of Sub — no 'from sub-machine' vocabulary
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("from sub-machine") && r.Contains("Sub")),
+            "an outgoing sub-machine transition -> located refusal");
+        Object.DestroyImmediate(c);
+    }
+
+    // ---- Review-2 #2: a real state named 'Exit' addressed bare -> a located refusal -----------------------
+
+    [Test]
+    public void Walk_Target_Named_Exit_Refuses()
+    {
+        var c = new AnimatorController { name = "ExitName_Fx" };
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        var s = sm.AddState("S");
+        var exit = sm.AddState("Exit"); // a real state literally named 'Exit'
+        s.AddTransition(exit);          // same-machine ⇒ bare 'Exit' target collides with the exit keyword
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("reserved token 'Exit'")),
+            "a bare target named 'Exit' -> located refusal");
+        Object.DestroyImmediate(c);
+    }
+
+    // ---- Review-2 #4: an UNSAVED controller keeps a standalone .anim as a ref (not inlined) ---------------
+
+    [Test]
+    public void Walk_Unsaved_Controller_Keeps_Standalone_Clip_As_Ref()
+    {
+        EnsureScratch();
+        string clipPath = ScratchFolder + "/standalone.anim";
+        var ext = new AnimationClip { name = "standalone" };
+        AnimationUtility.SetEditorCurve(ext, EditorCurveBinding.FloatCurve("", typeof(Animator), "P"),
+            AnimationCurve.Constant(0f, 0.1f, 1f));
+        AssetDatabase.CreateAsset(ext, clipPath);
+
+        // In-memory controller (no asset path) referencing a SAVED standalone clip: it must decode as a
+        // `ref:` (its own path), never inlined — the old guard tested the controller's path and inlined it.
+        var c = new AnimatorController { name = "Unsaved_Fx" };
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        st.motion = ext;
+
+        var w = ControllerDecompile.Walk(c);
+        var motion = w.Doc.Layers[0].Root.States.First(s => s.Name == "S").Motion;
+        Assert.AreEqual(clipPath, motion.RefPath, "standalone clip decodes as a ref even for an unsaved controller");
+        Assert.IsNull(motion.Clip, "not inlined");
+        Object.DestroyImmediate(c);
+        AssetDatabase.DeleteAsset(clipPath);
+    }
+
+    // ---- Review-2 (docs #1 / code): an IK-pass layer is out of vocabulary -> a located refusal -----------
+
+    [Test]
+    public void Walk_IkPass_Layer_Refuses()
+    {
+        var c = new AnimatorController { name = "IkPass_Fx" };
+        c.AddLayer("L");
+        var layers = c.layers;      // sm.layers returns a COPY
+        layers[0].iKPass = true;
+        c.layers = layers;
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("IK pass")), "an IK-pass layer -> located refusal");
+        Object.DestroyImmediate(c);
+    }
+
     private static void EnsureScratch()
     {
         if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");

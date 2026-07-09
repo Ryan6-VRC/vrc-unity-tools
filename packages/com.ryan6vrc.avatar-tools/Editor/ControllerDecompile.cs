@@ -160,6 +160,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 };
                 if (layer.avatarMask != null) model.Mask = AssetDatabase.GetAssetPath(layer.avatarMask);
 
+                // An IK-pass layer runs a humanoid IK solve pass the schema has no vocabulary for; decoding
+                // it silently would drop the pass on recompile. Refuse (named + located).
+                if (layer.iKPass)
+                    _result.Refusals.Add($"layer '{layer.name}': IK pass (iKPass) is out of vocabulary");
+
                 if (layer.stateMachine == null)
                 {
                     // A malformed controller: a layer with no state machine has no reachable graph to decode.
@@ -245,8 +250,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (cs.state != null) model.States.Add(DecodeState(cs.state, sm));
 
                 foreach (var child in sm.stateMachines)
-                    if (child.stateMachine != null)
-                        model.Machines.Add(new SubMachine { Name = child.stateMachine.name, Machine = DecodeMachine(child.stateMachine) });
+                {
+                    if (child.stateMachine == null) continue;
+                    // A sub-machine can carry OUTGOING transitions (fired when it reaches Exit) that the schema
+                    // has no "from sub-machine" vocabulary for. CountOrphans walks them (so they leave no orphan
+                    // signal), but the emitted YAML would drop them — refuse (named + located) instead.
+                    var smt = sm.GetStateMachineTransitions(child.stateMachine);
+                    if (smt != null && smt.Length > 0)
+                        _result.Refusals.Add($"state-machine '{PathLabel(sm)}': sub-machine '{child.stateMachine.name}' has {smt.Length} outgoing state-machine transition(s) (on Exit) — 'from sub-machine' transitions are out of vocabulary");
+                    model.Machines.Add(new SubMachine { Name = child.stateMachine.name, Machine = DecodeMachine(child.stateMachine) });
+                }
 
                 // Default: a DIRECT-state default is authoritative; a sub-machine default is the trailing
                 // unconditional entry transition (ControllerEmit adds it last, after the entry ladder). Unity's
@@ -442,16 +455,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // split on the UNescaped separator. A single-segment path is a top-level entity, anchored with '/'.
             private string StateTargetName(AnimatorState dest, AnimatorStateMachine srcSm, string loc)
             {
-                if (_stateOwner.TryGetValue(dest, out var owner) && owner == srcSm) return AddressPath.EscapeSegment(dest.name); // same machine ⇒ bare
+                if (_stateOwner.TryGetValue(dest, out var owner) && owner == srcSm) return BareTarget(dest.name, loc); // same machine ⇒ bare
                 if (_statePath.TryGetValue(dest, out var path))
                     return AddressPath.Split(path).Count == 1 ? "/" + path : path;
                 _result.Refusals.Add($"transition from {loc}: target state '{dest.name}' not found in the layer");
                 return dest.name;
             }
 
+            // A bare (same-machine / direct-child) target is emitted as the escaped name. The parser reserves
+            // the exact token 'Exit' for the exit pseudo-target, so a real state/sub-machine named 'Exit'
+            // addressed bare would recompile as exit-to-nowhere — refuse it (escaping can't disambiguate: the
+            // parser strips quotes before the keyword check). Multi-segment paths never collide (only exact 'Exit').
+            private string BareTarget(string name, string loc)
+            {
+                string enc = AddressPath.EscapeSegment(name);
+                if (enc == "Exit")
+                    _result.Refusals.Add($"transition from {loc}: target '{name}' encodes to the reserved token 'Exit' — a bare 'Exit' target reads as an exit transition on recompile");
+                return enc;
+            }
+
             private string SmTargetName(AnimatorStateMachine dest, AnimatorStateMachine srcSm, string loc)
             {
-                if (_smParent.TryGetValue(dest, out var parent) && parent == srcSm) return AddressPath.EscapeSegment(dest.name); // direct child ⇒ bare
+                if (_smParent.TryGetValue(dest, out var parent) && parent == srcSm) return BareTarget(dest.name, loc); // direct child ⇒ bare
                 if (_smPath.TryGetValue(dest, out var path))
                     // The layer root itself (empty path) is a legal target — "re-enter the layer at its
                     // default" — addressed by the bare '/' anchor. A top-level machine is a single segment,
@@ -498,7 +523,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (m is AnimationClip clip)
                 {
                     string p = AssetDatabase.GetAssetPath(clip);
-                    if (string.IsNullOrEmpty(_controllerPath) || p == _controllerPath)
+                    // Inline only a clip with NO path of its own (an in-memory / embedded sub-asset) or one
+                    // whose path IS the controller's. Testing the CLIP's path (not the controller's) keeps a
+                    // standalone .anim a `ref:` even when the controller itself is unsaved.
+                    if (string.IsNullOrEmpty(p) || p == _controllerPath)
                     {
                         // Embedded controller sub-asset ⇒ inline ClipSpec.
                         RegisterInlineClip(clip, loc);
