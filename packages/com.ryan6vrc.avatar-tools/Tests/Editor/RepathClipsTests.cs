@@ -46,6 +46,15 @@ public class RepathClipsTests
         return c != null && c.length > 0 ? c[0].value : float.NaN;
     }
 
+    // ClipHasBinding only inspects float bindings; the objectReference (PPtr) curves are a separate track.
+    static bool ClipHasObjRefBinding(string clipPath, string bindingPath)
+    {
+        var clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipPath);
+        foreach (var b in AnimationUtility.GetObjectReferenceCurveBindings(clip))
+            if (b.path == bindingPath) return true;
+        return false;
+    }
+
     [Test]
     public void SegmentSafe_match_hits_self_and_descendant_never_sibling_prefix()
     {
@@ -96,6 +105,9 @@ public class RepathClipsTests
 
         string forced = RepathClips.Run(ctrl, new[] { "A" }, new[] { "S" }, force: true);
         StringAssert.Contains("curve collision override (force)", forced);
+        StringAssert.Contains("=> PASS", forced);
+        Assert.AreEqual(2f, CurveValueAt(clip, "S"), "forced: A's curve (value 2) now on S");
+        Assert.IsFalse(AnimatorTestHelpers.ClipHasBinding(clip, "A"));
     }
 
     [Test]
@@ -119,6 +131,28 @@ public class RepathClipsTests
         Assert.AreEqual(0, AnimatorTestHelpers.CountOrZero(s, "writeLandedFailures"));
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(clip, "New/Path"));
         Assert.IsFalse(AnimatorTestHelpers.ClipHasBinding(clip, "Old/Path"));
+    }
+
+    [Test]
+    public void Repaths_objectReference_curve_binding()
+    {
+        string cp = Root + "/Obj.controller", clip = Root + "/Obj.anim";
+        var mat = new Material(Shader.Find("Standard")) { name = "ObjMat" };
+        AssetDatabase.CreateAsset(mat, Root + "/ObjMat.mat");
+
+        var ctrl = AnimatorController.CreateAnimatorControllerAtPath(cp);
+        var c = AnimatorTestHelpers.MakeClip(clip);
+        AnimatorTestHelpers.AddObjRefCurve(c, "Old/Path", "m_Materials.Array.data[0]", mat); // PPtr track only
+        AnimatorTestHelpers.Save(c, clip);
+        ctrl.layers[0].stateMachine.AddState("A").motion = c;
+        AnimatorTestHelpers.Save(ctrl, cp);
+
+        string s = RepathClips.Run(ctrl, new[] { "Old/Path" }, new[] { "New/Path" });
+        StringAssert.Contains("=> PASS", s);
+        Assert.AreEqual(0, AnimatorTestHelpers.CountOrZero(s, "writeLandedFailures"),
+            "objref content read-back (ObjCurvesEqual) landed");
+        Assert.IsTrue(ClipHasObjRefBinding(clip, "New/Path"), "objref binding moved to New/Path");
+        Assert.IsFalse(ClipHasObjRefBinding(clip, "Old/Path"), "objref binding gone from Old/Path");
     }
 
     [Test]
@@ -161,6 +195,9 @@ public class RepathClipsTests
 
         string forced = RepathClips.Run(ctrl, new[] { "P" }, new[] { "Q" }, force: true);
         StringAssert.Contains("read-only clip override (force)", forced);
+        StringAssert.Contains("=> PASS", forced);
+        Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(clip, "Q"), "forced: P moved to Q");
+        Assert.IsFalse(AnimatorTestHelpers.ClipHasBinding(clip, "P"));
     }
 
     [Test]
