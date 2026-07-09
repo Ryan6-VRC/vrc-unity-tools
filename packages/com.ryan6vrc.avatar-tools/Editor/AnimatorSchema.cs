@@ -111,8 +111,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public List<Transition> EntryLadder = new List<Transition>();   // ordered
         public List<Transition> AnyLadder = new List<Transition>();     // ordered; each has CanTransitionToSelf
         public List<Behaviour> Behaviours = new List<Behaviour>();
+        public MachineLayout Layout;
     }
     public sealed class SubMachine { public string Name; public StateMachine Machine = new StateMachine(); }
+
+    // Per-machine node layout (Unity graph positions). Null unless authored or captured. Nodes keyed by the
+    // EscapeSegment form of the state/sub-machine name (names may contain '/'); coords are [x, y] (z is
+    // always 0). Entry/Any/Exit/Parent are the four special-node positions; Parent (the "up" node) is
+    // meaningful only in a sub-machine. See docs/animator-schema.md and the layout-preservation spec.
+    public sealed class MachineLayout
+    {
+        public Dictionary<string, float[]> Nodes = new Dictionary<string, float[]>();
+        public float[] Entry, Any, Exit, Parent;   // [x, y] or null
+    }
 
     // Schema-tree traversal shared by every consumer that flattens a layer's states across the whole
     // sub-machine tree (WD hoist, state-count budget checks, RunLog summaries). One walk, so a new

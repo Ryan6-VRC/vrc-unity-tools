@@ -36,9 +36,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
     {
         /// <summary>Decompile the controller at <paramref name="controllerPath"/> (an <c>Assets/…</c>-relative
         /// asset path) to animator-schema YAML at <paramref name="outPath"/> (a filesystem path). With
-        /// <paramref name="whatIf"/> the whole walk + serialize runs but no <c>.yaml</c> is written. Returns
-        /// the one-line summary (see class docs).</summary>
-        public static string Decompile(string controllerPath, string outPath, bool whatIf = false)
+        /// <paramref name="whatIf"/> the whole walk + serialize runs but no <c>.yaml</c> is written. With
+        /// <paramref name="stripLayout"/> (opt-in, default off) the walk captures NO graph-layout blocks —
+        /// the own-a-vendor-controller path, where the vendor's node arrangement is noise. Returns the
+        /// one-line summary (see class docs).</summary>
+        public static string Decompile(string controllerPath, string outPath, bool whatIf = false, bool stripLayout = false)
         {
             // ── Arg guards (mirror CompileController) ─────────────────────────────────────────────────
             if (string.IsNullOrEmpty(controllerPath)) return Fail("controllerPath is empty");
@@ -49,7 +51,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ── Reachability walk ─────────────────────────────────────────────────────────────────────
             ControllerDecompile.WalkResult walk;
-            try { walk = ControllerDecompile.Walk(controller); }
+            try { walk = ControllerDecompile.Walk(controller, stripLayout); }
             catch (Exception e) { return Fail("walk: " + e.GetType().Name + ": " + e.Message); }
 
             // A refusal is fail-loud: name every out-of-vocabulary construct, write nothing.
@@ -83,10 +85,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ── Summary + body → Snapshot RunLog (written in whatIf too, mirroring CompileController) ──
             string name = doc.ControllerName;
             int states = doc.Layers.Sum(l => l.Root.CountStates());
+            string flags = (whatIf ? " (whatIf)" : "") + (stripLayout ? " (layout stripped)" : "");
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[DecompileController] {0}: layers={1} states={2} orphans={3} unresolved={4} => OK{5}",
                 name, doc.Layers.Count, states, walk.OrphanCount, walk.UnresolvedGuids.Count,
-                whatIf ? " (whatIf)" : "");
+                flags);
 
             string body = BuildBody(doc, controllerPath, outPath, walk, whatIf);
 

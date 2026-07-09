@@ -47,9 +47,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public List<string> Notes = new List<string>();      // tolerances applied, informational
         }
 
-        public static WalkResult Walk(AnimatorController controller)
+        // stripLayout (opt-in, default off) suppresses ALL per-machine layout capture — the own-a-vendor-
+        // controller path, where the vendor's node arrangement is YAML noise ahead of a heavy rewrite. Default
+        // stays capture-on (byte-identical to before the flag).
+        public static WalkResult Walk(AnimatorController controller, bool stripLayout = false)
         {
-            var ctx = new WalkContext(controller);
+            var ctx = new WalkContext(controller, stripLayout);
             return ctx.Run();
         }
 
@@ -57,6 +60,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             private readonly AnimatorController _controller;
             private readonly string _controllerPath;
+            private readonly bool _stripLayout;
             private readonly WalkResult _result = new WalkResult();
             private readonly AnimDocument _doc = new AnimDocument();
 
@@ -79,9 +83,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // drains in walk order, which need not match the YAML fill order.
             private readonly Dictionary<long, Queue<string>> _danglingByOwner;
 
-            public WalkContext(AnimatorController controller)
+            public WalkContext(AnimatorController controller, bool stripLayout)
             {
                 _controller = controller;
+                _stripLayout = stripLayout;
                 _controllerPath = AssetDatabase.GetAssetPath(controller);
                 _danglingByOwner = RecoverDanglingMotionGuids(controller);
             }
@@ -172,7 +177,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return model; // empty Root, WriteDefaults left null (no states to derive a policy from)
                 }
                 BuildAddressMaps(layer.stateMachine);
-                model.Root = DecodeMachine(layer.stateMachine);
+                model.Root = DecodeMachine(layer.stateMachine, isRoot: true);
                 HoistWriteDefaults(model);
                 return model;
             }
@@ -234,7 +239,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ----- state machines -----
 
-            private StateMachine DecodeMachine(AnimatorStateMachine sm)
+            private StateMachine DecodeMachine(AnimatorStateMachine sm, bool isRoot)
             {
                 var model = new StateMachine();
 
@@ -251,7 +256,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var smt = sm.GetStateMachineTransitions(child.stateMachine);
                     if (smt != null && smt.Length > 0)
                         _result.Refusals.Add($"state-machine '{PathLabel(sm)}': sub-machine '{child.stateMachine.name}' has {smt.Length} outgoing state-machine transition(s) (on Exit) — 'from sub-machine' transitions are out of vocabulary");
-                    model.Machines.Add(new SubMachine { Name = child.stateMachine.name, Machine = DecodeMachine(child.stateMachine) });
+                    model.Machines.Add(new SubMachine { Name = child.stateMachine.name, Machine = DecodeMachine(child.stateMachine, isRoot: false) });
                 }
 
                 // Default: a DIRECT-state default is authoritative; a sub-machine default is the trailing
@@ -298,8 +303,61 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     foreach (var b in sm.behaviours)
                         DecodeBehaviourInto(model.Behaviours, b, "state-machine '" + PathLabel(sm) + "'");
 
+                model.Layout = _stripLayout ? null : CaptureLayout(sm, isRoot);
                 return model;
             }
+
+            // Positions live in the PARENT's child structs (states[i].position / stateMachines[i].position),
+            // not AnimatorState.m_Position (which emit never writes). Special-node positions are the machine's
+            // own properties. Returns null when every node sits at its tool-owned grid/constant default, so a
+            // never-arranged machine stays layout-free.
+            private static MachineLayout CaptureLayout(AnimatorStateMachine sm, bool isRoot)
+            {
+                if (IsDefaultLayout(sm, isRoot)) return null;
+                var l = new MachineLayout();
+                foreach (var cs in sm.states)
+                    if (cs.state != null)
+                        l.Nodes[AddressPath.EscapeSegment(cs.state.name)] = new[] { cs.position.x, cs.position.y };
+                foreach (var child in sm.stateMachines)
+                    if (child.stateMachine != null)
+                        l.Nodes[AddressPath.EscapeSegment(child.stateMachine.name)] = new[] { child.position.x, child.position.y };
+                l.Entry = new[] { sm.entryPosition.x, sm.entryPosition.y };
+                l.Any   = new[] { sm.anyStatePosition.x, sm.anyStatePosition.y };
+                l.Exit  = new[] { sm.exitPosition.x, sm.exitPosition.y };
+                if (!isRoot) l.Parent = new[] { sm.parentStateMachinePosition.x, sm.parentStateMachinePosition.y };
+                return l;
+            }
+
+            // The omit-decision compares special-node positions (entry/any/exit, and parent for sub-machines) against
+            // the tool-owned constants, so a never-arranged machine stays layout-free. This relies on opening a
+            // controller in Unity's Animator window NOT perturbing those positions off the constants — verified: an
+            // opened-but-unedited controller neither dirties nor moves them (Unity serializes node positions to persist
+            // them). If that ever regresses, the fallback is to drop the three special-node comparisons below
+            // (grid-on-states/subs only); CaptureLayout still records the special positions whenever a block is emitted
+            // for state/sub reasons.
+            private static bool IsDefaultLayout(AnimatorStateMachine sm, bool isRoot)
+            {
+                int i = 0;
+                foreach (var cs in sm.states)
+                {
+                    if (cs.state == null) continue;
+                    if (!Approx(cs.position, ControllerEmit.GridState(i++))) return false;
+                }
+                int j = 0;
+                foreach (var child in sm.stateMachines)
+                {
+                    if (child.stateMachine == null) continue;
+                    if (!Approx(child.position, ControllerEmit.GridSub(j++))) return false;
+                }
+                if (!Approx(sm.entryPosition,    ControllerEmit.SpecialEntry)) return false;
+                if (!Approx(sm.anyStatePosition, ControllerEmit.SpecialAny))   return false;
+                if (!Approx(sm.exitPosition,     ControllerEmit.SpecialExit))  return false;
+                if (!isRoot && !Approx(sm.parentStateMachinePosition, ControllerEmit.SpecialParent)) return false;
+                return true;
+            }
+
+            private static bool Approx(Vector3 a, Vector3 b)
+                => Mathf.Abs(a.x - b.x) < 0.01f && Mathf.Abs(a.y - b.y) < 0.01f;
 
             // Two flavours of sibling name collision, each a located Refusal (never a silent collapse):
             //   (a) EXACT raw duplicates — two states, or two sub-machines, with the identical name. They

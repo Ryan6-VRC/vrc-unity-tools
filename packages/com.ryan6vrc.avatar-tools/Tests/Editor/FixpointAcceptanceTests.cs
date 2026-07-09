@@ -42,8 +42,10 @@ using UnityEngine.TestTools;
 //     via the stabilized form.
 //
 // Run headless via tools/run-editmode-tests.ps1 (or the Test Runner window / batchmode CI); not via MCP
-// run_tests — wrong venue (live editor). See docs/verify.md. The fixpoint fixtures live in the Plum-Remy
-// project; in a project lacking them the case self-Ignores.
+// run_tests — wrong venue (live editor). See docs/verify.md. The GrabProp/ContactTracker fixtures live
+// in-package under Tests/Editor/Fixtures (committed, controller + Animations with GUID-preserving .metas),
+// so those cases always run here; the GoLoco vendor fixture is external (not license-clean to commit) and
+// its case self-Ignores in a project lacking it.
 public class FixpointAcceptanceTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/fixpoint_tests";
@@ -96,8 +98,8 @@ public class FixpointAcceptanceTests
     // clean=false → assert the raw→owned diff is ONLY the documented normalization: after removing `default:`
     //               lines (resolve-through canonicalization), the sole remaining diffs are exactly
     //               expectedBrokenRefs `unresolved`→empty child slots, and no authored default is lost.
-    [TestCase("Assets/GestureTools/GrabProp/GrabProp_Fx.controller", "GrabProp_Fx", true, 0)]
-    [TestCase("Assets/GestureTools/ContactTracker/ContactTracker_Fx.controller", "ContactTracker_Fx", true, 0)]
+    [TestCase("Packages/com.ryan6vrc.avatar-tools/Tests/Editor/Fixtures/GestureTools/GrabProp/GrabProp_Fx.controller", "GrabProp_Fx", true, 0)]
+    [TestCase("Packages/com.ryan6vrc.avatar-tools/Tests/Editor/Fixtures/GestureTools/ContactTracker/ContactTracker_Fx.controller", "ContactTracker_Fx", true, 0)]
     [TestCase("Packages/gogoloco/Runtime/GoGo/GoLoco/Controllers/Heavy_Controler/GoLocoBaseFullPoses.controller", "GoLocoBaseFullPoses", false, 4)]
     public void Fixpoint(string fixturePath, string name, bool clean, int expectedBrokenRefs)
     {
