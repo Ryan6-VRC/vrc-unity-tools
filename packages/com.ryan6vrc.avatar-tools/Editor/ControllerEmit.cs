@@ -660,6 +660,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (spec.Kind == TreeKind.OneD) bt.useAutomaticThresholds = false;
                 if (!string.IsNullOrEmpty(spec.Param)) bt.blendParameter = spec.Param;
                 if (!string.IsNullOrEmpty(spec.ParamY)) bt.blendParameterY = spec.ParamY;
+                // Direct-tree "Normalized Blend Values" — no typed API, so set the serialized field. Only when
+                // the document specifies it; otherwise leave Unity's construction default.
+                if (spec.Kind == TreeKind.Direct && spec.Normalized.HasValue)
+                    using (var so = new SerializedObject(bt))
+                    {
+                        so.FindProperty("m_NormalizedBlendValues").boolValue = spec.Normalized.Value;
+                        so.ApplyModifiedPropertiesWithoutUndo();
+                    }
                 AssetDatabase.AddObjectToAsset(bt, _controller);
                 _result.Trees.Add(bt);
 

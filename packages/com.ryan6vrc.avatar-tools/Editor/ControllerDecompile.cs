@@ -431,6 +431,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ignores as editor-cosmetic. A property here is NOT swept; everything else non-default is refused.
             // NOT listed (⇒ swept ⇒ refused when set): m_CycleOffset, m_IKOnFeet, m_Tag (state); m_TransitionOffset
             // (transition) — the four this census was added to catch.
+            //
+            // SCOPE (what the census actually covers — the rest stays a hand-allowlist): the TOP-LEVEL scalar
+            // fields of AnimatorState, state/any/entry transitions, BlendTree, and the seven VRC SMB kinds.
+            // NOT covered — array-element structs (ChildMotion / AnimatorCondition at depth > 0, guarded by the
+            // recursive decoders' own explicit binding) and the layer / state-machine families (structs, not
+            // UnityEngine.Objects, so not SerializedObject-sweepable — their few fields are consumed/refused
+            // explicitly). Within scope the class is closed; outside it, the hand decoders remain the guard.
 
             private static readonly HashSet<string> UniversalIgnore = new HashSet<string>
             {
@@ -462,7 +469,31 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private static readonly HashSet<string> BlendTreeAware = new HashSet<string>
             {
                 "m_BlendType", "m_BlendParameter", "m_BlendParameterY", "m_Childs",
+                // m_MinThreshold/m_MaxThreshold/m_UseAutomaticThresholds are inert for the round-trip (child
+                // thresholds are read/emitted explicitly). m_NormalizedBlendValues IS consumed (Direct trees,
+                // above) — kept here so the sweep doesn't double-refuse it.
                 "m_MinThreshold", "m_MaxThreshold", "m_UseAutomaticThresholds", "m_NormalizedBlendValues",
+            };
+
+            // Per-SMB aware sets (VRC components are MonoBehaviours: public fields serialize under their own
+            // names, no m_ prefix; the MonoBehaviour internals are covered by UniversalIgnore). Each lists the
+            // fields its decoder consumes plus the editor-only debugString. A non-default field NOT here — one a
+            // decoder forgot, or a future SDK adds — is refused by the sweep.
+            private static readonly HashSet<string> DriverAware = new HashSet<string> { "parameters", "localOnly", "debugString" };
+            private static readonly HashSet<string> TrackingAware = new HashSet<string>
+            {
+                "trackingHead", "trackingLeftHand", "trackingRightHand", "trackingHip", "trackingLeftFoot",
+                "trackingRightFoot", "trackingLeftFingers", "trackingRightFingers", "trackingEyes", "trackingMouth", "debugString",
+            };
+            private static readonly HashSet<string> PlayableLayerAware = new HashSet<string> { "layer", "goalWeight", "blendDuration", "debugString" };
+            private static readonly HashSet<string> LocomotionAware = new HashSet<string> { "disableLocomotion", "debugString" };
+            private static readonly HashSet<string> PoseSpaceAware = new HashSet<string> { "enterPoseSpace", "fixedDelay", "delayTime", "debugString" };
+            private static readonly HashSet<string> LayerControlAware = new HashSet<string> { "playable", "layer", "goalWeight", "blendDuration", "debugString" };
+            private static readonly HashSet<string> PlayAudioAware = new HashSet<string>
+            {
+                "SourcePath", "PlaybackOrder", "ParameterName", "Volume", "VolumeApplySettings", "Pitch",
+                "PitchApplySettings", "Loop", "LoopApplySettings", "Clips", "ClipsApplySettings", "DelayInSeconds",
+                "PlayOnEnter", "StopOnEnter", "PlayOnExit", "StopOnExit", "debugString",
             };
 
             private void CompletenessSweep(Object o, HashSet<string> aware, string kind, string loc)
@@ -484,9 +515,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private static string Strip(string n) => n.StartsWith("m_") ? n.Substring(2) : n;
 
-            // True when a scalar leaf property differs from its type's default; `shown` is a value hint for the
-            // refusal. Non-scalar / unknown types return false (left to the recursive decoders) so the sweep
-            // never false-positives on an array, vector, or struct it does not model.
+            // True when a scalar leaf property differs from TYPE-ZERO (false / 0 / "" / enum-index-0 / null);
+            // `shown` is a value hint for the refusal. Non-scalar / unknown types return false (left to the
+            // recursive decoders) so the sweep never false-positives on an array, vector, or struct it does not
+            // model. FORWARD-SAFETY: type-zero is the true default for every field currently swept. If a future
+            // SDK adds a non-aware field whose real Unity default is NON-zero (a float defaulting to 1, an enum
+            // whose default index ≠ 0), this would refuse the compiler's OWN freshly-emitted output — a global
+            // fixpoint break (louder than a per-construct miss, so still fail-loud). Fix then: add it to the
+            // type's *Aware set (if consumed/inert) or compare against a freshly-constructed instance's value.
             private static bool NonDefaultScalar(SerializedProperty p, out string shown)
             {
                 shown = "";
@@ -621,7 +657,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case AnimatorConditionMode.Less: cond.Op = CondOp.Less; cond.Value = c.threshold; break;
                         case AnimatorConditionMode.Equals: cond.Op = CondOp.Equals; cond.Value = c.threshold; break;
                         case AnimatorConditionMode.NotEqual: cond.Op = CondOp.NotEqual; cond.Value = c.threshold; break;
-                        default: cond.Op = CondOp.Is; cond.Value = 1f; break;
+                        default:
+                            // An unknown/future/corrupt mode — refuse rather than approximate as `Is true`
+                            // (consistent with MapTreeKind / MapInterruption, which refuse their unknowns).
+                            _result.Refusals.Add($"transition from {loc}: condition on '{c.parameter}' has an unknown mode '{c.mode}' — out of vocabulary");
+                            continue;
                     }
                     list.Add(cond);
                 }
@@ -677,6 +717,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // ControllerEmit.BuildMotion preserves, and (b) leaves an orphan guid a later state mis-dequeues.
                 using (var btSo = new SerializedObject(bt))
                 {
+                    // Direct trees carry a behaviour-affecting "Normalized Blend Values" toggle (sum-to-1 vs
+                    // raw additive) with no typed API — read it verbatim so it round-trips (else a vendor tree
+                    // recompiles to the construction default, a silently different pose). No public property.
+                    if (direct)
+                        spec.Normalized = btSo.FindProperty("m_NormalizedBlendValues").boolValue;
                     var childs = btSo.FindProperty("m_Childs");
                     var kids = bt.children;
                     for (int i = 0; i < kids.Length; i++)
@@ -835,6 +880,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         _result.Refusals.Add($"behaviour on {loc}: unsupported SMB type '{smb.GetType().Name}' is out of vocabulary");
                         break;
                 }
+                SweepSmb(smb, loc);
+            }
+
+            // Census a known SMB against its per-kind aware set (unknown types are already refused above).
+            private void SweepSmb(StateMachineBehaviour smb, string loc)
+            {
+                HashSet<string> aware;
+                switch (smb)
+                {
+                    case VRC_AvatarParameterDriver _: aware = DriverAware; break;
+                    case VRC_AnimatorTrackingControl _: aware = TrackingAware; break;
+                    case VRC_PlayableLayerControl _: aware = PlayableLayerAware; break;
+                    case VRC_AnimatorLocomotionControl _: aware = LocomotionAware; break;
+                    case VRC_AnimatorTemporaryPoseSpace _: aware = PoseSpaceAware; break;
+                    case VRC_AnimatorPlayAudio _: aware = PlayAudioAware; break;
+                    case VRC_AnimatorLayerControl _: aware = LayerControlAware; break;
+                    default: return; // null or unsupported (already refused)
+                }
+                CompletenessSweep(smb, aware, "behaviour on", loc);
             }
 
             private Behaviour DecodeDriver(VRC_AvatarParameterDriver drv, string loc)
@@ -870,6 +934,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                     { ControllerEmit.DriverKeys.Min, p.valueMin }, { ControllerEmit.DriverKeys.Max, p.valueMax }, { ControllerEmit.DriverKeys.Chance, p.chance },
                                 };
                                 break;
+                            default:
+                                // An unknown/future ChangeType would be dropped from all four buckets — refuse it.
+                                _result.Refusals.Add($"behaviour on {loc}: driver operation on '{p.name}' has an unknown ChangeType '{p.type}' — out of vocabulary");
+                                break;
                         }
                     }
                 if (set.Count > 0) b.Fields[ControllerEmit.DriverKeys.Set] = set;
@@ -891,13 +959,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (drv.parameters == null || drv.parameters.Count == 0) return;
                 int prev = -1;
                 bool interleaved = false;
-                var seen = new HashSet<string>();
+                var seen = new HashSet<(Driver.ChangeType, string)>();
                 foreach (var p in drv.parameters)
                 {
                     int bucket = DriverBucket(p.type);
                     if (bucket < prev) interleaved = true;
                     prev = bucket;
-                    if (!seen.Add(p.type + " " + p.name))
+                    if (!seen.Add((p.type, p.name)))
                         _result.Refusals.Add(
                             $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' — the schema's name-keyed buckets keep only the last write");
                 }
@@ -913,7 +981,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case Driver.ChangeType.Set: return 0;
                     case Driver.ChangeType.Add: return 1;
                     case Driver.ChangeType.Copy: return 2;
-                    default: return 3; // Random
+                    case Driver.ChangeType.Random: return 3;
+                    default: return 4; // an unknown ChangeType — a distinct bucket so it never conflates with Random
+                                       // for the interleave check (DecodeDriver refuses it outright regardless)
                 }
             }
 

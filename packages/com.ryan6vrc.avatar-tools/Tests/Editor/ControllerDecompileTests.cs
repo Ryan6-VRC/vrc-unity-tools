@@ -851,6 +851,73 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
+    // ---- Review-6 #1 (BLOCKER): a Direct tree's Normalized Blend Values round-trips (not swept-away) --------
+
+    [Test]
+    public void Walk_Direct_Tree_NormalizedBlendValues_RoundTrips()
+    {
+        var doc = new AnimDocument { Schema = 1, ControllerName = "DirectNorm_Fx" };
+        doc.Parameters.Add(new ParamSpec { Name = "W", Type = AnimParamType.Float });
+        doc.Clips.Add(new ClipSpec { Name = "c", Seconds = 0.1f });
+        var layer = new Layer { Name = "L" };
+        var tree = new BlendTreeSpec { Kind = TreeKind.Direct, Normalized = false };
+        tree.Children.Add(new TreeChild { Motion = new MotionRef { Clip = "c" }, DirectWeight = "W" });
+        layer.Root.States.Add(new State { Name = "S", Motion = new MotionRef { Tree = tree } });
+        layer.Root.DefaultState = "S";
+        doc.Layers.Add(layer);
+        ControllerEmit.Build(doc, out var emitted);
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.IsFalse(w.Refusals.Any(r => r.Contains("NormalizedBlendValues")),
+            "normalizedBlendValues is consumed now, not swept-refused");
+        var t2 = w.Doc.Layers[0].Root.States.First(s => s.Name == "S").Motion.Tree;
+        Assert.IsTrue(t2.Normalized.HasValue, "the Direct tree's normalized value is decoded");
+        Assert.AreEqual(false, t2.Normalized.Value, "the explicit normalized value round-trips (would else reset to the construction default)");
+    }
+
+    // ---- Review-6 #2: an unknown driver ChangeType -> refusal (no longer dropped from all four buckets) ------
+
+    [Test]
+    public void Walk_Driver_Unknown_ChangeType_Refuses()
+    {
+        const string yaml =
+            "schema: 1\ncontroller: DrvBad_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  X: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - driver: { set: { X: 1 } }\n" +
+            "    default: S\n";
+        var src = AnimatorSchemaYaml.Parse(yaml, "test");
+        ControllerEmit.Build(src, out var emitted);
+        var drv = (VRC.SDKBase.VRC_AvatarParameterDriver)emitted.Controller.layers[0].stateMachine.states[0].state.behaviours[0];
+        drv.parameters = new List<VRC.SDKBase.VRC_AvatarParameterDriver.Parameter>
+        {
+            new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { type = (VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType)99, name = "X", value = 1f },
+        };
+        EditorUtility.SetDirty(drv);
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("unknown ChangeType")),
+            "an unknown driver ChangeType -> located refusal");
+    }
+
+    // ---- Review-6 #3: an unknown AnimatorConditionMode -> refusal (no longer approximated as Is-true) --------
+
+    [Test]
+    public void Walk_Unknown_ConditionMode_Refuses()
+    {
+        var c = new AnimatorController { name = "BadMode_Fx" };
+        c.AddParameter("P", AnimatorControllerParameterType.Float);
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        var s = sm.AddState("S");
+        var t = sm.AddState("T");
+        var tr = s.AddTransition(t);
+        tr.AddCondition((AnimatorConditionMode)99, 0f, "P");
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("unknown mode")),
+            "an unknown condition mode -> located refusal");
+        Object.DestroyImmediate(c);
+    }
+
     private static void EnsureScratch()
     {
         if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");

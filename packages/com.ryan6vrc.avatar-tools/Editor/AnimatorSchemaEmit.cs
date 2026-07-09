@@ -263,6 +263,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             L(sb, Sp(indent) + "tree: " + TreeKindToken(spec.Kind));
             if (!string.IsNullOrEmpty(spec.Param)) L(sb, Sp(indent) + "param: " + ScalarStr(spec.Param));
             if (!string.IsNullOrEmpty(spec.ParamY)) L(sb, Sp(indent) + "paramY: " + ScalarStr(spec.ParamY));
+            if (spec.Normalized.HasValue) L(sb, Sp(indent) + "normalized: " + Bool(spec.Normalized.Value));
             if (spec.Children.Count == 0)
             {
                 L(sb, Sp(indent) + "children: []");
@@ -306,6 +307,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var parts = new List<string> { "tree: " + TreeKindToken(spec.Kind) };
             if (!string.IsNullOrEmpty(spec.Param)) parts.Add("param: " + ScalarStr(spec.Param));
             if (!string.IsNullOrEmpty(spec.ParamY)) parts.Add("paramY: " + ScalarStr(spec.ParamY));
+            if (spec.Normalized.HasValue) parts.Add("normalized: " + Bool(spec.Normalized.Value));
             if (spec.Children.Count == 0)
             {
                 parts.Add("children: []");
