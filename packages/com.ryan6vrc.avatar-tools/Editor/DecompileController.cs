@@ -147,7 +147,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 string abs = EditorUtility.OpenFilePanel("Select an AnimatorController", Application.dataPath, "controller");
                 if (string.IsNullOrEmpty(abs)) return;
-                ctrlPath = ToProjectRelative(abs);
+                ctrlPath = AssetPathUtil.ToProjectRelative(abs);
                 if (ctrlPath == null) { Debug.LogError("[DecompileController] the controller must be under this project's Assets/."); return; }
             }
 
@@ -156,13 +156,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (string.IsNullOrEmpty(outPath)) return;
 
             DecompileController.Decompile(ctrlPath, outPath, false);
-        }
-
-        private static string ToProjectRelative(string abs)
-        {
-            abs = abs.Replace('\\', '/');
-            string data = Application.dataPath.Replace('\\', '/');
-            return abs.StartsWith(data + "/", StringComparison.Ordinal) ? "Assets" + abs.Substring(data.Length) : null;
         }
     }
 }

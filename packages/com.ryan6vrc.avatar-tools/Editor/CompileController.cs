@@ -432,18 +432,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             string abs = EditorUtility.SaveFolderPanel("Output folder (must be under Assets)", Application.dataPath, "");
             if (string.IsNullOrEmpty(abs)) return;
-            string outDir = ToProjectRelative(abs);
+            string outDir = AssetPathUtil.ToProjectRelative(abs);
             if (outDir == null) { Debug.LogError("[CompileController] output folder must be under this project's Assets/."); return; }
 
             CompileController.Compile(src, outDir, false);
-        }
-
-        private static string ToProjectRelative(string abs)
-        {
-            abs = abs.Replace('\\', '/');
-            string data = Application.dataPath.Replace('\\', '/');
-            if (abs == data) return "Assets";
-            return abs.StartsWith(data + "/", StringComparison.Ordinal) ? "Assets" + abs.Substring(data.Length) : null;
         }
     }
 }
