@@ -133,7 +133,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var driverIsolation = DriverIsolationAdvisories(doc);
             var unresolvedRefs = UnresolvedRefAdvisories(built);
 
-            int states = doc.Layers.Sum(l => CountStates(l.Root));
+            int states = doc.Layers.Sum(l => l.Root.CountStates());
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[CompileController] {0}: layers={1} states={2} params={3} => OK{4}",
                 name, doc.Layers.Count, states, doc.Parameters.Count, whatIf ? " (whatIf)" : "");
@@ -209,7 +209,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static (List<string> chain, bool overBudget) LongestFiringChain(Layer layer, bool defaultExitTime)
         {
             var states = new List<State>();
-            CollectStates(layer.Root, states);
+            layer.Root.CollectStates(states);
             if (states.Count == 0 || states.Count > 128) return (null, false); // pathological-size guard
             var names = new HashSet<string>(states.Select(s => s.Name));
 
@@ -325,7 +325,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("source: `").Append(doc.SourcePath ?? "(none)").Append("`  \n");
             sb.Append(whatIf ? "**WHATIF — no asset written**  \n" : "out: `" + finalPath + "`  \n");
             sb.Append("layers=").Append(doc.Layers.Count)
-              .Append(" states=").Append(doc.Layers.Sum(l => CountStates(l.Root)))
+              .Append(" states=").Append(doc.Layers.Sum(l => l.Root.CountStates()))
               .Append(" params=").Append(doc.Parameters.Count).Append("  \n");
 
             sb.Append("\n## Post-emit graph lint\n\n");
@@ -354,21 +354,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
-        private static void CollectStates(StateMachine sm, List<State> into)
-        {
-            if (sm == null) return;
-            foreach (var s in sm.States) if (s != null) into.Add(s);
-            foreach (var sub in sm.Machines) if (sub != null && sub.Machine != null) CollectStates(sub.Machine, into);
-        }
-
-        private static int CountStates(StateMachine sm)
-        {
-            if (sm == null) return 0;
-            int n = sm.States.Count;
-            foreach (var sub in sm.Machines) if (sub != null && sub.Machine != null) n += CountStates(sub.Machine);
-            return n;
-        }
-
         private static string NormalizeDir(string dir)
         {
             dir = dir.Replace('\\', '/');

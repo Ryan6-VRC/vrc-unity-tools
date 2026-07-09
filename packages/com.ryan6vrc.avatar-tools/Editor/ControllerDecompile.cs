@@ -186,7 +186,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private static void HoistWriteDefaults(Layer model)
             {
                 var states = new List<State>();
-                CollectStates(model.Root, states);
+                model.Root.CollectStates(states);
                 if (states.Count == 0) return; // nothing to derive from; leave WriteDefaults null
 
                 int trueCount = 0, falseCount = 0;
@@ -195,13 +195,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 model.WriteDefaults = policy;
                 foreach (var s in states)
                     if (s.WriteDefaults == policy) s.WriteDefaults = null; // majority inherits the layer policy
-            }
-
-            private static void CollectStates(StateMachine sm, List<State> into)
-            {
-                if (sm == null) return;
-                into.AddRange(sm.States);
-                foreach (var child in sm.Machines) CollectStates(child.Machine, into);
             }
 
             // Map every state/sub-machine of the layer to its owning machine + path-from-root, so a transition

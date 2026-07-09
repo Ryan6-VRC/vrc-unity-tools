@@ -82,7 +82,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ── Summary + body → Snapshot RunLog (written in whatIf too, mirroring CompileController) ──
             string name = doc.ControllerName;
-            int states = doc.Layers.Sum(l => CountStates(l.Root));
+            int states = doc.Layers.Sum(l => l.Root.CountStates());
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[DecompileController] {0}: layers={1} states={2} orphans={3} unresolved={4} => OK{5}",
                 name, doc.Layers.Count, states, walk.OrphanCount, walk.UnresolvedGuids.Count,
@@ -104,7 +104,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("controller: `").Append(controllerPath).Append("`  \n");
             sb.Append(whatIf ? "**WHATIF — no .yaml written**  \n" : "out: `" + outPath + "`  \n");
             sb.Append("layers=").Append(doc.Layers.Count)
-              .Append(" states=").Append(doc.Layers.Sum(l => CountStates(l.Root)))
+              .Append(" states=").Append(doc.Layers.Sum(l => l.Root.CountStates()))
               .Append(" orphans=").Append(walk.OrphanCount)
               .Append(" unresolved=").Append(walk.UnresolvedGuids.Count).Append("  \n");
 
@@ -117,15 +117,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             else foreach (var n in walk.Notes) sb.Append("- ").Append(n).Append('\n');
 
             return sb.ToString();
-        }
-
-        // Count every state under a schema state machine, recursing sub-machines at any depth.
-        private static int CountStates(StateMachine sm)
-        {
-            if (sm == null) return 0;
-            int n = sm.States.Count;
-            foreach (var sub in sm.Machines) if (sub != null && sub.Machine != null) n += CountStates(sub.Machine);
-            return n;
         }
 
         private static string Fail(string why)
