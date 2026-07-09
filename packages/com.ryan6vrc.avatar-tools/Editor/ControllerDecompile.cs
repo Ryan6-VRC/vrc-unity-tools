@@ -47,9 +47,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public List<string> Notes = new List<string>();      // tolerances applied, informational
         }
 
-        public static WalkResult Walk(AnimatorController controller)
+        // stripLayout (opt-in, default off) suppresses ALL per-machine layout capture — the own-a-vendor-
+        // controller path, where the vendor's node arrangement is YAML noise ahead of a heavy rewrite. Default
+        // stays capture-on (byte-identical to before the flag).
+        public static WalkResult Walk(AnimatorController controller, bool stripLayout = false)
         {
-            var ctx = new WalkContext(controller);
+            var ctx = new WalkContext(controller, stripLayout);
             return ctx.Run();
         }
 
@@ -57,6 +60,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             private readonly AnimatorController _controller;
             private readonly string _controllerPath;
+            private readonly bool _stripLayout;
             private readonly WalkResult _result = new WalkResult();
             private readonly AnimDocument _doc = new AnimDocument();
 
@@ -79,9 +83,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // drains in walk order, which need not match the YAML fill order.
             private readonly Dictionary<long, Queue<string>> _danglingByOwner;
 
-            public WalkContext(AnimatorController controller)
+            public WalkContext(AnimatorController controller, bool stripLayout)
             {
                 _controller = controller;
+                _stripLayout = stripLayout;
                 _controllerPath = AssetDatabase.GetAssetPath(controller);
                 _danglingByOwner = RecoverDanglingMotionGuids(controller);
             }
@@ -298,7 +303,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     foreach (var b in sm.behaviours)
                         DecodeBehaviourInto(model.Behaviours, b, "state-machine '" + PathLabel(sm) + "'");
 
-                model.Layout = CaptureLayout(sm, isRoot);
+                model.Layout = _stripLayout ? null : CaptureLayout(sm, isRoot);
                 return model;
             }
 

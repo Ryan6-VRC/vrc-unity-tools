@@ -141,6 +141,29 @@ layers:
         Assert.AreEqual(new[] { 777f, 888f }, layout.Nodes[AddressPath.EscapeSegment(sm.states[0].state.name)]);
     }
 
+    // The opt-in stripLayout flag suppresses ALL layout capture (own-a-vendor-controller path, where the
+    // vendor's node arrangement is just noise you're about to rewrite). Same arranged controller: default
+    // Walk DOES capture; Walk(stripLayout:true) captures nothing and serializes with no layout block.
+    [Test]
+    public void Decompile_StripLayout_Emits_No_Blocks()
+    {
+        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
+        ControllerEmit.Build(doc, out var res);
+        var sm = res.Controller.layers[0].stateMachine;
+        MoveState(sm, sm.states[0].state.name, new Vector3(777, 888, 0));
+
+        // Contrast — the default path still captures the arrangement (the flag's effect is unambiguous).
+        var captured = ControllerDecompile.Walk(res.Controller);
+        Assert.IsNotNull(captured.Doc.Layers[0].Root.Layout, "default Walk captures the arrangement");
+        StringAssert.Contains("layout:", AnimatorSchemaEmit.Serialize(captured.Doc), "default emits a layout block");
+
+        // stripLayout: no machine gets a Layout, and the serialized yaml carries no layout block.
+        var stripped = ControllerDecompile.Walk(res.Controller, stripLayout: true);
+        Assert.IsNull(stripped.Doc.Layers[0].Root.Layout, "stripLayout suppresses capture");
+        Assert.IsFalse(AnimatorSchemaEmit.Serialize(stripped.Doc).Contains("layout:"),
+            "stripLayout emits no layout block");
+    }
+
     [Test]
     public void Decompile_Omits_Layout_For_Grid_Controller()
     {

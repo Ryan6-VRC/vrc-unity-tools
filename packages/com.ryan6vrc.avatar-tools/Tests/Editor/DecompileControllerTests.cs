@@ -116,6 +116,28 @@ public class DecompileControllerTests
         Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
     }
 
+    // stripLayout: true decompiles an ARRANGED controller (a node dragged off-grid) to a .yaml with no
+    // layout block — the door-level mirror of the Walk-level suppression.
+    [Test]
+    public void StripLayout_Writes_Yaml_Without_Layout()
+    {
+        var src = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
+        ControllerEmit.Build(src, TestRoot + "/emit", "src", out var emitted);
+        var sm = emitted.Controller.layers[0].stateMachine;
+        var arr = sm.states;
+        arr[0].position = new Vector3(777, 888, 0); // arrange off-grid so a default decompile WOULD emit layout
+        sm.states = arr;
+        EditorUtility.SetDirty(sm);
+        AssetDatabase.SaveAssets();
+        string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
+
+        string yamlOut = TestRoot + "/stripped.yaml";
+        string dec = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false, stripLayout: true);
+        StringAssert.Contains("=> OK", dec);
+        Assert.IsTrue(File.Exists(yamlOut), "the .yaml is written");
+        Assert.IsFalse(File.ReadAllText(yamlOut).Contains("layout:"), "stripLayout writes no layout block");
+    }
+
     [Test]
     public void Empty_ControllerPath_Fails()
     {
