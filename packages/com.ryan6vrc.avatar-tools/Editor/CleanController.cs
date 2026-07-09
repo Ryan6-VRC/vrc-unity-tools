@@ -641,13 +641,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        /// <summary>Log early-abort errors, write RunLog, and return the error summary line.</summary>
+        /// <summary>Write the RunLog and return the error summary line. BuildSummary already
+        /// Debug.LogErrors any non-PASS result, so this path must NOT log again — doing so
+        /// double-logged every early-abort FAIL (the end-of-Run FAIL path logs once via BuildSummary).</summary>
         private static string FinishEarly(RunData data, string label)
         {
             string logPath = WriteRunLog(data, label);
-            string s = BuildSummary(data, label, logPath);
-            Debug.LogError(s);
-            return s;
+            return BuildSummary(data, label, logPath);
         }
 
         private static string BuildSummary(RunData data, string label, string logPath)

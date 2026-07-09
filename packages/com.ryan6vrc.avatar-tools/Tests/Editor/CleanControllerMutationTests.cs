@@ -190,11 +190,7 @@ public class CleanControllerMutationTests
     {
         var src = BuildSourceFx(Root + "/Src.controller");
         _avatar = new GameObject("NoDesc");
-        // FinishEarly double-logs: BuildSummary itself Debug.LogErrors the FAIL summary, then FinishEarly
-        // logs the same string again — verified empirically (the runner's "Unhandled log message" failure
-        // on a single Expect showed the identical line appearing twice in test output). Every FinishEarly
-        // exit (as opposed to a Step-6-verify FAIL, which logs once) needs two Expects.
-        LogAssert.Expect(LogType.Error, new Regex("VRCAvatarDescriptor not found"));
+        // FinishEarly and the Step-6-verify FAIL path both log exactly once (via BuildSummary) — one Expect.
         LogAssert.Expect(LogType.Error, new Regex("VRCAvatarDescriptor not found"));
         string s = CleanController.Run(src, _avatar, Root, new[] { "GestureLeft" });
         StringAssert.Contains("=> FAIL", s);
@@ -230,8 +226,7 @@ public class CleanControllerMutationTests
         // path instead, which is where the "wrong-typed asset FAILs loud" contract actually has that
         // phrasing to assert against.
         AnimatorTestHelpers.MakeClip(Root + "/VRCExpressionParameters_Empty.asset");
-        // FinishEarly double-logs the same FAIL summary (see Fails_when_no_descriptor) — two Expects.
-        LogAssert.Expect(LogType.Error, new Regex("exists but is not a VRCExpressionParameters"));
+        // FinishEarly logs the FAIL summary exactly once (via BuildSummary) — one Expect.
         LogAssert.Expect(LogType.Error, new Regex("exists but is not a VRCExpressionParameters"));
         string s = CleanController.Run(src, _avatar, Root, new[] { "GestureLeft" });
         StringAssert.Contains("=> FAIL", s);
