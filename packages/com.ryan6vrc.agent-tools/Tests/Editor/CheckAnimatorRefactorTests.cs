@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using NUnit.Framework;
 using UnityEditor;
@@ -114,6 +116,63 @@ public class CheckAnimatorRefactorTests
         StringAssert.Contains("brokenBinding=1", result,
             "rewriteBindings must resolve Armature/Bone; only Ghost/Missing may remain — a truthful count: " + result);
         StringAssert.Contains("=> PASS", result, "auto-basis still demotes broken-binding to advisory (PASS): " + result);
+    }
+
+    // orphanSubAsset detection (migrated from the deleted orphan-sweep tests when the mutating other half of
+    // this rule was removed in favor of the Decompile→Compile round-trip). This is the coverage that would
+    // otherwise be lost: that CheckAnimator NAMES a controller sub-asset reachable
+    // from no layer. SweepTestDummySmb (its own same-named file, relocated here for assembly visibility) is a
+    // StateMachineBehaviour, so it exercises the SMB arm of the five-type filter; HideInHierarchy guards the
+    // regression a reintroduced IsSubAsset gate would cause (Unity hides a controller's own sub-objects, so
+    // such a gate would silently drop the real dead weight this rule exists to name).
+    [Test]
+    public void OrphanSubAsset_hiddenSmb_isReported()
+    {
+        if (!AssetDatabase.IsValidFolder(TmpDir))
+            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+        var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
+        controller.layers[0].stateMachine.AddState("A"); // reachable content the orphan must not shadow
+
+        // The orphan: an SMB reachable from no state machine. Sub-assets only exist on a saved asset, so it
+        // is added after the controller is on disk. SMBs are ScriptableObjects — CreateInstance, not new().
+        var orphan = ScriptableObject.CreateInstance<SweepTestDummySmb>();
+        orphan.name = "ORPHAN_SMB";
+        AssetDatabase.AddObjectToAsset(orphan, controller);
+        orphan.hideFlags = HideFlags.HideInHierarchy;
+        EditorUtility.SetDirty(controller);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.ImportAsset(AssetPath);
+
+        // Orphan is advisory-tier → verdict PASS → Debug.Log (no error), so no LogAssert is needed.
+        var result = CheckAnimator.Lint(controller, "explicit", null, null, null);
+        _logPath = ExtractLogPath(result);
+
+        Assert.Contains("SweepTestDummySmb 'ORPHAN_SMB'", OrphanTokens(result),
+            "CheckAnimator must name the hidden orphan sub-asset (regression: a reintroduced IsSubAsset gate hides it): " + result);
+    }
+
+    // Parse the emitted RunLog markdown for orphanSubAsset "Type 'name'" tokens (advisory line shape:
+    // "- **orphanSubAsset** <Where> — <Detail>"). Reads the file at the in-band "| log=" path.
+    private static List<string> OrphanTokens(string result)
+    {
+        var tokens = new List<string>();
+        string rel = ExtractLogPath(result);
+        if (string.IsNullOrEmpty(rel)) return tokens;
+        string proj = Application.dataPath;
+        proj = proj.Substring(0, proj.Length - "Assets".Length); // project root (dataPath ends in /Assets)
+        string abs = proj + rel;
+        if (!File.Exists(abs)) return tokens;
+        const string mark = "**orphanSubAsset**";
+        foreach (var line in File.ReadAllText(abs).Split('\n'))
+        {
+            int oi = line.IndexOf(mark, StringComparison.Ordinal);
+            if (oi < 0) continue;
+            string after = line.Substring(oi + mark.Length);
+            int dash = after.IndexOf(" — ", StringComparison.Ordinal);
+            if (dash >= 0) after = after.Substring(0, dash);
+            tokens.Add(after.Trim());
+        }
+        return tokens;
     }
 
     private static string ExtractLogPath(string result)

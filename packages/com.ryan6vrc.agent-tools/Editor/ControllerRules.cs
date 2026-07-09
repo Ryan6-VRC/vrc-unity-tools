@@ -386,8 +386,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             // AssetDatabase.IsSubAsset returns FALSE for HideInHierarchy sub-objects — which is what a
             // controller's own states/machines/transitions/blend-trees are. Verified live against 67
             // real-world controllers: of the orphan objects, ~97% were hidden (0 satisfied IsSubAsset), so
-            // an IsSubAsset gate would have hidden the real dead weight this rule exists to name (and that
-            // SweepController exists to remove). o != controller + the five-type filter is the real gate.
+            // an IsSubAsset gate would have hidden the real dead weight this rule exists to name (and that a
+            // Decompile→Compile round-trip strips). o != controller + the five-type filter is the real gate.
             foreach (var o in AssetDatabase.LoadAllAssetsAtPath(path))
             {
                 if (o == null || o == controller) continue;
