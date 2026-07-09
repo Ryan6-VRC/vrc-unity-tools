@@ -5,20 +5,20 @@ using Ryan6Vrc.AvatarTools.Editor;
 // A resolvable non-VRC Component whose VrcComponentTable.Lookup is null (no row) — used to exercise
 // the "resolved type, but no table anchor" refusal branch without any VRC SDK reference. TypeCache
 // resolves it by simple name after compile, exactly as a real MA/VRCFury type would resolve.
-namespace RelocateComponentsTests_Ns
+namespace MoveComponentsTests_Ns
 {
     public class RcNoAnchorProbe : MonoBehaviour { }
 }
 
-public class RelocateComponentsTests
+public class MoveComponentsTests
 {
     [Test]
     public void ResolveAnchor_prefers_explicit_else_host()
     {
         var host = new GameObject("H").transform;
         var root = new GameObject("Root").transform;
-        Assert.AreEqual(host, RelocateComponents.ResolveAnchor(null, host));
-        Assert.AreEqual(root, RelocateComponents.ResolveAnchor(root, host));
+        Assert.AreEqual(host, MoveComponents.ResolveAnchor(null, host));
+        Assert.AreEqual(root, MoveComponents.ResolveAnchor(root, host));
         Object.DestroyImmediate(host.gameObject); Object.DestroyImmediate(root.gameObject);
     }
 
@@ -28,9 +28,9 @@ public class RelocateComponentsTests
         var t = new GameObject("T").transform;
         var child = new GameObject("C").transform; child.SetParent(t);
         var outside = new GameObject("O").transform;
-        Assert.IsTrue(RelocateComponents.IsUnderOrEqual(t, t));
-        Assert.IsTrue(RelocateComponents.IsUnderOrEqual(child, t));
-        Assert.IsFalse(RelocateComponents.IsUnderOrEqual(outside, t));
+        Assert.IsTrue(MoveComponents.IsUnderOrEqual(t, t));
+        Assert.IsTrue(MoveComponents.IsUnderOrEqual(child, t));
+        Assert.IsFalse(MoveComponents.IsUnderOrEqual(outside, t));
         Object.DestroyImmediate(t.gameObject); Object.DestroyImmediate(outside.gameObject);
     }
 
@@ -44,7 +44,7 @@ public class RelocateComponentsTests
         // This is exactly how Relocate refuses MA/VRCFury/NDMF and Unity built-in constraints.
         var inst = new GameObject("Inst");
         var root = inst.transform;
-        var summary = RelocateComponents.Run(inst, root, new[] { "RcNoAnchorProbe" }, "X");
+        var summary = MoveComponents.Run(inst, root, new[] { "RcNoAnchorProbe" }, "X");
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("RcNoAnchorProbe", summary);
         StringAssert.Contains("no relocatable anchor", summary);
@@ -57,7 +57,7 @@ public class RelocateComponentsTests
         // A name that resolves to no Component at all is also a loud FAIL (the other refusal path).
         var inst = new GameObject("Inst");
         var root = inst.transform;
-        var summary = RelocateComponents.Run(inst, root, new[] { "NoSuchComponentTypeXyz" }, "X");
+        var summary = MoveComponents.Run(inst, root, new[] { "NoSuchComponentTypeXyz" }, "X");
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("NoSuchComponentTypeXyz", summary);
         Object.DestroyImmediate(inst);

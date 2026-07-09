@@ -11,7 +11,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// several children sharing it (common on VRChat rigs — e.g. multiple <c>Col_*</c> anchors or hair
     /// chains); the disambiguation counts how many same-name siblings precede the target in child order
     /// and selects the Nth same-name child on the destination side, so the right one of N is always
-    /// chosen. <c>DuplicateAndConstrain</c>'s segment keys delegate here.
+    /// chosen. <c>ConstrainedDuplicate</c>'s segment keys delegate here.
     ///
     /// Shared, unchanged, by <see cref="RemapReferencesByPath"/> (read-only path resolution) and
     /// <see cref="ScaffoldBuilder"/> (which reuses an existing child at the indexed path or mints one) —

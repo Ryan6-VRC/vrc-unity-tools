@@ -29,7 +29,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// under <c>destPath</c> is counted <c>alreadyPlaced</c> and skipped. One collapsed Undo per call.
     /// </summary>
     [AgentTool]
-    public static class RelocateComponents
+    public static class MoveComponents
     {
         public static Transform ResolveAnchor(Transform explicitAnchor, Transform host)
             => explicitAnchor != null ? explicitAnchor : host;
@@ -41,7 +41,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                  string destPath, bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
-            var log = new TransplantRunLog("relocate-components")
+            var log = new TransplantRunLog("move-components")
             {
                 whatIf   = whatIf,
                 instance = ownedRoot != null ? ownedRoot.name : null,
@@ -107,7 +107,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!whatIf)
             {
                 Undo.IncrementCurrentGroup();
-                Undo.SetCurrentGroupName("RelocateComponents");
+                Undo.SetCurrentGroupName("MoveComponents");
                 group = Undo.GetCurrentGroup();
                 dest = GetOrCreatePath(ownedRoot.transform, destPath);
             }
@@ -147,7 +147,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (comp.transform.parent == dest) { alreadyPlaced++; continue; }
 
                     var holder = new GameObject(comp.gameObject.name);
-                    Undo.RegisterCreatedObjectUndo(holder, "RelocateComponents");
+                    Undo.RegisterCreatedObjectUndo(holder, "MoveComponents");
                     holder.transform.SetParent(dest, false);
 
                     var newComp = Undo.AddComponent(holder, comp.GetType());
@@ -255,7 +255,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (next == null)
                 {
                     var go = new GameObject(seg);
-                    Undo.RegisterCreatedObjectUndo(go, "RelocateComponents");
+                    Undo.RegisterCreatedObjectUndo(go, "MoveComponents");
                     go.transform.SetParent(current, false);
                     next = go.transform;
                 }

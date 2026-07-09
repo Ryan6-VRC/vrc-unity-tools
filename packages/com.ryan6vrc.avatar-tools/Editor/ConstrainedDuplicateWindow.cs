@@ -3,7 +3,7 @@ using UnityEngine;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
-    public class DuplicateAndConstrainWindow : EditorWindow
+    public class ConstrainedDuplicateWindow : EditorWindow
     {
         private Transform sourceRoot;
         private ConstraintDirection direction = ConstraintDirection.DuplicateFollowsOriginal;
@@ -15,10 +15,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private bool replaceExistingDrivenConstraints = false;
         private string duplicateSuffix = "_Copy";
 
-        [MenuItem("Tools/Ryan6VRC/Duplicate and Constrain Hierarchy")]
+        [MenuItem("Tools/Ryan6VRC/Constrained Duplicate")]
         private static void ShowWindow()
         {
-            GetWindow<DuplicateAndConstrainWindow>("Duplicate + VRC Constraints");
+            GetWindow<ConstrainedDuplicateWindow>("Duplicate + VRC Constraints");
         }
 
         private void OnEnable()
@@ -93,7 +93,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 EditorUtility.DisplayDialog("No Source Root", "Please select a source root transform first.", "OK");
                 return;
             }
-            Debug.Log(DuplicateAndConstrain.Run(
+            Debug.Log(ConstrainedDuplicate.Run(
                 sourceRoot.gameObject, constraintType, direction, includeRootBone, solveInLocalSpace,
                 stripClonedConstraintsFromDuplicate, replaceExistingDrivenConstraints, duplicateSuffix));
         }
