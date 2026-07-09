@@ -76,14 +76,6 @@ public static class AnimatorTestHelpers
         ctrl.layers = list.ToArray();
     }
 
-    // Set/clear the OS read-only file attribute (paired with a finally that clears it).
-    public static void SetOsReadOnly(string assetPath, bool on)
-    {
-        string abs = Path.GetFullPath(assetPath);
-        var a = File.GetAttributes(abs);
-        File.SetAttributes(abs, on ? (a | FileAttributes.ReadOnly) : (a & ~FileAttributes.ReadOnly));
-    }
-
     // Grammar: "[kind] (whatIf) label: k1=v1, k2=v2 offenders=[…] notes=[…] warnings=[…] error=… => RESULT | log=…"
     public static int Count(string summary, string key)
     {
@@ -93,16 +85,6 @@ public static class AnimatorTestHelpers
         int j = i;
         while (j < summary.Length && char.IsDigit(summary[j])) j++;
         return int.Parse(summary.Substring(i, j - i));
-    }
-
-    public static int CountOrZero(string summary, string key)
-    {
-        int i = summary.IndexOf(key + "=");
-        if (i < 0) return 0;
-        i += key.Length + 1;
-        int j = i;
-        while (j < summary.Length && char.IsDigit(summary[j])) j++;
-        return j > i ? int.Parse(summary.Substring(i, j - i)) : 0;
     }
 
     public static List<string> Notes(string summary)
