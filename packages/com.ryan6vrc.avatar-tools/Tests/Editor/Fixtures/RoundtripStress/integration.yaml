@@ -1,0 +1,42 @@
+# covers: the cross-cluster whole-graph witness — a blend tree on a state deep in a nested, cross-
+#         referenced sub-machine, plus a driver-set AAP racing a clip AAP on one state.
+schema: 1
+controller: Integration_Fx
+basis: avatar-root
+role: fx
+defaults:
+  writeDefaults: on
+  transition: { duration: 0, exitTime: none, interruption: none }
+parameters:
+  g:   bool
+  Dir: { type: float, default: 0.5 }
+  Out: { type: float, aap: true }
+layers:
+  - name: Integration
+    machines:
+      Deep:
+        machines:
+          Deeper:
+            states:
+              Tree:
+                motion:
+                  tree: 1d
+                  param: Dir
+                  children:
+                    - { clip: aap_min, threshold: 0.0 }
+                    - { clip: aap_max, threshold: 1.0 }
+                transitions:
+                  - { to: /Race, when: [ g is false ] }   # absolute cross-machine ref out of depth
+            default: Tree
+        default: Deeper
+    states:
+      Race:
+        motion: { clip: aap_max }                          # clip AAP on Out ...
+        behaviours:
+          - driver: { set: { Out: 1.0 } }                  # ... racing a driver set on the same Out
+        transitions:
+          - { to: Deep, when: [ g is true ] }              # bare local -> sub-machine Deep
+    default: Race
+clips:
+  aap_min: { set: { Out: 0.0 } }
+  aap_max: { set: { Out: 1.0 } }

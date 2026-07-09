@@ -37,6 +37,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
         [TestCase("addressing.yaml", "Addressing_Fx")]
         [TestCase("behaviours.yaml", "Behaviours_Fx")]
         [TestCase("clips.yaml", "Clips_Fx")]
+        [TestCase("integration.yaml", "Integration_Fx")]
         public void Fixpoint_AuthoredYaml(string fixture, string name)
         {
             string yaml = FixpointOracle.ReadPackageText(FixDir + "/" + fixture);
