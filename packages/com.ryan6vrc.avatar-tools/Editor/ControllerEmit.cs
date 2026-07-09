@@ -47,6 +47,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private const string ScratchRoot = "Assets/Agent/Scratch/emit";
 
+        // Tool-owned graph layout. The compiler owns EVERY node position — the state/sub-machine grid AND
+        // the four special nodes — so DecompileController has a deterministic baseline to compare against
+        // (a value Unity assigns at node creation is version-dependent). Single authority both directions read.
+        internal static Vector3 GridState(int i) => new Vector3(300f, 60f * i, 0f);
+        internal static Vector3 GridSub(int i)   => new Vector3(600f, 60f * i, 0f);
+        internal static readonly Vector3 SpecialEntry  = new Vector3(50f,   0f, 0f);
+        internal static readonly Vector3 SpecialAny    = new Vector3(50f,  60f, 0f);
+        internal static readonly Vector3 SpecialExit   = new Vector3(50f, 120f, 0f);
+        internal static readonly Vector3 SpecialParent = new Vector3(50f, -60f, 0f);
+
+        internal static Vector3? NodePos(MachineLayout l, string name)
+            => (l != null && l.Nodes.TryGetValue(AddressPath.EscapeSegment(name), out var xy))
+                ? new Vector3(xy[0], xy[1], 0f) : (Vector3?)null;
+        private static Vector3 SpecialPos(float[] xy, Vector3 fallback)
+            => xy != null ? new Vector3(xy[0], xy[1], 0f) : fallback;
+
         public sealed class EmitResult
         {
             public AnimatorController Controller;
@@ -419,7 +435,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 for (int i = 0; i < states.Count; i++)
                 {
                     var s = states[i];
-                    var pos = new Vector3(300f, 60f * i, 0f); // fixed grid keyed by document order
+                    var pos = NodePos(model.Layout, s.Name) ?? GridState(i); // authored layout, else the grid
                     var ast = target.AddState(s.Name, pos);
                     ast.writeDefaultValues = s.WriteDefaults ?? layer.WriteDefaults ?? _doc.Defaults.WriteDefaults;
                     ast.speed = s.Speed;
@@ -435,11 +451,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 for (int i = 0; i < machines.Count; i++)
                 {
                     var sub = machines[i];
-                    var pos = new Vector3(600f, 60f * i, 0f); // sub-machines to the right of the state grid
+                    var pos = NodePos(model.Layout, sub.Name) ?? GridSub(i); // authored layout, else the grid
                     var childSm = target.AddStateMachine(sub.Name, pos);
                     childSm.hideFlags = HideFlags.HideInHierarchy;
                     scope.Subs[sub.Name] = EmitMachine(layer, sub.Machine, childSm);
                 }
+
+                // Special-node positions are ALWAYS written (tool-owned): authored layout values when present,
+                // else the shared constants — so decompile has a deterministic baseline. parentStateMachinePosition
+                // on a layer-root machine is a harmless no-op (root has no up-node); kept unconditional for simplicity.
+                var lay = model.Layout;
+                target.entryPosition              = SpecialPos(lay?.Entry,  SpecialEntry);
+                target.anyStatePosition           = SpecialPos(lay?.Any,    SpecialAny);
+                target.exitPosition               = SpecialPos(lay?.Exit,   SpecialExit);
+                target.parentStateMachinePosition = SpecialPos(lay?.Parent, SpecialParent);
 
                 // A state and a sub-machine of the same name are both addressable by bare name, but ResolveName
                 // (and the default lookup) resolve states first — the sub-machine would be unreachable and a

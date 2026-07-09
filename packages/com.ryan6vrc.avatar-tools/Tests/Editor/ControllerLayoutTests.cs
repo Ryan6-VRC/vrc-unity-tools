@@ -1,9 +1,22 @@
 using NUnit.Framework;
 using Ryan6Vrc.AvatarTools.Editor;
+using UnityEditor;
+using UnityEditor.Animations;
+using UnityEngine;
 
-// Layout-preservation tests: in-memory parse + validate of the layout: block. No AssetDatabase / Build.
+// Layout-preservation tests: the parse + validate cases run purely in memory; the Compile_* cases below
+// call ControllerEmit.Build, which persists a controller to the scratch folder — TearDown removes it.
 public class ControllerLayoutTests
 {
+    private const string ScratchFolder = "Assets/Agent/Scratch/emit";
+
+    [TearDown]
+    public void TearDown()
+    {
+        if (AssetDatabase.IsValidFolder(ScratchFolder))
+            AssetDatabase.DeleteAsset(ScratchFolder);
+    }
+
     // A minimal two-state layer with an authored layout block placing Idle off-grid.
     private const string LayoutDoc = @"
 schema: 1
@@ -73,5 +86,32 @@ layers:
         var doc = AnimatorSchemaYaml.Parse(LayoutDoc, "test");
         var errors = SchemaValidation.Validate(doc);
         Assert.IsFalse(errors.Exists(e => e.Contains("dangling-layout")), string.Join(" | ", errors));
+    }
+
+    [Test]
+    public void Compile_Honors_Listed_And_Grids_Omitted()
+    {
+        // Author only Idle; Go is omitted from nodes -> grid slot 1.
+        var doc = AnimatorSchemaYaml.Parse(
+            LayoutDoc.Replace("nodes: { Idle: [111, 222], Go: [333, 444] }", "nodes: { Idle: [111, 222] }"),
+            "test");
+        ControllerEmit.Build(doc, out var res);
+        var sm = res.Controller.layers[0].stateMachine;
+        var idle = System.Array.Find(sm.states, cs => cs.state.name == "Idle");
+        var go   = System.Array.Find(sm.states, cs => cs.state.name == "Go");
+        Assert.AreEqual(new Vector3(111, 222, 0), idle.position, "Idle honored");
+        // Go is the 2nd state in document order -> grid slot i=1 -> (300, 60).
+        Assert.AreEqual(new Vector3(300, 60, 0), go.position, "Go grid-fallback");
+    }
+
+    [Test]
+    public void Compile_Writes_Special_Constants_When_Unauthored()
+    {
+        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
+        ControllerEmit.Build(doc, out var res);
+        var sm = res.Controller.layers[0].stateMachine;
+        Assert.AreEqual(ControllerEmit.SpecialEntry, sm.entryPosition);
+        Assert.AreEqual(ControllerEmit.SpecialAny,   sm.anyStatePosition);
+        Assert.AreEqual(ControllerEmit.SpecialExit,  sm.exitPosition);
     }
 }
