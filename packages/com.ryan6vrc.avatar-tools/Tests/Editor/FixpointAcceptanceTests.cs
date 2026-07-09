@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 using Ryan6Vrc.AvatarTools.Editor;
+using Ryan6Vrc.AvatarTools.Tests;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
@@ -65,35 +66,6 @@ public class FixpointAcceptanceTests
         AssetDatabase.Refresh();
     }
 
-    // The oracle must witness the fail-loud behaviour too: a refusal is a SIBLING of Doc, so serializing Doc
-    // alone would let a silently-dropped construct round-trip green while the real DecompileController door
-    // returns FAIL on the same controller. So the OWNED form (C1 onward) and every CLEAN fixture must decode
-    // refusal-free. requireClean is relaxed ONLY for a raw VENDOR (stabilized) C0 — a raw controller may carry
-    // out-of-vocabulary cruft the first compile normalizes away (e.g. GoLoco's editor mute/solo on 3 entry
-    // transitions; see the raw→owned categories above), and the door correctly refuses that raw input.
-    private static string Decode(AnimatorController c, bool requireClean = true)
-    {
-        var w = ControllerDecompile.Walk(c);
-        if (requireClean)
-            Assert.IsEmpty(w.Refusals, "fixpoint decode must be refusal-free — got: " + string.Join(" | ", w.Refusals));
-        return AnimatorSchemaEmit.Serialize(w.Doc);
-    }
-
-    // Write yaml to a temp file, compile into a fresh sub-folder, return the loaded controller.
-    private AnimatorController CompileTo(string yaml, string name, string tag)
-    {
-        string y = TestRoot + "/" + name + "_" + tag + ".yaml";
-        File.WriteAllText(y, yaml);
-        string outDir = TestRoot + "/out_" + name + "_" + tag;
-        Directory.CreateDirectory(outDir);
-        AssetDatabase.Refresh();
-        string res = CompileController.Compile(Path.GetFullPath(y), outDir, whatIf: false);
-        StringAssert.Contains("=> OK", res, "compile (" + tag + ") is clean");
-        var c = AssetDatabase.LoadAssetAtPath<AnimatorController>(outDir + "/" + name + ".controller");
-        Assert.IsNotNull(c, "compiled controller (" + tag + ") loads");
-        return c;
-    }
-
     // clean=true  → also assert the TIGHT fixpoint decode(C0)==decode(C1).
     // clean=false → assert the raw→owned diff is ONLY the documented normalization: after removing `default:`
     //               lines (resolve-through canonicalization), the sole remaining diffs are exactly
@@ -108,13 +80,13 @@ public class FixpointAcceptanceTests
 
         // Raw C0: a clean fixture must decode refusal-free; a raw vendor (stabilized) fixture may carry
         // refusals the first compile normalizes (GoLoco's 3 entry mute/solo). The OWNED forms below always must.
-        string yamlA = Decode(c0, requireClean: clean); // raw vendor decompile
-        var c1 = CompileTo(yamlA, name, "c1"); // own it once
-        string yamlB = Decode(c1);           // the owned form
+        string yamlA = FixpointOracle.Decode(c0, requireClean: clean); // raw vendor decompile
+        var c1 = FixpointOracle.CompileTo(TestRoot, yamlA, name, "c1"); // own it once
+        string yamlB = FixpointOracle.Decode(c1);           // the owned form
 
         // STABILIZED fixpoint: the owned form round-trips byte-for-byte.
-        var c2 = CompileTo(yamlB, name, "c2");
-        string yamlC = Decode(c2);
+        var c2 = FixpointOracle.CompileTo(TestRoot, yamlB, name, "c2");
+        string yamlC = FixpointOracle.Decode(c2);
         Assert.AreEqual(yamlB, yamlC, "stabilized fixpoint: the owned form's decompile is textually identical after a recompile");
         StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
 
@@ -214,12 +186,12 @@ public class FixpointAcceptanceTests
         bx.AddTransition(slash).AddCondition(AnimatorConditionMode.If, 0, "g");    // cross-machine ref (A/Foo\/Bar)
         AssetDatabase.SaveAssets();
 
-        string yaml1 = Decode(rc);
+        string yaml1 = FixpointOracle.Decode(rc);
         StringAssert.Contains("to: Foo\\/Bar", yaml1, "the local reference escapes the '/'");
         StringAssert.Contains("A/Foo\\/Bar", yaml1, "the cross-machine reference escapes the segment's '/'");
 
-        var c1 = CompileTo(yaml1, "SlashName_Fx", "c1");
-        string yaml2 = Decode(c1);
+        var c1 = FixpointOracle.CompileTo(TestRoot, yaml1, "SlashName_Fx", "c1");
+        string yaml2 = FixpointOracle.Decode(c1);
         Assert.AreEqual(yaml1, yaml2, "the slash-in-name controller reaches a textual fixpoint");
         StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
     }
