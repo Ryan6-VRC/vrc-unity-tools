@@ -10,8 +10,9 @@ using UnityEngine.TestTools;
 
 // Behavioral tests for the DecompileController door — the AGENT-FACING read door that ties
 // ControllerDecompile.Walk + AnimatorSchemaEmit.Serialize together. These touch the filesystem (the emitted
-// .yaml) and the AssetDatabase (the emitted/loaded .controller). NOT run via MCP run_tests (it crashes the
-// editor); run from the Unity Test Runner window or CI. TearDown removes the whole test tree each run.
+// .yaml) and the AssetDatabase (the emitted/loaded .controller). Run headless via tools/run-editmode-tests.ps1
+// (or the Test Runner window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
+// TearDown removes the whole test tree each run.
 public class DecompileControllerTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/dc_tests";

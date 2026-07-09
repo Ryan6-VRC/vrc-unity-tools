@@ -41,8 +41,9 @@ using UnityEngine.TestTools;
 //     refusal-free (the door refuses it), while the OWNED form is. GoLoco is in the passing [TestCase] set
 //     via the stabilized form.
 //
-// NOT run via MCP run_tests (it crashes the editor); run from the Test Runner window or batchmode CI. The
-// fixpoint fixtures live in the Plum-Remy project; in a project lacking them the case self-Ignores.
+// Run headless via tools/run-editmode-tests.ps1 (or the Test Runner window / batchmode CI); not via MCP
+// run_tests — wrong venue (live editor). See docs/verify.md. The fixpoint fixtures live in the Plum-Remy
+// project; in a project lacking them the case self-Ignores.
 public class FixpointAcceptanceTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/fixpoint_tests";

@@ -8,8 +8,9 @@ using UnityEngine;
 
 // Behavioral tests for ControllerDecompile — the AnimatorController -> AnimDocument read direction. Like
 // ControllerEmitTests these touch the AssetDatabase (Walk reads sub-asset clips/behaviours off a persisted
-// controller, and the round-trip emits one first). NOT run via MCP run_tests (it crashes the editor); run
-// from the Unity Test Runner window or CI. TearDown removes the scratch folder each run.
+// controller, and the round-trip emits one first). Run headless via tools/run-editmode-tests.ps1 (or the
+// Test Runner window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
+// TearDown removes the scratch folder each run.
 public class ControllerDecompileTests
 {
     private const string ScratchFolder = "Assets/Agent/Scratch/emit";
