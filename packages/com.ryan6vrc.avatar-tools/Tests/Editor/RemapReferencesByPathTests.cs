@@ -21,8 +21,10 @@ public class RemapReferencesByPathTests
     // NOTE: these tests assert the read-only resolver's DECISION (IndexedPath.FindByIndexedPath /
     // RemapReferencesByPath.Counterpart) rather than Remap's SerializedObject write-through. Building +
     // reading + destroying plain GameObject hierarchies is NUnit-safe; mutating a SerializedObject via
-    // Remap and then DestroyImmediate-ing its GameObject crashes the Editor (see coverage-gaps.md for what
-    // that dropped from coverage and where it's re-covered).
+    // Remap and then DestroyImmediate-ing its GameObject crashes the Editor. Remap's result aggregation
+    // (remapped/nulled counts, renameWarnings population) is therefore not asserted here — it is verified
+    // when a transplant runs on a real avatar via execute_code (the operator's gate; see docs/verify.md).
+    // The one decision with no read-only equivalent is the KNOWN COVERAGE GAP note further down.
 
     [Test]
     public void RenameMap_resolves_ref_across_renamed_armature_root_and_disambiguates_dup()
