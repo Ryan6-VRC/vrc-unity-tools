@@ -1,3 +1,5 @@
+// Behavioral tests for OwnControllerClips. Throwaway on-disk assets under an owned scratch path; assert on
+// the returned one-line summary + post-mutation controller/clip state. Headless via tools/run-editmode-tests.ps1.
 using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.Animations;
@@ -58,7 +60,7 @@ public class OwnControllerClipsTests
     }
 
     [Test]
-    public void Same_named_clips_dedup_with_guid_suffix()
+    public void Same_named_clips_get_guid_suffixed_not_collided()
     {
         EnsureVendor();
         AnimatorTestHelpers.EnsureFolder(VendorRoot + "/a");
@@ -150,10 +152,14 @@ public class OwnControllerClipsTests
         string fail = OwnControllerClips.Run(ctrl, Out);
         StringAssert.Contains("=> FAIL", fail);
         StringAssert.Contains("read-only controller", fail);
+
+        string forced = OwnControllerClips.Run(ctrl, Out, OwnControllerClips.Scope.VendorOnly, force: true);
+        StringAssert.Contains("=> PASS", forced);
+        StringAssert.Contains("read-only controller override (force)", forced);
     }
 
     [Test]
-    public void Readonly_outDir_fails()
+    public void Readonly_outDir_fails_unless_force()
     {
         var v = VendorClip("ROO");
         string cp = Root + "/Fx6.controller";
@@ -164,6 +170,10 @@ public class OwnControllerClipsTests
         string fail = OwnControllerClips.Run(ctrl, VendorRoot + "/out");
         StringAssert.Contains("=> FAIL", fail);
         StringAssert.Contains("read-only outDir", fail);
+
+        string forced = OwnControllerClips.Run(ctrl, VendorRoot + "/out", OwnControllerClips.Scope.VendorOnly, force: true);
+        StringAssert.Contains("=> PASS", forced);
+        StringAssert.Contains("read-only outDir override (force)", forced);
     }
 
     [Test]
