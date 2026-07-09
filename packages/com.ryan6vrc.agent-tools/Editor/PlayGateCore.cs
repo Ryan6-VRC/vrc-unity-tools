@@ -18,7 +18,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// Enumeration is scoped to the passed <paramref name="scene"/> (the "≥1 active avatar" trigger) —
     /// never the global <c>FindObjectsOfType</c>, which spans additively-loaded scenes + DontDestroyOnLoad
     /// and would false-positive "More than 1 avatar enabled". Non-SDK hazards (VRCFury / GestureManager /
-    /// LyumaAv3Emulator) are detected by <c>GetType().FullName</c> reflection (the <see cref="GimmickReport"/>
+    /// LyumaAv3Emulator) are detected by <c>GetType().FullName</c> reflection (the <see cref="ReportGimmick"/>
     /// precedent — no asmdef dependency).
     ///
     /// Two rules — GestureManager-enabled and the emulator config — fire ONLY when an enabled emulator
@@ -38,7 +38,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // when this no longer resolves in the loaded VRCFury assembly).
         public const string FwdFeatureFullName = "VF.Model.Feature.FixWriteDefaults";
         // Leaf (last segment) matched against each VRCFury feature's managedReferenceFullTypename leaf,
-        // mirroring GimmickReport's "FullController"/"ApplyDuringUpload" leaf-matching. Derived from the
+        // mirroring ReportGimmick's "FullController"/"ApplyDuringUpload" leaf-matching. Derived from the
         // full name — one source of truth, so a re-pin can't leave the two silently divergent.
         // Note the asymmetry: the blind check resolves the FULL name (exact); feature matching compares
         // the LEAF (loose). Both a full-name miss and a leaf mismatch resolve toward a BLOCK — the safe
@@ -46,7 +46,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         public static readonly string FwdFeatureLeaf =
             FwdFeatureFullName.Substring(FwdFeatureFullName.LastIndexOf('.') + 1);
 
-        // Full type names of the reflected hazards (mirrors verify.md's assert snippet + GimmickReport).
+        // Full type names of the reflected hazards (mirrors verify.md's assert snippet + ReportGimmick).
         // The emulator control component is `LyumaAv3Emulator` (the installed lyuma.av3emulator package ships
         // no bare `Av3Emulator` type — a wrong literal here silently disables the whole emulator rule).
         private const string VrcFuryComponentFullName = "VF.Model.VRCFury";
@@ -129,7 +129,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             foreach (var d in descriptors)
             {
-                // includeInactive: MANDATORY here (the GimmickReport precedent) — VRCFury's non-destructive
+                // includeInactive: MANDATORY here (the ReportGimmick precedent) — VRCFury's non-destructive
                 // build processes inactive objects too, so a VRCFury/FWD setup under a toggled-off child
                 // still pops the modal. Missing it would read "no VRCFury" and fail open. (Contrast the
                 // active-descriptor / GM / emulator scans, which stay active-only: an inactive GM or
@@ -214,8 +214,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static void CheckEmulatorConfig(MonoBehaviour emu, List<Offender> offenders)
         {
             var t = emu.GetType();
-            bool? run  = GimmickReport.ReadBoolMember(emu, t, "RunPreprocessAvatarHook");
-            bool? perm = GimmickReport.ReadBoolMember(emu, t, "EnablePlayerContactPermissions");
+            bool? run  = ReportGimmick.ReadBoolMember(emu, t, "RunPreprocessAvatarHook");
+            bool? perm = ReportGimmick.ReadBoolMember(emu, t, "EnablePlayerContactPermissions");
 
             // present-but-unreadable: the emulator IS here but a needed flag can't be reflected (renamed
             // field) → block loud rather than skip a live hazard.
@@ -275,8 +275,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return null;
         }
 
-        // Reuse GimmickReport's scene-root-absolute path grammar (one grammar across the family), inheriting
+        // Reuse ReportGimmick's scene-root-absolute path grammar (one grammar across the family), inheriting
         // its first-match duplicate-named-sibling caveat rather than authoring a second path formatter.
-        private static string Path(Transform t) => GimmickReport.GetHierarchyPath(t);
+        private static string Path(Transform t) => ReportGimmick.GetHierarchyPath(t);
     }
 }

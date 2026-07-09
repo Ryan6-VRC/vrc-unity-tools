@@ -9,12 +9,12 @@ using UnityEngine;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// The AnimatorLint rule set, extracted from <see cref="AnimatorLint"/> so the SAME rules can run on an
+    /// The CheckAnimator rule set, extracted from <see cref="CheckAnimator"/> so the SAME rules can run on an
     /// in-memory <see cref="AnimatorController"/> (a future compiler's write-substrate door) as on a saved
-    /// asset (AnimatorLint's inspection door). <see cref="Run"/> takes the already-resolved binding-basis
+    /// asset (CheckAnimator's inspection door). <see cref="Run"/> takes the already-resolved binding-basis
     /// <paramref name="roots"/> / <paramref name="brokenBindingIsError"/> tier flag / <paramref name="pathRewrite"/>
     /// and returns the raw <see cref="LintResult"/> — counts, error/advisory offenders, and rule-produced
-    /// notes. AnimatorLint keeps ownership of basis resolution (auto/explicit) and of rendering the result
+    /// notes. CheckAnimator keeps ownership of basis resolution (auto/explicit) and of rendering the result
     /// (summary line + RunLog markdown); ControllerRules owns only the defect detection.
     ///
     /// The two-tier discipline lives here: the schema-certain rules (missing motion, undeclared parameter,
@@ -23,7 +23,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// The verdict (error-tier fired ⇒ FAIL) is computed by the caller from these counts.
     ///
     /// The shared binding/frame helpers (<c>CollectUnresolvedBindings</c>, the <c>Try*Frame</c> detectors)
-    /// stay on <see cref="AnimatorLint"/> — they are also AvatarLint's; the broken-binding rule calls them.
+    /// stay on <see cref="CheckAnimator"/> — they are also CheckAvatar's; the broken-binding rule calls them.
     /// </summary>
     public static class ControllerRules
     {
@@ -55,7 +55,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Run the v1 rule set against <paramref name="controller"/> with the binding basis already
         /// resolved by the caller. <paramref name="roots"/> are the candidate basis roots (mount-first); an
         /// EMPTY list skips the broken-binding rule (records a note, counts nothing) exactly as a
-        /// no-basis-root AnimatorLint run does. <paramref name="brokenBindingIsError"/> places broken bindings
+        /// no-basis-root CheckAnimator run does. <paramref name="brokenBindingIsError"/> places broken bindings
         /// at error-tier (true) or demotes them to a single collapsed advisory (false — a build-rewrite auto
         /// site). <paramref name="pathRewrite"/> (null ⇒ identity) rewrites each binding path before
         /// resolution (a VRCFury FullController's rewriteBindings). Returns the raw counts + offenders +
@@ -276,7 +276,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // path each broken binding is a genuine named failure and gets its own line.
             var demotedSamples = new List<string>();
 
-            foreach (var (clip, b) in AnimatorLint.CollectUnresolvedBindings(controller, roots, pathRewrite))
+            foreach (var (clip, b) in CheckAnimator.CollectUnresolvedBindings(controller, roots, pathRewrite))
             {
                 rep.BrokenBinding++;
                 if (rep.BrokenBindingIsError)
@@ -386,8 +386,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             // AssetDatabase.IsSubAsset returns FALSE for HideInHierarchy sub-objects — which is what a
             // controller's own states/machines/transitions/blend-trees are. Verified live against 67
             // real-world controllers: of the orphan objects, ~97% were hidden (0 satisfied IsSubAsset), so
-            // an IsSubAsset gate would have hidden the real dead weight this rule exists to name (and that
-            // SweepController exists to remove). o != controller + the five-type filter is the real gate.
+            // an IsSubAsset gate would have hidden the real dead weight this rule exists to name (and that a
+            // Decompile→Compile round-trip strips). o != controller + the five-type filter is the real gate.
             foreach (var o in AssetDatabase.LoadAllAssetsAtPath(path))
             {
                 if (o == null || o == controller) continue;
@@ -521,7 +521,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     // ----- Public result types (the compiler door reads these) --------------------------------------
 
     /// <summary>One detected defect. <see cref="Kind"/> is the rule name, <see cref="Where"/> a topology/asset
-    /// handle, <see cref="Detail"/> the human-readable explanation. Rendered verbatim by AnimatorLint.Emit.</summary>
+    /// handle, <see cref="Detail"/> the human-readable explanation. Rendered verbatim by CheckAnimator.Emit.</summary>
     public struct LintOffender { public string Kind; public string Where; public string Detail; }
 
     /// <summary>The raw outcome of <see cref="ControllerRules.Run"/>: per-rule counts, the error/advisory

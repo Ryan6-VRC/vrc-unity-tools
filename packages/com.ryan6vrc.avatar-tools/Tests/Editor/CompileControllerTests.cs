@@ -45,7 +45,7 @@ public class CompileControllerTests
     }
 
     [Test]
-    public void Compiled_Controller_Passes_AnimatorLint()
+    public void Compiled_Controller_Passes_CheckAnimator()
     {
         string outDir = TestRoot + "/out_lint";
         CompileController.Compile(_srcPath, outDir, whatIf: false);
@@ -53,7 +53,7 @@ public class CompileControllerTests
         var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(outDir + "/Debounce_Fx.controller");
         Assert.IsNotNull(ctrl, "compiled controller loads");
 
-        string lint = AnimatorLint.Lint(ctrl, "explicit", null, null, null);
+        string lint = CheckAnimator.Lint(ctrl, "explicit", null, null, null);
         StringAssert.Contains("=> PASS", lint);
     }
 

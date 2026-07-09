@@ -58,7 +58,7 @@ public class DecompileControllerTests
 
         var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(TestRoot + "/out_rt/Debounce_Fx.controller");
         Assert.IsNotNull(ctrl, "recompiled controller loads");
-        StringAssert.Contains("=> PASS", AnimatorLint.Lint(ctrl, "explicit", null, null, null));
+        StringAssert.Contains("=> PASS", CheckAnimator.Lint(ctrl, "explicit", null, null, null));
     }
 
     // whatIf computes everything, writes NO .yaml, and appends " (whatIf)".

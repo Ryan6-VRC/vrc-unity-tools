@@ -543,7 +543,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     // Kept synced layer: params come from the source layer's structure plus this
                     // layer's per-state overrides. A dropped source layer is a broken sync however
-                    // params are counted (AnimatorLint territory) — collect what still resolves.
+                    // params are counted (CheckAnimator territory) — collect what still resolves.
                     if (allLayers != null && layer.syncedLayerIndex < allLayers.Length)
                     {
                         var src = allLayers[layer.syncedLayerIndex];

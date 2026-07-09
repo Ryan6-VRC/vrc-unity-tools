@@ -12,18 +12,18 @@ using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 using VRC.SDK3.Avatars.Components;
 
-// AvatarLint proof obligations (spec 2026-07-07-avatarlint-design.md, Acceptance criteria).
+// CheckAvatar proof obligations (spec 2026-07-07-avatarlint-design.md, Acceptance criteria).
 //
-// AvatarLint.Inspect resolves scene paths against the ACTIVE scene (its local FindByHierarchyPath), so —
-// like AnimatorLintRefactorTests — fixtures live in the active scene and are torn down in place. Nothing is
+// CheckAvatar.Inspect resolves scene paths against the ACTIVE scene (its local FindByHierarchyPath), so —
+// like CheckAnimatorRefactorTests — fixtures live in the active scene and are torn down in place. Nothing is
 // saved: temp controllers/clips + the emitted RunLog are deleted in TearDown; the real scene file is never
 // written. MA/VRCFury are the REAL installed types (reflection AddComponent), the same path the tool detects
 // them on. The internal test seams are flipped via reflection (Tests is a separate assembly), which is also
 // how they are exercised live via execute_code.
-public class AvatarLintTests
+public class CheckAvatarTests
 {
-    private const string TmpDir = "Assets/AgentAvatarLintTmp";
-    private const string VendorTmpDir = "Assets/Vendor/AgentAvatarLintTmp";
+    private const string TmpDir = "Assets/AgentCheckAvatarTmp";
+    private const string VendorTmpDir = "Assets/Vendor/AgentCheckAvatarTmp";
 
     private GameObject _avatar;
     private string _logPath;
@@ -35,7 +35,7 @@ public class AvatarLintTests
     public void SetUp()
     {
         LogAssert.ignoreFailingMessages = true; // CLASSIFY logs a warning; degrade paths log warnings — expected
-        if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", "AgentAvatarLintTmp");
+        if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", "AgentCheckAvatarTmp");
         // B4: build fixtures in a throwaway additive scene, never the real active scene (Plum-Remy is Ryan's
         // real project). Capture the seam delegates so TearDown restores the real behaviour.
         _prevActive = EditorSceneManager.GetActiveScene();
@@ -72,10 +72,10 @@ public class AvatarLintTests
             .FirstOrDefault(t => t.FullName == fullName);
 
     private static void SetSeam(string field, object value) =>
-        typeof(AvatarLint).GetField(field, BindingFlags.NonPublic | BindingFlags.Static).SetValue(null, value);
+        typeof(CheckAvatar).GetField(field, BindingFlags.NonPublic | BindingFlags.Static).SetValue(null, value);
 
     private static object GetSeam(string field) =>
-        typeof(AvatarLint).GetField(field, BindingFlags.NonPublic | BindingFlags.Static).GetValue(null);
+        typeof(CheckAvatar).GetField(field, BindingFlags.NonPublic | BindingFlags.Static).GetValue(null);
 
     private void ResetSeams()
     {
@@ -84,7 +84,7 @@ public class AvatarLintTests
         SetSeam("FrameAnchorOverride", _origAnchor);
     }
 
-    private static string Inspect(string root) => AvatarLint.Inspect(root);
+    private static string Inspect(string root) => CheckAvatar.Inspect(root);
 
     private string ReadLog(string result)
     {
@@ -336,7 +336,7 @@ public class AvatarLintTests
     public void ClipAssetPath_distinguishesVendorFromOwned()
     {
         if (!AssetDatabase.IsValidFolder("Assets/Vendor")) AssetDatabase.CreateFolder("Assets", "Vendor");
-        if (!AssetDatabase.IsValidFolder(VendorTmpDir)) AssetDatabase.CreateFolder("Assets/Vendor", "AgentAvatarLintTmp");
+        if (!AssetDatabase.IsValidFolder(VendorTmpDir)) AssetDatabase.CreateFolder("Assets/Vendor", "AgentCheckAvatarTmp");
 
         var a = NewAvatar("LintRoute");
         var ownedClip = NewClip(TmpDir, "OwnedBroken", "Body_base");
@@ -435,7 +435,7 @@ public class AvatarLintTests
         var c = AddVrcfFullControllerNoControllers(prop, prop);
 
         var args = new object[] { c, null, null };
-        bool ok = (bool)typeof(AnimatorLint).GetMethod("TryVrcfFrame", BindingFlags.NonPublic | BindingFlags.Static)
+        bool ok = (bool)typeof(CheckAnimator).GetMethod("TryVrcfFrame", BindingFlags.NonPublic | BindingFlags.Static)
             .Invoke(null, args);
         Assert.IsTrue(ok, "a present FullController is a frame");
         var frame = args[2];
@@ -457,7 +457,7 @@ public class AvatarLintTests
         so.ApplyModifiedPropertiesWithoutUndo(); // animator left null (present-but-null, not field-absent)
 
         var args = new object[] { c, a, null, null };
-        bool ok = (bool)typeof(AnimatorLint).GetMethod("TryMaFrame", BindingFlags.NonPublic | BindingFlags.Static)
+        bool ok = (bool)typeof(CheckAnimator).GetMethod("TryMaFrame", BindingFlags.NonPublic | BindingFlags.Static)
             .Invoke(null, args);
         Assert.IsFalse(ok, "a present-but-null animator is an intentional empty, not drift — stays quiet");
     }
@@ -491,9 +491,9 @@ public class AvatarLintTests
     [Test]
     public void BadInput_barFail_noTrailer()
     {
-        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[AvatarLint\] FAIL:"));
-        var r = AvatarLint.Inspect("NoSuchRoot_xyz");
-        StringAssert.StartsWith("[AvatarLint] FAIL:", r);
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckAvatar\] FAIL:"));
+        var r = CheckAvatar.Inspect("NoSuchRoot_xyz");
+        StringAssert.StartsWith("[CheckAvatar] FAIL:", r);
         Assert.IsFalse(r.Contains("| log="), "bad input carries no artifact trailer: " + r);
     }
 }

@@ -12,7 +12,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     public enum ConstraintDirection { DuplicateFollowsOriginal, OriginalFollowsDuplicate }
 
     [AgentTool]
-    public static class DuplicateAndConstrain
+    public static class ConstrainedDuplicate
     {
         public static string Run(
             GameObject sourceRoot,
@@ -25,7 +25,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string duplicateSuffix = "_Copy",
             bool whatIf = false)
         {
-            if (sourceRoot == null) return "[DuplicateAndConstrain] FAIL: sourceRoot is null";
+            if (sourceRoot == null) return "[ConstrainedDuplicate] FAIL: sourceRoot is null";
             Transform src = sourceRoot.transform;
             string dupName = string.IsNullOrWhiteSpace(duplicateSuffix) ? src.name + "(Clone)" : src.name + duplicateSuffix;
 
@@ -40,7 +40,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         : HasVRCConstraint(kv.Value);
                     if (drivenHasConstraint && !replaceExisting) ws++; else wc++;
                 }
-                return $"[DuplicateAndConstrain] (whatIf) would duplicate '{src.name}' as '{dupName}', " +
+                return $"[ConstrainedDuplicate] (whatIf) would duplicate '{src.name}' as '{dupName}', " +
                        $"{kind}/{direction}, {wc} constraint(s), {ws} skipped => PASS";
             }
 
@@ -62,7 +62,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (!duplicateMap.TryGetValue(pair.Key, out Transform dupBone))
                 {
-                    Debug.LogWarning($"[DuplicateAndConstrain] no matching duplicate bone for '{pair.Key}' — skipping.");
+                    Debug.LogWarning($"[ConstrainedDuplicate] no matching duplicate bone for '{pair.Key}' — skipping.");
                     skipped++;
                     continue;
                 }
@@ -77,7 +77,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Selection.activeGameObject = dupObj;
             Undo.CollapseUndoOperations(undoGroup);
 
-            return $"[DuplicateAndConstrain] '{dup.name}' created, {created} constraint(s), {skipped} skipped, " +
+            return $"[ConstrainedDuplicate] '{dup.name}' created, {created} constraint(s), {skipped} skipped, " +
                    $"root {GetHierarchyPath(dup)} => PASS";
         }
 

@@ -16,7 +16,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     ///
     /// The gap this closes is <b>isolation</b>, not screenshots: MCP <c>manage_camera screenshot</c>
     /// already auto-frames + orbits, but a framed grab still renders every avatar in the scene.
-    /// AvatarGrab drives the operator's Scene View to show the target subtree ALONE, headlight-lit on a
+    /// RenderAvatar drives the operator's Scene View to show the target subtree ALONE, headlight-lit on a
     /// uniform gray background, from named world-axis angles, into one contact-sheet PNG the agent reads.
     ///
     /// <b>Framing is measured, not estimated.</b> It frames off the <i>drawn silhouette</i> — the actual
@@ -50,7 +50,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// PNG to Application.temporaryCachePath (outside Assets/).
     /// </summary>
     [AgentTool]
-    public static class AvatarGrab
+    public static class RenderAvatar
     {
         private static readonly string[] Vocabulary = { "front", "back", "left", "right", "top", "bottom" };
 
@@ -331,7 +331,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var png = tex.EncodeToPNG();
 
                 var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-                var path = Application.temporaryCachePath + "/avatargrab_" + RunLogFormat.Sanitize(label) + "_" + stamp + ".png";
+                var path = Application.temporaryCachePath + "/renderavatar_" + RunLogFormat.Sanitize(label) + "_" + stamp + ".png";
                 File.WriteAllBytes(path, png);
 
                 // The temp grab dir is never swept by Unity or Windows, so it accumulates across every
@@ -339,7 +339,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // bounded; the just-written grab is always newer than the cutoff. Best-effort per file (a
                 // locked grab being Read elsewhere just survives to the next run).
                 var cutoff = DateTime.Now.AddDays(-30);
-                foreach (var old in Directory.GetFiles(Application.temporaryCachePath, "avatargrab_*.png"))
+                foreach (var old in Directory.GetFiles(Application.temporaryCachePath, "renderavatar_*.png"))
                 {
                     try { if (File.GetLastWriteTime(old) < cutoff) File.Delete(old); }
                     catch { /* locked or already gone — leave it for a later run */ }
@@ -355,7 +355,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // The note sits BEFORE png= so the png= trailer is always terminal — a consumer reading
                 // png= to end-of-line gets a clean path, never one with the note appended.
                 string summary = string.Format(CultureInfo.InvariantCulture,
-                    "[AvatarGrab] {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7} => OK{8} | png={9}",
+                    "[RenderAvatar] {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7} => OK{8} | png={9}",
                     label, string.Join(",", resolvedAngles), n, tileRes, margin.ToString("0.##", CultureInfo.InvariantCulture),
                     showGizmos ? "on" : "off", hiddenCount, excludedCount,
                     note, path);
@@ -743,7 +743,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Family arrow; NO `| png=` trailer — the schema never points at a PNG that isn't on disk.
         private static string Fail(string label, string reason)
         {
-            string msg = "[AvatarGrab] " + (string.IsNullOrEmpty(label) ? "?" : label) + " => FAIL: " + reason;
+            string msg = "[RenderAvatar] " + (string.IsNullOrEmpty(label) ? "?" : label) + " => FAIL: " + reason;
             Debug.LogError(msg);
             return msg;
         }

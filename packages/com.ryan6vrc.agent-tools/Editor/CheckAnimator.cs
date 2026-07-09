@@ -33,7 +33,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// with no artifact trailer. INSPECTION ONLY.
     /// </summary>
     [AgentTool]
-    public static class AnimatorLint
+    public static class CheckAnimator
     {
         // ----- Public API ---------------------------------------------------------------------------
 
@@ -42,7 +42,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// or <c>explicit</c> (caller names <paramref name="avatarRoot"/> / <paramref name="mountRoot"/> as
         /// active-scene hierarchy paths). Returns a one-line summary; a real run ends with the RunLog path
         /// in-band (<c>… =&gt; RESULT | log=&lt;path&gt;</c>). A bad-input/refusal early return is a bare
-        /// <c>[AnimatorLint] FAIL: …</c> with no trailer.</summary>
+        /// <c>[CheckAnimator] FAIL: …</c> with no trailer.</summary>
         public static string Lint(AnimatorController controller, string basis = "auto",
                                   string mergeSite = null, string avatarRoot = null, string mountRoot = null)
         {
@@ -91,7 +91,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // ---- Run the shared rule set on the resolved basis. The rule methods, topology collectors,
             //      and report data live in ControllerRules so a future compiler can run the SAME rules on an
-            //      in-memory controller; AnimatorLint owns only basis resolution (above) and rendering (below).
+            //      in-memory controller; CheckAnimator owns only basis resolution (above) and rendering (below).
             //      brokenBindingIsError = !buildRewrite: a build-rewrite auto site demotes broken bindings.
             var r = ControllerRules.Run(controller, roots, !buildRewrite, pathRewrite);
             notes.AddRange(r.Notes); // rule-produced caveats (skipped rules), after the basis-resolution notes
@@ -154,12 +154,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             return new AutoResult { Refusal = "no merge component referencing this controller at '" + mergeSite + "'" };
         }
 
-        // ----- Reusable frame detection (shared with AvatarLint) ------------------------------------
+        // ----- Reusable frame detection (shared with CheckAvatar) ------------------------------------
         // A "frame" is the binding-basis root a merge component establishes for the controller(s) it
         // mounts, plus how it was derived. The Try* helpers run on ANY subtree component (they self-check
         // type + controller reference), DISCOVER the referenced controller(s) so a caller can enumerate
         // mount sites, and set UnreflectedAnchor (naming a required frame field that failed to reflect) so
-        // a fail-loud caller can refuse. AnimatorLint's own Parse* wrappers keep the historical SILENT
+        // a fail-loud caller can refuse. CheckAnimator's own Parse* wrappers keep the historical SILENT
         // skip: "not our controller" / unreflected ⇒ the same null they returned before.
 
         internal enum FrameKind { DescriptorLayer, MA, VRCF }
@@ -173,7 +173,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // VRCF only: the FullController's "Path Rewrite Rules" (rewriteBindings) as a path transform,
             // applied to each binding path BEFORE the nearest-match ancestor walk (the build applies them in
             // that order). null ⇒ identity (no rules). Returns null for a path a delete-rule drops (the
-            // binding vanishes at build — not a real break). AnimatorLint ignores it; AvatarLint applies it.
+            // binding vanishes at build — not a real break). CheckAnimator ignores it; CheckAvatar applies it.
             public Func<string, string> PathRewrite;
         }
 
@@ -395,12 +395,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             };
         }
 
-        // Shared binding walk (reused by AvatarLint): every clip a controller references, both float and
+        // Shared binding walk (reused by CheckAvatar): every clip a controller references, both float and
         // objref bindings, humanoid muscle/root curves skipped, each resolved against ANY of roots (first
-        // hit ⇒ resolved). Returns the unresolved (clip, binding) pairs in AnimatorLint's traversal order
+        // hit ⇒ resolved). Returns the unresolved (clip, binding) pairs in CheckAnimator's traversal order
         // (clip-outer; float-then-objref inner) so a caller renders offenders in the exact same sequence.
-        // <paramref name="pathRewrite"/> (default null ⇒ identity, AnimatorLint's behavior) transforms each
-        // binding path before resolution — AvatarLint passes the VRCF FullController rewriter so a binding is
+        // <paramref name="pathRewrite"/> (default null ⇒ identity, CheckAnimator's behavior) transforms each
+        // binding path before resolution — CheckAvatar passes the VRCF FullController rewriter so a binding is
         // resolved the way the build will (rewriteBindings then nearest-match). A rewrite returning null
         // means a delete-rule drops that binding at build, so it is skipped (not unresolved). The returned
         // pair always carries the ORIGINAL binding (what the .anim holds — what a repath must target).
@@ -471,16 +471,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             int advisories = rep.Advisories.Count;
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[AnimatorLint] {0}: missingMotion={1} undeclaredParam={2} entryShadow={3} deadTransition={4} brokenBinding={5} advisories={6} => {7}",
+                "[CheckAnimator] {0}: missingMotion={1} undeclaredParam={2} entryShadow={3} deadTransition={4} brokenBinding={5} advisories={6} => {7}",
                 controller.name, rep.MissingMotion, rep.UndeclaredParam, rep.EntryShadow, rep.DeadTransition, rep.BrokenBinding, advisories, result);
 
             var sb = new StringBuilder();
-            sb.Append("# AnimatorLint: ").Append(controller.name).Append('\n');
+            sb.Append("# CheckAnimator: ").Append(controller.name).Append('\n');
             string assetPath = AssetDatabase.GetAssetPath(controller);
             sb.Append("asset: `").Append(string.IsNullOrEmpty(assetPath) ? "(unsaved)" : assetPath).Append("`  \n");
             sb.Append(detection).Append("  \n");
             foreach (var n in notes) sb.Append("> note: ").Append(n).Append("  \n");
-            sb.Append('\n').Append(summary.Substring("[AnimatorLint] ".Length)).Append('\n');
+            sb.Append('\n').Append(summary.Substring("[CheckAnimator] ".Length)).Append('\n');
 
             sb.Append("\n## Errors\n\n");
             if (rep.Errors.Count == 0) sb.Append("_(none)_\n");
@@ -523,7 +523,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static string Refuse(string why)
         {
-            string err = "[AnimatorLint] FAIL: " + why;
+            string err = "[CheckAnimator] FAIL: " + why;
             Debug.LogError(err);
             return err;
         }

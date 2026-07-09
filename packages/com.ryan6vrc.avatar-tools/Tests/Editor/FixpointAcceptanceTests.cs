@@ -116,7 +116,7 @@ public class FixpointAcceptanceTests
         var c2 = CompileTo(yamlB, name, "c2");
         string yamlC = Decode(c2);
         Assert.AreEqual(yamlB, yamlC, "stabilized fixpoint: the owned form's decompile is textually identical after a recompile");
-        StringAssert.Contains("=> PASS", AnimatorLint.Lint(c1, "explicit", null, null, null));
+        StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
 
         if (clean)
             // No broken refs ⇒ the RAW vendor already round-trips: the spec's literal tight fixpoint.
@@ -221,6 +221,6 @@ public class FixpointAcceptanceTests
         var c1 = CompileTo(yaml1, "SlashName_Fx", "c1");
         string yaml2 = Decode(c1);
         Assert.AreEqual(yaml1, yaml2, "the slash-in-name controller reaches a textual fixpoint");
-        StringAssert.Contains("=> PASS", AnimatorLint.Lint(c1, "explicit", null, null, null));
+        StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
     }
 }

@@ -380,7 +380,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // Bounded, cycle-safe SO-asset expansion — opt-in via followAssets. Filter: saved
             // ScriptableObject asset only (structurally excludes meshes/textures/materials/clips/
-            // controllers → no overlap with ControllerReport/ClipReport, and scene objects → no
+            // controllers → no overlap with ReportController/ReportClip, and scene objects → no
             // double-walk with the GameObject recursion). haveId already implies a non-empty assetPath.
             if (haveId && st.FollowAssets && o is ScriptableObject)
             {

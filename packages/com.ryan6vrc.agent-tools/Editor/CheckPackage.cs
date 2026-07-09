@@ -9,7 +9,7 @@ using UnityEngine;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Deterministic import-verify for the AI-assisted VRChat workflow.
+    /// Deterministic check-package for the AI-assisted VRChat workflow.
     ///
     /// Walks prefabs (under a folder) or selected objects and reports four classes of broken
     /// reference a vendor import can leave behind:
@@ -35,7 +35,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// isolated preview scene without touching the open scene. INSPECTION ONLY — never mutates.
     /// </summary>
     [AgentTool]
-    public static class ImportVerify
+    public static class CheckPackage
     {
         private const string RunLogDir = RunLogFormat.RunLogDir;
 
@@ -43,11 +43,11 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Verify every prefab under an asset folder. Returns a one-line PASS/FAIL summary;
         /// when a verification run was performed it ends with the RunLog path (<c>… => RESULT | log=&lt;path&gt;</c>) —
-        /// a bad-input early return is a bare <c>[ImportVerify] FAIL: …</c> with no trailer.</summary>
+        /// a bad-input early return is a bare <c>[CheckPackage] FAIL: …</c> with no trailer.</summary>
         public static string VerifyFolder(string assetFolderPath)
         {
             if (string.IsNullOrEmpty(assetFolderPath) || !AssetDatabase.IsValidFolder(assetFolderPath))
-                return "[ImportVerify] FAIL: not a valid asset folder: " + assetFolderPath;
+                return "[CheckPackage] FAIL: not a valid asset folder: " + assetFolderPath;
 
             var r = new Report { Target = assetFolderPath, Mode = "folder" };
             foreach (var guid in AssetDatabase.FindAssets("t:Prefab", new[] { assetFolderPath }))
@@ -67,8 +67,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             var objs = Selection.gameObjects;
             if (objs == null || objs.Length == 0)
             {
-                Debug.LogWarning("[ImportVerify] Nothing selected.");
-                return "[ImportVerify] FAIL: nothing selected.";
+                Debug.LogWarning("[CheckPackage] Nothing selected.");
+                return "[CheckPackage] FAIL: nothing selected.";
             }
 
             var r = new Report { Target = "selection", Mode = "selection" };
@@ -195,7 +195,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             string logPath = WriteRunLog(r, label);
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[ImportVerify] {0} ({1}, {2} scanned): materials resolved={3} empty={4} MISSING={5} | meshMISSING={6} | scriptMISSING={7} | remapSTALE={8}{9} => {10} | log={11}",
+                "[CheckPackage] {0} ({1}, {2} scanned): materials resolved={3} empty={4} MISSING={5} | meshMISSING={6} | scriptMISSING={7} | remapSTALE={8}{9} => {10} | log={11}",
                 label, r.Mode, r.Scanned, r.MatResolved, r.MatEmpty, r.MatMissing, r.MeshesMissing, r.ScriptsMissing, r.RemapStale,
                 r.LoadErrors > 0 ? " | loadErrors=" + r.LoadErrors : "", r.Result, logPath);
 
@@ -208,7 +208,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             Directory.CreateDirectory(RunLogDir);
             var sb = new StringBuilder();
             sb.Append("{\n");
-            sb.Append("  \"kind\": \"import-verify\",\n");
+            sb.Append("  \"kind\": \"check-package\",\n");
             sb.Append("  \"unityVersion\": ").Append(Q(Application.unityVersion)).Append(",\n");
             sb.Append("  \"timestampUtc\": ").Append(Q(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append(",\n");
             sb.Append("  \"target\": ").Append(Q(r.Target)).Append(",\n");

@@ -243,7 +243,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // Seconds-only clip → inert carrier that ONLY gives the clip a genuine length. Bind a flat
                     // curve on a scratch ANIMATOR parameter (path="", typeof(Animator)) — NOT a non-existent
                     // GameObject path. An animator-property binding resolves against any avatar root (the root
-                    // always carries an Animator), so AnimatorLint's broken-binding rule stays clean when the
+                    // always carries an Animator), so CheckAnimator's broken-binding rule stays clean when the
                     // emitted controller is linted against a real avatar; a fake GO path would false-FAIL it.
                     if (!spec.Seconds.HasValue)
                         throw new EmitException(
@@ -736,7 +736,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // One encoder per kind: materialise the concrete VRC SMB via `add(typeof(...))`, then a per-field
             // switch that sets its fields and throws EmitException (named offender) on any unknown field.
             // The enum-token casing is DEFINED HERE (the token→enum maps below) — camelCase (e.g. `animation`),
-            // NOT the PascalCase an enum ToString() (as in ControllerReport's Markdown) would give.
+            // NOT the PascalCase an enum ToString() (as in ReportController's Markdown) would give.
             // ControllerDecompile builds its reverse (enum→token) maps from these, so this is the single source
             // of truth for both directions.
             private void EmitBehaviours(List<Behaviour> behaviours, Func<Type, StateMachineBehaviour> add)

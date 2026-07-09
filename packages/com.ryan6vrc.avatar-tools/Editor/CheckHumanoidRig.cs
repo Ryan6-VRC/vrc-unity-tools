@@ -25,7 +25,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// false positives on healthy rigs while catching nothing that position misses.
     /// </summary>
     [AgentTool]
-    public static class ReproportionFreshness
+    public static class CheckHumanoidRig
     {
         private const string RunLogDir = RunLogFormat.RunLogDir;
         private const float Eps = 1e-3f;       // metres of local-position drift
@@ -89,7 +89,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             string logPath = WriteRunLog(label, ourFbxPath, bonesChecked, drifted, pass);
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[ReproportionFreshness] {0}: bonesChecked={1} drifted={2} => {3}{4}{5}",
+                "[CheckHumanoidRig] {0}: bonesChecked={1} drifted={2} => {3}{4}{5}",
                 label, bonesChecked, drifted.Count, pass ? "PASS" : "FAIL", failReason,
                 logPath != null ? " | log=" + logPath : "");
 
@@ -102,7 +102,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static string Fail(string label, string path, string why, int bonesChecked = 0)
         {
             string logPath = WriteRunLog(label, path, bonesChecked, new List<string> { why }, false);
-            string summary = "[ReproportionFreshness] " + label + ": => FAIL (" + why + ")"
+            string summary = "[CheckHumanoidRig] " + label + ": => FAIL (" + why + ")"
                 + (logPath != null ? " | log=" + logPath : "");
             Debug.LogError(summary);
             return summary;
@@ -115,7 +115,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Directory.CreateDirectory(RunLogDir);
                 var sb = new StringBuilder();
                 sb.Append("{\n");
-                sb.Append("  \"kind\": \"reproportion-freshness\",\n");
+                sb.Append("  \"kind\": \"check-humanoid-rig\",\n");
                 sb.Append("  \"unityVersion\": ").Append(Q(Application.unityVersion)).Append(",\n");
                 sb.Append("  \"timestampUtc\": ").Append(Q(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append(",\n");
                 sb.Append("  \"ourFbx\": ").Append(Q(path)).Append(",\n");
@@ -134,7 +134,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[ReproportionFreshness] Could not write RunLog: " + ex.Message);
+                Debug.LogWarning("[CheckHumanoidRig] Could not write RunLog: " + ex.Message);
                 return null;
             }
         }
