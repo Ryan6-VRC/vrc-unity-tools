@@ -41,11 +41,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             AssetDatabase.Refresh();
             var ctrl = Directory.GetFiles(Path.GetFullPath(tempAssetsDir), "*.controller").FirstOrDefault();
             if (ctrl == null) throw new Exception("no .controller emitted into " + tempAssetsDir);
-            return AssetDatabase.LoadAssetAtPath<AnimatorController>(ToAssetsRelative(ctrl));
+            var loaded = AssetDatabase.LoadAssetAtPath<AnimatorController>(ToAssetsRelative(ctrl));
+            if (loaded == null) throw new Exception("emitted .controller failed to load: " + ctrl);
+            return loaded;
         }
 
         // Copy a committed built/ folder (its .controller + .meta and any siblings) into Assets/ so the
-        // AssetDatabase imports it with the committed GUID, then load the controller.
+        // AssetDatabase imports it with the committed GUID, then load the controller. Assumes the package
+        // under test is NOT also loaded in this host — else the committed GUID exists twice (a collision).
         static AnimatorController ImportCommitted(string builtControllerPath, string destAssetsDir)
         {
             var full = Path.GetFullPath(destAssetsDir);
@@ -112,6 +115,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var builtDir = Path.Combine(dir, "built");
                 var built = Directory.Exists(builtDir)
                     ? Directory.GetFiles(builtDir, "*.controller").FirstOrDefault() : null;
+
+                // Tier is derived from files present; a GUID-consumer shape (a prefab, a non-empty assets/,
+                // or a built/ dir) MUST ship a built .controller. Without this, a Module/Asset-bound entry
+                // whose built controller went missing would silently pass as if it were a pure Pattern.
+                var assetsDir = Path.Combine(dir, "assets");
+                bool guidConsumer = Directory.GetFiles(dir, "*.prefab").Length > 0
+                    || Directory.Exists(builtDir)
+                    || (Directory.Exists(assetsDir) && Directory.GetFiles(assetsDir)
+                            .Any(f => !f.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)));
+                if (built == null && guidConsumer)
+                {
+                    Debug.Log($"[gate] FAIL {Path.GetFileName(dir)}: GUID-consumer entry (prefab/assets/built) has no built .controller");
+                    failed++; continue;
+                }
+
                 var (ok, msg) = Check(yaml, built);
                 Debug.Log($"[gate] {(ok ? "PASS" : "FAIL")} {Path.GetFileName(dir)}: {msg}");
                 if (!ok) failed++;
