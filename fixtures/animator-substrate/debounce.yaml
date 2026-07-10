@@ -5,7 +5,7 @@
 # feed a small timer state machine ... exitTime as the dwell"). Keep raw (RawInput) and debounced
 # (Debounced) parameters distinct.
 #
-# Compiles with CompileController; CheckAnimator PASS (basis=explicit); rung-3 verified in the emulator.
+# Compiles with CompileController; CheckAnimator PASS (basis=explicit); emulator-verified.
 
 schema: 1
 controller: Debounce_Fx

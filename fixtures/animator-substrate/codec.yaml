@@ -7,7 +7,7 @@
 # (one transition per frame); the compiler's frame-latency advisory reports the walk length.
 #
 # The machine loops Start->…->Start so it re-encodes every cycle, tracking OscFloat live. Raw input
-# (OscFloat) and encoded outputs (bit0..2) are distinct params. Compiles; CheckAnimator PASS; rung-3 verified.
+# (OscFloat) and encoded outputs (bit0..2) are distinct params. Compiles; CheckAnimator PASS; emulator-verified.
 
 schema: 1
 controller: Codec_Fx
