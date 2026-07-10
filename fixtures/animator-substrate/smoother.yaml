@@ -11,7 +11,7 @@
 # means ~10% of the gap closes per frame — visibly gradual, good for an emulator convergence read.
 # In production you feed a frametime compensator; for this worked example the constant is the point.
 #
-# Compiles with CompileController; CheckAnimator PASS; rung-3 verified (Smoothed climbs toward Target).
+# Compiles with CompileController; CheckAnimator PASS; emulator-verified (Smoothed climbs toward Target).
 
 schema: 1
 controller: Smoother_Fx

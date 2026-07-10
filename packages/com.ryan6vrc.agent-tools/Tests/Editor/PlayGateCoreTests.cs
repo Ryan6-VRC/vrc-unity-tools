@@ -247,7 +247,7 @@ public class PlayGateCoreTests
     [Test]
     public void EmulatorAbsent_ignores_emulator_flags()
     {
-        NewAvatar("Avatar"); // no emulator at all — a legitimate rung-2 bake
+        NewAvatar("Avatar"); // no emulator at all — a legitimate bake-only check
         var r = PlayGateCore.Evaluate(_scene);
         Assert.IsTrue(r.Pass, "emulator flags are moot with no emulator present: " + string.Join(",", Tags(r)));
     }
