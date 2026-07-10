@@ -12,8 +12,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // primitives: decode(c) = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(c).Doc), the same
     // canonical string the fixpoint tests trust. Drift is decompile-equality, never a byte diff.
     //
-    // Decoding a controller that lives under Packages/ throws (dangling-guid recovery reads the asset
-    // by path); so a committed built controller is copied into Assets/ before it is decoded.
+    // A committed built .controller lives at an arbitrary --root filesystem path, not under the
+    // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
     public static class ControllerFixpoint
     {
         static string Decode(AnimatorController c, out string refusal)
