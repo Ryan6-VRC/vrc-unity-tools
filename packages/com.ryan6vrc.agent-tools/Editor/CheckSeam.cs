@@ -79,6 +79,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                         PathOf(other.gameObject) + " vs " + PathOf(p.Merge.gameObject) + ")");
                 byBase[p.Base] = p.Merge;
             }
+            // MA and VRCFury can each contribute the SAME (Base,Merge) pair; the conflict loop above keeps an
+            // identical duplicate (it only rejects a base mapped to two DIFFERENT merges). Dedupe by reference
+            // identity so a single genuine proxy bone isn't double-counted past the ≤1 proxy REFUSE.
+            var seen = new HashSet<(Transform, Transform)>();
+            seam.Pairs = seam.Pairs.Where(p => seen.Add((p.Base, p.Merge))).ToList();
 
             // Count weighted humanoid bones: a pair qualifies iff its BASE is humanoid and a mergeable SMR skins
             // its MERGE side at ≥ WEIGHT. Join on the merge side — SMR.bones[] reference the merge transforms.
@@ -193,25 +198,32 @@ namespace Ryan6Vrc.AgentTools.Editor
             return anim.GetBoneTransform(HumanBodyBones.Hips);
         }
 
-        // Merge Transform → max vertex weight across every mergeable SMR (top-4 influences per vertex). Reads
-        // sharedMesh (not .mesh), null-checks bones[] entries. Keyed on the merge-side transforms the pairs carry.
+        // Merge Transform → max vertex weight across every mergeable SMR, over ALL influences per vertex (not the
+        // legacy top-4 mesh.boneWeights view — a humanoid bone at ≥WEIGHT that never lands in a vertex's top 4
+        // would otherwise be dropped, flipping the count). Walks the flat GetAllBoneWeights() array by the
+        // per-vertex GetBonesPerVertex() counts. Reads sharedMesh (not .mesh), null-checks bones[] entries.
         private static Dictionary<Transform, float> MaxWeights(GameObject mergeGO)
         {
             var w = new Dictionary<Transform, float>();
             foreach (var smr in mergeGO.GetComponentsInChildren<SkinnedMeshRenderer>(true))
             {
                 var mesh = smr.sharedMesh; if (mesh == null) continue;
-                var bones = smr.bones; var bw = mesh.boneWeights;
-                void Acc(int idx, float wt)
+                var bones = smr.bones;
+                var bonesPerVertex = mesh.GetBonesPerVertex(); // NativeArray<byte>, one count per vertex
+                var weights = mesh.GetAllBoneWeights();        // NativeArray<BoneWeight1>, flat, grouped by vertex
+                int ptr = 0;
+                for (int v = 0; v < bonesPerVertex.Length; v++)
                 {
-                    if (idx < 0 || idx >= bones.Length || bones[idx] == null) return;
-                    var t = bones[idx];
-                    if (!w.TryGetValue(t, out var cur) || wt > cur) w[t] = wt;
-                }
-                foreach (var v in bw)
-                {
-                    Acc(v.boneIndex0, v.weight0); Acc(v.boneIndex1, v.weight1);
-                    Acc(v.boneIndex2, v.weight2); Acc(v.boneIndex3, v.weight3);
+                    int count = bonesPerVertex[v];
+                    for (int j = 0; j < count; j++)
+                    {
+                        var bw1 = weights[ptr + j];
+                        int idx = bw1.boneIndex;
+                        if (idx < 0 || idx >= bones.Length || bones[idx] == null) continue;
+                        var t = bones[idx];
+                        if (!w.TryGetValue(t, out var cur) || bw1.weight > cur) w[t] = bw1.weight;
+                    }
+                    ptr += count;
                 }
             }
             return w;
@@ -280,8 +292,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var item in mapping)
                 {
                     var tt = item.GetType();
-                    var b = tt.GetField("Item1").GetValue(item) as Transform;
-                    var m = tt.GetField("Item2").GetValue(item) as Transform;
+                    var item1 = tt.GetField("Item1"); var item2 = tt.GetField("Item2");
+                    if (item1 == null) throw new MissingFieldException(tt.Name, "Item1");
+                    if (item2 == null) throw new MissingFieldException(tt.Name, "Item2");
+                    var b = item1.GetValue(item) as Transform;
+                    var m = item2.GetValue(item) as Transform;
                     res.Pairs.Add(new BonePair { Base = b, Merge = m });
                 }
             }
@@ -328,18 +343,29 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     bool forceOne = (bool)forceField.GetValue(content);
                     var factorTuple = getScaling.Invoke(null, new object[] { content, links });
-                    float factor = factorTuple != null ? (float)factorTuple.GetType().GetField("Item3").GetValue(factorTuple) : 1f;
+                    float factor = 1f;
+                    if (factorTuple != null)
+                    {
+                        var item3 = factorTuple.GetType().GetField("Item3");
+                        if (item3 == null) throw new MissingFieldException(factorTuple.GetType().Name, "Item3");
+                        factor = (float)item3.GetValue(factorTuple);
+                    }
                     if (forceOne || Mathf.Abs(1f - factor) > 1e-4f)
                         res.ScaleBakeReason = "scaled at bake (forceOneWorldScale / non-unit scale) — edit-time coincidence unverifiable, check the baked result";
                 }
 
-                var mergeBones = links.GetType().GetField("mergeBones").GetValue(links) as System.Collections.IEnumerable;
+                var mergeBonesField = links.GetType().GetField("mergeBones");
+                if (mergeBonesField == null) throw new MissingFieldException(links.GetType().Name, "mergeBones");
+                var mergeBones = mergeBonesField.GetValue(links) as System.Collections.IEnumerable;
                 if (mergeBones == null) continue;
                 foreach (var pair in mergeBones)
                 {
                     var pt = pair.GetType();
-                    var mergeVf = pt.GetField("Item1").GetValue(pair); // prop/merge
-                    var baseVf = pt.GetField("Item2").GetValue(pair);  // avatar/base
+                    var item1 = pt.GetField("Item1"); var item2 = pt.GetField("Item2");
+                    if (item1 == null) throw new MissingFieldException(pt.Name, "Item1");
+                    if (item2 == null) throw new MissingFieldException(pt.Name, "Item2");
+                    var mergeVf = item1.GetValue(pair); // prop/merge
+                    var baseVf = item2.GetValue(pair);  // avatar/base
                     res.Pairs.Add(new BonePair { Base = FromVfGameObject(vfGoType, baseVf), Merge = FromVfGameObject(vfGoType, mergeVf) });
                 }
             }

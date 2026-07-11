@@ -205,6 +205,27 @@ public class CheckSeamTests
         smr.bones = allBones;
     }
 
+    // Attach a SkinnedMeshRenderer whose mesh carries EXPLICIT per-vertex influences (via SetBoneWeights),
+    // exercising MaxWeights' all-influence read. Weights within a vertex must be sorted descending and are
+    // NORMALIZED per vertex by Unity's mesh store (GetAllBoneWeights returns the normalized view) — so make each
+    // vertex sum to 1 for the set weight to survive as the read weight. bones[] indices are what BoneWeight1.boneIndex
+    // references; bindposes ∥ bones.
+    private void AttachExplicitSkin(GameObject mergeGO, Transform[] bones, byte[] bonesPerVertex, BoneWeight1[] bw)
+    {
+        var verts = new Vector3[bonesPerVertex.Length];
+        var mesh = new Mesh { vertices = verts };
+        var bpvNa = new Unity.Collections.NativeArray<byte>(bonesPerVertex, Unity.Collections.Allocator.Temp);
+        var bwNa = new Unity.Collections.NativeArray<BoneWeight1>(bw, Unity.Collections.Allocator.Temp);
+        mesh.SetBoneWeights(bpvNa, bwNa);
+        bpvNa.Dispose(); bwNa.Dispose();
+        var bindposes = new Matrix4x4[bones.Length];
+        for (int i = 0; i < bones.Length; i++) bindposes[i] = Matrix4x4.identity;
+        mesh.bindposes = bindposes;
+        var smr = NewChild(mergeGO, "Skin").AddComponent<SkinnedMeshRenderer>();
+        smr.sharedMesh = mesh;
+        smr.bones = bones;
+    }
+
     private static System.Text.RegularExpressions.Regex RefuseRe =>
         new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] REFUSE:");
 
@@ -362,23 +383,143 @@ public class CheckSeamTests
         StringAssert.Contains("Head", r);
     }
 
+    // Regression: MA and VRCFury can each contribute the SAME (Base,Merge) pair. The conflict guard keeps an
+    // identical duplicate (it only rejects a base mapped to two DIFFERENT merges), so a genuine single-bone
+    // proxy was counted twice — reaching the ≥2 gate and PASSing an asset that must hit the ≤1 proxy REFUSE.
+    // The reference-identity dedupe collapses it to 1. Without the fix this returns PASS; with it, REFUSE.
+    [Test]
+    public void DuplicatePair_stillCountsOnce_refusesProxy()
+    {
+        LogAssert.Expect(LogType.Warning, RefuseRe); // collapses to 1 ⇒ proxy REFUSE (abstain ⇒ warning)
+        var baseGO = NewChild(_root, "Base");
+        var mergeGO = NewChild(_root, "Merge");
+        var bHead = NewChild(baseGO, "Head").transform;
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        map.Bones.Add(bHead);
+        CheckSeam.ResolveHumanoid = _ => map;
+
+        var mHead = NewChild(mergeGO, "Head").transform;
+        AttachSkin(mergeGO, new[] { (mHead, 1.0f) }, null); // weighted ≥0.1 ⇒ weighted humanoid
+
+        // The SAME (bHead, mHead) pair twice — same Transform instances, as MA∪VRCFury would produce.
+        var seam = new CheckSeam.SeamResolution();
+        seam.Pairs.Add(new CheckSeam.BonePair { Base = bHead, Merge = mHead });
+        seam.Pairs.Add(new CheckSeam.BonePair { Base = bHead, Merge = mHead });
+        CheckSeam.ResolveSeam = (_, __) => seam;
+
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("single humanoid attachment", r); // count collapses to 1, NOT a ≥2 gate PASS
+        StringAssert.Contains("Head", r);
+    }
+
     [Test]
     public void WeightThreshold_flipsTheCount()
     {
         LogAssert.Expect(LogType.Warning, RefuseRe); // 0.09 case ⇒ 1 weighted ⇒ proxy REFUSE (abstain ⇒ warning)
-        // 0.11 case ⇒ 2 weighted ⇒ reaches the (now-implemented) gate ⇒ coincident ⇒ PASS (no REFUSE logged).
-        // 2 mapped humanoid; Spine skinned 0.09 (below threshold, dropped) ⇒ 1 weighted ⇒ REFUSE.
-        BuildSeam(out var b1, out var m1, humanoid: new[] { "Chest", "Spine" },
-            weights: new[] { ("Chest", 1.0f), ("Spine", 0.09f) });
+        // Spine shares its vertex with a filler bone at the complementary weight (a realistic normalized skin —
+        // GetAllBoneWeights returns the normalized per-vertex view, so a lone sub-1 influence would read as 1.0).
+        // 0.09 case: Spine is 9% of its vertex, below the 0.1 threshold ⇒ dropped ⇒ 1 weighted ⇒ proxy REFUSE.
+        BuildThresholdFixture(0.09f, out var b1, out var m1);
         var r1 = CheckSeam.Check(Path(b1), Path(m1));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r1);
         StringAssert.Contains("single humanoid attachment", r1);
-        // Bump Spine to 0.11 ⇒ kept ⇒ 2 weighted ⇒ reaches the gate (not a proxy refuse). Gate verdict is Task 5.
-        BuildSeam(out var b2, out var m2, humanoid: new[] { "Chest", "Spine" },
-            weights: new[] { ("Chest", 1.0f), ("Spine", 0.11f) });
+
+        // Isolate the second fixture: it shares the "Base"/"Merge" hierarchy path, so Resolve(Path(b2)) would
+        // hit b1's base (and REFUSE "different avatar" before the count logic — a vacuous pass) unless b1 is
+        // gone. Destroy the first fixture, then 0.11 keeps Spine ⇒ 2 weighted ⇒ gate ⇒ coincident ⇒ PASS. This
+        // POSITIVELY exercises "0.11 flips 1→2 and reaches the gate".
+        UnityEngine.Object.DestroyImmediate(b1);
+        UnityEngine.Object.DestroyImmediate(m1);
+
+        BuildThresholdFixture(0.11f, out var b2, out var m2);
         var r2 = CheckSeam.Check(Path(b2), Path(m2));
-        Assert.IsFalse(r2.Contains("single humanoid attachment"),
-            "0.11 keeps the bone ⇒ 2 weighted humanoid ⇒ not a proxy refuse");
+        StringAssert.Contains("weightedHumanoid=2", r2);
+        StringAssert.Contains("=> PASS", r2);
+        ReadLog(r2); // sets _logPath so TearDown cleans the PASS RunLog
+    }
+
+    // Chest+Spine humanoid base/merge (coincident at origin); one filler bone. Mesh: v0 = Chest at 1.0; v1 =
+    // Spine at spineWeight sharing with the filler at (1−spineWeight) so the normalized Spine share == spineWeight.
+    private void BuildThresholdFixture(float spineWeight, out GameObject baseGO, out GameObject mergeGO)
+    {
+        baseGO = NewChild(_root, "Base");
+        mergeGO = NewChild(_root, "Merge");
+        var bChest = NewChild(baseGO, "Chest").transform;
+        var bSpine = NewChild(baseGO, "Spine").transform;
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        map.Bones.Add(bChest); map.Bones.Add(bSpine);
+        CheckSeam.ResolveHumanoid = _ => map;
+
+        var mChest = NewChild(mergeGO, "Chest").transform;
+        var mSpine = NewChild(mergeGO, "Spine").transform;
+        var mFill = NewChild(mergeGO, "Fill").transform; // non-humanoid, not a seam pair — weight-source only
+        var bones = new[] { mChest, mSpine, mFill };      // boneIndex 0,1,2
+        // v1 influences sorted descending: filler (1−w) then Spine (w) — requires w ≤ 0.5 (true for 0.09/0.11).
+        AttachExplicitSkin(mergeGO, bones,
+            new byte[] { 1, 2 },
+            new[]
+            {
+                new BoneWeight1 { boneIndex = 0, weight = 1.0f },              // v0: Chest
+                new BoneWeight1 { boneIndex = 2, weight = 1.0f - spineWeight },// v1: filler
+                new BoneWeight1 { boneIndex = 1, weight = spineWeight },       // v1: Spine
+            });
+
+        var seam = new CheckSeam.SeamResolution();
+        seam.Pairs.Add(new CheckSeam.BonePair { Base = bChest, Merge = mChest });
+        seam.Pairs.Add(new CheckSeam.BonePair { Base = bSpine, Merge = mSpine });
+        CheckSeam.ResolveSeam = (_, __) => seam;
+    }
+
+    // Regression: mesh.boneWeights (legacy) exposes only the top-4 influences per vertex, so a humanoid bone at
+    // ≥0.1 that never lands in a vertex's top 4 is dropped — flipping the count (here 2→1, a false proxy REFUSE).
+    // MaxWeights now reads GetAllBoneWeights()/GetBonesPerVertex(). Fixture: a vertex with 5 influences where the
+    // 5th (lowest) is Spine at 0.1; the old top-4 read would drop it, leaving count=1; the all-influence read
+    // keeps it ⇒ count=2 ⇒ reaches the gate ⇒ coincident ⇒ PASS.
+    [Test]
+    public void MaxWeights_countsInfluenceBeyondTop4()
+    {
+        var baseGO = NewChild(_root, "Base");
+        var mergeGO = NewChild(_root, "Merge");
+        var bChest = NewChild(baseGO, "Chest").transform;
+        var bSpine = NewChild(baseGO, "Spine").transform;
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        map.Bones.Add(bChest); map.Bones.Add(bSpine);
+        CheckSeam.ResolveHumanoid = _ => map;
+
+        // Merge bones: Chest, Spine (humanoid) + four fillers to crowd out Spine past the top-4 on one vertex.
+        var mChest = NewChild(mergeGO, "Chest").transform;
+        var mSpine = NewChild(mergeGO, "Spine").transform;
+        var f1 = NewChild(mergeGO, "F1").transform;
+        var f2 = NewChild(mergeGO, "F2").transform;
+        var f3 = NewChild(mergeGO, "F3").transform;
+        var f4 = NewChild(mergeGO, "F4").transform;
+        var bones = new[] { mChest, mSpine, f1, f2, f3, f4 }; // boneIndex 0..5
+
+        // Vertex 0: Chest at 1.0 (1 influence). Vertex 1: 5 influences sorted descending, Spine (idx 1) is the
+        // 5th/lowest at 0.1 — outside the legacy top-4 window (F1..F4 all outrank it).
+        // v1 sums to 1.0 (already normalized) so Spine's read weight stays 0.10 exactly at the threshold.
+        AttachExplicitSkin(mergeGO, bones,
+            new byte[] { 1, 5 },
+            new[]
+            {
+                new BoneWeight1 { boneIndex = 0, weight = 1.0f },  // v0: Chest
+                new BoneWeight1 { boneIndex = 2, weight = 0.40f }, // v1: F1
+                new BoneWeight1 { boneIndex = 3, weight = 0.20f }, // v1: F2
+                new BoneWeight1 { boneIndex = 4, weight = 0.15f }, // v1: F3
+                new BoneWeight1 { boneIndex = 5, weight = 0.15f }, // v1: F4
+                new BoneWeight1 { boneIndex = 1, weight = 0.10f }, // v1: Spine — 5th, dropped by a top-4 read
+            });
+
+        var seam = new CheckSeam.SeamResolution();
+        seam.Pairs.Add(new CheckSeam.BonePair { Base = bChest, Merge = mChest });
+        seam.Pairs.Add(new CheckSeam.BonePair { Base = bSpine, Merge = mSpine });
+        CheckSeam.ResolveSeam = (_, __) => seam;
+
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.Contains("weightedHumanoid=2", r); // the 5th influence (Spine@0.1) participates
+        StringAssert.Contains("=> PASS", r);
+        ReadLog(r);
     }
 
     // ── Task 5: the ε coincidence gate — PASS / NOT-PASS + offenders ────────────────────────────────────
