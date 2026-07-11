@@ -5,7 +5,8 @@
         "Ryan6VRC.AgentTools.Editor",
         "VRC.SDK3A",
         "UnityEngine.TestRunner",
-        "UnityEditor.TestRunner"
+        "UnityEditor.TestRunner",
+        "nadena.dev.modular-avatar.core"
     ],
     "includePlatforms": [
         "Editor"
@@ -22,6 +23,8 @@
     "defineConstraints": [
         "VRC_SDK_VRCSDK3"
     ],
-    "versionDefines": [],
+    "versionDefines": [
+        { "name": "nadena.dev.modular-avatar", "expression": "", "define": "MA_PRESENT" }
+    ],
     "noEngineReferences": false
 }
