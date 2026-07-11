@@ -31,13 +31,15 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// the bar. Headlight lighting is truthful for geometry/silhouette/clipping/fit; matcap / rim /
     /// fresnel / GrabPass effects are not the point — judge shading in the operator's scene view.
     ///
-    /// <b>Isolation is proxy-aware.</b> NDMF parks its preview proxies as roots of the hidden
+    /// <b>Isolation is proxy-aware.</b> NDMF parks its preview proxies in the hidden
     /// <c>___NDMF Preview___</c> scene; blanket-hiding "every other root" would hide them while the
     /// preview hook still suppresses their originals — deleting every reactive-targeted renderer (the
     /// body, typically) from the grab. So the preview scene is exempt from root isolation; instead each
-    /// proxy is attributed to its original via the public <c>NDMFPreview.GetOriginalObjectForProxy</c>
-    /// and hidden unless that original is drawable under the target (foreign avatars' proxies, stale or
-    /// unattributable proxies, and proxies of hide-listed / eye-hidden / inactive originals all hide).
+    /// proxy-renderer GameObject (the key NDMF's proxy map uses — SMR proxies are scene roots, MeshRenderer
+    /// proxies sit under shadow-bone trees) is attributed to its original via the public
+    /// <c>NDMFPreview.GetOriginalObjectForProxy</c> and self-only hidden unless that original is drawable
+    /// under the target (foreign avatars' proxies, stale or unattributable proxies, and proxies of
+    /// hide-listed / eye-hidden / inactive originals all hide).
     /// The summary reports <c>proxies=kept:N,hidden:M</c> whenever proxies exist; if the attribution
     /// API drifts, proxies are left visible and the note says so — a visible foreign-geometry leak the
     /// reader can see, never a silent body-drop it can't.
@@ -50,7 +52,10 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// Alt tap first releases the Windows foreground lock) so real frames fire between this call and the
     /// re-grab. Protocol stays <b>edit and grab in separate calls</b>; on the settle FAIL, just re-grab.
     /// In-call waiting is impossible by construction — no editor tick runs while the synchronous call
-    /// blocks the main thread. Mechanism →
+    /// blocks the main thread. Two deliberate edges: previews globally DISABLED is exempt, not a FAIL
+    /// (originals render un-suppressed — the sheet is trustworthy); an editor whose foregrounding Windows
+    /// keeps refusing stays FAILed by design — the message names the operator action (focus the editor),
+    /// and the tool never trades that cliff for a sheet it can't vouch for. Mechanism →
     /// docs/superpowers/surveys/2026-07-07-ndmf-preview-refresh.md.
     ///
     /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
@@ -649,23 +654,29 @@ namespace Ryan6Vrc.AgentTools.Editor
             return s.name == "___NDMF Preview___";
         }
 
-        // Hide every preview-scene proxy whose original is NOT drawable under the target; leave the
-        // target's own proxies visible (recording prior state in cascadeHides for the shared restore).
-        // Attribution drift (API handle unresolved or original lookup unavailable) hides NOTHING and
-        // returns the drift note: a visible foreign-proxy leak beats a silent body-drop.
+        // Hide every preview-scene proxy renderer whose original is NOT drawable under the target; leave
+        // the target's own proxies visible (recording prior state in cascadeHides for the shared restore).
+        // Attribution is per proxy-RENDERER GameObject — NDMF's proxy map is keyed on the renderer's GO,
+        // and only SkinnedMeshRenderer proxies are preview-scene roots; a MeshRenderer proxy lives UNDER a
+        // shadow-bone tree, so attributing scene roots would null-attribute the bone root and hide the
+        // target's own non-skinned props with it. Hides are self-only for the same reason (bones carry no
+        // renderers; nothing else must cascade). Attribution drift (API handle unresolved, lookup throw, or
+        // a non-GameObject return) hides NOTHING and returns the drift note: a visible foreign-proxy leak
+        // beats a silent body-drop.
         private static string IsolateNdmfProxies(
             GameObject root, List<GameObject> hideTargets, Dictionary<GameObject, bool> cascadeHides,
             SceneVisibilityManager svm, out int kept, out int hidden)
         {
             kept = 0; hidden = 0;
             var proxies = new List<GameObject>();
+            var seen = new HashSet<GameObject>();
             for (int i = 0; i < EditorSceneManager.sceneCount; i++)
             {
                 var s = EditorSceneManager.GetSceneAt(i);
                 if (!s.isLoaded || !IsNdmfPreviewScene(s)) continue;
-                foreach (var go in s.GetRootGameObjects())
-                    if (go.GetComponentInChildren<Renderer>(true) != null) // skips the ndmf Activator root
-                        proxies.Add(go);
+                foreach (var sceneRoot in s.GetRootGameObjects())
+                    foreach (var r in sceneRoot.GetComponentsInChildren<Renderer>(true))
+                        if (seen.Add(r.gameObject)) proxies.Add(r.gameObject);
             }
             if (proxies.Count == 0) return "";
             if (MiGetOriginalForProxy == null) return ProxyDriftNote;
@@ -673,7 +684,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var proxy in proxies)
             {
                 GameObject original;
-                try { original = MiGetOriginalForProxy.Invoke(null, new object[] { proxy }) as GameObject; }
+                try
+                {
+                    object result = MiGetOriginalForProxy.Invoke(null, new object[] { proxy });
+                    if (result != null && !(result is GameObject)) return ProxyDriftNote; // return-type drift
+                    original = result as GameObject;
+                }
                 catch { return ProxyDriftNote; } // partial hides already applied stay recorded in cascadeHides → restored
                 bool drawable = original != null
                     && (original.transform == root.transform || original.transform.IsChildOf(root.transform))
@@ -685,7 +701,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (!cascadeHides.ContainsKey(proxy))
                 {
                     cascadeHides[proxy] = svm.IsHidden(proxy, false);
-                    svm.Hide(proxy, true);
+                    svm.Hide(proxy, false); // self-only: never cascade over a shadow-bone tree
                 }
             }
             return "";
@@ -816,8 +832,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                     || FiNext == null || PiIsReady == null || PiIsInvalidated == null)
                 { pipeline = "NDMF internals drifted"; return Settle.Drift; }
                 // Global poll (NDMF has one preview session; single-LLM MCP → only this agent's edit unsettles it).
+                // Current is null EXACTLY when previews are globally disabled (NDMFPreview.cs: Current =
+                // !EnablePreviewsUI || _disablePreviewDepth != 0 ? null : _globalPreviewSession) — in that
+                // state originals render un-suppressed, so the sheet is trustworthy: Exempt, never a FAIL.
                 var current = PiCurrent.GetValue(null, null);
-                if (current == null) { pipeline = "PreviewSession.Current=null"; return Settle.Unsettled; }
+                if (current == null) { pipeline = "previews disabled (sheet renders originals)"; return Settle.Exempt; }
                 var prox = FiProxySession.GetValue(current);
                 if (prox == null) { pipeline = "_proxySession=null"; return Settle.Unsettled; }
                 var active = FiActive.GetValue(prox);
@@ -874,15 +893,22 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // windows that can hold OS foreground while the editor itself is unfocused and throttled
                 // (observed live) — the pid check reads "foreground" exactly when the kick is needed.
                 if (EditorApplication.isFocused) { detail = "editor already focused"; return true; }
-                var proc = System.Diagnostics.Process.GetCurrentProcess(); // qualified: `using System.Diagnostics` would make Debug ambiguous
-                var hWnd = proc.MainWindowHandle;
-                if (hWnd == IntPtr.Zero) { detail = "editor main window handle unresolved"; return false; }
-                if (IsIconic(hWnd)) ShowWindow(hWnd, SW_RESTORE);
-                keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
-                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                bool ok = SetForegroundWindow(hWnd);
-                detail = ok ? "editor foregrounded" : "SetForegroundWindow refused";
-                return ok;
+                using (var proc = System.Diagnostics.Process.GetCurrentProcess()) // qualified: `using System.Diagnostics` would make Debug ambiguous
+                {
+                    var hWnd = proc.MainWindowHandle;
+                    if (hWnd == IntPtr.Zero) { detail = "editor main window handle unresolved"; return false; }
+                    if (IsIconic(hWnd)) ShowWindow(hWnd, SW_RESTORE);
+                    if (SetForegroundWindow(hWnd)) { detail = "editor foregrounded"; return true; }
+                    // Bare call refused (background process without recent input). The synthetic Alt tap
+                    // marks this process as input-producing, which unlocks SetForegroundWindow. Cost owned:
+                    // the tap lands on whatever app IS foreground and can toggle its menu-accelerator mode —
+                    // taken only on this already-refused path, key-up guaranteed even if the down throws.
+                    try { keybd_event(VK_MENU, 0, 0, UIntPtr.Zero); }
+                    finally { keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); }
+                    bool ok = SetForegroundWindow(hWnd);
+                    detail = ok ? "editor foregrounded (Alt-tap fallback)" : "SetForegroundWindow refused";
+                    return ok;
+                }
             }
             catch (Exception e) { detail = "kick threw: " + e.Message; return false; }
         }
