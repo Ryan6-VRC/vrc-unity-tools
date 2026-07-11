@@ -110,22 +110,44 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
             }
             offenders.Sort((a, b) => b.mm.CompareTo(a.mm)); // worst (largest offset) first
-            return Emit(baseGO, mergeGO, weightedHum.Count, offenders, eps);
+
+            // Non-humanoid mapped bones NEVER gate (they legitimately deviate on a correct fit). Partition the
+            // weighted ones: leaves (physbone/collider end-bones) drop to a count; weighted non-leaves surface as
+            // ungated CONTEXT deltas. Leaf = no child transform among the mergeable's SMR bones[] set.
+            var smrBones = new HashSet<Transform>();
+            foreach (var smr in mergeGO.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+                foreach (var b in smr.bones) if (b != null) smrBones.Add(b);
+            bool IsLeaf(Transform t) { foreach (Transform c in t) if (smrBones.Contains(c)) return false; return true; }
+
+            int dropped = 0;
+            var context = new List<(string bone, float mm, float fromHips)>();
+            foreach (var p in seam.Pairs)
+            {
+                if (human.Bones.Contains(p.Base)) continue;                          // humanoid ⇒ the gate above
+                if (!maxW.TryGetValue(p.Merge, out var wt) || wt < WEIGHT) continue; // unweighted ⇒ ignore
+                if (IsLeaf(p.Merge)) { dropped++; continue; }                        // end-bone ⇒ count only
+                float mm = Vector3.Distance(p.Base.position, p.Merge.position) * 1000f;
+                float fromHips = hipsBase != null ? Vector3.Distance(hipsBase.position, p.Base.position) * 1000f : 0f;
+                context.Add((p.Base.name, mm, fromHips));
+            }
+            context.Sort((a, b) => b.mm.CompareTo(a.mm)); // worst (largest offset) first
+            return Emit(baseGO, mergeGO, weightedHum.Count, offenders, context, dropped, eps);
         }
 
         // ── Output (mirrors CheckAvatar.Emit: summary + markdown body + WriteRunLog + severity-by-verdict) ─
-        // context/dropped are 0 here — Task 6 populates the non-humanoid partition; the summary still prints
-        // context=0 dropped=0 so the family grammar (and its consumers) is stable from this task forward.
+        // Verdict is a pure function of the humanoid offender count — context (k) and dropped (d) are the
+        // non-humanoid partition (ungated) and NEVER shift PASS/NOT-PASS; they ride the summary + body so a
+        // PASS beside wild context deltas doesn't read like a clean one.
         private static string Emit(GameObject baseGO, GameObject mergeGO, int weightedCount,
-            List<(string bone, float mm, float fromHips)> offenders, float eps)
+            List<(string bone, float mm, float fromHips)> offenders,
+            List<(string bone, float mm, float fromHips)> context, int dropped, float eps)
         {
-            int m = offenders.Count;
-            const int context = 0, dropped = 0;
+            int m = offenders.Count, k = context.Count;
             string verdict = m == 0 ? "PASS" : "NOT-PASS";
 
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[CheckSeam] {0}→{1}: weightedHumanoid={2} offenders={3} context={4} dropped={5} => {6}",
-                mergeGO.name, baseGO.name, weightedCount, m, context, dropped, verdict);
+                mergeGO.name, baseGO.name, weightedCount, m, k, dropped, verdict);
 
             var sb = new StringBuilder();
             sb.Append("# CheckSeam: ").Append(mergeGO.name).Append(" → ").Append(baseGO.name).Append('\n');
@@ -141,6 +163,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                   .Append("` offset=").Append(o.mm.ToString("F1", CultureInfo.InvariantCulture))
                   .Append("mm fromHips=").Append(o.fromHips.ToString("F1", CultureInfo.InvariantCulture))
                   .Append("mm\n");
+
+            sb.Append("\n## Context — non-humanoid weighted bones (ungated; interpret in context)\n\n");
+            if (context.Count == 0) sb.Append("_(none)_\n");
+            else foreach (var c in context)
+                sb.Append("- bone=`").Append(c.bone)
+                  .Append("` offset=").Append(c.mm.ToString("F1", CultureInfo.InvariantCulture))
+                  .Append("mm fromHips=").Append(c.fromHips.ToString("F1", CultureInfo.InvariantCulture))
+                  .Append("mm\n");
+
+            sb.Append("\nDropped: ").Append(dropped)
+              .Append(" non-humanoid end-bones (physbone/collider tuning)\n");
 
             var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "checkseam_" + mergeGO.name, summary, sb.ToString(), ".md");
             if (verdict == "PASS") Debug.Log(res); else Debug.LogWarning(res);

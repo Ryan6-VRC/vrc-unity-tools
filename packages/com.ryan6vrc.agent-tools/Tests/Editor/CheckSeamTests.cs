@@ -179,6 +179,32 @@ public class CheckSeamTests
         CheckSeam.ResolveSeam = (_, __) => seam;
     }
 
+    // Build one SkinnedMeshRenderer under mergeGO. Each (bone, weight) in `weighted` gets one vertex binding it
+    // at influence-0 with that weight; `extraBones` are appended to bones[] (so they count as smrBones for leaf
+    // detection) but carry no vertex weight. bones[] ∥ bindposes[]. One SMR is enough — leaf/weight reads sweep
+    // every mergeable SMR, so a single one holding the whole skeleton mirrors the multi-SMR union.
+    private void AttachSkin(GameObject mergeGO, (Transform bone, float weight)[] weighted, Transform[] extraBones)
+    {
+        extraBones ??= Array.Empty<Transform>();
+        var allBones = weighted.Select(w => w.bone).Concat(extraBones).ToArray();
+        int nv = weighted.Length;
+        var verts = new Vector3[nv];
+        var bw = new BoneWeight[nv];
+        for (int i = 0; i < nv; i++)
+        {
+            verts[i] = Vector3.zero;
+            bw[i] = new BoneWeight { boneIndex0 = i, weight0 = weighted[i].weight };
+        }
+        var bindposes = new Matrix4x4[allBones.Length];
+        for (int i = 0; i < allBones.Length; i++) bindposes[i] = Matrix4x4.identity;
+        var mesh = new Mesh { vertices = verts };
+        mesh.boneWeights = bw;
+        mesh.bindposes = bindposes;
+        var smr = NewChild(mergeGO, "Skin").AddComponent<SkinnedMeshRenderer>();
+        smr.sharedMesh = mesh;
+        smr.bones = allBones;
+    }
+
     private static System.Text.RegularExpressions.Regex RefuseRe =>
         new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] REFUSE:");
 
@@ -360,5 +386,62 @@ public class CheckSeamTests
         var r2 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r2);
         ReadLog(r2);
+    }
+
+    // ── Task 6: non-humanoid handling — leaf drop + ungated context, never touching the verdict ─────────
+    // The gate sees two coincident weighted humanoid bones (→ PASS). A weighted non-humanoid NON-leaf bone
+    // (a child bone in SMR.bones[] ⇒ non-leaf) offset 50mm becomes ungated CONTEXT; a weighted non-humanoid
+    // LEAF bone (no child in SMR.bones[]) offset 30mm is DROPPED (count only). Neither shifts PASS.
+
+    [Test]
+    public void NonHumanoid_leafDropped_contextUngated()
+    {
+        var baseGO = NewChild(_root, "Base");
+        var mergeGO = NewChild(_root, "Merge");
+
+        // Base anchors (all at origin): two humanoid (Chest/Spine) + two non-humanoid the deltas measure to.
+        var bChest = NewChild(baseGO, "Chest").transform;
+        var bSpine = NewChild(baseGO, "Spine").transform;
+        var bBreast = NewChild(baseGO, "Breast_L_Root").transform; // non-humanoid base anchor (context)
+        var bTail = NewChild(baseGO, "Tail_End").transform;        // non-humanoid base anchor (dropped)
+
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        map.Bones.Add(bChest); map.Bones.Add(bSpine); // ONLY these two count as humanoid
+        CheckSeam.ResolveHumanoid = _ => map;
+
+        // Merge bones. Humanoid pairs coincident (delta 0 ⇒ gate PASS). Breast_L_Root is non-leaf (its child
+        // Breast_L_Tip is in SMR.bones[]) offset 50mm ⇒ context. Tail_End is a leaf offset 30mm ⇒ dropped.
+        var mChest = NewChild(mergeGO, "Chest").transform;
+        var mSpine = NewChild(mergeGO, "Spine").transform;
+        var mBreast = NewChild(mergeGO, "Breast_L_Root").transform;
+        var mBreastTip = NewChild(mBreast.gameObject, "Breast_L_Tip").transform; // child in smrBones ⇒ non-leaf
+        var mTail = NewChild(mergeGO, "Tail_End").transform;
+        mBreast.localPosition = new Vector3(0.05f, 0f, 0f); // 50mm ⇒ context delta
+        mTail.localPosition = new Vector3(0.03f, 0f, 0f);   // 30mm (irrelevant: leaf drops, no delta reported)
+
+        AttachSkin(mergeGO,
+            new[] { (mChest, 1.0f), (mSpine, 1.0f), (mBreast, 1.0f), (mTail, 1.0f) },
+            new[] { mBreastTip }); // Breast_L_Tip: in bones[] (⇒ parent non-leaf), no vertex weight of its own
+
+        var seam = new CheckSeam.SeamResolution();
+        seam.Pairs.Add(new CheckSeam.BonePair { Base = bChest, Merge = mChest });
+        seam.Pairs.Add(new CheckSeam.BonePair { Base = bSpine, Merge = mSpine });
+        seam.Pairs.Add(new CheckSeam.BonePair { Base = bBreast, Merge = mBreast });
+        seam.Pairs.Add(new CheckSeam.BonePair { Base = bTail, Merge = mTail });
+        CheckSeam.ResolveSeam = (_, __) => seam;
+
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.Contains("weightedHumanoid=2", r);
+        StringAssert.Contains("offenders=0", r);
+        StringAssert.Contains("context=1 dropped=1", r);
+        StringAssert.Contains("=> PASS", r); // a 50mm context delta NEVER flips the verdict
+
+        var body = ReadLog(r);
+        StringAssert.Contains("## Context", body);
+        StringAssert.Contains("bone=`Breast_L_Root`", body);
+        StringAssert.Contains("offset=50.0mm", body);
+        StringAssert.Contains("Dropped: 1 non-humanoid end-bones", body);
+        Assert.IsFalse(body.Contains("**seam-offset**"), "context/dropped bones are never gate offenders");
+        Assert.IsFalse(body.Contains("bone=`Tail_End`"), "a dropped leaf is neither offender nor context");
     }
 }
