@@ -14,18 +14,19 @@ using VRC.SDK3.Avatars.Components;
 
 // CheckSeam proof obligations (spec 2026-07-11-checkseam-design.md).
 //
-// The test venue (TestEditor) is VRChat-SDK-only — Modular Avatar is ABSENT — so the two hops that need
-// MA (seam classification + GetBonesMapping) are exercised through CheckSeam's internal seams, set via
-// reflection exactly as CheckAvatarTests sets its seams. Everything the metric actually reasons over —
-// base + mergeable bone Transforms and real SkinnedMeshRenderer weights — is built for real in a throwaway
-// scene; only the (base, merge) correspondence is injected (its real source, MA GetBonesMapping, is
-// validated live on the corpus, not here). Fixtures are torn down in place; nothing is saved.
+// The test venue (TestEditor) is VRChat-SDK-only — Modular Avatar and VRCFury are ABSENT — so the seam
+// resolution hop (MA GetBonesMapping / VRCFury GetLinks, unioned) is exercised through CheckSeam's one
+// internal seam, set via reflection exactly as CheckAvatarTests sets its seams. Everything the metric
+// actually reasons over — base + mergeable bone Transforms and real SkinnedMeshRenderer weights — is
+// built for real; only the (base, merge, will-snap) correspondence is injected. The real GetBonesMapping /
+// GetLinks chains are validated live on the corpus (both recover the true offsets), not here. The bare-
+// prefab refuse runs the REAL DefaultResolveSeam (that branch needs no MA/VRCFury types).
 public class CheckSeamTests
 {
     private const string TmpDir = "Assets/AgentCheckSeamTmp";
     private string _logPath;
     private Scene _tmpScene;
-    private object _origDetect, _origResolve;
+    private object _origResolveSeam;
 
     [SetUp]
     public void SetUp()
@@ -35,39 +36,30 @@ public class CheckSeamTests
         // Single (not Additive): order-independent — Additive throws "untitled scene unsaved" when this
         // fixture runs first/filtered. TestEditor is a throwaway project, so replacing its scene is safe.
         _tmpScene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
-        _origDetect = GetSeam("DetectSeam");
-        _origResolve = GetSeam("ResolveMapping");
+        _origResolveSeam = GetSeam("ResolveSeam");
     }
 
     [TearDown]
     public void TearDown()
     {
-        SetSeam("DetectSeam", _origDetect);
-        SetSeam("ResolveMapping", _origResolve);
+        SetSeam("ResolveSeam", _origResolveSeam);
         if (!string.IsNullOrEmpty(_logPath)) AssetDatabase.DeleteAsset(_logPath);
         _logPath = null;
         if (AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.DeleteAsset(TmpDir);
         LogAssert.ignoreFailingMessages = false;
     }
 
-    // ── Seam reflection (fields are internal; set/get via reflection, like CheckAvatarTests) ──────────
+    // ── Seam reflection (field is internal; set/get via reflection, like CheckAvatarTests) ────────────
 
     private static void SetSeam(string field, object value) =>
         typeof(CheckSeam).GetField(field, BindingFlags.NonPublic | BindingFlags.Static).SetValue(null, value);
     private static object GetSeam(string field) =>
         typeof(CheckSeam).GetField(field, BindingFlags.NonPublic | BindingFlags.Static).GetValue(null);
 
-    private void InjectMergeArmature(Component seamComp, List<(Transform, Transform)> pairs)
+    private void InjectSeam(CheckSeam.SeamKind kind, List<CheckSeam.SeamBone> bones, int links = 1)
     {
-        SetSeam("DetectSeam", (Func<GameObject, CheckSeam.SeamInfo>)(_ =>
-            new CheckSeam.SeamInfo { Kind = CheckSeam.SeamKind.MergeArmature, Component = seamComp }));
-        SetSeam("ResolveMapping", (Func<Component, List<(Transform, Transform)>>)(_ => pairs));
-    }
-
-    private void InjectSeamKind(CheckSeam.SeamKind kind)
-    {
-        SetSeam("DetectSeam", (Func<GameObject, CheckSeam.SeamInfo>)(_ =>
-            new CheckSeam.SeamInfo { Kind = kind, Component = null }));
+        SetSeam("ResolveSeam", (Func<GameObject, GameObject, CheckSeam.Seam>)((b, m) =>
+            new CheckSeam.Seam { Kind = kind, Bones = bones, LinkCount = links }));
     }
 
     private string ReadLog(string result)
@@ -91,7 +83,6 @@ public class CheckSeamTests
         return go;
     }
 
-    // A nested Hips→Spine→Chest→Neck chain under `armatureRoot`; returns the four bone transforms.
     private Transform[] BuildChain(GameObject armatureRoot)
     {
         var bones = new Transform[BoneNames.Length];
@@ -109,19 +100,16 @@ public class CheckSeamTests
     {
         var avatar = new GameObject("Base");
         avatar.AddComponent<VRCAvatarDescriptor>();
-        var arm = NewChild(avatar, "Armature", Vector3.zero);
-        baseBones = BuildChain(arm);
+        baseBones = BuildChain(NewChild(avatar, "Armature", Vector3.zero));
         return avatar;
     }
 
-    // A mergeable under `avatar`: Outfit/Armature + a chain + a skinned mesh whose vertices are each fully
-    // weighted to one bone (only the indices in `weightedIdx`). Returns the mergeable bones; `seamComp` is
-    // the armature root (stands in for the MA component the seam would carry).
-    private GameObject NewMergeable(GameObject avatar, int[] weightedIdx, out Transform[] mergeBones, out Component seamComp)
+    // A mergeable under `parent`: Outfit/Armature + chain + a skinned mesh whose vertices are each fully
+    // weighted to one bone (only the indices in `weightedIdx`). No seam component — correspondence is injected.
+    private GameObject NewMergeable(GameObject parent, int[] weightedIdx, out Transform[] mergeBones)
     {
-        var outfit = NewChild(avatar, "Outfit", Vector3.zero);
+        var outfit = NewChild(parent, "Outfit", Vector3.zero);
         var arm = NewChild(outfit, "Armature", Vector3.zero);
-        seamComp = arm.transform;
         mergeBones = BuildChain(arm);
 
         var meshGO = NewChild(outfit, "Mesh", Vector3.zero);
@@ -143,11 +131,12 @@ public class CheckSeamTests
         return outfit;
     }
 
-    private static List<(Transform, Transform)> Pairs(Transform[] baseBones, Transform[] mergeBones)
+    private static List<CheckSeam.SeamBone> Bones(Transform[] baseBones, Transform[] mergeBones, bool willSnap = false)
     {
-        var p = new List<(Transform, Transform)>();
-        for (int i = 0; i < baseBones.Length; i++) p.Add((baseBones[i], mergeBones[i]));
-        return p;
+        var l = new List<CheckSeam.SeamBone>();
+        for (int i = 0; i < baseBones.Length; i++)
+            l.Add(new CheckSeam.SeamBone { Base = baseBones[i], Merge = mergeBones[i], WillSnap = willSnap });
+        return l;
     }
 
     private static readonly int[] AllWeighted = { 0, 1, 2, 3 };
@@ -158,70 +147,84 @@ public class CheckSeamTests
     public void AlignedOverlay_isPass()
     {
         var avatar = NewBaseAvatar(out var baseBones);
-        NewMergeable(avatar, AllWeighted, out var mergeBones, out var seam); // coincide with base
-        InjectMergeArmature(seam, Pairs(baseBones, mergeBones));
-        var r = CheckSeam.Inspect("Base", "Outfit");
-        StringAssert.Contains("=> PASS", r, r);
+        NewMergeable(avatar, AllWeighted, out var mergeBones);
+        InjectSeam(CheckSeam.SeamKind.MergeArmature, Bones(baseBones, mergeBones));
+        StringAssert.Contains("=> PASS", CheckSeam.Inspect("Base", "Outfit"));
     }
 
-    // An offset bone that is UNWEIGHTED must not flag (weighted-restriction).
+    // A VRCFury link with offsets kept (no snap) scores exactly like MA.
+    [Test]
+    public void VrcfuryOffsetsKept_scoresLikeMA_isPass()
+    {
+        var avatar = NewBaseAvatar(out var baseBones);
+        NewMergeable(avatar, AllWeighted, out var mergeBones);
+        InjectSeam(CheckSeam.SeamKind.VRCFury, Bones(baseBones, mergeBones, willSnap: false));
+        StringAssert.Contains("=> PASS", CheckSeam.Inspect("Base", "Outfit"));
+    }
+
     [Test]
     public void UnweightedOffsetBone_doesNotFlag_isPass()
     {
         var avatar = NewBaseAvatar(out var baseBones);
-        NewMergeable(avatar, new[] { 0, 1, 2 }, out var mergeBones, out var seam); // Neck (idx3) unweighted
-        mergeBones[3].localPosition += new Vector3(0, 0.05f, 0);                    // shove the unweighted Neck 50mm
-        InjectMergeArmature(seam, Pairs(baseBones, mergeBones));
-        var r = CheckSeam.Inspect("Base", "Outfit");
-        StringAssert.Contains("=> PASS", r, "an unweighted bone's offset must not flag: " + r);
+        NewMergeable(avatar, new[] { 0, 1, 2 }, out var mergeBones); // Neck (idx3) unweighted
+        mergeBones[3].localPosition += new Vector3(0, 0.05f, 0);     // shove the unweighted Neck 50mm
+        InjectSeam(CheckSeam.SeamKind.MergeArmature, Bones(baseBones, mergeBones));
+        StringAssert.Contains("=> PASS", CheckSeam.Inspect("Base", "Outfit"));
     }
 
-    // ── REVIEW — uniform offset, root aligned (the head-swap class) ────────────────────────────────────
+    // ── REVIEW ─────────────────────────────────────────────────────────────────────────────────────────
 
+    // Uniform offset, root aligned (the head-swap class).
     [Test]
     public void UniformRegionOffset_rootAligned_isReview()
     {
         var avatar = NewBaseAvatar(out var baseBones);
-        NewMergeable(avatar, AllWeighted, out var mergeBones, out var seam);
-        // Shift Chest by +20mm; Neck (its child) rides along → Chest+Neck uniformly +20mm, Hips/Spine coincide.
-        mergeBones[2].localPosition += new Vector3(0, 0.02f, 0);
-        InjectMergeArmature(seam, Pairs(baseBones, mergeBones));
+        NewMergeable(avatar, AllWeighted, out var mergeBones);
+        mergeBones[2].localPosition += new Vector3(0, 0.02f, 0); // Chest+Neck ride +20mm; Hips/Spine coincide
+        InjectSeam(CheckSeam.SeamKind.MergeArmature, Bones(baseBones, mergeBones));
         var r = CheckSeam.Inspect("Base", "Outfit");
-        var log = ReadLog(r);
         StringAssert.Contains("=> REVIEW", r, r);
-        StringAssert.Contains("uniform", log, "the offending region is a uniform shift: " + log);
+        StringAssert.Contains("uniform", ReadLog(r));
     }
 
-    // ── FAIL — differential (a gradient) ──────────────────────────────────────────────────────────────
+    // A VRCFury will-snap bone: the build moves it, so the edit-time delta can't be certified → REVIEW.
+    [Test]
+    public void VrcfuryWillSnap_isReview()
+    {
+        var avatar = NewBaseAvatar(out var baseBones);
+        NewMergeable(avatar, AllWeighted, out var mergeBones);
+        mergeBones[3].localPosition += new Vector3(0, 0.05f, 0); // an offset that the build will snap away
+        InjectSeam(CheckSeam.SeamKind.VRCFury, Bones(baseBones, mergeBones, willSnap: true));
+        var r = CheckSeam.Inspect("Base", "Outfit");
+        StringAssert.Contains("=> REVIEW", r, r);
+        StringAssert.Contains("vrcfury-snap", ReadLog(r));
+    }
+
+    // ── FAIL ─────────────────────────────────────────────────────────────────────────────────────────
 
     [Test]
     public void DifferentialOffset_isFail()
     {
         var avatar = NewBaseAvatar(out var baseBones);
-        NewMergeable(avatar, AllWeighted, out var mergeBones, out var seam);
-        // Chest +20mm, Neck an ADDITIONAL +40mm → Chest world +20, Neck world +60 → offsets clearly disagree.
-        mergeBones[2].localPosition += new Vector3(0, 0.02f, 0);
-        mergeBones[3].localPosition += new Vector3(0, 0.04f, 0);
-        InjectMergeArmature(seam, Pairs(baseBones, mergeBones));
+        NewMergeable(avatar, AllWeighted, out var mergeBones);
+        mergeBones[2].localPosition += new Vector3(0, 0.02f, 0); // Chest world +20
+        mergeBones[3].localPosition += new Vector3(0, 0.04f, 0); // Neck world +60 → offsets disagree
+        InjectSeam(CheckSeam.SeamKind.MergeArmature, Bones(baseBones, mergeBones));
         var r = CheckSeam.Inspect("Base", "Outfit");
-        var log = ReadLog(r);
         StringAssert.Contains("=> FAIL", r, r);
-        StringAssert.Contains("differential", log, "disagreeing offsets are differential: " + log);
+        StringAssert.Contains("differential", ReadLog(r));
     }
-
-    // ── FAIL — uniform offset but the mergeable root was moved off its drop ────────────────────────────
 
     [Test]
     public void UniformOffset_rootMoved_isFail()
     {
         var avatar = NewBaseAvatar(out var baseBones);
-        var outfit = NewMergeable(avatar, AllWeighted, out var mergeBones, out var seam);
+        var outfit = NewMergeable(avatar, AllWeighted, out var mergeBones);
         outfit.transform.localPosition = new Vector3(0, 0.02f, 0); // whole mergeable shifted → uniform + root moved
-        InjectMergeArmature(seam, Pairs(baseBones, mergeBones));
+        InjectSeam(CheckSeam.SeamKind.MergeArmature, Bones(baseBones, mergeBones));
         var r = CheckSeam.Inspect("Base", "Outfit");
-        var log = ReadLog(r);
         StringAssert.Contains("=> FAIL", r, r);
-        StringAssert.Contains("root-moved", log, "a uniform shift from a moved root is a FAIL: " + log);
+        StringAssert.Contains("root-moved", ReadLog(r));
     }
 
     // A uniform offset from an intermediate offset CONTAINER (mergeable root at identity-local but world-
@@ -230,29 +233,42 @@ public class CheckSeamTests
     public void UniformOffset_intermediateContainer_isFail()
     {
         var avatar = NewBaseAvatar(out var baseBones);
-        var container = NewChild(avatar, "Container", new Vector3(0, 0.03f, 0)); // offset container
-        NewMergeable(container, AllWeighted, out var mergeBones, out var seam);  // Outfit under Container, local identity
-        InjectMergeArmature(seam, Pairs(baseBones, mergeBones));
+        var container = NewChild(avatar, "Container", new Vector3(0, 0.03f, 0));
+        NewMergeable(container, AllWeighted, out var mergeBones); // Outfit under Container, local identity
+        InjectSeam(CheckSeam.SeamKind.MergeArmature, Bones(baseBones, mergeBones));
         var r = CheckSeam.Inspect("Base", "Outfit");
-        var log = ReadLog(r);
-        StringAssert.Contains("=> FAIL", r, "an intermediate offset container is a wrong drop (world-space root check): " + r);
-        StringAssert.Contains("root-moved", log, log);
+        StringAssert.Contains("=> FAIL", r, r);
+        StringAssert.Contains("root-moved", ReadLog(r));
     }
 
-    // The seam's merge target resolving to ANOTHER avatar's rig (two-avatar scene / wrong base handle) must
-    // refuse, not silently score B's bones under a verdict labelled "onto Base".
+    // ── refuse ─────────────────────────────────────────────────────────────────────────────────────────
+
+    // The seam's merge target resolving to ANOTHER avatar's rig must refuse, not silently score B's bones.
     [Test]
     public void SeamTargetsDifferentBase_refuses()
     {
         var avatar = NewBaseAvatar(out _);
-        NewMergeable(avatar, AllWeighted, out var mergeBones, out var seam);
+        NewMergeable(avatar, AllWeighted, out var mergeBones);
         var other = new GameObject("OtherBase");
         other.AddComponent<VRCAvatarDescriptor>();
         var otherBones = BuildChain(NewChild(other, "Armature", Vector3.zero));
-        InjectMergeArmature(seam, Pairs(otherBones, mergeBones)); // base side belongs to OtherBase
+        InjectSeam(CheckSeam.SeamKind.MergeArmature, Bones(otherBones, mergeBones)); // base side belongs to OtherBase
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] FAIL:"));
         var r = CheckSeam.Inspect("Base", "Outfit");
         StringAssert.Contains("OUTSIDE the passed base", r, r);
+    }
+
+    // Bare prefab (no seam component) → the REAL DefaultResolveSeam refuses to own-mergeable (no injection).
+    [Test]
+    public void NoSeam_refusesToOwnMergeable()
+    {
+        var avatar = NewBaseAvatar(out _);
+        NewChild(avatar, "Outfit", Vector3.zero); // a bare object, no seam component
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] FAIL:"));
+        var r = CheckSeam.Inspect("Base", "Outfit");
+        StringAssert.StartsWith("[CheckSeam] FAIL:", r);
+        StringAssert.Contains("own-mergeable", r, r);
+        Assert.IsFalse(r.Contains("| log="), "a refusal carries no artifact trailer: " + r);
     }
 
     // ── Inspection-class: no scene dirtying ────────────────────────────────────────────────────────────
@@ -261,52 +277,14 @@ public class CheckSeamTests
     public void Inspect_doesNotDirtyScene()
     {
         var avatar = NewBaseAvatar(out var baseBones);
-        NewMergeable(avatar, AllWeighted, out var mergeBones, out var seam);
-        InjectMergeArmature(seam, Pairs(baseBones, mergeBones));
+        NewMergeable(avatar, AllWeighted, out var mergeBones);
+        InjectSeam(CheckSeam.SeamKind.MergeArmature, Bones(baseBones, mergeBones));
         string scenePath = TmpDir + "/CheckSeamNoDirty.unity";
         EditorSceneManager.SaveScene(_tmpScene, scenePath);
         Assert.IsFalse(_tmpScene.isDirty, "baseline must be a clean scene");
-        var r = CheckSeam.Inspect("Base", "Outfit");
-        ReadLog(r);
+        ReadLog(CheckSeam.Inspect("Base", "Outfit"));
         Assert.IsFalse(EditorSceneManager.GetActiveScene().isDirty, "Inspect must not dirty a clean scene");
         AssetDatabase.DeleteAsset(scenePath);
-    }
-
-    // ── Out-of-scope routing (refuse — bare FAIL, no trailer) ──────────────────────────────────────────
-
-    [Test]
-    public void NoSeam_refusesToOwnMergeable()
-    {
-        var avatar = NewBaseAvatar(out _);
-        NewChild(avatar, "Outfit", Vector3.zero);
-        InjectSeamKind(CheckSeam.SeamKind.None);
-        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] FAIL:"));
-        var r = CheckSeam.Inspect("Base", "Outfit");
-        StringAssert.StartsWith("[CheckSeam] FAIL:", r);
-        StringAssert.Contains("own-mergeable", r, "a bare prefab routes to own-mergeable: " + r);
-        Assert.IsFalse(r.Contains("| log="), "a refusal carries no artifact trailer: " + r);
-    }
-
-    [Test]
-    public void BoneProxyProp_refusesToAnchorCheck()
-    {
-        var avatar = NewBaseAvatar(out _);
-        NewChild(avatar, "Outfit", Vector3.zero);
-        InjectSeamKind(CheckSeam.SeamKind.BoneProxy);
-        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] FAIL:"));
-        var r = CheckSeam.Inspect("Base", "Outfit");
-        StringAssert.Contains("BoneProxy", r, "a BoneProxy prop routes to proxy-target check: " + r);
-    }
-
-    [Test]
-    public void VrcfurySeam_refusesWithFastFollowNote()
-    {
-        var avatar = NewBaseAvatar(out _);
-        NewChild(avatar, "Outfit", Vector3.zero);
-        InjectSeamKind(CheckSeam.SeamKind.VRCFury);
-        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] FAIL:"));
-        var r = CheckSeam.Inspect("Base", "Outfit");
-        StringAssert.Contains("VRCFury", r, "a VRCFury seam is v1-out-of-scope: " + r);
     }
 
     // ── Bad input → bare FAIL, no trailer ──────────────────────────────────────────────────────────────
