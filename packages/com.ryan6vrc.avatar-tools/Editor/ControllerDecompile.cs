@@ -867,7 +867,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var curve = AnimationUtility.GetEditorCurve(clip, b);
                     string target = ReconstructBindingTarget(b);
                     if (curve == null || curve.length == 0) continue;
-                    if (IsConstant(curve))
+                    // A constant-VALUE curve collapses to a Set — UNLESS its tangents are linear: `set:` carries
+                    // no tangent marker, so downgrading a constant linear curve would silently drop `tangents:
+                    // linear` and break the compile↔decompile fixpoint (a valid, BindCurve-accepted input like
+                    // a two-key linear curve holding one value). Keep any linear curve as a Curve.
+                    if (IsConstant(curve) && !IsAllLinear(curve))
                     {
                         spec.Sets[target] = curve.keys[0].value;
                         maxConstEnd = Mathf.Max(maxConstEnd, curve.keys[curve.length - 1].time);
