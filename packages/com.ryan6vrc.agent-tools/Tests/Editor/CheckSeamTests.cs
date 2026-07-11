@@ -97,6 +97,29 @@ public class CheckSeamTests
         return sb.ToString();
     }
 
+    // Build a base GO with N named child bones + an empty merge GO, and inject a non-empty HumanoidMap over the
+    // base bones so the door's humanoid guard passes and the seam guards (this task) are the ones under test.
+    private void SetupBaseAndHumanoid(out GameObject baseGO, out GameObject mergeGO, int humanoidBones)
+    {
+        baseGO = NewChild(_root, "Base");
+        mergeGO = NewChild(_root, "Merge");
+        string[] names = { "Hips", "Spine", "Chest", "Head", "Neck" };
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        for (int i = 0; i < humanoidBones; i++)
+            map.Bones.Add(NewChild(baseGO, names[i % names.Length]).transform);
+        CheckSeam.ResolveHumanoid = _ => map;
+    }
+
+    private static Transform FindBone(GameObject root, string name)
+    {
+        foreach (var t in root.GetComponentsInChildren<Transform>(true))
+            if (t.name == name) return t;
+        return null;
+    }
+
+    private static System.Text.RegularExpressions.Regex RefuseRe =>
+        new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] REFUSE:");
+
     // ── Tests ─────────────────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -122,5 +145,66 @@ public class CheckSeamTests
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("no humanoid", r);
+    }
+
+    // ── Task 3: seam-mapping structural guards (injected SeamResolution over plain Transforms) ─────────
+    // The reflection default (DefaultResolveSeam) is proven by the live corpus (Task 8), not here — a
+    // SDK-only TestEditor has no MA/VRCFury. These prove the door's union/guard/conflict branches.
+
+    [Test]
+    public void NoSeam_refuses()
+    {
+        LogAssert.Expect(LogType.Error, RefuseRe);
+        SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
+        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution(); // empty Pairs
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("no scorable seam", r);
+    }
+
+    [Test]
+    public void SeamConflict_refuses()
+    {
+        LogAssert.Expect(LogType.Error, RefuseRe);
+        SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
+        var baseBone = FindBone(baseGO, "Hips");
+        var m1 = NewChild(mergeGO, "Hips.a");
+        var m2 = NewChild(mergeGO, "Hips.b");
+        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution
+        {
+            Pairs = {
+                new CheckSeam.BonePair { Base = baseBone, Merge = m1.transform },
+                new CheckSeam.BonePair { Base = baseBone, Merge = m2.transform } }
+        };
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("seams disagree", r);
+    }
+
+    [Test]
+    public void RootsDontNest_refuses()
+    {
+        LogAssert.Expect(LogType.Error, RefuseRe);
+        SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
+        var baseBone = FindBone(baseGO, "Hips");
+        var stray = NewChild(_root, "StrayMerge"); // under _root, NOT under mergeGO
+        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution
+        {
+            Pairs = { new CheckSeam.BonePair { Base = baseBone, Merge = stray.transform } }
+        };
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("different avatar", r);
+    }
+
+    [Test]
+    public void ReflectError_refuses()
+    {
+        LogAssert.Expect(LogType.Error, RefuseRe);
+        SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
+        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution { ReflectError = "GetLinks threw" };
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("GetLinks threw", r);
     }
 }

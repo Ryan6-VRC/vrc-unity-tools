@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+using System.Reflection;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
@@ -56,7 +58,33 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (human.Bones.Count == 0)
                 return Refuse("base '" + baseRoot + "' has no humanoid Avatar — cannot certify fit (clothes-on-a-body is the domain)");
 
+            var seam = ResolveSeam(baseGO, mergeGO);
+            if (seam.ReflectError != null) return Refuse("seam resolution failed: " + seam.ReflectError);
+            if (seam.ScaleBakeReason != null) return Refuse(seam.ScaleBakeReason); // field stays null until Task 7
+            if (seam.Pairs.Count == 0) return Refuse("no scorable seam component on '" + mergeableRoot + "'");
+            foreach (var p in seam.Pairs)
+            {
+                if (p.Base == null || p.Merge == null) return Refuse("seam pair has a null bone");
+                if (!IsUnder(p.Base, baseGO) || !IsUnder(p.Merge, mergeGO))
+                    return Refuse("seam targets a different avatar (a mapped bone is not under its root)");
+            }
+            // conflict: the same base bone mapped to two different merge bones (MA and VRCFury disagree)
+            var byBase = new Dictionary<Transform, Transform>();
+            foreach (var p in seam.Pairs)
+            {
+                if (byBase.TryGetValue(p.Base, out var other) && other != p.Merge)
+                    return Refuse("seams disagree on base bone '" + p.Base.name + "' (" + other.name + " vs " + p.Merge.name + ")");
+                byBase[p.Base] = p.Merge;
+            }
+
             return Refuse("not yet implemented"); // replaced in later tasks
+        }
+
+        private static bool IsUnder(Transform t, GameObject root)
+        {
+            for (var cur = t; cur != null; cur = cur.parent)
+                if (cur == root.transform) return true;
+            return false;
         }
 
         private static string Refuse(string why) // valid-abstain vs misuse severity handled in Task 8
@@ -68,7 +96,122 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Seam defaults (real reflection lands in Tasks 2–3, 7; stubs so the field initializers compile) ─
 
-        private static SeamResolution DefaultResolveSeam(GameObject b, GameObject m) => throw new NotImplementedException();
+        // Real reflection: union MA GetBonesMapping (base,merge) + VRCFury GetLinks().mergeBones (merge,base,
+        // flipped). Wrap the whole body — any thrown hop OR a null GetLinks becomes ReflectError, never an
+        // escaping exception. Validated end-to-end by the live corpus (Task 8), not by unit tests (the SDK-only
+        // TestEditor has no MA/VRCFury). Scale detection (ScaleBakeReason) is Task 7 — not read here.
+        private static SeamResolution DefaultResolveSeam(GameObject baseGO, GameObject mergeGO)
+        {
+            var res = new SeamResolution();
+            try
+            {
+                CollectMaPairs(mergeGO, res);
+                CollectVrcfPairs(mergeGO, baseGO, res);
+            }
+            catch (Exception e)
+            {
+                res.ReflectError = e.GetType().Name + ": " + e.Message;
+            }
+            return res;
+        }
+
+        private static Type FindType(string fullName) =>
+            AppDomain.CurrentDomain.GetAssemblies()
+                .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
+                .FirstOrDefault(t => t.FullName == fullName);
+
+        // MA: ModularAvatarMergeArmature.GetBonesMapping() → List<(Transform base, Transform merge)> (Item1=base).
+        // Returns matched descendants only (not the root pair) — that is fine, the descendants carry the offset.
+        private static void CollectMaPairs(GameObject mergeGO, SeamResolution res)
+        {
+            var maType = FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
+            if (maType == null) return; // MA not installed ⇒ no MA seam
+            var getMapping = maType.GetMethod("GetBonesMapping", BindingFlags.Public | BindingFlags.Instance);
+            if (getMapping == null) throw new MissingMethodException("ModularAvatarMergeArmature.GetBonesMapping");
+            foreach (var comp in mergeGO.GetComponentsInChildren(maType, true))
+            {
+                var mapping = getMapping.Invoke(comp, null) as System.Collections.IEnumerable;
+                if (mapping == null) continue;
+                foreach (var item in mapping)
+                {
+                    var tt = item.GetType();
+                    var b = tt.GetField("Item1").GetValue(item) as Transform;
+                    var m = tt.GetField("Item2").GetValue(item) as Transform;
+                    res.Pairs.Add(new BonePair { Base = b, Merge = m });
+                }
+            }
+        }
+
+        // VRCFury: for each VF.Model.VRCFury whose `content` is a VF.Model.Feature.ArmatureLink, call
+        // VF.Service.ArmatureLinkService.GetLinks(model, avatarObj) (static). Its .mergeBones is a
+        // Stack<(VFGameObject prop/merge, VFGameObject avatar/base)> — flipped vs MA. Reflection will NOT auto-
+        // apply the implicit Transform↔VFGameObject operators, so op_Implicit is invoked explicitly both ways.
+        // GetLinks throws (empty linkTo / link inside armature / bad Hips) AND returns null (propBone == null) —
+        // both are resolution failures (thrown → caught upstream; null → thrown here → caught upstream).
+        private static void CollectVrcfPairs(GameObject mergeGO, GameObject avatarGO, SeamResolution res)
+        {
+            var vrcfType = FindType("VF.Model.VRCFury");
+            if (vrcfType == null) return; // VRCFury not installed ⇒ no VRCFury seam
+            var armLinkType = FindType("VF.Model.Feature.ArmatureLink");
+            var svcType = FindType("VF.Service.ArmatureLinkService");
+            var vfGoType = FindType("VF.Utils.VFGameObject");
+            if (armLinkType == null || svcType == null || vfGoType == null)
+                throw new TypeLoadException("VRCFury ArmatureLink/Service/VFGameObject type missing");
+
+            var getLinks = svcType.GetMethod("GetLinks", BindingFlags.Public | BindingFlags.Static);
+            if (getLinks == null) throw new MissingMethodException("ArmatureLinkService.GetLinks");
+            var contentField = vrcfType.GetField("content", BindingFlags.Public | BindingFlags.Instance);
+            if (contentField == null) throw new MissingFieldException("VRCFury.content");
+
+            var avatarVfGo = ToVfGameObject(vfGoType, avatarGO);
+
+            foreach (var comp in mergeGO.GetComponentsInChildren(vrcfType, true))
+            {
+                var content = contentField.GetValue(comp);
+                if (content == null || !armLinkType.IsInstanceOfType(content)) continue; // not an ArmatureLink feature
+                var links = getLinks.Invoke(null, new object[] { content, avatarVfGo });
+                if (links == null) throw new NullReferenceException("GetLinks returned null (propBone == null)");
+                var mergeBones = links.GetType().GetField("mergeBones").GetValue(links) as System.Collections.IEnumerable;
+                if (mergeBones == null) continue;
+                foreach (var pair in mergeBones)
+                {
+                    var pt = pair.GetType();
+                    var mergeVf = pt.GetField("Item1").GetValue(pair); // prop/merge
+                    var baseVf = pt.GetField("Item2").GetValue(pair);  // avatar/base
+                    res.Pairs.Add(new BonePair { Base = FromVfGameObject(vfGoType, baseVf), Merge = FromVfGameObject(vfGoType, mergeVf) });
+                }
+            }
+        }
+
+        // Transform/GameObject → VFGameObject via the explicit op_Implicit (reflection won't apply it implicitly).
+        private static object ToVfGameObject(Type vfGoType, GameObject go)
+        {
+            foreach (var m in vfGoType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (m.Name != "op_Implicit" || m.ReturnType != vfGoType) continue;
+                var ps = m.GetParameters();
+                if (ps.Length != 1) continue;
+                if (ps[0].ParameterType == typeof(Transform)) return m.Invoke(null, new object[] { go.transform });
+                if (ps[0].ParameterType == typeof(GameObject)) return m.Invoke(null, new object[] { go });
+            }
+            throw new MissingMethodException("op_Implicit(Transform|GameObject) → VFGameObject");
+        }
+
+        // VFGameObject → Transform via the explicit op_Implicit (either the Transform or the GameObject operator).
+        private static Transform FromVfGameObject(Type vfGoType, object vfGo)
+        {
+            if (vfGo == null) return null;
+            foreach (var m in vfGoType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (m.Name != "op_Implicit") continue;
+                var ps = m.GetParameters();
+                if (ps.Length != 1 || ps[0].ParameterType != vfGoType) continue;
+                var result = m.Invoke(null, new object[] { vfGo });
+                if (result is Transform t) return t;
+                if (result is GameObject g) return g.transform;
+            }
+            throw new MissingMethodException("op_Implicit(VFGameObject) → Transform|GameObject");
+        }
 
         private static HumanoidMap DefaultResolveHumanoid(GameObject baseGO)
         {
