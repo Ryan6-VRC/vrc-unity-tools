@@ -279,7 +279,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         if (spec.Seconds.Value > last.time)
                             keys.Add(new Keyframe(spec.Seconds.Value, last.value)); // hold to the declared length
                     }
-                    AnimationUtility.SetEditorCurve(clip, binding, new AnimationCurve(keys.ToArray()));
+                    var animCurve = new AnimationCurve(keys.ToArray());
+                    if (cs.Tangents == CurveTangent.Linear)
+                        for (int i = 0; i < animCurve.length; i++)
+                        {
+                            AnimationUtility.SetKeyLeftTangentMode(animCurve, i, AnimationUtility.TangentMode.Linear);
+                            AnimationUtility.SetKeyRightTangentMode(animCurve, i, AnimationUtility.TangentMode.Linear);
+                        }
+                    AnimationUtility.SetEditorCurve(clip, binding, animCurve);
                 }
                 return clip;
             }

@@ -867,7 +867,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var curve = AnimationUtility.GetEditorCurve(clip, b);
                     string target = ReconstructBindingTarget(b);
                     if (curve == null || curve.length == 0) continue;
-                    if (IsConstant(curve))
+                    // A constant-VALUE curve collapses to a Set — UNLESS its tangents are linear: `set:` carries
+                    // no tangent marker, so downgrading a constant linear curve would silently drop `tangents:
+                    // linear` and break the compile↔decompile fixpoint (a valid, BindCurve-accepted input like
+                    // a two-key linear curve holding one value). Keep any linear curve as a Curve.
+                    if (IsConstant(curve) && !IsAllLinear(curve))
                     {
                         spec.Sets[target] = curve.keys[0].value;
                         maxConstEnd = Mathf.Max(maxConstEnd, curve.keys[curve.length - 1].time);
@@ -877,6 +881,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         {
                             Binding = target,
                             Keys = curve.keys.Select(k => new Keyframe2(k.time, k.value)).ToList(),
+                            Tangents = IsAllLinear(curve) ? CurveTangent.Linear : CurveTangent.Flat,
                         });
                 }
                 // A Set curve carries no keyframes in the schema, so a Sets clip authored with an explicit
@@ -902,6 +907,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 float v = curve.keys[0].value;
                 for (int i = 1; i < curve.length; i++)
                     if (!Mathf.Approximately(curve.keys[i].value, v)) return false;
+                return true;
+            }
+
+            // Round-trips ControllerEmit's linear-tangent marker: true only when EVERY key is linear on
+            // both sides (ControllerEmit sets both when `tangents: linear`), so any hand-authored or
+            // imported mixed-tangent curve decodes as Flat rather than falsely claiming linear.
+            private static bool IsAllLinear(AnimationCurve curve)
+            {
+                if (curve.length == 0) return false;
+                for (int i = 0; i < curve.length; i++)
+                    if (AnimationUtility.GetKeyLeftTangentMode(curve, i) != AnimationUtility.TangentMode.Linear
+                     || AnimationUtility.GetKeyRightTangentMode(curve, i) != AnimationUtility.TangentMode.Linear)
+                        return false;
                 return true;
             }
 

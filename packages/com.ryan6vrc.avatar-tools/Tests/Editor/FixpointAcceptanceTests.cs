@@ -195,4 +195,70 @@ public class FixpointAcceptanceTests
         Assert.AreEqual(yaml1, yaml2, "the slash-in-name controller reaches a textual fixpoint");
         StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
     }
+
+    // A `tangents: linear` curve must decompile back to the SAME map form (never silently downgrade to the
+    // bare-list form flat curves use), and that owned form must itself reach a byte-identical fixpoint on a
+    // second compile→decompile — the substrate doesn't just parse the marker once, it OWNS it durably.
+    [Test]
+    public void Roundtrip_LinearTangentCurve_SerializesAsMapForm_And_ReachesFixpoint()
+    {
+        const string yaml = @"schema: 1
+controller: LinearTangent_Fx
+basis: avatar-root
+clips:
+  c:
+    curves:
+      Prop/Renderer.enabled:
+        tangents: linear
+        keys: [[0, 0], [1, 1]]
+layers:
+  - name: L
+    states:
+      S:
+        motion: { clip: c }
+    default: S
+";
+        var c1 = FixpointOracle.CompileTo(TestRoot, yaml, "LinearTangent_Fx", "c1");
+        string yamlB = FixpointOracle.Decode(c1);
+        StringAssert.Contains("Prop/Renderer.enabled: { tangents: linear, keys: [ [0, 0], [1, 1] ] }", yamlB,
+            "the linear-tangent curve decompiles back to the map form, not the bare-list form flat curves use");
+
+        var c2 = FixpointOracle.CompileTo(TestRoot, yamlB, "LinearTangent_Fx", "c2");
+        string yamlC = FixpointOracle.Decode(c2);
+        Assert.AreEqual(yamlB, yamlC, "tight fixpoint: the owned linear-tangent form round-trips byte-for-byte");
+        StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
+    }
+
+    // Regression: a CONSTANT-value linear curve (both keys hold the same value) is `IsConstant` but must NOT
+    // collapse to `set:` — `set:` has no tangent marker, so downgrading it silently drops `tangents: linear`
+    // and breaks the fixpoint. It has to stay the map form like any other linear curve.
+    [Test]
+    public void Roundtrip_ConstantValueLinearCurve_StaysMapForm_NotSet()
+    {
+        const string yaml = @"schema: 1
+controller: ConstLinear_Fx
+basis: avatar-root
+clips:
+  c:
+    curves:
+      Prop/Renderer.enabled:
+        tangents: linear
+        keys: [[0, 0], [1, 0]]
+layers:
+  - name: L
+    states:
+      S:
+        motion: { clip: c }
+    default: S
+";
+        var c1 = FixpointOracle.CompileTo(TestRoot, yaml, "ConstLinear_Fx", "c1");
+        string yamlB = FixpointOracle.Decode(c1);
+        StringAssert.Contains("Prop/Renderer.enabled: { tangents: linear, keys: [ [0, 0], [1, 0] ] }", yamlB,
+            "a constant-value linear curve keeps the map form; it must not downgrade to set: and lose the marker");
+        StringAssert.DoesNotContain("set:", yamlB,
+            "the constant linear curve must NOT collapse to a set: write (that drops tangents: linear)");
+
+        var c2 = FixpointOracle.CompileTo(TestRoot, yamlB, "ConstLinear_Fx", "c2");
+        Assert.AreEqual(yamlB, FixpointOracle.Decode(c2), "tight fixpoint on the constant linear curve");
+    }
 }

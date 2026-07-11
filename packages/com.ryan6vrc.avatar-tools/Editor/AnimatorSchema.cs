@@ -215,7 +215,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public Dictionary<string, float> Sets = new Dictionary<string, float>();   // binding -> constant
         public List<CurveSpec> Curves = new List<CurveSpec>();
     }
-    public sealed class CurveSpec { public string Binding; public List<Keyframe2> Keys = new List<Keyframe2>(); }
+    public enum CurveTangent { Flat, Linear }
+    public sealed class CurveSpec { public string Binding; public CurveTangent Tangents = CurveTangent.Flat; public List<Keyframe2> Keys = new List<Keyframe2>(); }
     public struct Keyframe2 { public float Time; public float Value; public Keyframe2(float t, float v){ Time=t; Value=v; } }
 
     public sealed class Behaviour
