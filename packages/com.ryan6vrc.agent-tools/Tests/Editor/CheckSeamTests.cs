@@ -206,10 +206,11 @@ public class CheckSeamTests
     }
 
     // Attach a SkinnedMeshRenderer whose mesh carries EXPLICIT per-vertex influences (via SetBoneWeights),
-    // exercising MaxWeights' all-influence read. Weights within a vertex must be sorted descending and are
-    // NORMALIZED per vertex by Unity's mesh store (GetAllBoneWeights returns the normalized view) — so make each
-    // vertex sum to 1 for the set weight to survive as the read weight. bones[] indices are what BoneWeight1.boneIndex
-    // references; bindposes ∥ bones.
+    // exercising MaxWeights' all-influence read. Weights within a vertex must be sorted descending. Unity's mesh
+    // store QUANTIZES the weights (16-bit), so a read value drifts ~1e-5 from what was set — make each vertex sum
+    // to 1 (so no per-vertex renormalization compounds it) AND keep any threshold-sensitive weight clear of the
+    // 0.1 gate boundary, or the quantization drift can flip the comparison. bones[] indices are what
+    // BoneWeight1.boneIndex references; bindposes ∥ bones.
     private void AttachExplicitSkin(GameObject mergeGO, Transform[] bones, byte[] bonesPerVertex, BoneWeight1[] bw)
     {
         var verts = new Vector3[bonesPerVertex.Length];
@@ -497,8 +498,9 @@ public class CheckSeamTests
         var bones = new[] { mChest, mSpine, f1, f2, f3, f4 }; // boneIndex 0..5
 
         // Vertex 0: Chest at 1.0 (1 influence). Vertex 1: 5 influences sorted descending, Spine (idx 1) is the
-        // 5th/lowest at 0.1 — outside the legacy top-4 window (F1..F4 all outrank it).
-        // v1 sums to 1.0 (already normalized) so Spine's read weight stays 0.10 exactly at the threshold.
+        // 5th/lowest at 0.12 — outside the legacy top-4 window (F1..F4 all outrank it). Spine sits 0.02 ABOVE the
+        // 0.1 gate threshold (not on it) so 16-bit weight quantization can't drift the read below 0.1 and flip
+        // the count. v1 sums to 1.0 so no per-vertex renormalization compounds the drift.
         AttachExplicitSkin(mergeGO, bones,
             new byte[] { 1, 5 },
             new[]
@@ -507,8 +509,8 @@ public class CheckSeamTests
                 new BoneWeight1 { boneIndex = 2, weight = 0.40f }, // v1: F1
                 new BoneWeight1 { boneIndex = 3, weight = 0.20f }, // v1: F2
                 new BoneWeight1 { boneIndex = 4, weight = 0.15f }, // v1: F3
-                new BoneWeight1 { boneIndex = 5, weight = 0.15f }, // v1: F4
-                new BoneWeight1 { boneIndex = 1, weight = 0.10f }, // v1: Spine — 5th, dropped by a top-4 read
+                new BoneWeight1 { boneIndex = 5, weight = 0.13f }, // v1: F4
+                new BoneWeight1 { boneIndex = 1, weight = 0.12f }, // v1: Spine — 5th, dropped by a top-4 read
             });
 
         var seam = new CheckSeam.SeamResolution();
@@ -517,7 +519,7 @@ public class CheckSeamTests
         CheckSeam.ResolveSeam = (_, __) => seam;
 
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
-        StringAssert.Contains("weightedHumanoid=2", r); // the 5th influence (Spine@0.1) participates
+        StringAssert.Contains("weightedHumanoid=2", r); // the 5th influence (Spine@0.12) participates
         StringAssert.Contains("=> PASS", r);
         ReadLog(r);
     }
