@@ -135,4 +135,94 @@ public partial class CheckSeamLiveTests
         StringAssert.Contains("Hips", body); // bone name is in the RunLog body, not the one-line summary
     }
 }
+
+public partial class CheckSeamLiveTests
+{
+    private static Type FindType(string full) =>
+        AppDomain.CurrentDomain.GetAssemblies()
+            .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
+            .FirstOrDefault(t => t.FullName == full);
+
+    private static void SetField(object o, string name, object v)
+    {
+        var f = o.GetType().GetField(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+        if (f == null) throw new MissingFieldException(o.GetType().Name, name);
+        f.SetValue(o, v);
+    }
+
+    // Attach a real VRCFury component carrying an object-mode, recursive ArmatureLink linking merge→base.
+    // Object-mode (useObj) skips VRCFury's humanoid-Hips lookup (which would need a real Animator); recursive
+    // makes GetLinks walk the >=2 name-matched children. Returns false if VRCFury isn't installed.
+    private bool AttachVrcfArmatureLink(GameObject mergeArm, GameObject baseArm, GameObject propRoot, bool forceScale)
+    {
+        var vrcfType = FindType("VF.Model.VRCFury");
+        var alType = FindType("VF.Model.Feature.ArmatureLink");
+        if (vrcfType == null || alType == null) return false;
+
+        var al = System.Activator.CreateInstance(alType);
+        SetField(al, "propBone", propRoot);
+        SetField(al, "recursive", true);
+        SetField(al, "forceOneWorldScale", forceScale);
+
+        var linkTo = alType.GetField("linkTo").GetValue(al) as System.Collections.IList;
+        var link0 = linkTo[0];
+        SetField(link0, "useBone", false);
+        SetField(link0, "useObj", true);
+        SetField(link0, "obj", baseArm);
+
+        var comp = mergeArm.AddComponent(vrcfType);
+        SetField(comp, "content", al);
+        return true;
+    }
+
+    private bool BuildVrcfFixture(out GameObject baseGO, out GameObject mergeGO, out Transform mHips, bool forceScale)
+    {
+        var baseArm = Child(_avatar, "BaseArmature", Vector3.zero);
+        var bHips = Child(baseArm, "Hips", new Vector3(0f, 1.0f, 0f)).transform;
+        var bSpine = Child(baseArm, "Spine", new Vector3(0f, 1.2f, 0f)).transform;
+        baseGO = baseArm;
+
+        mergeGO = Child(_avatar, "Outfit", Vector3.zero);
+        var mergeArm = Child(mergeGO, "Armature", Vector3.zero);
+        mHips = Child(mergeArm, "Hips", new Vector3(0f, 1.0f, 0f)).transform;
+        var mSpine = Child(mergeArm, "Spine", new Vector3(0f, 1.2f, 0f)).transform;
+
+        AttachSkin(mergeGO, new[] { mHips, mSpine });
+        InjectHumanoid(bHips, bSpine);
+        return AttachVrcfArmatureLink(mergeArm, baseArm, mergeArm, forceScale);
+    }
+
+    [Test]
+    public void VrcfArmatureLink_coincident_pass()
+    {
+        if (!BuildVrcfFixture(out var baseGO, out var mergeGO, out _, forceScale: false))
+            Assert.Ignore("VRCFury not installed in this editor");
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.Contains("=> PASS", r);
+        StringAssert.Contains("weightedHumanoid=2", r);
+        ReadLog(r);
+    }
+
+    [Test]
+    public void VrcfArmatureLink_offset_notPass()
+    {
+        if (!BuildVrcfFixture(out var baseGO, out var mergeGO, out var mHips, forceScale: false))
+            Assert.Ignore("VRCFury not installed in this editor");
+        mHips.localPosition += new Vector3(0.01f, 0f, 0f); // 10mm ⇒ offender
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.Contains("=> NOT-PASS", r);
+        var body = ReadLog(r);
+        StringAssert.Contains("Hips", body); // bone names appear in the RunLog BODY, not the one-liner
+    }
+
+    [Test]
+    public void VrcfArmatureLink_forceOneWorldScale_refuses()
+    {
+        if (!BuildVrcfFixture(out var baseGO, out var mergeGO, out _, forceScale: true))
+            Assert.Ignore("VRCFury not installed in this editor");
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("scaled at bake", r);
+    }
+}
 #endif
