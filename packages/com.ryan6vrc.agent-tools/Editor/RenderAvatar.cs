@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -30,10 +31,31 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// the bar. Headlight lighting is truthful for geometry/silhouette/clipping/fit; matcap / rim /
     /// fresnel / GrabPass effects are not the point — judge shading in the operator's scene view.
     ///
-    /// <b>Freshness — settle, not focus.</b> The preview rebuilds asynchronously, advanced only by NDMF
-    /// ticks that fire after a synchronous call returns — not by OS focus. A same-call edit+grab captures
-    /// the pre-edit proxy (stale), so <b>edit and grab in separate calls</b>; the summary's <c>note=</c>
-    /// reports the settle-state when it can't be sure. Mechanism →
+    /// <b>Isolation is proxy-aware.</b> NDMF parks its preview proxies in the hidden
+    /// <c>___NDMF Preview___</c> scene; blanket-hiding "every other root" would hide them while the
+    /// preview hook still suppresses their originals — deleting every reactive-targeted renderer (the
+    /// body, typically) from the grab. So the preview scene is exempt from root isolation; instead each
+    /// proxy-renderer GameObject (the key NDMF's proxy map uses — SMR proxies are scene roots, MeshRenderer
+    /// proxies sit under shadow-bone trees) is attributed to its original via the public
+    /// <c>NDMFPreview.GetOriginalObjectForProxy</c> and self-only hidden unless that original is drawable
+    /// under the target (foreign avatars' proxies, stale or unattributable proxies, and proxies of
+    /// hide-listed / eye-hidden / inactive originals all hide).
+    /// The summary reports <c>proxies=kept:N,hidden:M</c> whenever proxies exist; if the attribution
+    /// API drifts, proxies are left visible and the note says so — a visible foreign-geometry leak the
+    /// reader can see, never a silent body-drop it can't.
+    ///
+    /// <b>Freshness — settle-gated.</b> The preview rebuilds asynchronously, advanced only by editor
+    /// ticks that fire after a synchronous call returns — so a same-call edit+grab would capture the
+    /// pre-edit proxy, and a background-throttled editor stops ticking and wedges the rebuild
+    /// indefinitely. Rather than return an untrustworthy sheet, an unsettled pipeline on a reactive
+    /// target FAILS the grab — after kicking the editor's main window to the OS foreground (a synthetic
+    /// Alt tap first releases the Windows foreground lock) so real frames fire between this call and the
+    /// re-grab. Protocol stays <b>edit and grab in separate calls</b>; on the settle FAIL, just re-grab.
+    /// In-call waiting is impossible by construction — no editor tick runs while the synchronous call
+    /// blocks the main thread. Two deliberate edges: previews globally DISABLED is exempt, not a FAIL
+    /// (originals render un-suppressed — the sheet is trustworthy); an editor whose foregrounding Windows
+    /// keeps refusing stays FAILed by design — the message names the operator action (focus the editor),
+    /// and the tool never trades that cliff for a sheet it can't vouch for. Mechanism →
     /// docs/superpowers/surveys/2026-07-07-ndmf-preview-refresh.md.
     ///
     /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
@@ -105,6 +127,20 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static readonly PropertyInfo PiIsInvalidated = SafeGetProperty(ProxyPipelineType, "IsInvalidated",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
+        // ----- NDMF preview-scene proxy attribution (reflection, same drift rules) ---------------
+        // Both hooks are PUBLIC NDMF API (NDMFPreviewSceneManager.IsPreviewScene, changelog-tracked
+        // NDMFPreview.GetOriginalObjectForProxy) — reflected only because this asmdef has references:[].
+        // A drift leaves the handles null → proxies stay visible + an in-band note (see class doc).
+        private const string ProxyDriftNote =
+            " | note=NDMF proxy attribution drifted — preview proxies left visible (possible foreign-geometry leak)";
+        private static readonly Type PreviewSceneManagerType =
+            ResolveNdmfType("nadena.dev.ndmf.preview.NDMFPreviewSceneManager");
+        private static readonly MethodInfo MiIsPreviewScene = SafeGetMethod(PreviewSceneManagerType, "IsPreviewScene",
+            BindingFlags.Static | BindingFlags.Public);
+        private static readonly Type NdmfPreviewType = ResolveNdmfType("nadena.dev.ndmf.preview.NDMFPreview");
+        private static readonly MethodInfo MiGetOriginalForProxy = SafeGetMethod(NdmfPreviewType, "GetOriginalObjectForProxy",
+            BindingFlags.Static | BindingFlags.Public);
+
         /// <summary>
         /// Render the GameObject subtree at <paramref name="target"/> in isolation from
         /// <paramref name="angles"/>, silhouette-frame each, and write a single contact-sheet PNG to
@@ -150,6 +186,21 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (Array.IndexOf(Vocabulary, a) < 0)
                     return Fail(label, "unknown angle '" + angles[i] + "' — valid: " + string.Join(",", Vocabulary));
                 resolvedAngles[i] = a;
+            }
+
+            // ----- Settle gate (reactive targets only) ----------------------------------------
+            // An unsettled NDMF preview means the frame about to be grabbed shows a stale or
+            // bodiless avatar — never return that sheet. FAIL instead, after kicking the editor
+            // to the OS foreground so the rebuild's ticks fire between this call and the re-grab
+            // (a background-throttled editor wedges the rebuild indefinitely; waiting in-call is
+            // impossible — no editor tick runs while this synchronous call blocks the main thread).
+            if (ProbeSettle(root, out string pipeline) == Settle.Unsettled)
+            {
+                bool kicked = TryFocusKick(out string kick);
+                return Fail(label, "preview not settled (NDMF rebuild in flight; " + pipeline + ") — "
+                    + (kicked
+                        ? "focus kick sent (" + kick + "), the rebuild can advance now: re-grab in a separate call"
+                        : "focus kick failed (" + kick + "): focus the Unity Editor window, then re-grab"));
             }
 
             // ----- Resolve hide list (descendants of target) + default hides -----------------
@@ -224,6 +275,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                         cascadeHides[t] = svm.IsHidden(t, false);
                         svm.Hide(t, true);
                     }
+
+                // NDMF preview-scene proxies: exempt from the blanket root-hide above (RecordRootVisibility
+                // skips the preview scene), attributed per-proxy here — the target's own proxies must stay
+                // visible or the preview hook deletes every reactive-targeted renderer from the grab.
+                string proxyNote = IsolateNdmfProxies(root, hideTargets, cascadeHides, svm,
+                    out int proxiesKept, out int proxiesHidden);
 
                 // ----- Collect drawable renderers + count hidden -----------------------------
                 var all = root.GetComponentsInChildren<Renderer>(true);
@@ -345,20 +402,21 @@ namespace Ryan6Vrc.AgentTools.Editor
                     catch { /* locked or already gone — leave it for a later run */ }
                 }
 
-                // Settle note: NDMF reactive preview rebuilds asynchronously, advanced only by
-                // EditorApplication.update ticks that fire AFTER this synchronous call returns — so a
-                // same-call edit+grab captures the pre-edit proxy. SettleNote polls the settled predicate
-                // (read-only) and REPORTS staleness; it does not settle (a sync call cannot force-complete a
-                // rebuild — survey). Mechanism → the class doc-comment's survey pointer.
+                // Settle note (residual): the pre-grab gate FAILED any grab that STARTED unsettled, so
+                // this firing means the pipeline invalidated DURING the call (this grab's own SVM churn
+                // can). The grabbed frames still rendered the pre-call settled proxies — no tick ran
+                // in-call to swap them — so the sheet stands; the note flags it for a cautious re-grab.
                 string note = SettleNote(root);
 
                 // The note sits BEFORE png= so the png= trailer is always terminal — a consumer reading
                 // png= to end-of-line gets a clean path, never one with the note appended.
+                string proxyInfo = (proxiesKept + proxiesHidden) > 0
+                    ? " proxies=kept:" + proxiesKept + ",hidden:" + proxiesHidden : "";
                 string summary = string.Format(CultureInfo.InvariantCulture,
-                    "[RenderAvatar] {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7} => OK{8} | png={9}",
+                    "[RenderAvatar] {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7}{8} => OK{9}{10} | png={11}",
                     label, string.Join(",", resolvedAngles), n, tileRes, margin.ToString("0.##", CultureInfo.InvariantCulture),
-                    showGizmos ? "on" : "off", hiddenCount, excludedCount,
-                    note, path);
+                    showGizmos ? "on" : "off", hiddenCount, excludedCount, proxyInfo,
+                    proxyNote, note, path);
                 Debug.Log(summary);
                 return summary;
             }
@@ -565,9 +623,12 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ===== Visibility recording ==============================================================
 
-        // Self hidden-state of every root in every loaded scene. Isolation hides non-target roots with
-        // includeDescendants; restore cascades each root back to this self-state (a per-object partial
-        // hide under a non-target root is not preserved — rare, and documented).
+        // Self hidden-state of every root in every loaded scene EXCEPT the NDMF preview scene, whose
+        // roots are the preview proxies — never blanket-hidden (the preview hook suppresses their
+        // originals, so hiding a proxy deletes its renderer from the grab outright). Proxies are handled
+        // per-object by IsolateNdmfProxies. Isolation hides non-target roots with includeDescendants;
+        // restore cascades each root back to this self-state (a per-object partial hide under a
+        // non-target root is not preserved — rare, and documented).
         private static Dictionary<GameObject, bool> RecordRootVisibility()
         {
             var svm = SceneVisibilityManager.instance;
@@ -575,10 +636,75 @@ namespace Ryan6Vrc.AgentTools.Editor
             for (int i = 0; i < EditorSceneManager.sceneCount; i++)
             {
                 var s = EditorSceneManager.GetSceneAt(i);
-                if (!s.isLoaded) continue;
+                if (!s.isLoaded || IsNdmfPreviewScene(s)) continue;
                 foreach (var go in s.GetRootGameObjects()) map[go] = svm.IsHidden(go, false);
             }
             return map;
+        }
+
+        // Public NDMF API when resolvable; name fallback otherwise (the constant predates the API and
+        // NDMF itself falls back to it on load). Never throws.
+        private static bool IsNdmfPreviewScene(Scene s)
+        {
+            if (MiIsPreviewScene != null)
+            {
+                try { return (bool)MiIsPreviewScene.Invoke(null, new object[] { s }); }
+                catch { /* fall through to the name check */ }
+            }
+            return s.name == "___NDMF Preview___";
+        }
+
+        // Hide every preview-scene proxy renderer whose original is NOT drawable under the target; leave
+        // the target's own proxies visible (recording prior state in cascadeHides for the shared restore).
+        // Attribution is per proxy-RENDERER GameObject — NDMF's proxy map is keyed on the renderer's GO,
+        // and only SkinnedMeshRenderer proxies are preview-scene roots; a MeshRenderer proxy lives UNDER a
+        // shadow-bone tree, so attributing scene roots would null-attribute the bone root and hide the
+        // target's own non-skinned props with it. Hides are self-only for the same reason (bones carry no
+        // renderers; nothing else must cascade). Attribution drift (API handle unresolved, lookup throw, or
+        // a non-GameObject return) hides NOTHING and returns the drift note: a visible foreign-proxy leak
+        // beats a silent body-drop.
+        private static string IsolateNdmfProxies(
+            GameObject root, List<GameObject> hideTargets, Dictionary<GameObject, bool> cascadeHides,
+            SceneVisibilityManager svm, out int kept, out int hidden)
+        {
+            kept = 0; hidden = 0;
+            var proxies = new List<GameObject>();
+            var seen = new HashSet<GameObject>();
+            for (int i = 0; i < EditorSceneManager.sceneCount; i++)
+            {
+                var s = EditorSceneManager.GetSceneAt(i);
+                if (!s.isLoaded || !IsNdmfPreviewScene(s)) continue;
+                foreach (var sceneRoot in s.GetRootGameObjects())
+                    foreach (var r in sceneRoot.GetComponentsInChildren<Renderer>(true))
+                        if (seen.Add(r.gameObject)) proxies.Add(r.gameObject);
+            }
+            if (proxies.Count == 0) return "";
+            if (MiGetOriginalForProxy == null) return ProxyDriftNote;
+
+            foreach (var proxy in proxies)
+            {
+                GameObject original;
+                try
+                {
+                    object result = MiGetOriginalForProxy.Invoke(null, new object[] { proxy });
+                    if (result != null && !(result is GameObject)) return ProxyDriftNote; // return-type drift
+                    original = result as GameObject;
+                }
+                catch { return ProxyDriftNote; } // partial hides already applied stay recorded in cascadeHides → restored
+                bool drawable = original != null
+                    && (original.transform == root.transform || original.transform.IsChildOf(root.transform))
+                    && original.activeInHierarchy
+                    && !IsUnderAny(original.transform, hideTargets)
+                    && !svm.IsHidden(original, false);
+                if (drawable) { kept++; continue; }
+                hidden++;
+                if (!cascadeHides.ContainsKey(proxy))
+                {
+                    cascadeHides[proxy] = svm.IsHidden(proxy, false);
+                    svm.Hide(proxy, false); // self-only: never cascade over a shadow-bone tree
+                }
+            }
+            return "";
         }
 
         private static bool IsUnderAny(Transform t, List<GameObject> ancestors)
@@ -679,39 +805,112 @@ namespace Ryan6Vrc.AgentTools.Editor
             catch { return null; }
         }
 
-        // Poll NDMF's preview settle-state at capture time (read-only). "" when settled OR when there is no
-        // settle risk (play mode / non-reactive target); UnsettledNote when a rebuild is in flight (predicate
-        // false, or any runtime hop legitimately null — no pipeline yet / between builds / absent fit);
-        // DriftNote when reflection itself failed (a handle didn't resolve, or a read threw). The whole body
-        // is wrapped in one try/catch and it ALWAYS returns a string, so an exception can never reach Capture's
-        // outer catch and drop the already-written png= trailer. Called after cap.Grab (~314): no update tick
-        // fires inside the synchronous call, so the polled state is exactly the state that produced the frame.
-        private static string SettleNote(GameObject root)
+        private static MethodInfo SafeGetMethod(Type type, string name, BindingFlags flags)
         {
+            if (type == null) return null;
+            try { return type.GetMethod(name, flags); }
+            catch { return null; }
+        }
+
+        private enum Settle { Exempt, Settled, Unsettled, Drift }
+
+        // The one settle probe (read-only), shared by the pre-grab gate and the residual note.
+        // Exempt when there is no settle risk (play mode / non-reactive target); Unsettled when a rebuild
+        // is in flight (predicate false, or any runtime hop legitimately null — no pipeline yet / between
+        // builds / absent fit); Drift when reflection itself failed (a handle didn't resolve, or a read
+        // threw). `pipeline` names the exact hop for the gate's fail-loud message. The whole body is one
+        // try/catch and it ALWAYS returns, so an exception can never escape to Capture's outer catch.
+        private static Settle ProbeSettle(GameObject root, out string pipeline)
+        {
+            pipeline = "";
             try
             {
-                if (Application.isPlaying) return "";     // play renders the driven runtime — always fresh
-                if (!HasReactiveMA(root)) return "";       // no reactive fit → nothing to settle, no reflection
+                if (Application.isPlaying) return Settle.Exempt;   // play renders the driven runtime — always fresh
+                if (!HasReactiveMA(root)) return Settle.Exempt;    // no reactive fit → nothing to settle, no reflection
                 // Drift: a reflection handle failed to resolve at class load.
                 if (PiCurrent == null || FiProxySession == null || FiActive == null
                     || FiNext == null || PiIsReady == null || PiIsInvalidated == null)
-                    return DriftNote;
+                { pipeline = "NDMF internals drifted"; return Settle.Drift; }
                 // Global poll (NDMF has one preview session; single-LLM MCP → only this agent's edit unsettles it).
+                // Current is null EXACTLY when previews are globally disabled (NDMFPreview.cs: Current =
+                // !EnablePreviewsUI || _disablePreviewDepth != 0 ? null : _globalPreviewSession) — in that
+                // state originals render un-suppressed, so the sheet is trustworthy: Exempt, never a FAIL.
                 var current = PiCurrent.GetValue(null, null);
-                if (current == null) return UnsettledNote;  // no pipeline yet — unsettled, not drift
+                if (current == null) { pipeline = "previews disabled (sheet renders originals)"; return Settle.Exempt; }
                 var prox = FiProxySession.GetValue(current);
-                if (prox == null) return UnsettledNote;
+                if (prox == null) { pipeline = "_proxySession=null"; return Settle.Unsettled; }
                 var active = FiActive.GetValue(prox);
-                if (active == null) return UnsettledNote;    // between builds / absent fit
+                if (active == null) { pipeline = "_active=null (no pipeline built)"; return Settle.Unsettled; }
                 var next = FiNext.GetValue(prox);            // non-null == a rebuild is queued to swap in
                 bool isReady = (bool)PiIsReady.GetValue(active, null);
                 bool isInvalidated = (bool)PiIsInvalidated.GetValue(active, null);
-                return (isReady && !isInvalidated && next == null) ? "" : UnsettledNote;
+                pipeline = "_active.IsReady=" + isReady + " _active.IsInvalidated=" + isInvalidated
+                    + " _next=" + (next == null ? "null" : "queued");
+                return (isReady && !isInvalidated && next == null) ? Settle.Settled : Settle.Unsettled;
             }
-            catch
+            catch (Exception e)
             {
-                return DriftNote;   // unexpected read exception / cast mismatch — drift, never throw
+                pipeline = "probe threw: " + e.Message;      // unexpected read exception / cast mismatch
+                return Settle.Drift;
             }
+        }
+
+        // Residual settle-state note for the summary (see the call site for when it can still fire).
+        // Called after cap.Grab: no update tick fires inside the synchronous call, so the polled state
+        // is exactly the state that produced the frames.
+        private static string SettleNote(GameObject root)
+        {
+            switch (ProbeSettle(root, out _))
+            {
+                case Settle.Unsettled: return UnsettledNote;
+                case Settle.Drift: return DriftNote;
+                default: return "";
+            }
+        }
+
+        // ----- Editor focus kick (Windows) --------------------------------------------------------
+        // A background-throttled editor stops painting frames, which stops the ticks that advance the
+        // NDMF rebuild — the preview wedges until the editor is foregrounded. The kick restores and
+        // foregrounds the editor's main window so frames fire again between MCP calls. Windows refuses
+        // SetForegroundWindow from a background process unless it recently sent input, so a synthetic
+        // Alt tap (down+up) goes first to release the foreground lock — the accepted user32 workaround.
+        // Only ever called on the gate's fail path, so the stray Alt lands rarely and on purpose.
+        private const int SW_RESTORE = 9;
+        private const byte VK_MENU = 0x12;
+        private const uint KEYEVENTF_KEYUP = 0x2;
+        [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
+        [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll")] private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        private static bool TryFocusKick(out string detail)
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+            { detail = "non-Windows editor, no kick path"; return false; }
+            try
+            {
+                // isFocused, not a GetForegroundWindow pid check: the Unity process owns hidden helper
+                // windows that can hold OS foreground while the editor itself is unfocused and throttled
+                // (observed live) — the pid check reads "foreground" exactly when the kick is needed.
+                if (EditorApplication.isFocused) { detail = "editor already focused"; return true; }
+                using (var proc = System.Diagnostics.Process.GetCurrentProcess()) // qualified: `using System.Diagnostics` would make Debug ambiguous
+                {
+                    var hWnd = proc.MainWindowHandle;
+                    if (hWnd == IntPtr.Zero) { detail = "editor main window handle unresolved"; return false; }
+                    if (IsIconic(hWnd)) ShowWindow(hWnd, SW_RESTORE);
+                    if (SetForegroundWindow(hWnd)) { detail = "editor foregrounded"; return true; }
+                    // Bare call refused (background process without recent input). The synthetic Alt tap
+                    // marks this process as input-producing, which unlocks SetForegroundWindow. Cost owned:
+                    // the tap lands on whatever app IS foreground and can toggle its menu-accelerator mode —
+                    // taken only on this already-refused path, key-up guaranteed even if the down throws.
+                    try { keybd_event(VK_MENU, 0, 0, UIntPtr.Zero); }
+                    finally { keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); }
+                    bool ok = SetForegroundWindow(hWnd);
+                    detail = ok ? "editor foregrounded (Alt-tap fallback)" : "SetForegroundWindow refused";
+                    return ok;
+                }
+            }
+            catch (Exception e) { detail = "kick threw: " + e.Message; return false; }
         }
 
         // The MA reactive-object family (+ Blendshape Sync) — components whose rendered result only
