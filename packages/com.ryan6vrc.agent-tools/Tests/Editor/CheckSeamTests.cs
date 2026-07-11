@@ -268,6 +268,9 @@ public class CheckSeamTests
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("seams disagree", r);
+        // Two same-base-bone merges are disambiguated by hierarchy path, not bare name.
+        StringAssert.Contains(Path(m1), r);
+        StringAssert.Contains(Path(m2), r);
     }
 
     [Test]
@@ -295,6 +298,36 @@ public class CheckSeamTests
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("GetLinks threw", r);
+    }
+
+    // ── Reflection failure classification: genuine API drift vs a seam that can't resolve onto THIS base ──
+    // DefaultResolveSeam's unwrap/classify branch can't run here (no MA/VRCFury to throw); these prove the
+    // door routes the two carrier fields to the right severity. Drift = tool broken vs installed package
+    // (misuse → error); Unresolvable = valid asset the gate can't certify against this base (abstain → warning).
+
+    [Test]
+    public void ReflectDrift_refusesAtError()
+    {
+        LogAssert.Expect(LogType.Error, RefuseRe); // genuine API drift ⇒ misuse ⇒ error
+        SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
+        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution { ReflectError = "MissingMethodException: X" };
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("MissingMethodException: X", r);
+    }
+
+    [Test]
+    public void UnresolvableSeam_refusesAtWarning()
+    {
+        LogAssert.Expect(LogType.Warning, RefuseRe); // seam present but can't resolve onto this base ⇒ abstain ⇒ warning
+        SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
+        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution
+        {
+            UnresolvableReason = "seam present but does not resolve onto this base: InvalidOperationException: boom"
+        };
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("does not resolve onto this base", r);
     }
 
     // ── Task 7: VRCFury scale-bake REFUSE + severity split ──────────────────────────────────────────────

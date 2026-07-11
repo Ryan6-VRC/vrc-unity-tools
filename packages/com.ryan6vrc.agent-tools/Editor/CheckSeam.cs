@@ -32,7 +32,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             public List<BonePair> Pairs = new List<BonePair>(); // union of MA + VRCFury, base↔merge
             public string ScaleBakeReason;                      // non-null ⇒ VRCFury applies scale at bake ⇒ REFUSE
-            public string ReflectError;                         // non-null ⇒ a reflective hop failed ⇒ REFUSE
+            public string ReflectError;                         // non-null ⇒ genuine API drift (tool broken vs pkg) ⇒ REFUSE (error)
+            public string UnresolvableReason;                   // non-null ⇒ seam exists but won't resolve onto THIS base ⇒ REFUSE (abstain)
         }
 
         internal class HumanoidMap
@@ -60,6 +61,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             var seam = ResolveSeam(baseGO, mergeGO);
             if (seam.ReflectError != null) return RefuseMisuse("seam resolution failed: " + seam.ReflectError);
+            if (seam.UnresolvableReason != null) return RefuseAbstain(seam.UnresolvableReason);
             if (seam.ScaleBakeReason != null) return RefuseAbstain(seam.ScaleBakeReason);
             if (seam.Pairs.Count == 0) return RefuseAbstain("no scorable seam component on '" + mergeableRoot + "'");
             foreach (var p in seam.Pairs)
@@ -73,7 +75,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var p in seam.Pairs)
             {
                 if (byBase.TryGetValue(p.Base, out var other) && other != p.Merge)
-                    return RefuseAbstain("seams disagree on base bone '" + p.Base.name + "' (" + other.name + " vs " + p.Merge.name + ")");
+                    return RefuseAbstain("seams disagree on base bone '" + p.Base.name + "' (" +
+                        PathOf(other.gameObject) + " vs " + PathOf(p.Merge.gameObject) + ")");
                 byBase[p.Base] = p.Merge;
             }
 
@@ -243,7 +246,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             catch (Exception e)
             {
-                res.ReflectError = e.GetType().Name + ": " + e.Message;
+                // Reflection surfaces the resolver's real throw wrapped in TargetInvocationException — unwrap it.
+                var real = (e as System.Reflection.TargetInvocationException)?.InnerException ?? e;
+                if (real is MissingMethodException || real is MissingFieldException ||
+                    real is MissingMemberException || real is TypeLoadException)
+                    // Genuine API drift: the tool is broken against the installed package version ⇒ misuse (error).
+                    res.ReflectError = real.GetType().Name + ": " + real.Message;
+                else
+                    // A seam component exists but its resolver threw resolving against THIS base ⇒ valid-abstain (warning).
+                    res.UnresolvableReason = "seam present but does not resolve onto this base (likely an incompatible or independent rig): " +
+                        real.GetType().Name + ": " + real.Message;
             }
             return res;
         }
