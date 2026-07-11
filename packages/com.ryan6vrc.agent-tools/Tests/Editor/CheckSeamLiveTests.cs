@@ -178,7 +178,8 @@ public partial class CheckSeamLiveTests
         SetField(al, "recursive", true);
         SetField(al, "forceOneWorldScale", forceScale);
 
-        var linkTo = alType.GetField("linkTo").GetValue(al) as System.Collections.IList;
+        var linkTo = alType.GetField("linkTo")?.GetValue(al) as System.Collections.IList;
+        if (linkTo == null || linkTo.Count == 0) return false; // linkTo reshaped/emptied → drift → BuildVrcfOrGate's Assert.Fail("collector drift"), not a raw NRE/IndexOutOfRange
         var link0 = linkTo[0];
         SetField(link0, "useBone", false);
         SetField(link0, "useObj", true);
