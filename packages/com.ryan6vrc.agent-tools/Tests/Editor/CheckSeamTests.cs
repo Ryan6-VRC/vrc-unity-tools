@@ -224,6 +224,37 @@ public class CheckSeamTests
         StringAssert.Contains("root-moved", log, "a uniform shift from a moved root is a FAIL: " + log);
     }
 
+    // A uniform offset from an intermediate offset CONTAINER (mergeable root at identity-local but world-
+    // displaced) is a wrong drop → FAIL. Guards the world-space (not parent-local) root-alignment check.
+    [Test]
+    public void UniformOffset_intermediateContainer_isFail()
+    {
+        var avatar = NewBaseAvatar(out var baseBones);
+        var container = NewChild(avatar, "Container", new Vector3(0, 0.03f, 0)); // offset container
+        NewMergeable(container, AllWeighted, out var mergeBones, out var seam);  // Outfit under Container, local identity
+        InjectMergeArmature(seam, Pairs(baseBones, mergeBones));
+        var r = CheckSeam.Inspect("Base", "Outfit");
+        var log = ReadLog(r);
+        StringAssert.Contains("=> FAIL", r, "an intermediate offset container is a wrong drop (world-space root check): " + r);
+        StringAssert.Contains("root-moved", log, log);
+    }
+
+    // The seam's merge target resolving to ANOTHER avatar's rig (two-avatar scene / wrong base handle) must
+    // refuse, not silently score B's bones under a verdict labelled "onto Base".
+    [Test]
+    public void SeamTargetsDifferentBase_refuses()
+    {
+        var avatar = NewBaseAvatar(out _);
+        NewMergeable(avatar, AllWeighted, out var mergeBones, out var seam);
+        var other = new GameObject("OtherBase");
+        other.AddComponent<VRCAvatarDescriptor>();
+        var otherBones = BuildChain(NewChild(other, "Armature", Vector3.zero));
+        InjectMergeArmature(seam, Pairs(otherBones, mergeBones)); // base side belongs to OtherBase
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] FAIL:"));
+        var r = CheckSeam.Inspect("Base", "Outfit");
+        StringAssert.Contains("OUTSIDE the passed base", r, r);
+    }
+
     // ── Inspection-class: no scene dirtying ────────────────────────────────────────────────────────────
 
     [Test]

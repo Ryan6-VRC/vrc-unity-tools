@@ -133,8 +133,22 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (pairs == null || pairs.Count == 0)
                 return Refuse("MergeArmature on '" + PathOf(merge != null ? merge.gameObject : mergeGO) + "' maps no bones — its merge target did not resolve to the base rig (wrong base?); route to refit");
 
+            // The mapping's base side must actually live under the passed base — else the seam targets a
+            // DIFFERENT avatar (a two-avatar scene, or a wrong base handle) and a verdict "onto <base>" would
+            // be confidently mislabeled, the one thing this gate exists to prevent. Verify both sides.
+            foreach (var (b, m) in pairs)
+            {
+                if (b != null && !b.IsChildOf(baseGO.transform))
+                    return Refuse("the seam's merge target resolves OUTSIDE the passed base '" + baseRoot + "' (bone '"
+                        + b.name + "' is not under it) — wrong base handle, or the seam targets another avatar; pass the base the seam merges onto");
+                if (m != null && !m.IsChildOf(mergeGO.transform))
+                    return Refuse("a mapped mergeable bone ('" + m.name + "') is not under '" + mergeableRoot
+                        + "' — the seam is wired across objects; pass the mergeable that carries the seam");
+            }
+
             // maxW per mergeable bone Transform, aggregated across all the mergeable's SMRs.
-            var maxW = MaxWeightPerBone(mergeGO);
+            var maxW = MaxWeightPerBone(mergeGO, out string weightErr);
+            if (weightErr != null) return Refuse(weightErr);
 
             // Score.
             var scored = new List<Scored>();
@@ -165,7 +179,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             string result;
             string shape;      // for the summary/offender diagnostic
-            bool rootAligned = RootAligned(mergeGO.transform, eps);
+            bool rootAligned = RootAligned(mergeGO.transform, baseGO.transform, eps);
 
             if (offenders.Count == 0)
             {
@@ -173,12 +187,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             else
             {
-                // Uniform vs differential: residual spread of the offending deltas about their mean.
+                // Uniform vs differential, measured in WEIGHTED (effDisp) space — matching how offenders
+                // crossed eps — and over the OFFENDING REGION, not the whole rig: a lone root-aligned
+                // offender (or coincident Hips/Spine with an offset head cluster) is a uniform region →
+                // REVIEW by design, not FAIL. (Whole-rig residual would wrongly flip the head-swap case.)
                 Vector3 mean = Vector3.zero;
-                foreach (var o in offenders) mean += o.Delta;
+                foreach (var o in offenders) mean += o.Delta * o.MaxW;
                 mean /= offenders.Count;
                 float residualMax = 0f;
-                foreach (var o in offenders) residualMax = Mathf.Max(residualMax, (o.Delta - mean).magnitude);
+                foreach (var o in offenders) residualMax = Mathf.Max(residualMax, (o.Delta * o.MaxW - mean).magnitude);
                 bool uniform = residualMax <= eps;
 
                 if (!uniform) { result = "FAIL"; shape = "differential"; }
@@ -206,8 +223,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         // objects GetBonesMapping returns). NOTE: Unity fills unskinned verts with boneIndex0=0/weight0=1,
         // which can inflate an SMR's bones[0] maxW — a conservative over-state (fails safe: it can only
         // raise a bone's effDisp, never hide one), and VRChat meshes are fully skinned in practice.
-        private static Dictionary<Transform, float> MaxWeightPerBone(GameObject mergeGO)
+        private static Dictionary<Transform, float> MaxWeightPerBone(GameObject mergeGO, out string error)
         {
+            error = null;
             var maxW = new Dictionary<Transform, float>();
             foreach (var smr in mergeGO.GetComponentsInChildren<SkinnedMeshRenderer>(true))
             {
@@ -215,7 +233,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (mesh == null) continue;
                 var bones = smr.bones;
                 if (bones == null || bones.Length == 0) continue;
-                var bw = mesh.boneWeights;
+                BoneWeight[] bw;
+                try { bw = mesh.boneWeights; } // throws if the mesh is Read/Write-disabled — honour never-throw
+                catch (Exception e)
+                {
+                    error = "could not read skin weights for '" + PathOf(smr.gameObject) + "' (" + e.GetType().Name
+                          + ") — mesh Read/Write may be disabled; cannot score fit";
+                    return null;
+                }
                 foreach (var w in bw)
                 {
                     Accumulate(maxW, bones, w.boneIndex0, w.weight0);
@@ -236,13 +261,16 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // The drop convention (compose-mergeable step 2) places the mergeable at identity LOCAL transform
-        // under the avatar. A root shifted off that is a wrong drop; combined with a uniform bone offset it
-        // escalates REVIEW→FAIL. localPosition is parent-relative, so the avatar's own world offset never
-        // trips this. Scale is deliberately NOT checked here — a mis-scale surfaces as the bone deltas.
-        private static bool RootAligned(Transform mergeRoot, float eps)
+        // under the avatar root, i.e. its world pose COINCIDES with the avatar root's. Measured in WORLD
+        // space against the avatar root (not parent-local): parent-local would read "aligned" for a
+        // mergeable tucked under an intermediate offset/rotated container, and would mismatch the
+        // world-space eps under a non-unit avatar scale. A root shifted off its drop is a wrong drop;
+        // combined with a uniform bone offset it escalates REVIEW→FAIL. Scale is not checked here — a
+        // mis-scale surfaces as the bone deltas.
+        private static bool RootAligned(Transform mergeRoot, Transform avatarRoot, float eps)
         {
-            return mergeRoot.localPosition.magnitude <= eps
-                && Quaternion.Angle(mergeRoot.localRotation, Quaternion.identity) <= RootRotToleranceDeg;
+            return (mergeRoot.position - avatarRoot.position).magnitude <= eps
+                && Quaternion.Angle(mergeRoot.rotation, avatarRoot.rotation) <= RootRotToleranceDeg;
         }
 
         // ── MA reflection (guarded) ─────────────────────────────────────────────────────────────────────
