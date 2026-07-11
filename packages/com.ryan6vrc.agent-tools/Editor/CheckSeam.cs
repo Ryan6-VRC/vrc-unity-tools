@@ -77,7 +77,50 @@ namespace Ryan6Vrc.AgentTools.Editor
                 byBase[p.Base] = p.Merge;
             }
 
-            return Refuse("not yet implemented"); // replaced in later tasks
+            // Count weighted humanoid bones: a pair qualifies iff its BASE is humanoid and a mergeable SMR skins
+            // its MERGE side at ≥ WEIGHT. Join on the merge side — SMR.bones[] reference the merge transforms.
+            var maxW = MaxWeights(mergeGO);
+            const float WEIGHT = 0.1f;
+            var weightedHum = new List<BonePair>();
+            foreach (var p in seam.Pairs)
+                if (human.Bones.Contains(p.Base) && maxW.TryGetValue(p.Merge, out var wt) && wt >= WEIGHT)
+                    weightedHum.Add(p);
+
+            if (weightedHum.Count <= 1) // offset-independent bone-proxy (hair/earring/hat/tail) or bare prop
+            {
+                string bone = weightedHum.Count == 1 ? weightedHum[0].Base.name : "(none)";
+                float d = weightedHum.Count == 1
+                    ? Vector3.Distance(weightedHum[0].Base.position, weightedHum[0].Merge.position) * 1000f
+                    : 0f;
+                return Refuse("single humanoid attachment: " + bone + ", delta=" + d.ToString("F1", CultureInfo.InvariantCulture) +
+                    "mm — offset-tolerant accessory/proxy, verify the baked result");
+            }
+
+            return Refuse("not yet implemented"); // ≥2 weighted humanoid ⇒ coincidence gate (Task 5)
+        }
+
+        // Merge Transform → max vertex weight across every mergeable SMR (top-4 influences per vertex). Reads
+        // sharedMesh (not .mesh), null-checks bones[] entries. Keyed on the merge-side transforms the pairs carry.
+        private static Dictionary<Transform, float> MaxWeights(GameObject mergeGO)
+        {
+            var w = new Dictionary<Transform, float>();
+            foreach (var smr in mergeGO.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                var mesh = smr.sharedMesh; if (mesh == null) continue;
+                var bones = smr.bones; var bw = mesh.boneWeights;
+                void Acc(int idx, float wt)
+                {
+                    if (idx < 0 || idx >= bones.Length || bones[idx] == null) return;
+                    var t = bones[idx];
+                    if (!w.TryGetValue(t, out var cur) || wt > cur) w[t] = wt;
+                }
+                foreach (var v in bw)
+                {
+                    Acc(v.boneIndex0, v.weight0); Acc(v.boneIndex1, v.weight1);
+                    Acc(v.boneIndex2, v.weight2); Acc(v.boneIndex3, v.weight3);
+                }
+            }
+            return w;
         }
 
         private static bool IsUnder(Transform t, GameObject root)

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -117,6 +118,67 @@ public class CheckSeamTests
         return null;
     }
 
+    // Create one merge bone child per (name,weight) under mergeGO, plus a SkinnedMeshRenderer whose sharedMesh
+    // has one vertex per bone binding that bone at influence-0 with the given weight, and whose bones[] point at
+    // exactly those transforms. Returns name→merge Transform so the caller can map base↔merge on the SAME
+    // instances (the merge-side join is on the Transform reference, not the name).
+    private Dictionary<string, Transform> NewSkinnedMergeable(GameObject mergeGO, (string name, float weight)[] weights)
+    {
+        int n = weights.Length;
+        var bones = new Transform[n];
+        var byName = new Dictionary<string, Transform>();
+        var verts = new Vector3[n];
+        var bw = new BoneWeight[n];
+        var bindposes = new Matrix4x4[n];
+        for (int i = 0; i < n; i++)
+        {
+            var b = NewChild(mergeGO, weights[i].name).transform;
+            bones[i] = b;
+            byName[weights[i].name] = b;
+            verts[i] = Vector3.zero;
+            bw[i] = new BoneWeight { boneIndex0 = i, weight0 = weights[i].weight };
+            bindposes[i] = Matrix4x4.identity;
+        }
+        var mesh = new Mesh { vertices = verts };
+        mesh.boneWeights = bw;
+        mesh.bindposes = bindposes;
+        var smr = NewChild(mergeGO, "Skin").AddComponent<SkinnedMeshRenderer>();
+        smr.sharedMesh = mesh;
+        smr.bones = bones;
+        return byName;
+    }
+
+    // Build a base+merge fixture wired for the count branch: for each humanoid name create a base bone (→ injected
+    // HumanoidMap) and a merge bone (skinned per `weights` if listed, else a plain child), map them base↔merge via
+    // an injected SeamResolution. A weight ≥0.1 makes that pair weighted-humanoid. Names in `weights` must be a
+    // subset of `humanoid`.
+    private void BuildSeam(out GameObject baseGO, out GameObject mergeGO, string[] humanoid, (string, float)[] weights)
+    {
+        baseGO = NewChild(_root, "Base");
+        mergeGO = NewChild(_root, "Merge");
+
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        var baseByName = new Dictionary<string, Transform>();
+        foreach (var name in humanoid)
+        {
+            var bt = NewChild(baseGO, name).transform;
+            baseByName[name] = bt;
+            map.Bones.Add(bt);
+        }
+        CheckSeam.ResolveHumanoid = _ => map;
+
+        var mergeByName = NewSkinnedMergeable(mergeGO, weights);
+
+        var seam = new CheckSeam.SeamResolution();
+        foreach (var name in humanoid)
+        {
+            if (!mergeByName.TryGetValue(name, out var mt))
+                mt = NewChild(mergeGO, name).transform; // mapped humanoid bone with no skin weight
+            seam.Pairs.Add(new CheckSeam.BonePair { Base = baseByName[name], Merge = mt });
+        }
+        CheckSeam.ResolveSeam = (_, __) => seam;
+    }
+
     private static System.Text.RegularExpressions.Regex RefuseRe =>
         new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] REFUSE:");
 
@@ -206,5 +268,40 @@ public class CheckSeamTests
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("GetLinks threw", r);
+    }
+
+    // ── Task 4: weighted-humanoid count + ≤1 proxy REFUSE ──────────────────────────────────────────────
+    // Join on the merge side: NewSkinnedMergeable's SMR.bones[] reference the SAME Transforms the injected
+    // SeamResolution's .Merge carries, so a ≥0.1 skin weight on a mapped humanoid pair makes it count.
+
+    [Test]
+    public void OneWeightedHumanoid_refusesAsProxy()
+    {
+        LogAssert.Expect(LogType.Error, RefuseRe);
+        // Head-only hair: 1 humanoid weighted bone ⇒ offset-tolerant proxy ⇒ REFUSE.
+        BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Head" }, weights: new[] { ("Head", 1.0f) });
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("single humanoid attachment", r);
+        StringAssert.Contains("Head", r);
+    }
+
+    [Test]
+    public void WeightThreshold_flipsTheCount()
+    {
+        LogAssert.Expect(LogType.Error, RefuseRe); // 0.09 case ⇒ 1 weighted ⇒ proxy REFUSE
+        LogAssert.Expect(LogType.Error, RefuseRe); // 0.11 case ⇒ 2 weighted ⇒ gate tail ("not yet implemented")
+        // 2 mapped humanoid; Spine skinned 0.09 (below threshold, dropped) ⇒ 1 weighted ⇒ REFUSE.
+        BuildSeam(out var b1, out var m1, humanoid: new[] { "Chest", "Spine" },
+            weights: new[] { ("Chest", 1.0f), ("Spine", 0.09f) });
+        var r1 = CheckSeam.Check(Path(b1), Path(m1));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r1);
+        StringAssert.Contains("single humanoid attachment", r1);
+        // Bump Spine to 0.11 ⇒ kept ⇒ 2 weighted ⇒ reaches the gate (not a proxy refuse). Gate verdict is Task 5.
+        BuildSeam(out var b2, out var m2, humanoid: new[] { "Chest", "Spine" },
+            weights: new[] { ("Chest", 1.0f), ("Spine", 0.11f) });
+        var r2 = CheckSeam.Check(Path(b2), Path(m2));
+        Assert.IsFalse(r2.Contains("single humanoid attachment"),
+            "0.11 keeps the bone ⇒ 2 weighted humanoid ⇒ not a proxy refuse");
     }
 }
