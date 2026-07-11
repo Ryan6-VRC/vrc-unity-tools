@@ -304,4 +304,61 @@ public class CheckSeamTests
         Assert.IsFalse(r2.Contains("single humanoid attachment"),
             "0.11 keeps the bone ⇒ 2 weighted humanoid ⇒ not a proxy refuse");
     }
+
+    // ── Task 5: the ε coincidence gate — PASS / NOT-PASS + offenders ────────────────────────────────────
+    // Fixtures put base bones and merge bones both at their root origin (localPosition 0) ⇒ coincident ⇒
+    // delta 0; move a merge bone's localPosition to inject a known world offset. SpanMm=350 (BuildSeam) ⇒
+    // ε = max(0.5, 0.002·350) = 0.7mm.
+
+    [Test]
+    public void Gate_coincident_pass()
+    {
+        BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Chest", "Spine" },
+            weights: new[] { ("Chest", 1.0f), ("Spine", 1.0f) });
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.Contains("=> PASS", r);
+        StringAssert.Contains("| log=", r);
+        StringAssert.Contains("weightedHumanoid=2", r);
+        StringAssert.Contains("offenders=0", r);
+        StringAssert.Contains("context=0 dropped=0", r);
+        var body = ReadLog(r);
+        StringAssert.Contains("_(all within ε)_", body);
+    }
+
+    [Test]
+    public void Gate_offset_notPass()
+    {
+        BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Chest", "Spine" },
+            weights: new[] { ("Chest", 1.0f), ("Spine", 1.0f) });
+        // ε = 0.7mm; offset Chest by ε+1mm = 1.7mm (0.0017 world units) ⇒ one offender.
+        FindBone(mergeGO, "Chest").localPosition = new Vector3(0.0017f, 0f, 0f);
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.Contains("=> NOT-PASS", r);
+        StringAssert.Contains("offenders=1", r);
+        var body = ReadLog(r);
+        StringAssert.Contains("**seam-offset**", body);
+        StringAssert.Contains("bone=`Chest`", body);
+    }
+
+    [Test]
+    public void Gate_boundary()
+    {
+        // ε = 0.7mm. One fixture, one bone (a second fixture would collide on the "Base"/"Merge" hierarchy
+        // path and Resolve would return the first): at ε−0.1mm (0.6mm) → PASS; nudged to ε+0.1mm (0.8mm) →
+        // NOT-PASS.
+        BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Chest", "Spine" },
+            weights: new[] { ("Chest", 1.0f), ("Spine", 1.0f) });
+        var chest = FindBone(mergeGO, "Chest");
+
+        chest.localPosition = new Vector3(0.0006f, 0f, 0f); // 0.6mm < ε
+        var r1 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.Contains("=> PASS", r1);
+        ReadLog(r1); // sets _logPath; delete now so both boundary logs are cleaned (TearDown handles r2)
+        if (!string.IsNullOrEmpty(_logPath)) AssetDatabase.DeleteAsset(_logPath);
+
+        chest.localPosition = new Vector3(0.0008f, 0f, 0f); // 0.8mm > ε
+        var r2 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.Contains("=> NOT-PASS", r2);
+        ReadLog(r2);
+    }
 }

@@ -96,7 +96,65 @@ namespace Ryan6Vrc.AgentTools.Editor
                     "mm — offset-tolerant accessory/proxy, verify the baked result");
             }
 
-            return Refuse("not yet implemented"); // ≥2 weighted humanoid ⇒ coincidence gate (Task 5)
+            // ≥2 weighted humanoid ⇒ coincidence gate: compare edit-time WORLD positions at ε tolerance.
+            float eps = Mathf.Max(0.5f, 0.002f * human.SpanMm);
+            var hipsBase = HipsOf(baseGO); // fromHips anchor; null ⇒ report 0 (robust, non-load-bearing)
+            var offenders = new List<(string bone, float mm, float fromHips)>();
+            foreach (var p in weightedHum)
+            {
+                float mm = Vector3.Distance(p.Base.position, p.Merge.position) * 1000f;
+                if (mm > eps)
+                {
+                    float fromHips = hipsBase != null ? Vector3.Distance(hipsBase.position, p.Base.position) * 1000f : 0f;
+                    offenders.Add((p.Base.name, mm, fromHips));
+                }
+            }
+            offenders.Sort((a, b) => b.mm.CompareTo(a.mm)); // worst (largest offset) first
+            return Emit(baseGO, mergeGO, weightedHum.Count, offenders, eps);
+        }
+
+        // ── Output (mirrors CheckAvatar.Emit: summary + markdown body + WriteRunLog + severity-by-verdict) ─
+        // context/dropped are 0 here — Task 6 populates the non-humanoid partition; the summary still prints
+        // context=0 dropped=0 so the family grammar (and its consumers) is stable from this task forward.
+        private static string Emit(GameObject baseGO, GameObject mergeGO, int weightedCount,
+            List<(string bone, float mm, float fromHips)> offenders, float eps)
+        {
+            int m = offenders.Count;
+            const int context = 0, dropped = 0;
+            string verdict = m == 0 ? "PASS" : "NOT-PASS";
+
+            string summary = string.Format(CultureInfo.InvariantCulture,
+                "[CheckSeam] {0}→{1}: weightedHumanoid={2} offenders={3} context={4} dropped={5} => {6}",
+                mergeGO.name, baseGO.name, weightedCount, m, context, dropped, verdict);
+
+            var sb = new StringBuilder();
+            sb.Append("# CheckSeam: ").Append(mergeGO.name).Append(" → ").Append(baseGO.name).Append('\n');
+            sb.Append("mergeable: `").Append(PathOf(mergeGO)).Append("`  \n");
+            sb.Append("base: `").Append(PathOf(baseGO)).Append("`  \n\n");
+            sb.Append(summary.Substring("[CheckSeam] ".Length)).Append('\n');
+
+            sb.Append("\n## Gate — weighted humanoid bones (ε=")
+              .Append(eps.ToString("F2", CultureInfo.InvariantCulture)).Append("mm)\n\n");
+            if (offenders.Count == 0) sb.Append("_(all within ε)_\n");
+            else foreach (var o in offenders)
+                sb.Append("- **seam-offset** bone=`").Append(o.bone)
+                  .Append("` offset=").Append(o.mm.ToString("F1", CultureInfo.InvariantCulture))
+                  .Append("mm fromHips=").Append(o.fromHips.ToString("F1", CultureInfo.InvariantCulture))
+                  .Append("mm\n");
+
+            var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "checkseam_" + mergeGO.name, summary, sb.ToString(), ".md");
+            if (verdict == "PASS") Debug.Log(res); else Debug.LogWarning(res);
+            return res;
+        }
+
+        // Base Hips transform for the fromHips report distance; null unless the base has a humanoid Animator
+        // (tests inject the HumanoidMap and carry no Animator ⇒ null ⇒ fromHips 0, which is fine — it is a
+        // report field, never gates).
+        private static Transform HipsOf(GameObject baseGO)
+        {
+            var anim = baseGO.GetComponentInChildren<Animator>();
+            if (anim == null || anim.avatar == null || !anim.isHuman) return null;
+            return anim.GetBoneTransform(HumanBodyBones.Hips);
         }
 
         // Merge Transform → max vertex weight across every mergeable SMR (top-4 influences per vertex). Reads
