@@ -150,6 +150,20 @@ public partial class CheckSeamLiveTests
         f.SetValue(o, v);
     }
 
+    // VRCFury is internal → reflection. Distinguish "package absent" (Ignore) from "package present but its
+    // types didn't resolve" — the latter is real collector DRIFT (e.g. a package-side type rename) and MUST
+    // fail, not skip, or the loudest drift this suite exists to catch would pass green. VRCF_PRESENT keys on
+    // the package name (stable across type reshapes), unlike the reflected type string.
+    private void BuildVrcfOrGate(out GameObject baseGO, out GameObject mergeGO, out Transform mHips, bool forceScale)
+    {
+        if (BuildVrcfFixture(out baseGO, out mergeGO, out mHips, forceScale)) return;
+#if VRCF_PRESENT
+        Assert.Fail("VRCFury is installed but VF.Model.VRCFury/ArmatureLink did not resolve — collector drift");
+#else
+        Assert.Ignore("VRCFury not installed in this editor");
+#endif
+    }
+
     // Attach a real VRCFury component carrying an object-mode, recursive ArmatureLink linking merge→base.
     // Object-mode (useObj) skips VRCFury's humanoid-Hips lookup (which would need a real Animator); recursive
     // makes GetLinks walk the >=2 name-matched children. Returns false if VRCFury isn't installed.
@@ -195,8 +209,7 @@ public partial class CheckSeamLiveTests
     [Test]
     public void VrcfArmatureLink_coincident_pass()
     {
-        if (!BuildVrcfFixture(out var baseGO, out var mergeGO, out _, forceScale: false))
-            Assert.Ignore("VRCFury not installed in this editor");
+        BuildVrcfOrGate(out var baseGO, out var mergeGO, out _, forceScale: false);
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> PASS", r);
         StringAssert.Contains("weightedHumanoid=2", r);
@@ -206,11 +219,11 @@ public partial class CheckSeamLiveTests
     [Test]
     public void VrcfArmatureLink_offset_notPass()
     {
-        if (!BuildVrcfFixture(out var baseGO, out var mergeGO, out var mHips, forceScale: false))
-            Assert.Ignore("VRCFury not installed in this editor");
+        BuildVrcfOrGate(out var baseGO, out var mergeGO, out var mHips, forceScale: false);
         mHips.localPosition += new Vector3(0.01f, 0f, 0f); // 10mm ⇒ offender
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r);
+        StringAssert.Contains("offenders=1", r);   // N2: parity with the MA twin
         var body = ReadLog(r);
         StringAssert.Contains("Hips", body); // bone names appear in the RunLog BODY, not the one-liner
     }
@@ -218,8 +231,7 @@ public partial class CheckSeamLiveTests
     [Test]
     public void VrcfArmatureLink_forceOneWorldScale_refuses()
     {
-        if (!BuildVrcfFixture(out var baseGO, out var mergeGO, out _, forceScale: true))
-            Assert.Ignore("VRCFury not installed in this editor");
+        BuildVrcfOrGate(out var baseGO, out var mergeGO, out _, forceScale: true);
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("scaled at bake", r);

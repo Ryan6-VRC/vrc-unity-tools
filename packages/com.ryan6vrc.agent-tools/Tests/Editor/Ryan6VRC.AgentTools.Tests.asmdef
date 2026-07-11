@@ -24,7 +24,8 @@
         "VRC_SDK_VRCSDK3"
     ],
     "versionDefines": [
-        { "name": "nadena.dev.modular-avatar", "expression": "", "define": "MA_PRESENT" }
+        { "name": "nadena.dev.modular-avatar", "expression": "", "define": "MA_PRESENT" },
+        { "name": "com.vrcfury.vrcfury", "expression": "", "define": "VRCF_PRESENT" }
     ],
     "noEngineReferences": false
 }
