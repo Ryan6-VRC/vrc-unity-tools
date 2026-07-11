@@ -141,6 +141,58 @@ public class ControllerEmitTests
     }
 
     [Test]
+    public void Curve_Tangents_Linear_Marker_Sets_Linear_Tangents_Flat_Stays_Default()
+    {
+        // `tangents: linear` (map form) opts a curve into linear tangents on every key; the bare-list form
+        // (unmarked, still legal) keeps the default flat tangents — both forms coexist in one clip.
+        const string yaml = @"schema: 1
+controller: T_Tangents
+basis: avatar-root
+clips:
+  c:
+    curves:
+      Prop/Renderer.enabled:
+        tangents: linear
+        keys: [[0, 0], [1, 1]]
+      Prop2/Renderer.enabled: [[0, 0], [1, 1]]
+layers:
+  - name: L
+    states:
+      S:
+        motion: { clip: c }
+    default: S
+";
+        var doc = AnimatorSchemaYaml.Parse(yaml, "mem://tangents");
+        ControllerEmit.Build(doc, out var r);
+
+        var clip = r.Clips["c"];
+        var bindings = AnimationUtility.GetCurveBindings(clip);
+        Assert.AreEqual(2, bindings.Length, "both curves emitted");
+
+        var linearBinding = bindings.First(b => b.path == "Prop");
+        var linearCurve = AnimationUtility.GetEditorCurve(clip, linearBinding);
+        Assert.AreEqual(2, linearCurve.length);
+        for (int i = 0; i < linearCurve.length; i++)
+        {
+            Assert.AreEqual(AnimationUtility.TangentMode.Linear, AnimationUtility.GetKeyLeftTangentMode(linearCurve, i),
+                $"key {i} left tangent is linear");
+            Assert.AreEqual(AnimationUtility.TangentMode.Linear, AnimationUtility.GetKeyRightTangentMode(linearCurve, i),
+                $"key {i} right tangent is linear");
+        }
+
+        var flatBinding = bindings.First(b => b.path == "Prop2");
+        var flatCurve = AnimationUtility.GetEditorCurve(clip, flatBinding);
+        Assert.AreEqual(2, flatCurve.length);
+        for (int i = 0; i < flatCurve.length; i++)
+        {
+            Assert.AreEqual(AnimationUtility.TangentMode.Free, AnimationUtility.GetKeyLeftTangentMode(flatCurve, i),
+                $"unmarked curve key {i} left tangent stays the default (flat, reported as Free)");
+            Assert.AreEqual(AnimationUtility.TangentMode.Free, AnimationUtility.GetKeyRightTangentMode(flatCurve, i),
+                $"unmarked curve key {i} right tangent stays the default (flat, reported as Free)");
+        }
+    }
+
+    [Test]
     public void Seconds_Shorter_Than_Last_Key_Fails()
     {
         var doc = new AnimDocument { Schema = 1, ControllerName = "T_Short" };

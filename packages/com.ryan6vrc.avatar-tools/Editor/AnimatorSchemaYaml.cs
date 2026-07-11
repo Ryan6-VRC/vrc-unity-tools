@@ -1008,7 +1008,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             break;
                         case "curves":
                             foreach (var cv in ToMap(ck.Value, $"clip '{name}' curves"))
-                                clip.Curves.Add(BindCurve(cv.Key, ToList(cv.Value, $"clip '{name}' curve '{cv.Key}'")));
+                                clip.Curves.Add(BindCurve(cv.Key, cv.Value, $"clip '{name}' curve '{cv.Key}'"));
                             break;
                         default: throw new SchemaException($"clip '{name}': unknown field '{ck.Key}'");
                     }
@@ -1017,9 +1017,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        private static CurveSpec BindCurve(string binding, List<object> keys)
+        // Accepts EITHER the bare list form `[[t,v],...]` (flat tangents) or a map form
+        // `{ tangents: linear, keys: [[t,v],...] }` for an opt-in linear ramp.
+        private static CurveSpec BindCurve(string binding, object value, string ctx)
         {
             var curve = new CurveSpec { Binding = binding };
+            List<object> keys;
+            if (value is Dictionary<string, object> m)
+            {
+                keys = null;
+                foreach (var kv in m)
+                {
+                    switch (kv.Key)
+                    {
+                        case "tangents":
+                            var t = ToStr(kv.Value, $"{ctx} tangents");
+                            curve.Tangents = t == "linear" ? CurveTangent.Linear
+                                : t == "flat" ? CurveTangent.Flat
+                                : throw new SchemaException($"curve '{binding}': tangents must be 'linear' or 'flat', got '{t}'");
+                            break;
+                        case "keys": keys = ToList(kv.Value, $"{ctx} keys"); break;
+                        default: throw new SchemaException($"curve '{binding}': unknown field '{kv.Key}'");
+                    }
+                }
+                if (keys == null) throw new SchemaException($"curve '{binding}': map form requires 'keys'");
+            }
+            else keys = ToList(value, ctx);
+
             foreach (var k in keys)
             {
                 var pair = ToList(k, $"curve '{binding}' keyframe");
