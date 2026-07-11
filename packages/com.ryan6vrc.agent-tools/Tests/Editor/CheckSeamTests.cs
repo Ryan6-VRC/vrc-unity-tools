@@ -226,7 +226,8 @@ public class CheckSeamTests
     {
         // A base with no humanoid Animator → DefaultResolveHumanoid returns an empty map. Inject the empty map
         // directly so this proves the door's empty-bucket REFUSE path independently of the reflection default.
-        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] REFUSE:"));
+        // no-humanoid is a valid-abstain REFUSE ⇒ warning (RefuseAbstain → Debug.LogWarning).
+        LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] REFUSE:"));
         var baseGO = NewChild(_root, "Base");     // plain GO, no humanoid Animator
         var mergeGO = NewChild(_root, "Merge");
         CheckSeam.ResolveHumanoid = _ => new CheckSeam.HumanoidMap(); // empty ⇒ REFUSE upstream
@@ -242,7 +243,7 @@ public class CheckSeamTests
     [Test]
     public void NoSeam_refuses()
     {
-        LogAssert.Expect(LogType.Error, RefuseRe);
+        LogAssert.Expect(LogType.Warning, RefuseRe); // no scorable seam ⇒ valid-abstain ⇒ warning
         SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
         CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution(); // empty Pairs
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
@@ -253,7 +254,7 @@ public class CheckSeamTests
     [Test]
     public void SeamConflict_refuses()
     {
-        LogAssert.Expect(LogType.Error, RefuseRe);
+        LogAssert.Expect(LogType.Warning, RefuseRe); // seams disagree ⇒ valid-abstain ⇒ warning
         SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
         var baseBone = FindBone(baseGO, "Hips");
         var m1 = NewChild(mergeGO, "Hips.a");
@@ -272,7 +273,7 @@ public class CheckSeamTests
     [Test]
     public void RootsDontNest_refuses()
     {
-        LogAssert.Expect(LogType.Error, RefuseRe);
+        LogAssert.Expect(LogType.Warning, RefuseRe); // roots don't nest ⇒ valid-abstain ⇒ warning
         SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
         var baseBone = FindBone(baseGO, "Hips");
         var stray = NewChild(_root, "StrayMerge"); // under _root, NOT under mergeGO
@@ -296,6 +297,22 @@ public class CheckSeamTests
         StringAssert.Contains("GetLinks threw", r);
     }
 
+    // ── Task 7: VRCFury scale-bake REFUSE + severity split ──────────────────────────────────────────────
+    // The real scale read (forceOneWorldScale / GetScalingFactor) is proven live (Task 8); here inject a
+    // SeamResolution carrying ScaleBakeReason and prove the door REFUSEs on it at WARNING (valid-abstain
+    // severity, not misuse), distinguishing it from the root-not-found / reflect-error misuse paths.
+
+    [Test]
+    public void ScaleBake_refusesAtWarning()
+    {
+        SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
+        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution { ScaleBakeReason = "scaled at bake — test" };
+        LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex("REFUSE: scaled at bake"));
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("scaled at bake", r);
+    }
+
     // ── Task 4: weighted-humanoid count + ≤1 proxy REFUSE ──────────────────────────────────────────────
     // Join on the merge side: NewSkinnedMergeable's SMR.bones[] reference the SAME Transforms the injected
     // SeamResolution's .Merge carries, so a ≥0.1 skin weight on a mapped humanoid pair makes it count.
@@ -303,7 +320,7 @@ public class CheckSeamTests
     [Test]
     public void OneWeightedHumanoid_refusesAsProxy()
     {
-        LogAssert.Expect(LogType.Error, RefuseRe);
+        LogAssert.Expect(LogType.Warning, RefuseRe); // ≤1 proxy ⇒ valid-abstain ⇒ warning
         // Head-only hair: 1 humanoid weighted bone ⇒ offset-tolerant proxy ⇒ REFUSE.
         BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Head" }, weights: new[] { ("Head", 1.0f) });
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
@@ -315,8 +332,8 @@ public class CheckSeamTests
     [Test]
     public void WeightThreshold_flipsTheCount()
     {
-        LogAssert.Expect(LogType.Error, RefuseRe); // 0.09 case ⇒ 1 weighted ⇒ proxy REFUSE
-        LogAssert.Expect(LogType.Error, RefuseRe); // 0.11 case ⇒ 2 weighted ⇒ gate tail ("not yet implemented")
+        LogAssert.Expect(LogType.Warning, RefuseRe); // 0.09 case ⇒ 1 weighted ⇒ proxy REFUSE (abstain ⇒ warning)
+        // 0.11 case ⇒ 2 weighted ⇒ reaches the (now-implemented) gate ⇒ coincident ⇒ PASS (no REFUSE logged).
         // 2 mapped humanoid; Spine skinned 0.09 (below threshold, dropped) ⇒ 1 weighted ⇒ REFUSE.
         BuildSeam(out var b1, out var m1, humanoid: new[] { "Chest", "Spine" },
             weights: new[] { ("Chest", 1.0f), ("Spine", 0.09f) });

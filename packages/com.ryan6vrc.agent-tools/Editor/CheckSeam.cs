@@ -50,30 +50,30 @@ namespace Ryan6Vrc.AgentTools.Editor
         public static string Check(string baseRoot, string mergeableRoot)
         {
             var baseGO = Resolve(baseRoot);
-            if (baseGO == null) return Refuse("base root '" + baseRoot + "' not found in the active scene");
+            if (baseGO == null) return RefuseMisuse("base root '" + baseRoot + "' not found in the active scene");
             var mergeGO = Resolve(mergeableRoot);
-            if (mergeGO == null) return Refuse("mergeable root '" + mergeableRoot + "' not found in the active scene");
+            if (mergeGO == null) return RefuseMisuse("mergeable root '" + mergeableRoot + "' not found in the active scene");
 
             var human = ResolveHumanoid(baseGO);
             if (human.Bones.Count == 0)
-                return Refuse("base '" + baseRoot + "' has no humanoid Avatar — cannot certify fit (clothes-on-a-body is the domain)");
+                return RefuseAbstain("base '" + baseRoot + "' has no humanoid Avatar — cannot certify fit (clothes-on-a-body is the domain)");
 
             var seam = ResolveSeam(baseGO, mergeGO);
-            if (seam.ReflectError != null) return Refuse("seam resolution failed: " + seam.ReflectError);
-            if (seam.ScaleBakeReason != null) return Refuse(seam.ScaleBakeReason); // field stays null until Task 7
-            if (seam.Pairs.Count == 0) return Refuse("no scorable seam component on '" + mergeableRoot + "'");
+            if (seam.ReflectError != null) return RefuseMisuse("seam resolution failed: " + seam.ReflectError);
+            if (seam.ScaleBakeReason != null) return RefuseAbstain(seam.ScaleBakeReason);
+            if (seam.Pairs.Count == 0) return RefuseAbstain("no scorable seam component on '" + mergeableRoot + "'");
             foreach (var p in seam.Pairs)
             {
-                if (p.Base == null || p.Merge == null) return Refuse("seam pair has a null bone");
+                if (p.Base == null || p.Merge == null) return RefuseAbstain("seam pair has a null bone");
                 if (!IsUnder(p.Base, baseGO) || !IsUnder(p.Merge, mergeGO))
-                    return Refuse("seam targets a different avatar (a mapped bone is not under its root)");
+                    return RefuseAbstain("seam targets a different avatar (a mapped bone is not under its root)");
             }
             // conflict: the same base bone mapped to two different merge bones (MA and VRCFury disagree)
             var byBase = new Dictionary<Transform, Transform>();
             foreach (var p in seam.Pairs)
             {
                 if (byBase.TryGetValue(p.Base, out var other) && other != p.Merge)
-                    return Refuse("seams disagree on base bone '" + p.Base.name + "' (" + other.name + " vs " + p.Merge.name + ")");
+                    return RefuseAbstain("seams disagree on base bone '" + p.Base.name + "' (" + other.name + " vs " + p.Merge.name + ")");
                 byBase[p.Base] = p.Merge;
             }
 
@@ -92,7 +92,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 float d = weightedHum.Count == 1
                     ? Vector3.Distance(weightedHum[0].Base.position, weightedHum[0].Merge.position) * 1000f
                     : 0f;
-                return Refuse("single humanoid attachment: " + bone + ", delta=" + d.ToString("F1", CultureInfo.InvariantCulture) +
+                return RefuseAbstain("single humanoid attachment: " + bone + ", delta=" + d.ToString("F1", CultureInfo.InvariantCulture) +
                     "mm — offset-tolerant accessory/proxy, verify the baked result");
             }
 
@@ -221,19 +221,18 @@ namespace Ryan6Vrc.AgentTools.Editor
             return false;
         }
 
-        private static string Refuse(string why) // valid-abstain vs misuse severity handled in Task 8
-        {
-            string err = "[CheckSeam] REFUSE: " + why;
-            Debug.LogError(err);
-            return err;
-        }
+        // REFUSE severity split: misuse (bad input / broken environment the caller must fix) logs at ERROR;
+        // valid-abstain (a legitimate scene the gate simply can't certify — no humanoid, no seam, proxy,
+        // scale-at-bake, …) logs at WARNING. Same bare "[CheckSeam] REFUSE: {why}" string either way.
+        private static string RefuseMisuse(string why) { var e = "[CheckSeam] REFUSE: " + why; Debug.LogError(e); return e; }
+        private static string RefuseAbstain(string why) { var e = "[CheckSeam] REFUSE: " + why; Debug.LogWarning(e); return e; }
 
         // ── Seam defaults (real reflection lands in Tasks 2–3, 7; stubs so the field initializers compile) ─
 
         // Real reflection: union MA GetBonesMapping (base,merge) + VRCFury GetLinks().mergeBones (merge,base,
         // flipped). Wrap the whole body — any thrown hop OR a null GetLinks becomes ReflectError, never an
         // escaping exception. Validated end-to-end by the live corpus (Task 8), not by unit tests (the SDK-only
-        // TestEditor has no MA/VRCFury). Scale detection (ScaleBakeReason) is Task 7 — not read here.
+        // TestEditor has no MA/VRCFury). CollectVrcfPairs also sets ScaleBakeReason on a scaled bake ⇒ REFUSE.
         private static SeamResolution DefaultResolveSeam(GameObject baseGO, GameObject mergeGO)
         {
             var res = new SeamResolution();
@@ -296,6 +295,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (getLinks == null) throw new MissingMethodException("ArmatureLinkService.GetLinks");
             var contentField = vrcfType.GetField("content", BindingFlags.Public | BindingFlags.Instance);
             if (contentField == null) throw new MissingFieldException("VRCFury.content");
+            // Scale-at-bake detection: forceOneWorldScale (bool field on the ArmatureLink model) OR a non-unit
+            // GetScalingFactor Item3. A scaled bake makes edit-time world-position coincidence meaningless (the
+            // baker rescales the whole prop), so we can't certify from the edit-time pose — REFUSE (abstain).
+            var forceField = armLinkType.GetField("forceOneWorldScale", BindingFlags.Public | BindingFlags.Instance);
+            if (forceField == null) throw new MissingFieldException("ArmatureLink.forceOneWorldScale");
+            var getScaling = svcType.GetMethod("GetScalingFactor", BindingFlags.Public | BindingFlags.Static);
+            if (getScaling == null) throw new MissingMethodException("ArmatureLinkService.GetScalingFactor");
 
             var avatarVfGo = ToVfGameObject(vfGoType, avatarGO);
 
@@ -305,6 +311,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (content == null || !armLinkType.IsInstanceOfType(content)) continue; // not an ArmatureLink feature
                 var links = getLinks.Invoke(null, new object[] { content, avatarVfGo });
                 if (links == null) throw new NullReferenceException("GetLinks returned null (propBone == null)");
+
+                if (res.ScaleBakeReason == null) // GetScalingFactor(model, links) → (float,float,float); Item3 = factor
+                {
+                    bool forceOne = (bool)forceField.GetValue(content);
+                    var factorTuple = getScaling.Invoke(null, new object[] { content, links });
+                    float factor = factorTuple != null ? (float)factorTuple.GetType().GetField("Item3").GetValue(factorTuple) : 1f;
+                    if (forceOne || Mathf.Abs(1f - factor) > 1e-4f)
+                        res.ScaleBakeReason = "scaled at bake (forceOneWorldScale / non-unit scale) — edit-time coincidence unverifiable, check the baked result";
+                }
+
                 var mergeBones = links.GetType().GetField("mergeBones").GetValue(links) as System.Collections.IEnumerable;
                 if (mergeBones == null) continue;
                 foreach (var pair in mergeBones)
