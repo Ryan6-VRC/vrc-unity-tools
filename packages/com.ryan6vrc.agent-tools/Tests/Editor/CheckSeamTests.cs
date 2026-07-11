@@ -109,4 +109,18 @@ public class CheckSeamTests
         StringAssert.Contains("no-such-base", r);
         Assert.IsFalse(r.Contains("| log="), "refusal carries no RunLog trailer");
     }
+
+    [Test]
+    public void NoHumanoidAvatar_refuses()
+    {
+        // A base with no humanoid Animator → DefaultResolveHumanoid returns an empty map. Inject the empty map
+        // directly so this proves the door's empty-bucket REFUSE path independently of the reflection default.
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] REFUSE:"));
+        var baseGO = NewChild(_root, "Base");     // plain GO, no humanoid Animator
+        var mergeGO = NewChild(_root, "Merge");
+        CheckSeam.ResolveHumanoid = _ => new CheckSeam.HumanoidMap(); // empty ⇒ REFUSE upstream
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("no humanoid", r);
+    }
 }

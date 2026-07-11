@@ -51,6 +51,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (baseGO == null) return Refuse("base root '" + baseRoot + "' not found in the active scene");
             var mergeGO = Resolve(mergeableRoot);
             if (mergeGO == null) return Refuse("mergeable root '" + mergeableRoot + "' not found in the active scene");
+
+            var human = ResolveHumanoid(baseGO);
+            if (human.Bones.Count == 0)
+                return Refuse("base '" + baseRoot + "' has no humanoid Avatar — cannot certify fit (clothes-on-a-body is the domain)");
+
             return Refuse("not yet implemented"); // replaced in later tasks
         }
 
@@ -64,7 +69,24 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── Seam defaults (real reflection lands in Tasks 2–3, 7; stubs so the field initializers compile) ─
 
         private static SeamResolution DefaultResolveSeam(GameObject b, GameObject m) => throw new NotImplementedException();
-        private static HumanoidMap DefaultResolveHumanoid(GameObject b) => throw new NotImplementedException();
+
+        private static HumanoidMap DefaultResolveHumanoid(GameObject baseGO)
+        {
+            var map = new HumanoidMap();
+            var anim = baseGO.GetComponentInChildren<Animator>();
+            if (anim == null || anim.avatar == null || !anim.isHuman) return map; // empty ⇒ REFUSE upstream
+            Transform hips = null, head = null;
+            for (int i = 0; i < (int)HumanBodyBones.LastBone; i++)
+            {
+                var t = anim.GetBoneTransform((HumanBodyBones)i);
+                if (t == null) continue;
+                map.Bones.Add(t);
+                if ((HumanBodyBones)i == HumanBodyBones.Hips) hips = t;
+                if ((HumanBodyBones)i == HumanBodyBones.Head) head = t;
+            }
+            map.SpanMm = (hips != null && head != null) ? Vector3.Distance(hips.position, head.position) * 1000f : 0f;
+            return map;
+        }
 
         // ── Scene resolver (path → instance id → name; copied verbatim from CheckAvatar.Resolve) ────────
 
