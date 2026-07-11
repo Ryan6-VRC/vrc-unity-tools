@@ -877,6 +877,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         {
                             Binding = target,
                             Keys = curve.keys.Select(k => new Keyframe2(k.time, k.value)).ToList(),
+                            Tangents = IsAllLinear(curve) ? CurveTangent.Linear : CurveTangent.Flat,
                         });
                 }
                 // A Set curve carries no keyframes in the schema, so a Sets clip authored with an explicit
@@ -902,6 +903,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 float v = curve.keys[0].value;
                 for (int i = 1; i < curve.length; i++)
                     if (!Mathf.Approximately(curve.keys[i].value, v)) return false;
+                return true;
+            }
+
+            // Round-trips ControllerEmit's linear-tangent marker: true only when EVERY key is linear on
+            // both sides (ControllerEmit sets both when `tangents: linear`), so any hand-authored or
+            // imported mixed-tangent curve decodes as Flat rather than falsely claiming linear.
+            private static bool IsAllLinear(AnimationCurve curve)
+            {
+                if (curve.length == 0) return false;
+                for (int i = 0; i < curve.length; i++)
+                    if (AnimationUtility.GetKeyLeftTangentMode(curve, i) != AnimationUtility.TangentMode.Linear
+                     || AnimationUtility.GetKeyRightTangentMode(curve, i) != AnimationUtility.TangentMode.Linear)
+                        return false;
                 return true;
             }
 

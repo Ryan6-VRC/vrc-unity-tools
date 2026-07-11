@@ -111,7 +111,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (c.Seconds.HasValue) L(sb, "    seconds: " + Num(c.Seconds.Value));
                     if (c.Sets.Count > 0) L(sb, "    set: " + FlowSets(c.Sets));
                     L(sb, "    curves:");
-                    foreach (var cs in c.Curves) L(sb, "      " + Key(cs.Binding) + ": " + FlowCurveKeys(cs.Keys));
+                    foreach (var cs in c.Curves) L(sb, "      " + Key(cs.Binding) + ": " + FlowCurve(cs));
                 }
                 else
                 {
@@ -142,6 +142,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var parts = new List<string>();
             foreach (var k in keys) parts.Add("[" + Num(k.Time) + ", " + Num(k.Value) + "]");
             return "[ " + string.Join(", ", parts) + " ]";
+        }
+
+        // Flat (default) curves keep the bare-list form byte-identical to before linear tangents existed;
+        // only a Linear-tangent curve pays for the map form, matching AnimatorSchemaYaml.BindCurve's reader.
+        private static string FlowCurve(CurveSpec cs)
+        {
+            var keysFlow = FlowCurveKeys(cs.Keys);
+            return cs.Tangents == CurveTangent.Linear
+                ? "{ tangents: linear, keys: " + keysFlow + " }"
+                : keysFlow;
         }
 
         // ----- layers / machines / states -----
