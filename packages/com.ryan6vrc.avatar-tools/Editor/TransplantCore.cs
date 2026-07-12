@@ -143,6 +143,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             AppendStringArray(sb, "notes", log.notes);
             sb.Append(",\n");
             AppendStringArray(sb, "warnings", log.warnings);
+
+            foreach (var kv in log.sections)
+                sb.Append(",\n  ").Append(Q(kv.Key)).Append(": ").Append(kv.Value);
+
             sb.Append("\n}");
 
             var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
@@ -230,6 +234,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
             return leaks;
+        }
+
+        /// <summary>
+        /// Recursively ensure every segment of an Assets/-relative folder path exists, via
+        /// <see cref="AssetDatabase.CreateFolder"/> per segment — a plain
+        /// <c>Directory.CreateDirectory</c> would leave the AssetDatabase blind to the new folders
+        /// until an import. The single copy the folder-creating tools share.
+        /// </summary>
+        public static void EnsureFolderExists(string assetPath)
+        {
+            assetPath = assetPath.TrimEnd('/');
+            if (AssetDatabase.IsValidFolder(assetPath)) return;
+            int slash = assetPath.LastIndexOf('/');
+            if (slash < 0) return;
+            string parent = assetPath.Substring(0, slash);
+            string leaf = assetPath.Substring(slash + 1);
+            EnsureFolderExists(parent);
+            AssetDatabase.CreateFolder(parent, leaf);
         }
 
         static void AppendStringArray(StringBuilder sb, string key, List<string> items)
@@ -403,9 +425,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <summary>
     /// Mutable accumulator for one tool run, serialized by <see cref="TransplantCore.WriteRunLog"/> and
     /// summarized by <see cref="TransplantCore.Summary"/>. <see cref="counts"/> preserves insertion order
-    /// so the JSON and one-line summary read in a stable, tool-defined order.
+    /// so the JSON and one-line summary read in a stable, tool-defined order. Unsealed so a tool can
+    /// subclass to carry its bespoke structured rows alongside the envelope (see <see cref="Section"/>).
     /// </summary>
-    public sealed class TransplantRunLog
+    public class TransplantRunLog
     {
         public string kind;
         public bool whatIf;
@@ -420,10 +443,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         public TransplantRunLog(string kind) { this.kind = kind; }
 
+        /// <summary>Bespoke structured JSON sections (e.g. OwnMaterial's <c>slots[]</c> table), emitted
+        /// verbatim after <see cref="warnings"/> in insertion order. The value is PRE-RENDERED JSON the
+        /// tool builds with <see cref="TransplantCore.Q"/> — what you pass is exactly what lands, so the
+        /// envelope writer stays logic-free. Sections never appear in the one-line summary.</summary>
+        public readonly List<KeyValuePair<string, string>> sections = new List<KeyValuePair<string, string>>();
+
         public void Count(string name, long value) => counts.Add(new KeyValuePair<string, long>(name, value));
         public void Offender(string msg) { if (!string.IsNullOrEmpty(msg)) offenders.Add(msg); }
         public void Note(string msg) { if (!string.IsNullOrEmpty(msg)) notes.Add(msg); }
         public void Warning(string msg) { if (!string.IsNullOrEmpty(msg)) warnings.Add(msg); }
+
+        /// <summary>Attach a bespoke structured section: <paramref name="renderedJson"/> must be a complete
+        /// JSON value (typically an array). Emitted as <c>"name": renderedJson</c> by
+        /// <see cref="TransplantCore.WriteRunLog"/>.</summary>
+        public void Section(string name, string renderedJson)
+            => sections.Add(new KeyValuePair<string, string>(name, renderedJson));
 
         /// <summary>
         /// Enforce the reverse leg of the offenders⇔FAIL invariant: a FAIL with no named offender
