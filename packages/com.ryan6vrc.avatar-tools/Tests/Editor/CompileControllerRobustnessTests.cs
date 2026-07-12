@@ -117,6 +117,7 @@ public class CompileControllerRobustnessTests
         StringAssert.Contains("UnityEngine", result,
             "the refusal names the UnityEngine-namespace scope limit so it reads as intentional");
         Assert.IsFalse(File.Exists(outDir + "/Ui_Fx.controller"), "no controller written on the refused binding");
+        AnimatorTestHelpers.DeleteRefusalArtifact(result);
     }
 
     // ── Gap 4 — "nothing written on failure" extends to FOLDERS. A fresh compile into a not-yet-existing
@@ -140,5 +141,6 @@ public class CompileControllerRobustnessTests
         StringAssert.Contains("FAIL", result);
         Assert.IsFalse(AssetDatabase.IsValidFolder(outDir), "freshly-created leaf folder removed on a failed compile");
         Assert.IsFalse(AssetDatabase.IsValidFolder(TestRoot + "/g4_new"), "freshly-created ancestor folder removed too");
+        AnimatorTestHelpers.DeleteRefusalArtifact(result);
     }
 }

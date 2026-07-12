@@ -149,6 +149,7 @@ public class DecompileControllerTests
         LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
         string res = DecompileController.Decompile("", TestRoot + "/x.yaml", whatIf: false);
         StringAssert.Contains("FAIL", res);
+        AnimatorTestHelpers.DeleteRefusalArtifact(res);
     }
 
     [Test]
@@ -161,6 +162,7 @@ public class DecompileControllerTests
         LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
         string res = DecompileController.Decompile(ctrlPath, "", whatIf: false);
         StringAssert.Contains("FAIL", res);
+        AnimatorTestHelpers.DeleteRefusalArtifact(res);
     }
 
     [Test]
@@ -169,5 +171,6 @@ public class DecompileControllerTests
         LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
         string res = DecompileController.Decompile(TestRoot + "/nope.controller", TestRoot + "/x.yaml", whatIf: false);
         StringAssert.Contains("FAIL", res);
+        AnimatorTestHelpers.DeleteRefusalArtifact(res);
     }
 }

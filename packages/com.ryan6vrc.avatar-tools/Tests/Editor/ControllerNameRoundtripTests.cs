@@ -187,6 +187,7 @@ clips:
             StringAssert.Contains("FAIL", res);
             StringAssert.Contains("line break", res, "the refusal names the offending construct");
             Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
+            AnimatorTestHelpers.DeleteRefusalArtifact(res);
         }
 
         // ── 6: a named STATE-ladder transition round-trips ──────────────────────────────────────────────
@@ -290,6 +291,7 @@ layers:
             StringAssert.Contains("FAIL", res);
             StringAssert.Contains("line break", res, "the refusal names the offending construct");
             Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
+            AnimatorTestHelpers.DeleteRefusalArtifact(res);
         }
 
         // ── 10: a name requiring YAML quoting (a colon) round-trips intact — the first feature to put

@@ -76,6 +76,15 @@ public static class AnimatorTestHelpers
         ctrl.layers = list.ToArray();
     }
 
+    // Compile/Decompile door refusals write a RunLog/Snapshot artifact (R4) outside any TestRoot
+    // teardown — refusal-path tests call this on the returned summary so artifacts don't accumulate
+    // across runs.
+    public static void DeleteRefusalArtifact(string summary)
+    {
+        int i = summary.IndexOf("log=", System.StringComparison.Ordinal);
+        if (i >= 0) AssetDatabase.DeleteAsset(summary.Substring(i + 4));
+    }
+
     // Grammar: "[kind] (whatIf) label: k1=v1, k2=v2 offenders=[…] notes=[…] warnings=[…] error=… => RESULT | log=…"
     public static int Count(string summary, string key)
     {

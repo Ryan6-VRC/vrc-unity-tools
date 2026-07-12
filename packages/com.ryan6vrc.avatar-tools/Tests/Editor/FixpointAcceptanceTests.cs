@@ -164,6 +164,7 @@ public class FixpointAcceptanceTests
         StringAssert.Contains("FAIL", res);
         StringAssert.Contains("Trigger", res, "the refusal names the offending construct");
         Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
+        AnimatorTestHelpers.DeleteRefusalArtifact(res);
     }
 
     // A state whose NAME contains the addressing path separator '/', referenced BOTH same-machine (local) and

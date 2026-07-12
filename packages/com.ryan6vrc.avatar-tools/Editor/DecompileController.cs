@@ -44,7 +44,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public static string Decompile(string controllerPath, string outPath, bool whatIf = false, bool stripLayout = false)
         {
             // One refusal label per run: the controller asset's leaf (the thing being decompiled).
-            string failLabel = string.IsNullOrEmpty(controllerPath) ? "unknown" : Path.GetFileName(controllerPath);
+            // Path.GetFileName throws on invalid-char paths (Mono/2022.3) — the door must refuse,
+            // not crash, so use the non-throwing asset-path leaf.
+            string failLabel = RunLogFormat.Leaf(controllerPath);
+            if (failLabel.Length == 0) failLabel = "unknown";
 
             // ── Arg guards (mirror CompileController) ─────────────────────────────────────────────────
             if (string.IsNullOrEmpty(controllerPath)) return Fail(failLabel, controllerPath, "controllerPath is empty");
@@ -133,8 +136,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// unchanged; the artifact is the verdict record.</summary>
         private static string Fail(string label, string controllerPath, string why)
         {
-            string summary = "[DecompileController] " + label + ": " + why + " => FAIL";
-            string body = "# DecompileController FAIL\n\n- controller: " + (controllerPath ?? "(null)") + "\n- reason: " + why + "\n";
+            // Keep the one-line verdict one line (refusal strings can embed raw asset names, which
+            // can carry newlines); the artifact body keeps `why` raw.
+            string oneLineWhy = why.Replace("\r", " ").Replace("\n", " ");
+            string summary = "[DecompileController] " + label + ": " + oneLineWhy + " => FAIL";
+            string body = "# DecompileController FAIL\n\n- controller: " + (string.IsNullOrEmpty(controllerPath) ? "(null)" : controllerPath) + "\n- reason: " + why + "\n";
             string res = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "decompilecontroller_" + label, summary, body, ".md");
             Debug.LogError(res);
             return res;

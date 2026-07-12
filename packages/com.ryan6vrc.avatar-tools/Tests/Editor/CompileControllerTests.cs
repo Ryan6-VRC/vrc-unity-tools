@@ -119,6 +119,7 @@ public class CompileControllerTests
         var after = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
         Assert.IsNotNull(after, "prior controller still loads");
         Assert.AreEqual(layersBefore, after.layers.Length, "prior controller was NOT stripped by the failed recompile");
+        AnimatorTestHelpers.DeleteRefusalArtifact(result);
     }
 
     [Test]

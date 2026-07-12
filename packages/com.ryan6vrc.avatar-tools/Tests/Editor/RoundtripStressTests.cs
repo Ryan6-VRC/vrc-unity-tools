@@ -91,6 +91,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
             StringAssert.Contains("FAIL", res);
             StringAssert.Contains(expectedToken, res, "the refusal names the offending construct: " + expectedToken);
             Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
+            AnimatorTestHelpers.DeleteRefusalArtifact(res);
         }
 
         [Test] public void Refusal_SyncedLayer() =>

@@ -52,7 +52,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             // One refusal label per run: the source file's leaf (pre-parse stages don't know the
             // controller name; on failure the source is the thing to name).
-            string failLabel = string.IsNullOrEmpty(sourcePath) ? "unknown" : Path.GetFileName(sourcePath);
+            string failLabel = SafeLeaf(sourcePath);
 
             // ── 1. Read the source file ──────────────────────────────────────────────────────────────
             if (string.IsNullOrEmpty(sourcePath)) return Fail(failLabel, sourcePath, "sourcePath is empty");
@@ -468,11 +468,26 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// uniform across every refusal stage (pre-parse stages don't know the controller name).</summary>
         private static string Fail(string label, string sourcePath, string why)
         {
-            string summary = "[CompileController] " + label + ": " + why + " => FAIL";
-            string body = "# CompileController FAIL\n\n- source: " + (sourcePath ?? "(null)") + "\n- reason: " + why + "\n";
+            // The one-line verdict must stay one line: exception messages / asset names inside `why`
+            // can carry raw newlines. Flatten in the summary only; the artifact body keeps `why` raw.
+            string oneLineWhy = why.Replace("\r", " ").Replace("\n", " ");
+            string summary = "[CompileController] " + label + ": " + oneLineWhy + " => FAIL";
+            string body = "# CompileController FAIL\n\n- source: " + (string.IsNullOrEmpty(sourcePath) ? "(null)" : sourcePath) + "\n- reason: " + why + "\n";
             string res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "compilecontroller_" + label, summary, body, ".md");
             Debug.LogError(res);
             return res;
+        }
+
+        /// <summary>Non-throwing leaf of a filesystem path — <c>Path.GetFileName</c> throws
+        /// <c>ArgumentException</c> on invalid-char paths (Mono/2022.3), which would crash the door
+        /// before its guards can refuse; splits on both separators (filesystem paths carry
+        /// backslashes, unlike <see cref="RunLogFormat.Leaf"/>'s asset paths).</summary>
+        private static string SafeLeaf(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return "unknown";
+            int i = path.LastIndexOfAny(new[] { '/', '\\' });
+            string leaf = i >= 0 ? path.Substring(i + 1) : path;
+            return leaf.Length == 0 ? "unknown" : leaf;
         }
     }
 
