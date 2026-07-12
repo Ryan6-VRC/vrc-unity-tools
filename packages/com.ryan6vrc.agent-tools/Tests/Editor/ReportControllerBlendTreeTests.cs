@@ -8,7 +8,8 @@ using Ryan6Vrc.AgentTools.Editor;
 // Locks the empty-vs-broken split for blend-tree CHILD motions (finding F11). Before the fix,
 // AppendBlendTree printed a bare "(empty)" for any null child motion — a dangling child (asset
 // deleted) was indistinguishable from an intentionally-empty slot. These two tests pin both poles;
-// the dangling case would also silently regress if the "m_Childs" serialized key were wrong.
+// the EMPTY case also guards the "m_Childs" serialized key — a wrong key nulls the child property,
+// so the empty child would render the loud "(broken: …unreadable)" fallback instead of "(empty)".
 public class ReportControllerBlendTreeTests
 {
     private const string Dir = "Assets/Agent/_bt_test";
