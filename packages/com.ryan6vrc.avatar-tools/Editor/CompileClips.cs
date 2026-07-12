@@ -235,7 +235,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 sb.Append('\n');
             }
 
-            // Object-reference curves — same sort; key times + target instance identity.
+            // Object-reference (PPtr) curves — same sort; key times + STABLE target identity (RefId). Not
+            // exercised by CompileClips' own output: the clips: grammar produces only float curves via
+            // BuildClipContent. This branch exists so a hand-edited .anim carrying a PPtr curve hashes stably
+            // for Task 4's divergence check.
             foreach (var b in AnimationUtility.GetObjectReferenceCurveBindings(clip)
                          .OrderBy(x => x.path, StringComparer.Ordinal)
                          .ThenBy(x => x.type == null ? "" : x.type.FullName, StringComparer.Ordinal)
@@ -247,9 +250,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var keys = AnimationUtility.GetObjectReferenceCurve(clip, b);
                 if (keys != null)
                     foreach (var k in keys)
-                        sb.Append(R(k.time)).Append(':')
-                          .Append(k.value == null ? "null" : k.value.GetInstanceID().ToString(CultureInfo.InvariantCulture))
-                          .Append(';');
+                        sb.Append(R(k.time)).Append(':').Append(RefId(k.value)).Append(';');
                 sb.Append('\n');
             }
 
@@ -258,8 +259,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 sb.Append("E ").Append(R(e.time)).Append('|').Append(e.functionName).Append('|')
                   .Append(e.stringParameter).Append('|').Append(R(e.floatParameter)).Append('|')
                   .Append(e.intParameter.ToString(CultureInfo.InvariantCulture)).Append('|')
-                  .Append(e.objectReferenceParameter == null ? "null"
-                        : e.objectReferenceParameter.GetInstanceID().ToString(CultureInfo.InvariantCulture))
+                  .Append(RefId(e.objectReferenceParameter))
                   .Append('\n');
 
             // Clip settings (loopTime etc.).
@@ -288,6 +288,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // Round-trip float formatting — "R" so serialization is lossless and deterministic.
         static string R(float f) => f.ToString("R", CultureInfo.InvariantCulture);
+
+        // Stable identity for a PPtr target: asset GUID+localFileId (survives domain reload / reimport / restart)
+        // rather than a session-local GetInstanceID (the only otherwise non-deterministic term in the hash).
+        // Fallback to iid for a scene/non-asset object with no GUID.
+        static string RefId(UnityEngine.Object o)
+        {
+            if (o == null) return "null";
+            return AssetDatabase.TryGetGUIDAndLocalFileIdentifier(o, out var guid, out long lfid)
+                ? guid + ":" + lfid.ToString(CultureInfo.InvariantCulture)
+                : "iid:" + o.GetInstanceID().ToString(CultureInfo.InvariantCulture);
+        }
 
         /// <summary>Stamp <paramref name="hash"/> into the <c>.anim</c>'s importer userData (the same channel as
         /// the controller srchash). Reimports so the stamp persists. No-op on a null importer.</summary>
