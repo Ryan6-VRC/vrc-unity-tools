@@ -250,12 +250,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return sb.ToString();
         }
 
-        private static string Leaf(string assetPath)
-        {
-            var p = assetPath.TrimEnd('/');
-            int i = p.LastIndexOf('/');
-            return i >= 0 ? p.Substring(i + 1) : p;
-        }
+        private static string Leaf(string assetPath) => RunLogFormat.Leaf(assetPath);
 
         private static string Sanitize(string s) => RunLogFormat.Sanitize(s);
 

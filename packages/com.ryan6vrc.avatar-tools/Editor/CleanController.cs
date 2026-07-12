@@ -205,7 +205,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
 
                 // ── Ensure outDir exists ───────────────────────────────────────────────────
-                EnsureFolderExists(outDir);
+                TransplantCore.EnsureFolderExists(outDir);
 
                 // ── Step 1: Clean FX controller → <name>_Clean.controller ─────────────────
                 // Create-if-missing / reuse-if-present (preserve GUID). If absent, copy the source
@@ -488,22 +488,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static string AppendNote(string existing, string note)
         {
             return string.IsNullOrEmpty(existing) ? note : existing + "; " + note;
-        }
-
-        /// <summary>
-        /// Recursively ensure every segment of an asset path folder exists.
-        /// e.g. "Assets/Agent/Scratch" creates "Assets/Agent" then "Assets/Agent/Scratch".
-        /// </summary>
-        private static void EnsureFolderExists(string assetPath)
-        {
-            assetPath = assetPath.TrimEnd('/');
-            if (AssetDatabase.IsValidFolder(assetPath)) return;
-            int slash = assetPath.LastIndexOf('/');
-            if (slash < 0) return;
-            string parent = assetPath.Substring(0, slash);
-            string leaf   = assetPath.Substring(slash + 1);
-            EnsureFolderExists(parent);
-            AssetDatabase.CreateFolder(parent, leaf);
         }
 
         // ── Parameter pruning ─────────────────────────────────────────────────────────────────

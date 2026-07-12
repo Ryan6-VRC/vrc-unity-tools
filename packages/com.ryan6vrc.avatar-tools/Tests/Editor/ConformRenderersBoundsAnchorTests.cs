@@ -1,5 +1,7 @@
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 
 // Exercises SetBoundsAndAnchor's bounds/anchor branches. The owned root has no humanoid Animator, so the
@@ -34,6 +36,9 @@ public class ConformRenderersBoundsAnchorTests
 
     static string Conform(GameObject owned, bool whatIf = false)
     {
+        // The empty source always makes materials FAIL (see the type comment), and a FAIL summary is
+        // emitted via Debug.LogError — expected, or the runner flags an unhandled error log.
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
         var src = new GameObject("Src");
         var summary = ConformRenderers.Run(owned, src, null, whatIf);
         Object.DestroyImmediate(src);
@@ -109,5 +114,16 @@ public class ConformRenderersBoundsAnchorTests
         StringAssert.Contains("set=1", summary);
         StringAssert.Contains("boundsKeptLarger=1", summary);
         Object.DestroyImmediate(owned);
+    }
+
+    [Test]
+    public void Null_arg_fails_through_the_runlog_grammar_not_a_bare_line()
+    {
+        LogAssert.Expect(LogType.Error, new Regex("ownedRoot is null"));
+        var summary = ConformRenderers.Run(null, null);
+        StringAssert.Contains("error=ownedRoot is null => FAIL | log=", summary);
+        var path = summary.Substring(summary.IndexOf("log=") + 4);
+        Assert.IsTrue(System.IO.File.Exists(path), "guard FAIL must write a RunLog: " + path);
+        UnityEditor.AssetDatabase.DeleteAsset(path);
     }
 }

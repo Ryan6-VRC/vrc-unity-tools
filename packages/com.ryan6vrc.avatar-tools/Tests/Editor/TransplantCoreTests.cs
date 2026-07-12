@@ -355,4 +355,61 @@ public class TransplantCoreTests
         Assert.AreEqual(1, log.offenders.Count);
         StringAssert.Contains("no error detail", log.offenders[0]);
     }
+
+    // ── WriteRunLog sections (the envelope's custom-section hook) ─────────────────────────────
+
+    [Test]
+    public void WriteRunLog_without_sections_ends_at_warnings()
+    {
+        var log = new TransplantRunLog("tc-test");
+        log.Count("n", 1);
+        string path = TransplantCore.WriteRunLog(log, "no-sections");
+        try
+        {
+            string json = System.IO.File.ReadAllText(path);
+            StringAssert.Contains("\"warnings\": []\n}", json); // envelope closes right after warnings
+        }
+        finally { UnityEditor.AssetDatabase.DeleteAsset(path); }
+    }
+
+    [Test]
+    public void WriteRunLog_emits_sections_verbatim_after_warnings_in_order()
+    {
+        var log = new TransplantRunLog("tc-test");
+        log.Warning("w1");
+        log.Section("rows", "[\n    { \"a\": 1 }\n  ]");
+        log.Section("extra", "[]");
+        string path = TransplantCore.WriteRunLog(log, "with-sections");
+        try
+        {
+            string json = System.IO.File.ReadAllText(path);
+            StringAssert.Contains(",\n  \"rows\": [\n    { \"a\": 1 }\n  ],\n  \"extra\": []\n}", json);
+            Assert.Less(json.IndexOf("\"warnings\""), json.IndexOf("\"rows\""),
+                "sections must follow the warnings array");
+        }
+        finally { UnityEditor.AssetDatabase.DeleteAsset(path); }
+    }
+
+    [Test]
+    public void Subclassed_runlog_flows_through_finish_with_its_section()
+    {
+        var log = new SectionedProbeLog();
+        log.Section("probe", "[]");
+        string summary = TransplantCore.Finish(log, "probe-label");
+        StringAssert.Contains("[tc-probe] probe-label", summary);
+        int i = summary.IndexOf("log=");
+        Assert.GreaterOrEqual(i, 0, "summary missing 'log=' trailer: " + summary);
+        string path = summary.Substring(i + 4);
+        try
+        {
+            string json = System.IO.File.ReadAllText(path);
+            StringAssert.Contains("\"probe\": []", json);
+        }
+        finally { UnityEditor.AssetDatabase.DeleteAsset(path); }
+    }
+
+    sealed class SectionedProbeLog : TransplantRunLog
+    {
+        public SectionedProbeLog() : base("tc-probe") { }
+    }
 }
