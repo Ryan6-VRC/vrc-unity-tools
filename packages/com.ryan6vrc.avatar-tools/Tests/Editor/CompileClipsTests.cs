@@ -161,4 +161,19 @@ public class CompileClipsTests
         StringAssert.Contains("=> PASS", s);
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim"));
     }
+
+    [Test]
+    public void Content_hash_is_stable_and_edit_sensitive()
+    {
+        CompileClips.Compile(WriteYaml(TwoPoses), Out);
+        string h1 = CompileClips.ReadContentStamp(Out + "/Wave.anim");
+        Assert.IsFalse(string.IsNullOrEmpty(h1), "stamp written on emit");
+        CompileClips.Compile(WriteYaml(TwoPoses), Out);                 // identical recompile
+        Assert.AreEqual(h1, CompileClips.ReadContentStamp(Out + "/Wave.anim"), "stable for identical content");
+        var c = AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim");
+        Assert.AreEqual(h1, CompileClips.HashClipContent(c), "hash of the on-disk clip matches its stamp");
+        string mutated = TwoPoses.Replace("blendShape.Wave", "blendShape.Salute");
+        CompileClips.Compile(WriteYaml(mutated), Out, force: true);     // force: content diverged from stamp (Task 4 not yet built, but force is safe)
+        Assert.AreNotEqual(h1, CompileClips.ReadContentStamp(Out + "/Wave.anim"), "hash changes when content changes");
+    }
 }

@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using UnityEditor;
 using UnityEngine;
 using Ryan6Vrc.AgentTools.Editor;
@@ -166,7 +168,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     log.Note(path);
                 }
 
-                if (!whatIf) AssetDatabase.SaveAssets();
+                if (!whatIf)
+                {
+                    AssetDatabase.SaveAssets();
+
+                    // ── Content-provenance stamp. Reload each emitted clip FROM DISK and stamp the hash of THAT
+                    //    on-disk clip — never the in-memory `built` clip. Float/tangent serialization can drift
+                    //    subtly across the in-memory→.anim round-trip, so stamping the disk hash guarantees the
+                    //    stamp equals what a divergence check (Task 4) recomputes from the .anim; an unmodified
+                    //    clip can never read as diverged. Nothing to stamp under whatIf (nothing was written). ──
+                    foreach (var spec in doc.Clips)
+                    {
+                        string path = outClean + "/" + TransplantCore.Sanitize(spec.Name) + ".anim";
+                        var onDisk = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
+                        if (onDisk != null) StampContent(path, HashClipContent(onDisk));
+                    }
+                }
 
                 log.Count("emitted", doc.Clips.Count);
                 log.Count("created", created);
@@ -180,6 +197,125 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             return TransplantCore.Finish(log, label);
+        }
+
+        // ── Content-hash provenance ────────────────────────────────────────────────────────────────────
+        //
+        // A deterministic, order-INDEPENDENT hash over an emitted clip's CONTENT (curves, object refs, events,
+        // settings). Task 4 recomputes this from disk and refuses to clobber a clip whose content diverges from
+        // its stamp; this task only stamps + reads it back. Reuses ControllerEmit.SourceHash so the hash width /
+        // format matches the sibling srchash provenance.
+
+        /// <summary>Deterministic content hash of <paramref name="clip"/> — order-independent (binding lists
+        /// sorted), so two clips with the same content hash equal regardless of authoring/enumeration order.
+        /// Covers frameRate, every float curve (keys with time/value/inTangent/outTangent in round-trip "R"),
+        /// every object-reference curve (key times + target instance identity), animation events, and the clip
+        /// settings.</summary>
+        public static string HashClipContent(AnimationClip clip)
+        {
+            if (clip == null) return ControllerEmit.SourceHash("");
+
+            var sb = new StringBuilder();
+            sb.Append("frameRate=").Append(R(clip.frameRate)).Append('\n');
+
+            // Float curves — sorted by path+type+propertyName (order-independent).
+            foreach (var b in AnimationUtility.GetCurveBindings(clip)
+                         .OrderBy(x => x.path, StringComparer.Ordinal)
+                         .ThenBy(x => x.type == null ? "" : x.type.FullName, StringComparer.Ordinal)
+                         .ThenBy(x => x.propertyName, StringComparer.Ordinal))
+            {
+                sb.Append("F ").Append(b.path).Append('|')
+                  .Append(b.type == null ? "" : b.type.FullName).Append('|')
+                  .Append(b.propertyName).Append('=');
+                var curve = AnimationUtility.GetEditorCurve(clip, b);
+                if (curve != null)
+                    foreach (var k in curve.keys)
+                        sb.Append(R(k.time)).Append(':').Append(R(k.value)).Append('/')
+                          .Append(R(k.inTangent)).Append('/').Append(R(k.outTangent)).Append(';');
+                sb.Append('\n');
+            }
+
+            // Object-reference curves — same sort; key times + target instance identity.
+            foreach (var b in AnimationUtility.GetObjectReferenceCurveBindings(clip)
+                         .OrderBy(x => x.path, StringComparer.Ordinal)
+                         .ThenBy(x => x.type == null ? "" : x.type.FullName, StringComparer.Ordinal)
+                         .ThenBy(x => x.propertyName, StringComparer.Ordinal))
+            {
+                sb.Append("O ").Append(b.path).Append('|')
+                  .Append(b.type == null ? "" : b.type.FullName).Append('|')
+                  .Append(b.propertyName).Append('=');
+                var keys = AnimationUtility.GetObjectReferenceCurve(clip, b);
+                if (keys != null)
+                    foreach (var k in keys)
+                        sb.Append(R(k.time)).Append(':')
+                          .Append(k.value == null ? "null" : k.value.GetInstanceID().ToString(CultureInfo.InvariantCulture))
+                          .Append(';');
+                sb.Append('\n');
+            }
+
+            // Animation events — order-preserving (event order is itself content).
+            foreach (var e in AnimationUtility.GetAnimationEvents(clip))
+                sb.Append("E ").Append(R(e.time)).Append('|').Append(e.functionName).Append('|')
+                  .Append(e.stringParameter).Append('|').Append(R(e.floatParameter)).Append('|')
+                  .Append(e.intParameter.ToString(CultureInfo.InvariantCulture)).Append('|')
+                  .Append(e.objectReferenceParameter == null ? "null"
+                        : e.objectReferenceParameter.GetInstanceID().ToString(CultureInfo.InvariantCulture))
+                  .Append('\n');
+
+            // Clip settings (loopTime etc.).
+            var s = AnimationUtility.GetAnimationClipSettings(clip);
+            sb.Append("S loopTime=").Append(s.loopTime)
+              .Append(";loopBlend=").Append(s.loopBlend)
+              .Append(";cycleOffset=").Append(R(s.cycleOffset))
+              .Append(";startTime=").Append(R(s.startTime))
+              .Append(";stopTime=").Append(R(s.stopTime))
+              .Append(";mirror=").Append(s.mirror)
+              .Append(";level=").Append(R(s.level))
+              .Append(";orientationOffsetY=").Append(R(s.orientationOffsetY))
+              .Append(";heightFromFeet=").Append(s.heightFromFeet)
+              .Append(";keepOriginalOrientation=").Append(s.keepOriginalOrientation)
+              .Append(";keepOriginalPositionY=").Append(s.keepOriginalPositionY)
+              .Append(";keepOriginalPositionXZ=").Append(s.keepOriginalPositionXZ)
+              .Append(";loopBlendOrientation=").Append(s.loopBlendOrientation)
+              .Append(";loopBlendPositionY=").Append(s.loopBlendPositionY)
+              .Append(";loopBlendPositionXZ=").Append(s.loopBlendPositionXZ)
+              .Append(";hasAdditiveReferencePose=").Append(s.hasAdditiveReferencePose)
+              .Append(";additiveReferencePoseTime=").Append(R(s.additiveReferencePoseTime))
+              .Append('\n');
+
+            return ControllerEmit.SourceHash(sb.ToString());
+        }
+
+        // Round-trip float formatting — "R" so serialization is lossless and deterministic.
+        static string R(float f) => f.ToString("R", CultureInfo.InvariantCulture);
+
+        /// <summary>Stamp <paramref name="hash"/> into the <c>.anim</c>'s importer userData (the same channel as
+        /// the controller srchash). Reimports so the stamp persists. No-op on a null importer.</summary>
+        public static void StampContent(string animPath, string hash)
+        {
+            var imp = AssetImporter.GetAtPath(animPath);
+            if (imp == null) return;
+            imp.userData = "clipcontent:" + hash;
+            imp.SaveAndReimport();
+        }
+
+        /// <summary>Read back the content stamp from the <c>.anim</c>'s importer userData; null when absent
+        /// (unstamped, hand-authored, or a missing importer).</summary>
+        public static string ReadContentStamp(string animPath)
+        {
+            var imp = AssetImporter.GetAtPath(animPath);
+            return imp == null ? null : ExtractField(imp.userData, "clipcontent:");
+        }
+
+        // Extract a ";"-delimited "<key><value>" field from userData (mirrors CompileController.ExtractField).
+        static string ExtractField(string userData, string key)
+        {
+            if (string.IsNullOrEmpty(userData)) return null;
+            int i = userData.IndexOf(key, StringComparison.Ordinal);
+            if (i < 0) return null;
+            i += key.Length;
+            int end = userData.IndexOf(';', i);
+            return end < 0 ? userData.Substring(i) : userData.Substring(i, end - i);
         }
 
         // Replace `target`'s content with `built`'s, clearing residual curves/object-refs/events FIRST so a
