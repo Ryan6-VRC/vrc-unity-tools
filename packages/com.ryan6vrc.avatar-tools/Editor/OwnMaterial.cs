@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Text;
@@ -201,7 +200,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return WhatIfPreview(mat, textureHome, requested, data, coLabel);
             }
 
-            EnsureFolderExists(outClean);
+            TransplantCore.EnsureFolderExists(outClean);
             if (!AssetDatabase.CopyAsset(sourcePath, targetPath))
                 return Fail(data, coLabel, "CopyAsset failed: " + sourcePath + " -> " + targetPath);
 
@@ -441,7 +440,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (anyForkNeeded)
                 {
                     homeCreatedThisRun = !AssetDatabase.IsValidFolder(textureHome);
-                    EnsureFolderExists(textureHome);
+                    TransplantCore.EnsureFolderExists(textureHome);
                 }
 
                 foreach (var row in plan)
@@ -1047,18 +1046,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
-        static void EnsureFolderExists(string assetPath)
-        {
-            assetPath = assetPath.TrimEnd('/');
-            if (AssetDatabase.IsValidFolder(assetPath)) return;
-            int slash = assetPath.LastIndexOf('/');
-            if (slash < 0) return;
-            string parent = assetPath.Substring(0, slash);
-            string leaf = assetPath.Substring(slash + 1);
-            EnsureFolderExists(parent);
-            AssetDatabase.CreateFolder(parent, leaf);
-        }
-
         /// <summary>Route an argument-guard failure through the house RunLog grammar (summary + RunLog +
         /// LogError), like the sibling transplant tools — never a bare trailer-less line.</summary>
         static string ArgFail(string label, string msg)
@@ -1078,90 +1065,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return Finish(data, label);
         }
 
-        /// <summary>Write the RunLog, build the one-line summary with the RunLog path folded onto its
-        /// tail, log it at the right severity (PASS → Log, else LogError), and return the summary.</summary>
+        /// <summary>Attach the bespoke <c>slots[]</c> section, then the shared envelope tail
+        /// (<see cref="TransplantCore.Finish"/>: RunLog + one-line summary + severity log; it also
+        /// backfills an offender on an offenderless FAIL). Every OwnMaterial exit funnels through here,
+        /// so every RunLog carries a <c>slots</c> key — empty on a pre-plan FAIL.</summary>
         static string Finish(RunData data, string label)
         {
-            if (data.result == "FAIL" && data.offenders.Count == 0)
-                data.Offender("unnamed failure: " + (data.error ?? "no error detail"));
-
-            string path = WriteRunLog(data, label);
-            string summary = Summary(data, label) + " | log=" + path;
-            if (data.result == "PASS") Debug.Log(summary); else Debug.LogError(summary);
-            return summary;
+            data.Section("slots", RenderSlots(data.slots));
+            return TransplantCore.Finish(data, label);
         }
 
-        /// <summary>One-line PASS/FAIL summary: <c>[own-material] label: k1=v1, k2=v2 offenders=[...] => RESULT</c>.</summary>
-        static string Summary(RunData data, string label)
+        /// <summary>Render the per-slot provenance table as a JSON array (the RunLog's <c>slots</c>
+        /// section) — see <see cref="SlotRow"/> for the disposition vocabulary.</summary>
+        static string RenderSlots(List<SlotRow> slots)
         {
-            var counts = new StringBuilder();
-            for (int i = 0; i < data.counts.Count; i++)
-            {
-                if (i > 0) counts.Append(", ");
-                counts.Append(data.counts[i].Key).Append('=').Append(data.counts[i].Value.ToString(CultureInfo.InvariantCulture));
-            }
-
-            string offenders = data.offenders.Count > 0 ? " offenders=[" + string.Join("; ", data.offenders) + "]" : "";
-            string notes = data.notes.Count > 0 ? " notes=[" + string.Join("; ", data.notes) + "]" : "";
-            string warnings = data.warnings.Count > 0 ? " warnings=[" + string.Join("; ", data.warnings) + "]" : "";
-            string error = data.error != null ? " error=" + data.error : "";
-            string whatIf = data.whatIf ? " (whatIf)" : "";
-
-            return string.Format(CultureInfo.InvariantCulture,
-                "[own-material]{0} {1}: {2}{3}{4}{5}{6} => {7}",
-                whatIf, label, counts, offenders, notes, warnings, error, data.result);
-        }
-
-        // ── RunLog output ─────────────────────────────────────────────────────────────────────────────
-
-        static string WriteRunLog(RunData data, string label)
-        {
-            Directory.CreateDirectory(TransplantCore.RunLogDir);
-
-            var sb = new StringBuilder();
-            sb.Append("{\n");
-            sb.Append("  \"kind\": \"own-material\",\n");
-            sb.Append("  \"unityVersion\": ").Append(TransplantCore.Q(Application.unityVersion)).Append(",\n");
-            sb.Append("  \"timestampUtc\": ").Append(TransplantCore.Q(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append(",\n");
-            sb.Append("  \"whatIf\": ").Append(data.whatIf ? "true" : "false").Append(",\n");
-            sb.Append("  \"instance\": ").Append(TransplantCore.Q(data.instance)).Append(",\n");
-            sb.Append("  \"source\": ").Append(TransplantCore.Q(data.source)).Append(",\n");
-            sb.Append("  \"result\": ").Append(TransplantCore.Q(data.result)).Append(",\n");
-            sb.Append("  \"error\": ").Append(TransplantCore.Q(data.error)).Append(",\n");
-
-            foreach (var kv in data.counts)
-                sb.Append("  ").Append(TransplantCore.Q(kv.Key)).Append(": ").Append(kv.Value.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-
-            AppendStringArray(sb, "offenders", data.offenders);
-            sb.Append(",\n");
-            AppendStringArray(sb, "notes", data.notes);
-            sb.Append(",\n");
-            AppendStringArray(sb, "warnings", data.warnings);
-            sb.Append(",\n");
-            AppendSlotArray(sb, data.slots);
-            sb.Append("\n}");
-
-            var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-            var path = TransplantCore.RunLogDir + "/own-material_" + TransplantCore.Sanitize(label) + "_" + stamp + ".json";
-            File.WriteAllText(path, sb.ToString());
-            AssetDatabase.Refresh();
-            return path;
-        }
-
-        static void AppendStringArray(StringBuilder sb, string key, List<string> items)
-        {
-            sb.Append("  ").Append(TransplantCore.Q(key)).Append(": [");
-            for (int i = 0; i < items.Count; i++)
-            {
-                sb.Append(i == 0 ? "\n" : ",\n");
-                sb.Append("    ").Append(TransplantCore.Q(items[i]));
-            }
-            sb.Append(items.Count > 0 ? "\n  ]" : "]");
-        }
-
-        static void AppendSlotArray(StringBuilder sb, List<SlotRow> slots)
-        {
-            sb.Append("  \"slots\": [");
+            var sb = new StringBuilder("[");
             for (int i = 0; i < slots.Count; i++)
             {
                 var s = slots[i];
@@ -1174,6 +1092,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                   .Append(" }");
             }
             sb.Append(slots.Count > 0 ? "\n  ]" : "]");
+            return sb.ToString();
         }
 
         // ── Data types ────────────────────────────────────────────────────────────────────────────────
@@ -1192,30 +1111,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public string ownedPath;
         }
 
-        /// <summary>Mutable accumulator for one Run, serialized by <see cref="WriteRunLog"/> and
-        /// summarized by <see cref="Summary"/>. Mirrors <c>TransplantRunLog</c>'s envelope conventions
-        /// (ordered <see cref="counts"/>, offenders/notes/warnings) plus the bespoke <see cref="slots"/>
-        /// structured array ConformRenderers-style RunLogs use for a per-row table.</summary>
-        class RunData
+        /// <summary>The shared envelope accumulator plus this tool's bespoke rows: the <see cref="slots"/>
+        /// provenance table (rendered into the RunLog's <c>slots</c> section by
+        /// <see cref="OwnMaterial.Finish"/>) and its running disposition <see cref="tally"/>
+        /// (<see cref="OwnMaterial.TallyDisposition"/>, flushed into the six ordered <c>slotsX</c> counts
+        /// by <see cref="OwnMaterial.EmitDispositionCounts"/>).</summary>
+        sealed class RunData : TransplantRunLog
         {
-            public bool whatIf;
-            public string instance;
-            public string source;
-            public string result = "PASS";
-            public string error;
-            public readonly List<KeyValuePair<string, long>> counts = new List<KeyValuePair<string, long>>();
-            public readonly List<string> offenders = new List<string>();
-            public readonly List<string> notes = new List<string>();
-            public readonly List<string> warnings = new List<string>();
+            public RunData() : base("own-material") { }
             public readonly List<SlotRow> slots = new List<SlotRow>();
-            /// <summary>Running disposition tally (<see cref="OwnMaterial.TallyDisposition"/>), flushed into
-            /// the six ordered <c>slotsX</c> counts by <see cref="OwnMaterial.EmitDispositionCounts"/>.</summary>
             public readonly Dictionary<string, long> tally = new Dictionary<string, long>(StringComparer.Ordinal);
-
-            public void Count(string name, long value) => counts.Add(new KeyValuePair<string, long>(name, value));
-            public void Offender(string msg) { if (!string.IsNullOrEmpty(msg)) offenders.Add(msg); }
-            public void Note(string msg) { if (!string.IsNullOrEmpty(msg)) notes.Add(msg); }
-            public void Warning(string msg) { if (!string.IsNullOrEmpty(msg)) warnings.Add(msg); }
         }
     }
 }
