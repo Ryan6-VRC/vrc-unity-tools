@@ -99,17 +99,18 @@ namespace Ryan6Vrc.AgentTools.Editor
             int obsCount = AppendObservations(body, constraintRows, applyDuringUploadHosts);
             int other = AppendOther(body, root, tier1);
 
-            var header = new StringBuilder();
-            header.Append("# ReportGimmick: ").Append(root.name).Append('\n');
-            header.Append("root: `").Append(GetHierarchyPath(root.transform)).Append("`  \n");
-            header.Append("_transform handles are full scene-root-absolute paths; under first-match resolution a duplicate-named sibling makes a handle non-unique (a pre-existing family caveat, surfaced here because the interior walk can hit duplicate-named bones)._\n");
-            header.Append("\ncontacts=").Append(contactCount)
+            // Header carries the count line, which needs `other` — known only after AppendOther walked the
+            // subtree — so the digest body is built first, then wrapped by the header into the final doc.
+            var doc = new StringBuilder();
+            doc.Append("# ReportGimmick: ").Append(root.name).Append('\n');
+            doc.Append("root: `").Append(GetHierarchyPath(root.transform)).Append("`  \n");
+            doc.Append("_transform handles are full scene-root-absolute paths; under first-match resolution a duplicate-named sibling makes a handle non-unique (a pre-existing family caveat, surfaced here because the interior walk can hit duplicate-named bones)._\n");
+            doc.Append("\ncontacts=").Append(contactCount)
                   .Append(" physbones=").Append(physbones.Length)
                   .Append(" constraints=").Append(constraintCount)
                   .Append(" vrcfury=").Append(fury.Count)
                   .Append(" other=").Append(other).Append('\n');
-            header.Append(body);
-            body = header;
+            doc.Append(body);
 
             var summary = "[ReportGimmick] " + root.name
                         + ": contacts=" + contactCount
@@ -118,7 +119,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         + " vrcfury=" + fury.Count
                         + " other=" + other
                         + " observations=" + obsCount + " => OK";
-            var result = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "gimmick_" + root.name, summary, body.ToString(), ".md");
+            var result = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "gimmick_" + root.name, summary, doc.ToString(), ".md");
             Debug.Log(result);
             return result;
         }
@@ -620,7 +621,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var o = p.objectReferenceValue;
                     if (o == null) return;
                     string path = AssetDatabase.GetAssetPath(o);
-                    string handle = string.IsNullOrEmpty(path) && o is Component oc ? GetHierarchyPath(oc.transform) : path;
+                    // Asset ref → asset path; scene ref (Component or GameObject) → its hierarchy path.
+                    string handle = !string.IsNullOrEmpty(path) ? path
+                                  : o is Component oc ? GetHierarchyPath(oc.transform)
+                                  : o is GameObject go ? GetHierarchyPath(go.transform)
+                                  : "";
                     AssetDatabase.TryGetGUIDAndLocalFileIdentifier(o, out string guid, out long _);
                     sb.Append(pad).Append("- ").Append(Cell(p.name)).Append(" → `").Append(Cell(o.name)).Append('`');
                     if (!string.IsNullOrEmpty(handle)) sb.Append(" (`").Append(Cell(handle)).Append("`)");

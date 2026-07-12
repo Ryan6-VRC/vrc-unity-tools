@@ -114,6 +114,9 @@ public class ReportGimmickWidenTests
         StringAssert.Contains("ModularAvatarMenuItem", report);
         StringAssert.Contains("MyToggleControl", report);         // control name (one struct level)
         StringAssert.Contains("Toggle", report);                  // control type enum (one struct level)
+        // Upper bound of the one-struct-level peek: parameter.name is a SECOND struct level (Control →
+        // parameter → name) and must NOT surface in-tool — it's AgentInspector's depth (design decision A).
+        StringAssert.DoesNotContain("MyDrivenParam", report);
     }
 
     [Test]
@@ -143,6 +146,8 @@ public class ReportGimmickWidenTests
         c.AddComponent<PositionConstraint>();
 
         string report = ReadReport("Rig");
-        StringAssert.Contains("other=2", report);                 // probe + menuitem only; constraint + Transforms excluded
+        // other counts one row per single-visit component, so a tier-1 constraint (rendered in the
+        // constraints TABLE, not the census) and the four Transforms cannot inflate it: probe + menuitem = 2.
+        StringAssert.Contains("other=2", report);
     }
 }
