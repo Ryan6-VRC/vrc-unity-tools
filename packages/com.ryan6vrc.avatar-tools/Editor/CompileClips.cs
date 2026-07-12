@@ -110,7 +110,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 //    names + shared filename, writing NOTHING (consistent with batch-atomicity). We deliberately
                 //    do NOT guid-suffix like OwnControllerClips (that tool dedups vendor churn; here the intent
                 //    is legible authored filenames). ──
-                var byFile = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+                // OrdinalIgnoreCase, not Ordinal: the platform filesystem (VRChat-pinned Windows/NTFS) is
+                // case-insensitive, so "Wave" and "wave" occupy ONE file. Under Ordinal they'd hash to distinct
+                // keys, the guard would pass, and the write loop's case-insensitive LoadAssetAtPath would resolve
+                // the second to the first and silently clobber it — the exact failure this guard prevents.
+                var byFile = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
                 foreach (var spec in doc.Clips)
                 {
                     string fname = TransplantCore.Sanitize(spec.Name) + ".anim";
@@ -130,7 +134,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 // ── BUILD-ALL-IN-MEMORY FIRST (batch atomicity). A bad binding on ANY clip fails the whole
                 //    run here, before a single file is written — never a partial external-clip set on disk. ──
+                // built[...] holds detached, unmanaged AnimationClip instances. Each is adopted (CreateAsset) or
+                // destroyed (in-place reuse / whatIf) in the write loop below, and its slot nulled the instant it
+                // is — so the finally frees ONLY the leftovers an early refusal (bad binding, collision, divergence,
+                // read-only) or a whatIf would otherwise strand. Adopted clips (which BECAME the asset) are nulled,
+                // never destroyed.
                 var built = new Dictionary<string, AnimationClip>();
+                try
+                {
                 foreach (var spec in doc.Clips)
                 {
                     try { built[spec.Name] = ControllerEmit.BuildClipContent(spec, paramNames); }
@@ -186,6 +197,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (whatIf)
                     {
                         if (existing != null) reused++; else created++;
+                        UnityEngine.Object.DestroyImmediate(b); // nothing written — free the build source
+                        built[spec.Name] = null;
                     }
                     else if (existing != null)
                     {
@@ -194,12 +207,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         // mint a new GUID and break external references to the clip.
                         ClearAndCopy(existing, b);
                         UnityEngine.Object.DestroyImmediate(b); // detached build source, no longer needed
+                        built[spec.Name] = null;
                         reused++;
                     }
                     else
                     {
                         // Absent path → the built clip BECOMES the new asset (visible main asset; no hideFlags).
                         AssetDatabase.CreateAsset(b, path);
+                        built[spec.Name] = null; // adopted as the asset — must NOT be destroyed by the finally
                         created++;
                     }
                     log.Note(path);
@@ -226,6 +241,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 log.Count("created", created);
                 log.Count("reused", reused);
                 log.result = "PASS";
+                }
+                finally
+                {
+                    // Free any built clip that never became an asset — every adopted/destroyed slot was nulled
+                    // above, so this frees only what an early refusal or whatIf stranded (no double-free, and
+                    // adopted assets are untouched).
+                    foreach (var kv in built)
+                        if (kv.Value != null) UnityEngine.Object.DestroyImmediate(kv.Value);
+                }
             }
             catch (Exception ex)
             {
@@ -245,15 +269,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>Deterministic content hash of <paramref name="clip"/> — order-independent (binding lists
         /// sorted), so two clips with the same content hash equal regardless of authoring/enumeration order.
-        /// Covers frameRate, every float curve (keys with time/value/inTangent/outTangent in round-trip "R"),
-        /// every object-reference curve (key times + target instance identity), animation events, and the clip
-        /// settings.</summary>
+        /// Covers frameRate/wrapMode/legacy, every float curve (keys with time/value/in-out-tangent/in-out-weight/
+        /// weightedMode in round-trip "R" + pre/post wrap), every object-reference curve (key times + target
+        /// instance identity), animation events (incl. messageOptions), and the clip settings. Hashes only
+        /// human-editable, round-trip-STABLE fields — deliberately NOT clip.localBounds (auto-derived from the
+        /// curves; Unity may recompute it, which would manufacture false divergence).</summary>
         public static string HashClipContent(AnimationClip clip)
         {
             if (clip == null) return ControllerEmit.SourceHash("");
 
             var sb = new StringBuilder();
-            sb.Append("frameRate=").Append(R(clip.frameRate)).Append('\n');
+            sb.Append("frameRate=").Append(R(clip.frameRate))
+              .Append(";wrapMode=").Append(((int)clip.wrapMode).ToString(CultureInfo.InvariantCulture))
+              .Append(";legacy=").Append(clip.legacy).Append('\n');
 
             // Float curves — sorted by path+type+propertyName (order-independent).
             foreach (var b in AnimationUtility.GetCurveBindings(clip)
@@ -266,9 +294,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                   .Append(b.propertyName).Append('=');
                 var curve = AnimationUtility.GetEditorCurve(clip, b);
                 if (curve != null)
+                {
                     foreach (var k in curve.keys)
                         sb.Append(R(k.time)).Append(':').Append(R(k.value)).Append('/')
-                          .Append(R(k.inTangent)).Append('/').Append(R(k.outTangent)).Append(';');
+                          .Append(R(k.inTangent)).Append('/').Append(R(k.outTangent)).Append('/')
+                          .Append(R(k.inWeight)).Append('/').Append(R(k.outWeight)).Append('/')
+                          .Append(((int)k.weightedMode).ToString(CultureInfo.InvariantCulture)).Append(';');
+                    // Per-curve wrap: human-editable, serialized as m_Pre/PostInfinity, stable disk↔disk.
+                    sb.Append('~').Append(((int)curve.preWrapMode).ToString(CultureInfo.InvariantCulture))
+                      .Append('/').Append(((int)curve.postWrapMode).ToString(CultureInfo.InvariantCulture));
+                }
                 sb.Append('\n');
             }
 
@@ -296,7 +331,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 sb.Append("E ").Append(R(e.time)).Append('|').Append(e.functionName).Append('|')
                   .Append(e.stringParameter).Append('|').Append(R(e.floatParameter)).Append('|')
                   .Append(e.intParameter.ToString(CultureInfo.InvariantCulture)).Append('|')
-                  .Append(RefId(e.objectReferenceParameter))
+                  .Append(RefId(e.objectReferenceParameter)).Append('|')
+                  .Append(((int)e.messageOptions).ToString(CultureInfo.InvariantCulture))
                   .Append('\n');
 
             // Clip settings (loopTime etc.).

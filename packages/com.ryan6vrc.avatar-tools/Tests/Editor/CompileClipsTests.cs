@@ -139,6 +139,25 @@ public class CompileClipsTests
     }
 
     [Test]
+    public void Sanitized_filename_collision_is_case_insensitive()
+    {
+        // "Wave" and "wave" sanitize to "Wave.anim"/"wave.anim" — distinct under Ordinal but ONE file on the
+        // case-insensitive (VRChat-pinned Windows/NTFS) filesystem. The guard's OrdinalIgnoreCase comparer must
+        // collide them and refuse; otherwise the write loop's case-insensitive LoadAssetAtPath would resolve the
+        // second onto the first and silently clobber it under a green PASS.
+        string body = Head + "clips:\n" +
+            "  \"Wave\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.Wave\": 100 } }\n" +
+            "  \"wave\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.Wave\": 100 } }\n";
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("collision"));
+        string s = CompileClips.Compile(WriteYaml(body), Out);
+        StringAssert.Contains("FAIL", s);
+        StringAssert.Contains("Wave", s);
+        StringAssert.Contains("wave", s);
+        Assert.IsNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim"), "nothing written");
+        Assert.IsFalse(AssetDatabase.IsValidFolder(Out), "collision refused before the out folder is created");
+    }
+
+    [Test]
     public void Readonly_outDir_fails_unless_force()
     {
         EnsureVendor();
@@ -176,6 +195,32 @@ public class CompileClipsTests
         string mutated = TwoPoses.Replace("blendShape.Wave", "blendShape.Salute");
         CompileClips.Compile(WriteYaml(mutated), Out);                  // recompile with changed YAML: the on-disk clip still matches its stamp (no human edit), so it is NOT diverged and overwrites without force; the new content changes the hash
         Assert.AreNotEqual(h1, CompileClips.ReadContentStamp(Out + "/Wave.anim"), "hash changes when content changes");
+    }
+
+    [Test]
+    public void Weighted_tangent_edit_is_caught()
+    {
+        // A weighted-tangent toggle (a common smoothing hand-edit) changes serialized content WITHOUT touching
+        // any pre-F3 hashed field. The fuller hash (weightedMode/inWeight/outWeight) must now catch it as a
+        // divergence and refuse — else a no-force recompile would silently clobber the smoothing.
+        CompileClips.Compile(WriteYaml(TwoPoses), Out);                  // emit + stamp Wave (PASS)
+        var wave = AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim");
+        var binding = AnimationUtility.GetCurveBindings(wave)[0];
+        var curve = AnimationUtility.GetEditorCurve(wave, binding);
+        var keys = curve.keys;
+        keys[0].weightedMode = WeightedMode.Both;                       // the smoothing hand-edit
+        curve.keys = keys;
+        AnimationUtility.SetEditorCurve(wave, binding, curve);
+        AnimatorTestHelpers.Save(wave, Out + "/Wave.anim");            // edit lands on disk (stamp now stale)
+
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("refusing to clobber"));
+        string s = CompileClips.Compile(WriteYaml(TwoPoses), Out);      // no-force recompile
+        StringAssert.Contains("FAIL", s);
+        StringAssert.Contains("Wave", s);
+
+        var after = AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim");
+        var afterKeys = AnimationUtility.GetEditorCurve(after, binding).keys;
+        Assert.AreEqual(WeightedMode.Both, afterKeys[0].weightedMode, "weighted-tangent edit preserved (refused)");
     }
 
     [Test]
