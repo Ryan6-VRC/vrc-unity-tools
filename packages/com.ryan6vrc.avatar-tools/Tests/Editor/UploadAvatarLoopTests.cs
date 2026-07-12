@@ -65,7 +65,9 @@ public class UploadAvatarLoopTests
             UploadAvatar.UploadOutcome.Failed(httpStatus: 500),
             UploadAvatar.UploadOutcome.Uploaded(),
         });
-        var report = UploadAvatar.RunCore(avatars, _ => outcomes.Dequeue(), () => saveCalls++);
+        var report = UploadAvatar.RunCore(avatars,
+            _ => System.Threading.Tasks.Task.FromResult(outcomes.Dequeue()),
+            () => saveCalls++).GetAwaiter().GetResult();
         Assert.AreEqual("A", report.rows[0].handle); Assert.AreEqual("uploaded", report.rows[0].result);
         Assert.AreEqual("failed", report.rows[1].result); Assert.AreEqual("transient", report.rows[1].cls);
         Assert.AreEqual(2, report.rows.Count);
@@ -79,7 +81,8 @@ public class UploadAvatarLoopTests
         var a = MakeAvatar("A","");
         int calls = 0;
         var report = UploadAvatar.RunCore(new[]{a},
-            _ => { calls++; return UploadAvatar.UploadOutcome.Failed(httpStatus: 429); }, () => {});
+            _ => { calls++; return System.Threading.Tasks.Task.FromResult(UploadAvatar.UploadOutcome.Failed(httpStatus: 429)); },
+            () => {}).GetAwaiter().GetResult();
         Assert.AreEqual(1, calls);
         Assert.AreEqual("rate-limit", report.rows[0].cls);
         UnityEngine.Object.DestroyImmediate(a);
@@ -90,7 +93,8 @@ public class UploadAvatarLoopTests
     {
         var a = MakeAvatar("A","");
         var report = UploadAvatar.RunCore(new[]{a},
-            _ => UploadAvatar.UploadOutcome.ReservedNoBundle(), () => {});
+            _ => System.Threading.Tasks.Task.FromResult(UploadAvatar.UploadOutcome.ReservedNoBundle()),
+            () => {}).GetAwaiter().GetResult();
         Assert.AreEqual("reserved-no-bundle", report.rows[0].result);
         UnityEngine.Object.DestroyImmediate(a);
     }
@@ -100,7 +104,8 @@ public class UploadAvatarLoopTests
     {
         var a = MakeAvatar("A","");
         var report = UploadAvatar.RunCore(new[]{a},
-            _ => UploadAvatar.UploadOutcome.Failed(httpStatus:400, message:"rejected avtr_dead for usr_beef"), () => {});
+            _ => System.Threading.Tasks.Task.FromResult(UploadAvatar.UploadOutcome.Failed(httpStatus:400, message:"rejected avtr_dead for usr_beef")),
+            () => {}).GetAwaiter().GetResult();
         StringAssert.DoesNotContain("avtr_", report.rows[0].error);
         StringAssert.DoesNotContain("usr_",  report.rows[0].error);
         UnityEngine.Object.DestroyImmediate(a);

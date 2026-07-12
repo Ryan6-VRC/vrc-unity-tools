@@ -70,6 +70,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // fake-delegate tests are unaffected.
         static readonly UploadAvatarLogic.AttemptLedger _ledger = new UploadAvatarLogic.AttemptLedger();
 
+        // The in-flight execute batch. Run fires RunCore and returns immediately; the editor update loop
+        // pumps CAU's async continuations. The agent polls Status() until it stops reporting "running".
+        static System.Threading.Tasks.Task<UploadReport> _inflight;
+
         // ── The loop (pure, injectable, fully unit-tested) ──────────────────────────────────────
 
         /// <summary>Drive one pass over <paramref name="avatars"/> with an injected per-avatar delegate.
@@ -79,9 +83,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// tool never auto-retries — a single pass is the whole contract. The id-persistence verify (which
         /// needs the live id CAU writes) is NOT here; it lives in the real adapter that produces the
         /// outcome. RunCore trusts the outcome and only records rows / counts / stop-semantics.</summary>
-        public static UploadReport RunCore(GameObject[] avatars,
-                                           Func<GameObject, UploadOutcome> uploadOne,
-                                           Action saveAssets)
+        public static async System.Threading.Tasks.Task<UploadReport> RunCore(
+            GameObject[] avatars,
+            Func<GameObject, System.Threading.Tasks.Task<UploadOutcome>> uploadOne,
+            Action saveAssets)
         {
             var report = new UploadReport();
             int n = avatars != null ? avatars.Length : 0;
@@ -98,7 +103,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
 
                 string state = ClassifyAvatar(go).state;
-                var outcome = uploadOne(go);
+                var outcome = await uploadOne(go);
 
                 switch (outcome.kind)
                 {
@@ -159,13 +164,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return "[upload-avatar] (whatIf) " + n + " avatar(s): " + rows + " => PASS";
             }
 
-            // Execute path: acquire the builder once, then drive the real per-avatar upload through RunCore.
+            // Execute path: fire-and-forget the async batch, return immediately. The editor update loop
+            // pumps CAU's continuations (blocking here would deadlock the main thread — Task-8 confirmed);
+            // the agent polls Status() for progress and the final summary.
+            if (_inflight != null && !_inflight.IsCompleted)
+                return Refuse("an upload batch is already in flight — poll UploadAvatar.Status()");
             if (!CauReflect.TryGetBuilder(out var builder, out var whyBuilder))
                 return Refuse(whyBuilder);
+            _inflight = RunCore(avatars, go => RealUploadOne(go, builder), () => AssetDatabase.SaveAssets());
+            return "[upload-avatar] batch started (" + (avatars != null ? avatars.Length : 0) +
+                   " avatar(s)); poll UploadAvatar.Status()";
+        }
 
-            var report = RunCore(avatars, go => RealUploadOne(go, builder), () => AssetDatabase.SaveAssets());
-            string logPath = WriteRunLog(report, whatIf: false, label: "all");
-            return BuildSummary(report, whatIf: false, logPath);
+        /// <summary>Poll the in-flight execute batch. The upload is async-driven — Run returns immediately and
+        /// the editor's update loop pumps CAU's continuations; the agent polls this until it stops reporting
+        /// "running". Writes the RunLog + returns the final summary once complete.</summary>
+        public static string Status()
+        {
+            if (_inflight == null) return "[upload-avatar] no batch started";
+            if (!_inflight.IsCompleted) return "[upload-avatar] running…";
+            if (_inflight.IsFaulted)
+            {
+                var ex = _inflight.Exception != null ? _inflight.Exception.GetBaseException() : null;
+                return "[upload-avatar] batch FAULTED: " + UploadAvatarLogic.RedactIds(ex != null ? ex.Message : "unknown");
+            }
+            var report = _inflight.Result;
+            string logPath = WriteRunLog(report, false, "all");
+            return BuildSummary(report, false, logPath);
         }
 
         /// <summary>The REAL per-avatar upload: attempt-ceiling gate → build the CAU setting →
@@ -177,10 +202,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         ///     landed → ReservedNoBundle.
         ///   • The <see cref="UploadAvatarLogic.AttemptLedger"/> caps re-attempts per handle at 3.
         ///
-        /// LIVE-INTEGRATION RISK (Task-8): CAU's UploadSingle is async and may need editor update ticks to
-        /// progress; blocking on it via GetAwaiter().GetResult() from this synchronous tool MAY deadlock
-        /// the main thread and force an async/coroutine pump refactor. Not verifiable headless (CAU absent).</summary>
-        static UploadOutcome RealUploadOne(GameObject go, object builder)
+        /// Async-driven (Task-8 confirmed the sync block deadlocked): the returned Task is fire-and-forget
+        /// from <see cref="Run"/> and the editor update loop pumps CAU's continuations; poll <see cref="Status"/>.</summary>
+        static async System.Threading.Tasks.Task<UploadOutcome> RealUploadOne(GameObject go, object builder)
         {
             string handle = go.name;
 
@@ -201,9 +225,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             try
             {
-                // Synchronous block on the async upload — see the RISK note above.
-                bool ok = CauReflect.UploadOne(setting, builder, CancellationToken.None)
-                            .GetAwaiter().GetResult();
+                // Async-driven: the editor update loop pumps CAU's continuations (blocking the main
+                // thread here deadlocks — CAU's continuations need it). See Run/Status for the drive.
+                bool ok = await CauReflect.UploadOne(setting, builder, CancellationToken.None);
                 if (!ok)
                     return UploadOutcome.Failed(message: "CAU UploadSingle returned false");
 
