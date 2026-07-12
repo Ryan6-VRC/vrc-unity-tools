@@ -32,6 +32,14 @@ public class UploadAvatarLogicTests
         Assert.IsTrue(l.MayAttempt("b"));
     }
 
+    [Test] public void Ledger_ClearResetsHandle()
+    {
+        var l = new UploadAvatarLogic.AttemptLedger();
+        l.Record("a"); l.Record("a"); l.Clear("a");
+        for (int i = 0; i < 3; i++) { Assert.IsTrue(l.MayAttempt("a")); l.Record("a"); }
+        Assert.IsFalse(l.MayAttempt("a"));
+    }
+
     [Test] public void Blueprint_EmptyIsFirstUpload()
     {
         Assert.AreEqual("first-upload", UploadAvatarLogic.ClassifyBlueprint(null));

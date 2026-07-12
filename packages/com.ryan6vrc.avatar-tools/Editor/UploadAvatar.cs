@@ -64,8 +64,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // Per-handle attempt ceiling, static so a skill-driven re-invocation of Run is capped across
-        // calls (account safety must not depend on skill prose). Consulted only by the REAL adapter —
-        // RunCore stays a single, ledger-free pass so the fake-delegate tests are unaffected.
+        // calls (account safety must not depend on skill prose). Cleared on each SUCCESS so it counts
+        // only CONSECUTIVE failures — legitimate successful re-uploads of the same avatar never trip it.
+        // Consulted only by the REAL adapter — RunCore stays a single, ledger-free pass so the
+        // fake-delegate tests are unaffected.
         static readonly UploadAvatarLogic.AttemptLedger _ledger = new UploadAvatarLogic.AttemptLedger();
 
         // ── The loop (pure, injectable, fully unit-tested) ──────────────────────────────────────
@@ -208,6 +210,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 AssetDatabase.SaveAssets();
                 if (wasFirstUpload && ClassifyAvatar(go).state == "first-upload")
                     return UploadOutcome.ReservedNoBundle();
+                _ledger.Clear(handle); // success resets the ceiling — it counts only consecutive failures
                 return UploadOutcome.Uploaded();
             }
             catch (Exception e)

@@ -45,6 +45,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 => !_n.TryGetValue(handle, out var c) || c < MaxAttempts;
             internal void Record(string handle)
                 => _n[handle] = (_n.TryGetValue(handle, out var c) ? c : 0) + 1;
+            internal void Clear(string handle) => _n.Remove(handle);
         }
     }
 }
