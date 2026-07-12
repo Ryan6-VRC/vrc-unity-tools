@@ -228,12 +228,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return Fail(data, coLabel, ThryUnresolvedMessage(resolveReason));
                 }
 
-                bool hasOriginalShaderTag = !string.IsNullOrEmpty(normalizeTarget.GetTag(ThryTagOriginalShader, false, "")) ||
-                    !string.IsNullOrEmpty(normalizeTarget.GetTag(ThryTagOriginalShaderGuid, false, ""));
-                if (!hasOriginalShaderTag)
+                // Dialog guard: Thry's UnlockConcrete pops a blocking EditorUtility.DisplayDialog in a live
+                // (non-batch) editor when the original-shader tag is present but does not RESOLVE to a real
+                // shader (a stale GUID after a poi reinstall/version bump, or a renamed shader) — a modal
+                // that would hang the session. Mirror Thry's own two-step fallback and refuse rather than
+                // risk it: GUID tag → GUIDToAssetPath → LoadAssetAtPath<Shader>, else name tag → Shader.Find.
+                if (!OriginalShaderResolves(normalizeTarget, out string origTag))
                 {
                     AssetDatabase.DeleteAsset(targetPath);
-                    return Fail(data, coLabel, "locked material has no saved original shader; cannot unlock safely");
+                    return Fail(data, coLabel, "locked poi material's original-shader tag ('" + origTag +
+                        "') does not resolve to a shader — cannot safely unlock");
                 }
 
                 var (unlocked, unlockReason) = PoiUnlock(normalizeTarget);
@@ -244,6 +248,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         unlockReason + " — is com.poiyomi.toon installed?");
                 }
 
+                // Hand-rolled rather than IsLocked(reloadedO): this must also FAIL on a null shader (a
+                // corrupt post-unlock load), which IsLocked treats as not-locked.
                 var reloadedO = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
                 if (reloadedO == null || reloadedO.shader == null ||
                     reloadedO.shader.name.StartsWith("Hidden/Locked/", StringComparison.Ordinal))
@@ -272,7 +278,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                data.Note("unlocked locked-poi material via Thry.ShaderOptimizer.UnlockMaterials");
+                data.Note("unlocked locked-poi material via Thry.ThryEditor.ShaderOptimizer.UnlockMaterials");
             }
 
             // O now exists on disk (createdO=true) — any FAIL from here rolls it back (see
@@ -762,6 +768,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         static string ThryUnresolvedMessage(string reason) =>
             "locked poi material but Thry ShaderOptimizer not found — is com.poiyomi.toon installed? (" + reason + ")";
+
+        /// <summary>
+        /// Does <paramref name="m"/>'s saved original-shader tag resolve to a REAL shader? Mirrors Thry's
+        /// own two-step fallback (the same order <c>UnlockConcrete</c> uses before it pops its blocking
+        /// <c>DisplayDialog</c>): the <c>OriginalShaderGUID</c> tag → <c>GUIDToAssetPath</c> →
+        /// <c>LoadAssetAtPath&lt;Shader&gt;</c>, else the <c>OriginalShader</c> tag (a shader NAME) →
+        /// <c>Shader.Find</c>. Presence alone is not enough — a stale GUID (poi reinstall/version bump) or a
+        /// renamed shader leaves the tag present but unresolvable, which is exactly what makes Thry pop the
+        /// modal. <paramref name="tag"/> returns whichever tag value was examined (for the refusal message).
+        /// </summary>
+        static bool OriginalShaderResolves(Material m, out string tag)
+        {
+            string guid = m.GetTag(ThryTagOriginalShaderGuid, false, "");
+            if (!string.IsNullOrEmpty(guid))
+            {
+                tag = guid;
+                string path = AssetDatabase.GUIDToAssetPath(guid);
+                if (!string.IsNullOrEmpty(path) && AssetDatabase.LoadAssetAtPath<Shader>(path) != null) return true;
+            }
+
+            string name = m.GetTag(ThryTagOriginalShader, false, "");
+            if (!string.IsNullOrEmpty(name))
+            {
+                tag = name;
+                if (Shader.Find(name) != null) return true;
+            }
+
+            tag = string.IsNullOrEmpty(guid) ? name : guid;
+            return false;
+        }
 
         /// <summary>
         /// Reflection-resolve <c>Thry.ThryEditor.ShaderOptimizer.UnlockMaterials(IEnumerable&lt;Material&gt;,
