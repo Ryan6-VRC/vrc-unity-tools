@@ -620,6 +620,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 SetTarget(tr, t, srcSm, loc);
                 tr.Mute = t.mute;
                 tr.Solo = t.solo;
+                tr.Name = MeaningfulName(t.name, "", loc);
 
                 tr.When = DecodeConditions(t.conditions, loc);
                 tr.ExitTime = t.hasExitTime ? t.exitTime : (float?)null;

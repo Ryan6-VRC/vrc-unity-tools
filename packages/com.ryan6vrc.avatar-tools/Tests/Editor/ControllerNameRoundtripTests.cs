@@ -11,11 +11,12 @@ using UnityEngine.TestTools;
 
 namespace Ryan6Vrc.AvatarTools.Tests
 {
-    // Behavioral tests for the blend-tree name round-trip (compile <-> decompile): a human-authored `name:`
-    // survives; an auto-named tree (the positional <State>_BlendTree / <parent>_<i> default) stays nameless in
-    // YAML; a name that cannot round-trip the line-based YAML (a line break) is refused, not mangled. Run
-    // headless via tools/run-editmode-tests.ps1 (or the Test Runner window / CI); not via MCP run_tests —
-    // wrong venue (live editor). See docs/verify.md.
+    // Behavioral tests for the name round-trip (compile <-> decompile) of blend trees AND state/AnyState
+    // transitions: a human-authored `name:` survives; an auto-named tree (the positional <State>_BlendTree /
+    // <parent>_<i> default) or an unnamed transition stays nameless in YAML; a name that cannot round-trip the
+    // line-based YAML (a line break) is refused, not mangled; a `name:` on an entry-ladder rung is refused at
+    // parse (the entry emit path never reads it). Run headless via tools/run-editmode-tests.ps1 (or the Test
+    // Runner window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
     public class ControllerNameRoundtripTests
     {
         private const string TestRoot = "Assets/Agent/Scratch/name_roundtrip_tests";
@@ -184,6 +185,152 @@ clips:
             StringAssert.Contains("FAIL", res);
             StringAssert.Contains("line break", res, "the refusal names the offending construct");
             Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
+        }
+
+        // ── 6: a named STATE-ladder transition round-trips ──────────────────────────────────────────────
+        [Test]
+        public void NamedStateTransition_Roundtrips()
+        {
+            string yaml = @"schema: 1
+controller: NamedTransition_Fx
+basis: avatar-root
+role: fx
+parameters:
+  Go: bool
+layers:
+  - name: L
+    states:
+      Idle:
+        motion: ~
+        transitions:
+          - { to: Emote, name: EmoteExit, when: [ Go is true ] }
+      Emote:
+        motion: ~
+    default: Idle
+";
+            var c0 = FixpointOracle.CompileTo(TestRoot, yaml, "NamedTransition_Fx", "c0");
+            string yamlA = FixpointOracle.Decode(c0);
+            StringAssert.Contains("name: EmoteExit", yamlA, "the authored transition name survives decode");
+
+            var c1 = FixpointOracle.CompileTo(TestRoot, yamlA, "NamedTransition_Fx", "c1");
+            string yamlB = FixpointOracle.Decode(c1);
+            Assert.AreEqual(yamlA, yamlB, "a named transition reaches a textual fixpoint");
+        }
+
+        // ── 7: a named ANYSTATE-ladder transition round-trips too — proves the shared
+        //      ConfigureStateTransition path (not just the state ladder) assigns the name ─────────────────
+        [Test]
+        public void NamedAnyStateTransition_Roundtrips()
+        {
+            string yaml = @"schema: 1
+controller: NamedAnyTransition_Fx
+basis: avatar-root
+role: fx
+parameters:
+  Go: bool
+layers:
+  - name: L
+    states:
+      Idle:
+        motion: ~
+      Emote:
+        motion: ~
+    any:
+      - { to: Emote, name: AnyEmote, when: [ Go is true ], canTransitionToSelf: false }
+    default: Idle
+";
+            var c0 = FixpointOracle.CompileTo(TestRoot, yaml, "NamedAnyTransition_Fx", "c0");
+            string yamlA = FixpointOracle.Decode(c0);
+            StringAssert.Contains("name: AnyEmote", yamlA, "the authored AnyState transition name survives decode");
+
+            var c1 = FixpointOracle.CompileTo(TestRoot, yamlA, "NamedAnyTransition_Fx", "c1");
+            string yamlB = FixpointOracle.Decode(c1);
+            Assert.AreEqual(yamlA, yamlB, "a named AnyState transition reaches a textual fixpoint");
+        }
+
+        // ── 8: a `name:` on an entry-ladder rung is refused AT PARSE — the entry-emit path never reads a
+        //      transition name, so silently accepting one would drop it without a trace ───────────────────
+        [Test]
+        public void EntryRungName_ThrowsAtParse()
+        {
+            const string yaml = @"schema: 1
+controller: BadEntryName_Fx
+basis: avatar-root
+role: fx
+layers:
+  - name: L
+    states:
+      Idle: { motion: ~ }
+    entry:
+      - { to: Idle, name: Bad, when: [] }
+    default: Idle
+";
+            var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(yaml, "test"));
+            StringAssert.Contains("name", ex.Message);
+        }
+
+        // ── 9: a transition name containing a line break cannot round-trip the line-based YAML — refuse it
+        //      rather than silently mangle it (the transition mirror of test 5) ───────────────────────────
+        [Test]
+        public void TransitionNameWithLineBreak_IsRefused()
+        {
+            string ctrlPath = TestRoot + "/NewlineTransitionName_Fx.controller";
+            var rc = AnimatorController.CreateAnimatorControllerAtPath(ctrlPath);
+            var idle = rc.layers[0].stateMachine.AddState("Idle");
+            var tr = idle.AddExitTransition();
+            tr.name = "Bad\nName";
+            AssetDatabase.SaveAssets();
+
+            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+            string yamlOut = TestRoot + "/newlinetransitionname.yaml";
+            string res = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
+
+            StringAssert.Contains("FAIL", res);
+            StringAssert.Contains("line break", res, "the refusal names the offending construct");
+            Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
+        }
+
+        // ── 10: a name requiring YAML quoting (a colon) round-trips intact — the first feature to put
+        //       arbitrary human text through ScalarStr/NeedsQuote in a name position — for both a blend-tree
+        //       name and a transition name ───────────────────────────────────────────────────────────────
+        [Test]
+        public void QuotingRequiredNames_Roundtrip()
+        {
+            string yaml = @"schema: 1
+controller: QuotedNames_Fx
+basis: avatar-root
+role: fx
+parameters:
+  Blend: { type: float, default: 0.0 }
+  Go: bool
+layers:
+  - name: L
+    states:
+      Idle:
+        motion:
+          tree: 1d
+          name: ""Loco: Motion""
+          param: Blend
+          children:
+            - { clip: a, threshold: 0.0 }
+            - { clip: b, threshold: 1.0 }
+        transitions:
+          - { to: Emote, name: ""Emote: Exit"", when: [ Go is true ] }
+      Emote:
+        motion: ~
+    default: Idle
+clips:
+  a: { seconds: 0.1 }
+  b: { seconds: 0.1 }
+";
+            var c0 = FixpointOracle.CompileTo(TestRoot, yaml, "QuotedNames_Fx", "c0");
+            string yamlA = FixpointOracle.Decode(c0);
+            StringAssert.Contains("name: \"Loco: Motion\"", yamlA, "the quoted tree name round-trips intact");
+            StringAssert.Contains("name: \"Emote: Exit\"", yamlA, "the quoted transition name round-trips intact");
+
+            var c1 = FixpointOracle.CompileTo(TestRoot, yamlA, "QuotedNames_Fx", "c1");
+            string yamlB = FixpointOracle.Decode(c1);
+            Assert.AreEqual(yamlA, yamlB, "a quoting-requiring name reaches a textual fixpoint");
         }
     }
 }

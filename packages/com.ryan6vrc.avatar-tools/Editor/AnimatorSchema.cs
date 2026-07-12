@@ -170,6 +170,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public bool ToExit;
         public List<Condition> When = new List<Condition>();
         public bool CanTransitionToSelf;        // AnyState ladder only
+        public string Name;                     // null ⇒ Unity's empty default; state/AnyState only (refused on entry)
         public bool Mute; public bool Solo;     // AnimatorStateTransition editor flags (state + AnyState ladders)
         // null == inherit Defaults:
         public float? Duration; public float? ExitTime; public bool? FixedDuration;

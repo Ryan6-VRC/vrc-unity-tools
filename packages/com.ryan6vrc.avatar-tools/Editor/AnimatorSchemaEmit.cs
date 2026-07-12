@@ -361,11 +361,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static string FlowTransition(Transition t, bool anyLadder)
         {
-            var parts = new List<string>
-            {
-                "to: " + (t.ToExit ? "Exit" : ScalarStr(t.To)),
-                "when: " + WhenList(t.When),
-            };
+            var parts = new List<string> { "to: " + (t.ToExit ? "Exit" : ScalarStr(t.To)) };
+            if (!string.IsNullOrEmpty(t.Name)) parts.Add("name: " + ScalarStr(t.Name));
+            parts.Add("when: " + WhenList(t.When));
             if (t.ExitTime.HasValue) parts.Add("exitTime: " + Num(t.ExitTime.Value));
             if (t.Duration.HasValue) parts.Add("duration: " + Num(t.Duration.Value));
             if (t.FixedDuration.HasValue) parts.Add("fixedDuration: " + Bool(t.FixedDuration.Value));

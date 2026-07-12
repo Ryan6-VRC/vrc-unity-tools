@@ -644,6 +644,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 tr.orderedInterruption = t.OrderedInterruption ?? true;
                 tr.mute = t.Mute;
                 tr.solo = t.Solo;
+                if (!string.IsNullOrEmpty(t.Name)) tr.name = t.Name;
                 foreach (var c in t.When) tr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param); // empty When = unconditional
             }
 

@@ -810,6 +810,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             if (!allowSelf) throw new SchemaException("transition: 'canTransitionToSelf' is only valid on an AnyState ladder");
                             t.CanTransitionToSelf = ToBool(kv.Value, "transition.canTransitionToSelf");
                             break;
+                        case "name":
+                            if (!allowMuteSolo) throw new SchemaException("transition: 'name' is not valid on an entry ladder");
+                            { var n = ToStr(kv.Value, "transition.name"); t.Name = string.IsNullOrEmpty(n) ? null : n; }
+                            break;
                         default: throw new SchemaException($"transition: unknown field '{kv.Key}'");
                     }
                 }
@@ -914,7 +918,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 switch (kv.Key)
                 {
                     case "tree": break;   // the discriminator, already read
-                    case "name": spec.Name = ToStr(kv.Value, $"{ctx} tree.name"); break;
+                    case "name": { var n = ToStr(kv.Value, $"{ctx} tree.name"); spec.Name = string.IsNullOrEmpty(n) ? null : n; break; }
                     case "param": spec.Param = ToStr(kv.Value, $"{ctx} tree.param"); break;
                     case "paramY": spec.ParamY = ToStr(kv.Value, $"{ctx} tree.paramY"); break;
                     case "normalized": spec.Normalized = ToBool(kv.Value, $"{ctx} tree.normalized"); break;
