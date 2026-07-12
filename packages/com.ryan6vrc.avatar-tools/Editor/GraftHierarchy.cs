@@ -95,7 +95,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                  bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
-            var log = new TransplantRunLog("graft-hierarchy")
+            var log = new RunLog("graft-hierarchy")
             {
                 whatIf   = whatIf,
                 instance = ownedRoot != null ? ownedRoot.name : null,

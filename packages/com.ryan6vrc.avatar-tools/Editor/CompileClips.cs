@@ -52,7 +52,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// one-line PASS/FAIL summary with the RunLog path folded on (<c>… => RESULT | log=&lt;path&gt;</c>).</summary>
         public static string Compile(string sourcePath, string outDir, bool force = false, bool whatIf = false)
         {
-            var log = new TransplantRunLog("compile-clips") { whatIf = whatIf, source = sourcePath };
+            var log = new RunLog("compile-clips") { whatIf = whatIf, source = sourcePath };
             string label = "clips";
 
             try
@@ -423,7 +423,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // Route a FAIL through the house RunLog grammar (summary + RunLog + LogError). Sets result/error and
         // returns Finish (which backfills an offender from `error` when none was named).
-        static string Fail(TransplantRunLog log, string label, string msg)
+        static string Fail(RunLog log, string label, string msg)
         {
             log.result = "FAIL";
             log.error = msg;

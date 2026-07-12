@@ -323,7 +323,7 @@ public class TransplantCoreTests
     [Test]
     public void EnsureFailHasOffender_backfills_from_error_on_offenderless_fail()
     {
-        var log = new TransplantRunLog("test") { result = "FAIL", error = "NullReferenceException: boom" };
+        var log = new RunLog("test") { result = "FAIL", error = "NullReferenceException: boom" };
         log.EnsureFailHasOffender();
         Assert.AreEqual(1, log.offenders.Count);
         StringAssert.Contains("NullReferenceException: boom", log.offenders[0]);
@@ -332,7 +332,7 @@ public class TransplantCoreTests
     [Test]
     public void EnsureFailHasOffender_does_not_double_add_when_offender_present()
     {
-        var log = new TransplantRunLog("test") { result = "FAIL" };
+        var log = new RunLog("test") { result = "FAIL" };
         log.Offender("real named offender");
         log.EnsureFailHasOffender();
         Assert.AreEqual(1, log.offenders.Count);
@@ -342,7 +342,7 @@ public class TransplantCoreTests
     [Test]
     public void EnsureFailHasOffender_leaves_pass_untouched()
     {
-        var log = new TransplantRunLog("test") { result = "PASS" };
+        var log = new RunLog("test") { result = "PASS" };
         log.EnsureFailHasOffender();
         Assert.AreEqual(0, log.offenders.Count);
     }
@@ -350,7 +350,7 @@ public class TransplantCoreTests
     [Test]
     public void EnsureFailHasOffender_uses_fallback_text_when_error_null()
     {
-        var log = new TransplantRunLog("test") { result = "FAIL", error = null };
+        var log = new RunLog("test") { result = "FAIL", error = null };
         log.EnsureFailHasOffender();
         Assert.AreEqual(1, log.offenders.Count);
         StringAssert.Contains("no error detail", log.offenders[0]);
@@ -361,7 +361,7 @@ public class TransplantCoreTests
     [Test]
     public void WriteRunLog_without_sections_ends_at_warnings()
     {
-        var log = new TransplantRunLog("tc-test");
+        var log = new RunLog("tc-test");
         log.Count("n", 1);
         string path = TransplantCore.WriteRunLog(log, "no-sections");
         try
@@ -375,7 +375,7 @@ public class TransplantCoreTests
     [Test]
     public void WriteRunLog_emits_sections_verbatim_after_warnings_in_order()
     {
-        var log = new TransplantRunLog("tc-test");
+        var log = new RunLog("tc-test");
         log.Warning("w1");
         log.Section("rows", "[\n    { \"a\": 1 }\n  ]");
         log.Section("extra", "[]");
@@ -408,7 +408,7 @@ public class TransplantCoreTests
         finally { UnityEditor.AssetDatabase.DeleteAsset(path); }
     }
 
-    sealed class SectionedProbeLog : TransplantRunLog
+    sealed class SectionedProbeLog : RunLog
     {
         public SectionedProbeLog() : base("tc-probe") { }
     }

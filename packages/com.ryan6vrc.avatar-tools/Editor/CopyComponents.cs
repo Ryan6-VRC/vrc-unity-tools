@@ -792,7 +792,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                  IDictionary<string, string> renameMap = null, bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
-            var log = new TransplantRunLog("copy-components")
+            var log = new RunLog("copy-components")
             {
                 whatIf   = whatIf,
                 instance = ownedRoot != null ? ownedRoot.name : null,
@@ -1119,7 +1119,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// against the component's table descriptor (inert soft-dep drop vs. may-block hard-dep null).
         /// </summary>
         static List<string> RemapBySession(Component comp, SessionMap session, Transform vendorRoot, Transform ourRoot,
-                                            IDictionary<string, string> renameMap, TransplantRunLog log)
+                                            IDictionary<string, string> renameMap, RunLog log)
         {
             var so = new SerializedObject(comp);
             so.Update();

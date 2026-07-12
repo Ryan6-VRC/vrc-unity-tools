@@ -120,7 +120,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// envelope shape, with <c>kind</c> a parameter), refresh the asset DB, and return the path.
         /// <paramref name="label"/> is sanitized into the file name.
         /// </summary>
-        public static string WriteRunLog(TransplantRunLog log, string label)
+        public static string WriteRunLog(RunLog log, string label)
         {
             Directory.CreateDirectory(RunLogDir);
 
@@ -160,7 +160,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// One-line PASS/FAIL summary: <c>[kind] label: k1=v1, k2=v2 offenders=[...] => RESULT</c>.
         /// Reusable by every tool's Run.
         /// </summary>
-        public static string Summary(TransplantRunLog log, string label)
+        public static string Summary(RunLog log, string label)
         {
             var counts = new StringBuilder();
             for (int i = 0; i < log.counts.Count; i++)
@@ -194,7 +194,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// single tail every transplant tool's Run funnels through — hoisted out of the three
         /// byte-identical local copies (CopyComponents / MoveComponents / GraftHierarchy).
         /// </summary>
-        public static string Finish(TransplantRunLog log, string label)
+        public static string Finish(RunLog log, string label)
         {
             log.EnsureFailHasOffender();
             string path = WriteRunLog(log, label);
@@ -211,7 +211,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// verdict (a non-zero count is a real tool fault). Null entries in <paramref name="created"/> are
         /// skipped.
         /// </summary>
-        public static int SweepVendorLeaks(IEnumerable<Component> created, Transform vendorRoot, TransplantRunLog log)
+        public static int SweepVendorLeaks(IEnumerable<Component> created, Transform vendorRoot, RunLog log)
         {
             int leaks = 0;
             foreach (var ours in created)
@@ -428,7 +428,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// so the JSON and one-line summary read in a stable, tool-defined order. Unsealed so a tool can
     /// subclass to carry its bespoke structured rows alongside the envelope (see <see cref="Section"/>).
     /// </summary>
-    public class TransplantRunLog
+    public class RunLog
     {
         public string kind;
         public bool whatIf;
@@ -441,7 +441,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public readonly List<string> notes = new List<string>();
         public readonly List<string> warnings = new List<string>();
 
-        public TransplantRunLog(string kind) { this.kind = kind; }
+        public RunLog(string kind) { this.kind = kind; }
 
         /// <summary>Bespoke structured JSON sections (e.g. OwnMaterial's <c>slots[]</c> table), emitted
         /// verbatim after <see cref="warnings"/> in insertion order. The value is PRE-RENDERED JSON the

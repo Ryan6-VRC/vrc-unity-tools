@@ -427,7 +427,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <c>counts</c> by <see cref="Finish"/> — they are incremented mid-run, which the envelope's
         /// append-only counts list can't do). <c>AnchorWarning</c> stays a field because the PASS gate
         /// consults it; <see cref="Finish"/> folds it into offender grammar.</summary>
-        private sealed class RunData : TransplantRunLog
+        private sealed class RunData : RunLog
         {
             public RunData() : base("conform-renderers") { }
 

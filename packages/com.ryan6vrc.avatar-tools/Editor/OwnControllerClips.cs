@@ -53,7 +53,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return ArgFail(TransplantCore.Sanitize(controller.name), "outDir is null or empty");
 
             string controllerPath = AssetDatabase.GetAssetPath(controller);
-            var log = new TransplantRunLog("own-controller-clips")
+            var log = new RunLog("own-controller-clips")
             {
                 whatIf = whatIf,
                 instance = controller.name,
@@ -396,7 +396,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// LogError), like the sibling transplant tools — never a bare trailer-less line.</summary>
         static string ArgFail(string label, string msg)
         {
-            var log = new TransplantRunLog("own-controller-clips") { result = "FAIL", error = msg };
+            var log = new RunLog("own-controller-clips") { result = "FAIL", error = msg };
             log.Offender(msg);
             return TransplantCore.Finish(log, label);
         }
