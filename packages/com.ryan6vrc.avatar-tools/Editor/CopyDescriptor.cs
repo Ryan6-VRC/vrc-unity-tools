@@ -504,7 +504,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// computes them (state assertions — viseme/eyes/blueprint/layers/viewpoint — ride as notes,
         /// so the one-line summary still carries them; the viewpoint note is the NON-fatal
         /// state-asserting FixViewpoint fold that never flips the verdict).</summary>
-        private sealed class RunData : TransplantRunLog
+        private sealed class RunData : RunLog
         {
             public RunData() : base("copy-descriptor") { }
         }

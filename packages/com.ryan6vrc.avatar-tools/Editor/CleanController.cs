@@ -615,7 +615,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>Mid-flow FAIL: set the verdict + error + finish in one call, so a call site can never
         /// set <c>error</c> but forget <c>result</c> (which would ship a log whose verdict is still the
-        /// default PASS — a slip <see cref="TransplantRunLog.EnsureFailHasOffender"/> cannot catch).</summary>
+        /// default PASS — a slip <see cref="RunLog.EnsureFailHasOffender"/> cannot catch).</summary>
         private static string Fail(RunData data, string label, string msg)
         {
             data.result = "FAIL";
@@ -713,7 +713,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// structurally; <see cref="FinishFull"/> flushes them into the envelope's counts/notes.
         /// JSON key rename vs the old bespoke writer: <c>sourceFx</c> → the envelope's
         /// <c>source</c>.</summary>
-        private sealed class RunData : TransplantRunLog
+        private sealed class RunData : RunLog
         {
             public RunData() : base("clean-controller") { }
 

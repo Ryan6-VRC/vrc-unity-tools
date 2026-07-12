@@ -41,7 +41,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                  string destPath, bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
-            var log = new TransplantRunLog("move-components")
+            var log = new RunLog("move-components")
             {
                 whatIf   = whatIf,
                 instance = ownedRoot != null ? ownedRoot.name : null,
@@ -266,7 +266,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Finish / Fail (shared TransplantCore RunLog + summary, like CopyComponents) ───────────────
 
-        static string Fail(TransplantRunLog log, string label, string msg)
+        static string Fail(RunLog log, string label, string msg)
         {
             log.result = "FAIL";
             log.error  = msg;

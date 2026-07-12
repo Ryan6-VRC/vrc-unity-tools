@@ -85,7 +85,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (moves == null || moves.Length == 0)
                 return ArgFail(TransplantCore.Sanitize(controller.name), "moves is null or empty");
 
-            var log = new TransplantRunLog("repath-clips")
+            var log = new RunLog("repath-clips")
             {
                 whatIf = whatIf,
                 instance = controller.name,
@@ -372,7 +372,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// LogError), like the sibling transplant tools — never a bare trailer-less line.</summary>
         static string ArgFail(string label, string msg)
         {
-            var log = new TransplantRunLog("repath-clips") { result = "FAIL", error = msg };
+            var log = new RunLog("repath-clips") { result = "FAIL", error = msg };
             log.Offender(msg);
             return TransplantCore.Finish(log, label);
         }

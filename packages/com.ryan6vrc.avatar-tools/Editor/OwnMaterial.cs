@@ -1116,7 +1116,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <see cref="OwnMaterial.Finish"/>) and its running disposition <see cref="tally"/>
         /// (<see cref="OwnMaterial.TallyDisposition"/>, flushed into the six ordered <c>slotsX</c> counts
         /// by <see cref="OwnMaterial.EmitDispositionCounts"/>).</summary>
-        sealed class RunData : TransplantRunLog
+        sealed class RunData : RunLog
         {
             public RunData() : base("own-material") { }
             public readonly List<SlotRow> slots = new List<SlotRow>();

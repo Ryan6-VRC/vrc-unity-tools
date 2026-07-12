@@ -174,7 +174,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public static string Run(GameObject ownedRoot, GameObject referenceRoot, bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
-            var log = new TransplantRunLog("fix-viewpoint")
+            var log = new RunLog("fix-viewpoint")
             {
                 whatIf   = whatIf,
                 instance = ownedRoot != null ? ownedRoot.name : null,
