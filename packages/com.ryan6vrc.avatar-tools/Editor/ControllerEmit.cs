@@ -106,6 +106,137 @@ namespace Ryan6Vrc.AvatarTools.Editor
             result = ctx.Run();
         }
 
+        // ----- detached clip content (controller-free; shared by the embedded EmitClips and a future
+        // CompileClips door that builds a clip WITHOUT a controller) -----
+
+        /// <summary>Author and return a DETACHED <see cref="AnimationClip"/> (curves/settings only) for
+        /// <paramref name="spec"/> — NO controller access, NO sub-asset embedding, NO hideFlags, and (for a
+        /// seconds-only clip) NO carrier-param declaration. Those are the CALLER's responsibility. The output
+        /// curves/tangents/lengths are identical to the embedded emission path.
+        /// <paramref name="paramNames"/> is the set of declared Animator parameter names — the gate that routes
+        /// a bare binding to an Animator-property curve (path="") rather than a scene binding.</summary>
+        internal static AnimationClip BuildClipContent(ClipSpec spec, HashSet<string> paramNames)
+        {
+            var clip = new AnimationClip { name = spec.Name, frameRate = 60f };
+            bool hasContent = spec.Sets.Count > 0 || spec.Curves.Count > 0;
+
+            if (!hasContent)
+            {
+                // Seconds-only clip → inert carrier that ONLY gives the clip a genuine length. Bind a flat
+                // curve on a scratch ANIMATOR parameter (path="", typeof(Animator)) — NOT a non-existent
+                // GameObject path. An animator-property binding resolves against any avatar root (the root
+                // always carries an Animator), so CheckAnimator's broken-binding rule stays clean when the
+                // emitted controller is linted against a real avatar; a fake GO path would false-FAIL it.
+                // DECLARING the carrier param is a CONTROLLER side effect and is left to the caller.
+                if (!spec.Seconds.HasValue)
+                    throw new EmitException(
+                        $"clip '{spec.Name}' declares no set/curves and no seconds — nothing to emit (parser/validator should have caught this)");
+                var carrier = EditorCurveBinding.FloatCurve("", typeof(Animator), ReservedNames.CarrierParam);
+                var flat = new AnimationCurve(new Keyframe(0f, 0f), new Keyframe(spec.Seconds.Value, 0f));
+                AnimationUtility.SetEditorCurve(clip, carrier, flat);
+                return clip;
+            }
+
+            float length = spec.Seconds ?? CurveLength(spec);
+            foreach (var kv in spec.Sets)
+            {
+                var binding = ResolveBinding(kv.Key, paramNames);
+                AnimationUtility.SetEditorCurve(clip, binding, AnimationCurve.Constant(0f, length, kv.Value));
+            }
+            foreach (var cs in spec.Curves)
+                SetKeyedCurve(clip, spec, cs, paramNames);
+            return clip;
+        }
+
+        // Author one keyframed curve onto `clip`. Split out of BuildClipContent verbatim (unchanged logic).
+        private static void SetKeyedCurve(AnimationClip clip, ClipSpec spec, CurveSpec cs, HashSet<string> paramNames)
+        {
+            var binding = ResolveBinding(cs.Binding, paramNames);
+            var keys = cs.Keys.Select(k => new Keyframe(k.Time, k.Value)).ToList();
+            // Unity derives a keyframed clip's length from its last key, so an explicit `seconds:` must be
+            // stamped onto the curve too or it is silently ignored (animator-schema.md: seconds declares
+            // the length; matters for motion-time / blend-tree timing). Hold the last value out to
+            // `seconds`; refuse a `seconds` shorter than the authored content (it can't truncate a key).
+            if (spec.Seconds.HasValue && keys.Count > 0)
+            {
+                var last = keys[0];
+                foreach (var k in keys) if (k.time > last.time) last = k;
+                if (spec.Seconds.Value < last.time)
+                    throw new EmitException(
+                        $"clip '{spec.Name}': seconds={spec.Seconds.Value} is shorter than curve '{cs.Binding}' last key at {last.time}");
+                if (spec.Seconds.Value > last.time)
+                    keys.Add(new Keyframe(spec.Seconds.Value, last.value)); // hold to the declared length
+            }
+            var animCurve = new AnimationCurve(keys.ToArray());
+            if (cs.Tangents == CurveTangent.Linear)
+                for (int i = 0; i < animCurve.length; i++)
+                {
+                    AnimationUtility.SetKeyLeftTangentMode(animCurve, i, AnimationUtility.TangentMode.Linear);
+                    AnimationUtility.SetKeyRightTangentMode(animCurve, i, AnimationUtility.TangentMode.Linear);
+                }
+            AnimationUtility.SetEditorCurve(clip, binding, animCurve);
+        }
+
+        private static float CurveLength(ClipSpec spec)
+        {
+            float max = 0f; bool any = false;
+            foreach (var cs in spec.Curves)
+                foreach (var k in cs.Keys) { if (k.Time > max) max = k.Time; any = true; }
+            return any ? max : MinClipLength;
+        }
+
+        // A bare identifier naming a declared Animator parameter → an Animator-parameter curve (path="").
+        // Otherwise the general scene binding: "path/Component.property", split on the LAST '/' then
+        // the FIRST '.'. The first dot is the right split because a component type name never contains a
+        // dot, while the property CAN — `blendShape.Smile`, `material._Color` are the common cases a
+        // LastIndexOf split would fold into the type name (and then fail to resolve).
+        private static EditorCurveBinding ResolveBinding(string target, HashSet<string> paramNames)
+        {
+            if (paramNames.Contains(target))
+                return EditorCurveBinding.FloatCurve("", typeof(Animator), target);
+
+            int slash = target.LastIndexOf('/');
+            string path = slash >= 0 ? target.Substring(0, slash) : "";
+            string compProp = slash >= 0 ? target.Substring(slash + 1) : target;
+
+            int dot = compProp.IndexOf('.');
+            if (dot < 0)
+                throw new EmitException(
+                    $"clip binding '{target}' is neither a declared AAP param nor a 'path/Component.property' scene binding");
+            string typeName = compProp.Substring(0, dot);
+            string prop = compProp.Substring(dot + 1);
+            return EditorCurveBinding.FloatCurve(path, ResolveComponentType(typeName), prop);
+        }
+
+        private static Type ResolveComponentType(string typeName)
+        {
+            switch (typeName)
+            {
+                case "GameObject": return typeof(GameObject);
+                case "Transform": return typeof(Transform);
+            }
+            // Most animatable components live in Transform's assembly (UnityEngine.CoreModule).
+            var t = typeof(Transform).Assembly.GetType("UnityEngine." + typeName);
+            if (t != null) return t;
+            // Fallback: a `UnityEngine.<typeName>` type in any other loaded module assembly (e.g.
+            // UnityEngine.AudioSource in AudioModule). This resolves ONLY the UnityEngine namespace.
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var byNs = asm.GetType("UnityEngine." + typeName);
+                if (byNs != null) return byNs;
+            }
+            // SCOPE (kickoff item V, gap 1 — decided intentional, NOT a resolver bug): inline clip bindings
+            // resolve UnityEngine-namespace component types only. That is the entire authored surface
+            // (Renderer/SkinnedMeshRenderer/MeshRenderer/Light/Transform/GameObject + material & blendShape
+            // sub-properties — docs/animator-schema.md §clips). A UI or VRC-SDK component (e.g.
+            // UnityEngine.UI.Image, whose simple name is not under `UnityEngine.`) is deliberately out of
+            // scope; do not broaden this lookup on speculation. If a real need appears, widen here AND
+            // document it in the schema — never one silently.
+            throw new EmitException($"clip binding component type '{typeName}' could not be resolved to a "
+                + "UnityEngine-namespace component — inline bindings resolve UnityEngine component types only "
+                + "(UI / VRC-SDK components are out of scope); check the type name or bind a supported UnityEngine component");
+        }
+
         // Per-build mutable state kept off the static surface so Build stays a pure entry point.
         private sealed class BuildContext
         {
@@ -221,82 +352,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ----- clips -----
 
+            // Embedded emission: build each clip's content (controller-free, via the shared
+            // ControllerEmit.BuildClipContent) then attach it as a hidden controller sub-asset and record it.
+            // The controller-side responsibilities stay here: declaring the carrier param for a seconds-only
+            // clip, hiding + embedding the sub-asset. BuildClipContent produces byte-identical curves.
             private void EmitClips()
             {
                 foreach (var spec in _doc.Clips)
                 {
-                    var clip = BuildClip(spec);
-                    clip.hideFlags = HideFlags.HideInHierarchy;
+                    bool secondsOnly = spec.Sets.Count == 0 && spec.Curves.Count == 0;
+                    if (secondsOnly) EnsureCarrierParam();               // controller declares _CompilerNull
+                    var clip = ControllerEmit.BuildClipContent(spec, _paramNames);
+                    clip.hideFlags = HideFlags.HideInHierarchy;          // embedded sub-asset stays hidden
                     AssetDatabase.AddObjectToAsset(clip, _controller);
                     _result.Clips[spec.Name] = clip;
                     _result.ClipList.Add(clip);
                 }
-            }
-
-            private AnimationClip BuildClip(ClipSpec spec)
-            {
-                var clip = new AnimationClip { name = spec.Name, frameRate = 60f };
-                bool hasContent = spec.Sets.Count > 0 || spec.Curves.Count > 0;
-
-                if (!hasContent)
-                {
-                    // Seconds-only clip → inert carrier that ONLY gives the clip a genuine length. Bind a flat
-                    // curve on a scratch ANIMATOR parameter (path="", typeof(Animator)) — NOT a non-existent
-                    // GameObject path. An animator-property binding resolves against any avatar root (the root
-                    // always carries an Animator), so CheckAnimator's broken-binding rule stays clean when the
-                    // emitted controller is linted against a real avatar; a fake GO path would false-FAIL it.
-                    if (!spec.Seconds.HasValue)
-                        throw new EmitException(
-                            $"clip '{spec.Name}' declares no set/curves and no seconds — nothing to emit (parser/validator should have caught this)");
-                    EnsureCarrierParam();
-                    var carrier = EditorCurveBinding.FloatCurve("", typeof(Animator), CarrierParam);
-                    var flat = new AnimationCurve(new Keyframe(0f, 0f), new Keyframe(spec.Seconds.Value, 0f));
-                    AnimationUtility.SetEditorCurve(clip, carrier, flat);
-                    return clip;
-                }
-
-                float length = spec.Seconds ?? CurveLength(spec);
-                foreach (var kv in spec.Sets)
-                {
-                    var binding = ResolveBinding(kv.Key);
-                    AnimationUtility.SetEditorCurve(clip, binding, AnimationCurve.Constant(0f, length, kv.Value));
-                }
-                foreach (var cs in spec.Curves)
-                {
-                    var binding = ResolveBinding(cs.Binding);
-                    var keys = cs.Keys.Select(k => new Keyframe(k.Time, k.Value)).ToList();
-                    // Unity derives a keyframed clip's length from its last key, so an explicit `seconds:` must be
-                    // stamped onto the curve too or it is silently ignored (animator-schema.md: seconds declares
-                    // the length; matters for motion-time / blend-tree timing). Hold the last value out to
-                    // `seconds`; refuse a `seconds` shorter than the authored content (it can't truncate a key).
-                    if (spec.Seconds.HasValue && keys.Count > 0)
-                    {
-                        var last = keys[0];
-                        foreach (var k in keys) if (k.time > last.time) last = k;
-                        if (spec.Seconds.Value < last.time)
-                            throw new EmitException(
-                                $"clip '{spec.Name}': seconds={spec.Seconds.Value} is shorter than curve '{cs.Binding}' last key at {last.time}");
-                        if (spec.Seconds.Value > last.time)
-                            keys.Add(new Keyframe(spec.Seconds.Value, last.value)); // hold to the declared length
-                    }
-                    var animCurve = new AnimationCurve(keys.ToArray());
-                    if (cs.Tangents == CurveTangent.Linear)
-                        for (int i = 0; i < animCurve.length; i++)
-                        {
-                            AnimationUtility.SetKeyLeftTangentMode(animCurve, i, AnimationUtility.TangentMode.Linear);
-                            AnimationUtility.SetKeyRightTangentMode(animCurve, i, AnimationUtility.TangentMode.Linear);
-                        }
-                    AnimationUtility.SetEditorCurve(clip, binding, animCurve);
-                }
-                return clip;
-            }
-
-            private static float CurveLength(ClipSpec spec)
-            {
-                float max = 0f; bool any = false;
-                foreach (var cs in spec.Curves)
-                    foreach (var k in cs.Keys) { if (k.Time > max) max = k.Time; any = true; }
-                return any ? max : MinClipLength;
             }
 
             // The scratch float a seconds-only carrier animates. Declared on the controller on first use (never
@@ -317,58 +388,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         name = CarrierParam, type = AnimatorControllerParameterType.Float, defaultFloat = 0f,
                     });
                 _carrierDeclared = true;
-            }
-
-            // A bare identifier naming a declared Animator parameter → an Animator-parameter curve (path="").
-            // Otherwise the general scene binding: "path/Component.property", split on the LAST '/' then
-            // the FIRST '.'. The first dot is the right split because a component type name never contains a
-            // dot, while the property CAN — `blendShape.Smile`, `material._Color` are the common cases a
-            // LastIndexOf split would fold into the type name (and then fail to resolve).
-            private EditorCurveBinding ResolveBinding(string target)
-            {
-                if (_paramNames.Contains(target))
-                    return EditorCurveBinding.FloatCurve("", typeof(Animator), target);
-
-                int slash = target.LastIndexOf('/');
-                string path = slash >= 0 ? target.Substring(0, slash) : "";
-                string compProp = slash >= 0 ? target.Substring(slash + 1) : target;
-
-                int dot = compProp.IndexOf('.');
-                if (dot < 0)
-                    throw new EmitException(
-                        $"clip binding '{target}' is neither a declared AAP param nor a 'path/Component.property' scene binding");
-                string typeName = compProp.Substring(0, dot);
-                string prop = compProp.Substring(dot + 1);
-                return EditorCurveBinding.FloatCurve(path, ResolveComponentType(typeName), prop);
-            }
-
-            private static Type ResolveComponentType(string typeName)
-            {
-                switch (typeName)
-                {
-                    case "GameObject": return typeof(GameObject);
-                    case "Transform": return typeof(Transform);
-                }
-                // Most animatable components live in Transform's assembly (UnityEngine.CoreModule).
-                var t = typeof(Transform).Assembly.GetType("UnityEngine." + typeName);
-                if (t != null) return t;
-                // Fallback: a `UnityEngine.<typeName>` type in any other loaded module assembly (e.g.
-                // UnityEngine.AudioSource in AudioModule). This resolves ONLY the UnityEngine namespace.
-                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    var byNs = asm.GetType("UnityEngine." + typeName);
-                    if (byNs != null) return byNs;
-                }
-                // SCOPE (kickoff item V, gap 1 — decided intentional, NOT a resolver bug): inline clip bindings
-                // resolve UnityEngine-namespace component types only. That is the entire authored surface
-                // (Renderer/SkinnedMeshRenderer/MeshRenderer/Light/Transform/GameObject + material & blendShape
-                // sub-properties — docs/animator-schema.md §clips). A UI or VRC-SDK component (e.g.
-                // UnityEngine.UI.Image, whose simple name is not under `UnityEngine.`) is deliberately out of
-                // scope; do not broaden this lookup on speculation. If a real need appears, widen here AND
-                // document it in the schema — never one silently.
-                throw new EmitException($"clip binding component type '{typeName}' could not be resolved to a "
-                    + "UnityEngine-namespace component — inline bindings resolve UnityEngine component types only "
-                    + "(UI / VRC-SDK components are out of scope); check the type name or bind a supported UnityEngine component");
             }
 
             // ----- layers / states / transitions -----
