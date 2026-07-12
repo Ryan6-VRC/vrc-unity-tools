@@ -1,4 +1,7 @@
+using System.Text;
+using UnityEditor;
 using UnityEngine;
+using VRC.Core;
 using Ryan6Vrc.AgentTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Editor
@@ -22,9 +25,66 @@ namespace Ryan6Vrc.AvatarTools.Editor
                              "com.anatawa12.continuous-avatar-uploader (ALCOM), or upload via the SDK panel";
                 return log.Finish("all");
             }
+
+            if (whatIf)
+            {
+                // Preflight the whole REFUSE register once (env not ready → no per-avatar work).
+                var refuse = CheckPreconditions();
+                if (refuse != null)
+                {
+                    log.result = "REFUSE";
+                    log.error  = refuse;
+                    return log.Finish("all");
+                }
+
+                // Per-avatar read-only classification. Uploads nothing, dirties nothing.
+                int n = avatars != null ? avatars.Length : 0;
+                var rows = new StringBuilder();
+                for (int i = 0; i < n; i++)
+                {
+                    var go = avatars[i];
+                    var (state, publishName) = ClassifyAvatar(go);
+                    bool noPm = go == null || go.GetComponent<PipelineManager>() == null;
+                    if (rows.Length > 0) rows.Append("; ");
+                    rows.Append("handle=").Append(go != null ? go.name : "(null)")
+                        .Append(" state=").Append(state)
+                        .Append(" publishName=").Append(publishName);
+                    if (noPm) rows.Append(" (no PipelineManager — never uploaded)");
+                }
+                return "[upload-avatar] (whatIf) " + n + " avatar(s): " + rows + " => PASS";
+            }
+
             log.result = "REFUSE";
             log.error  = "not yet implemented";
             return log.Finish("all");
+        }
+
+        /// <summary>Read-only per-avatar preflight read: (blueprint-state, name-that-would-publish). Reads
+        /// PipelineManager.blueprintId via SerializedObject and never surfaces the id itself. No PipelineManager
+        /// → treated as first-upload (its absence means the avatar was never uploaded). Mutates nothing.</summary>
+        public static (string state, string publishName) ClassifyAvatar(GameObject go)
+        {
+            var pm = go.GetComponent<PipelineManager>();
+            if (pm == null) return (UploadAvatarLogic.ClassifyBlueprint(null), go.name);
+            var prop = new SerializedObject(pm).FindProperty("blueprintId");
+            string id = prop != null ? prop.stringValue : pm.blueprintId;
+            return (UploadAvatarLogic.ClassifyBlueprint(id), go.name);
+        }
+
+        /// <summary>The upload REFUSE register: returns the first unmet precondition (with its named fix) or
+        /// null when the environment is upload-ready. Order is cheap-to-costly.</summary>
+        static string CheckPreconditions()
+        {
+            if (EditorApplication.isPlaying)
+                return "in Play mode — exit Play mode before uploading";
+            if (!APIUser.IsLoggedIn)
+                return "not logged into the VRChat SDK — open the Control Panel and sign in";
+            if (!CauReflect.TryGetBuilder(out _, out var why))
+                return why;
+            if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.StandaloneWindows64)
+                return "build target is " + EditorUserBuildSettings.activeBuildTarget +
+                       "; switch to Windows (StandaloneWindows64)";
+            return null;
         }
     }
 
