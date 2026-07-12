@@ -52,4 +52,57 @@ public class UploadAvatarLoopTests
             Assert.IsFalse(string.IsNullOrEmpty(why));
         });
     }
+
+    // ── RunCore loop semantics (fake delegate — the real SDK call is live-gated to Task 8) ──────
+
+    [Test]
+    public void Loop_StopsOnFirstFailure_AndSavesSuccesses()
+    {
+        var avatars = new[] { MakeAvatar("A",""), MakeAvatar("B",""), MakeAvatar("C","") };
+        int saveCalls = 0;
+        var outcomes = new System.Collections.Generic.Queue<UploadAvatar.UploadOutcome>(new[] {
+            UploadAvatar.UploadOutcome.Uploaded(),
+            UploadAvatar.UploadOutcome.Failed(httpStatus: 500),
+            UploadAvatar.UploadOutcome.Uploaded(),
+        });
+        var report = UploadAvatar.RunCore(avatars, _ => outcomes.Dequeue(), () => saveCalls++);
+        Assert.AreEqual("A", report.rows[0].handle); Assert.AreEqual("uploaded", report.rows[0].result);
+        Assert.AreEqual("failed", report.rows[1].result); Assert.AreEqual("transient", report.rows[1].cls);
+        Assert.AreEqual(2, report.rows.Count);
+        Assert.AreEqual(1, saveCalls);
+        foreach (var g in avatars) UnityEngine.Object.DestroyImmediate(g);
+    }
+
+    [Test]
+    public void Loop_RateLimitIsNotAutoRetried()
+    {
+        var a = MakeAvatar("A","");
+        int calls = 0;
+        var report = UploadAvatar.RunCore(new[]{a},
+            _ => { calls++; return UploadAvatar.UploadOutcome.Failed(httpStatus: 429); }, () => {});
+        Assert.AreEqual(1, calls);
+        Assert.AreEqual("rate-limit", report.rows[0].cls);
+        UnityEngine.Object.DestroyImmediate(a);
+    }
+
+    [Test]
+    public void Loop_ReservedNoBundleIsItsOwnState()
+    {
+        var a = MakeAvatar("A","");
+        var report = UploadAvatar.RunCore(new[]{a},
+            _ => UploadAvatar.UploadOutcome.ReservedNoBundle(), () => {});
+        Assert.AreEqual("reserved-no-bundle", report.rows[0].result);
+        UnityEngine.Object.DestroyImmediate(a);
+    }
+
+    [Test]
+    public void Loop_RedactsErrorIds()
+    {
+        var a = MakeAvatar("A","");
+        var report = UploadAvatar.RunCore(new[]{a},
+            _ => UploadAvatar.UploadOutcome.Failed(httpStatus:400, message:"rejected avtr_dead for usr_beef"), () => {});
+        StringAssert.DoesNotContain("avtr_", report.rows[0].error);
+        StringAssert.DoesNotContain("usr_",  report.rows[0].error);
+        UnityEngine.Object.DestroyImmediate(a);
+    }
 }
