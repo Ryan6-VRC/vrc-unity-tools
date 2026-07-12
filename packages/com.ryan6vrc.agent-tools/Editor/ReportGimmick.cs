@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Animations;
 using UnityEngine.SceneManagement;
 using VRC.Dynamics;
 using VRC.SDK3.Dynamics.Contact.Components;
@@ -20,12 +21,24 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// indirection made explicit), and its VRCFury AUTHORING inventory — plus a short Observations index
     /// naming only the five mechanically-certain structural idioms (world anchor, feedback loop,
     /// TargetTransform indirection, hold, editor/runtime swap), each carrying a docs/ pointer. So an
-    /// agent can hold a whole gimmick in a few thousand tokens.
+    /// agent can hold a gimmick subtree in a few thousand tokens — the digest scales with component
+    /// count (the tier-2 census names renderers/animators too), so a whole-avatar subtree is a
+    /// proportionally large, honest digest, not a compact one; scope the root to the gimmick.
     ///
     /// Two seams are deliberately NOT crossed: it reports a contact/physbone's DECLARED `parameter`
     /// field but never traces it into an animator (H's domain), and it reports VRCFury features verbatim
     /// but predicts no bake output — no prefix rewrite, no sync-bit tally, no bake diff (J's domain).
     /// No verdict, no heuristic/"suspected" tier: it is a digest like ReportController, not a lint.
+    ///
+    /// SUBTREE-COMPLETE BY CONSTRUCTION: the tier-1 tables above interpret the known gimmick families
+    /// (contacts, physbones+colliders, VRC/Unity constraints, VRCFury), and a generic tier-2 "Other
+    /// components" census then names EVERY remaining component (Modular Avatar, VRCLens, custom scripts)
+    /// plus every MISSING/broken-script slot — with its object-reference seam and a SHALLOW scalar peek
+    /// (top-level + one struct level; arrays as `name[N]`; no asset-following, no deep recursion). Nothing
+    /// in the subtree is invisible. AgentInspector is the door to exhaustive/nested/asset depth beyond
+    /// that shallow peek. VRCFury stays tier-1 (not folded into tier-2) because its seam is a nested
+    /// polymorphic `content[]` managed-reference array that a generic top-level walk renders as noise;
+    /// MA and most scripts expose their seam as top-level fields the shallow peek reads directly.
     ///
     /// INSPECTION ONLY — never mutates. Emits one line carrying the artifact path in-band.
     /// </summary>
@@ -53,6 +66,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             var physbones   = root.GetComponentsInChildren<VRCPhysBone>(true);
             var colliders   = root.GetComponentsInChildren<VRCPhysBoneCollider>(true);
             var constraints = root.GetComponentsInChildren<VRCConstraintBase>(true);
+            // Interface query, not a concrete-type union: Unity constraints derive from Behaviour (not
+            // MonoBehaviour), so a per-type list would let an unlisted Unity constraint slip through. VRC
+            // constraints do NOT implement UnityEngine's IConstraint, so the two families never overlap.
+            var unityConstraints = root.GetComponentsInChildren<IConstraint>(true);
+            var constraintRows = BuildConstraintRows(constraints, unityConstraints);
+            int constraintCount = constraints.Length + unityConstraints.Length;
 
             // VRCFury is read untyped (no asmdef ref): match the component by full type name, decode via
             // SerializedObject. A project without VRCFury simply finds none and the section is _(none)_.
@@ -61,29 +80,48 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (mb != null && mb.GetType().FullName == "VF.Model.VRCFury") fury.Add(mb);
 
             var body = new StringBuilder();
-            body.Append("# ReportGimmick: ").Append(root.name).Append('\n');
-            body.Append("root: `").Append(GetHierarchyPath(root.transform)).Append("`  \n");
-            body.Append("_transform handles are full scene-root-absolute paths; under first-match resolution a duplicate-named sibling makes a handle non-unique (a pre-existing family caveat, surfaced here because the interior walk can hit duplicate-named bones)._\n");
+
+            // Tier-1 exclusion set for the tier-2 census: every component a table above already interprets.
+            var tier1 = new HashSet<Component>();
+            foreach (var a in senders) tier1.Add(a);
+            foreach (var a in receivers) tier1.Add(a);
+            foreach (var a in physbones) tier1.Add(a);
+            foreach (var a in colliders) tier1.Add(a);
+            foreach (var a in constraints) tier1.Add(a);
+            foreach (var a in unityConstraints) tier1.Add((Component)a);
+            foreach (var a in fury) tier1.Add(a);
 
             int contactCount = senders.Length + receivers.Length;
-            body.Append("\ncontacts=").Append(contactCount)
-                .Append(" physbones=").Append(physbones.Length)
-                .Append(" constraints=").Append(constraints.Length)
-                .Append(" vrcfury=").Append(fury.Count).Append('\n');
-
+            // Header count line is emitted AFTER the tier-1 tables/observations run, because `other` is only
+            // known once AppendOther has walked the subtree — so build the digest body first, then prepend.
             AppendContacts(body, senders, receivers);
             AppendPhysBones(body, physbones, colliders);
-            AppendConstraints(body, constraints);
+            AppendConstraints(body, constraintRows);
             var applyDuringUploadHosts = AppendVrcFury(body, fury);
-            int obsCount = AppendObservations(body, constraints, applyDuringUploadHosts);
+            int obsCount = AppendObservations(body, constraintRows, applyDuringUploadHosts);
+            int other = AppendOther(body, root, tier1);
+
+            // Header carries the count line, which needs `other` — known only after AppendOther walked the
+            // subtree — so the digest body is built first, then wrapped by the header into the final doc.
+            var doc = new StringBuilder();
+            doc.Append("# ReportGimmick: ").Append(root.name).Append('\n');
+            doc.Append("root: `").Append(GetHierarchyPath(root.transform)).Append("`  \n");
+            doc.Append("_transform handles are full scene-root-absolute paths; under first-match resolution a duplicate-named sibling makes a handle non-unique (a pre-existing family caveat, surfaced here because the interior walk can hit duplicate-named bones)._\n");
+            doc.Append("\ncontacts=").Append(contactCount)
+                  .Append(" physbones=").Append(physbones.Length)
+                  .Append(" constraints=").Append(constraintCount)
+                  .Append(" vrcfury=").Append(fury.Count)
+                  .Append(" other=").Append(other).Append('\n');
+            doc.Append(body);
 
             var summary = "[ReportGimmick] " + root.name
                         + ": contacts=" + contactCount
                         + " physbones=" + physbones.Length
-                        + " constraints=" + constraints.Length
+                        + " constraints=" + constraintCount
                         + " vrcfury=" + fury.Count
+                        + " other=" + other
                         + " observations=" + obsCount + " => OK";
-            var result = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "gimmick_" + root.name, summary, body.ToString(), ".md");
+            var result = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "gimmick_" + root.name, summary, doc.ToString(), ".md");
             Debug.Log(result);
             return result;
         }
@@ -151,42 +189,146 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Constraints edge-list (§5.3) -------------------------------------------------------
 
-        private static void AppendConstraints(StringBuilder sb, VRCConstraintBase[] constraints)
+        // One edge-list row's worth of constraint facts, family-neutral. VRC and Unity constraints fill
+        // this through separate extractors — they share the rendered Row(), never each other's readers.
+        private struct ConstraintRow
+        {
+            public string Type;
+            public string Driven;                        // hierarchy path of the driven transform
+            public (string src, float weight)[] Sources; // src="(none)" when unwired; empty => source-less
+            public float GlobalWeight;
+            public string Axes;                          // rendered mask, or "—"
+            public bool AxisMiss;                        // VRC-only; Unity never sets this
+            public string Note;                          // VRC-only idioms; "" for Unity
+            public Transform DrivenTransform;            // for the feedback-loop observation
+            public Transform[] SourceTransforms;         // for the feedback-loop observation
+            public VRCConstraintBase Vrc;                // family discriminator; null for Unity constraints
+        }
+
+        // Normalize both constraint families into one row list. Order is VRC-first, then Unity — VRC output
+        // stays byte-for-byte what it was (VRC rows render through the same reads as before).
+        private static ConstraintRow[] BuildConstraintRows(VRCConstraintBase[] vrc, IConstraint[] unity)
+        {
+            var rows = new List<ConstraintRow>(vrc.Length + unity.Length);
+            foreach (var c in vrc) rows.Add(FromVrc(c));
+            foreach (var c in unity) rows.Add(FromUnity(c));
+            return rows.ToArray();
+        }
+
+        // VRC extractor — reuses the EXISTING VRC reads (TargetTransform-or-host driven, Sources with
+        // (none) for unwired slots, AxisMask, ConstraintNote) unchanged, so VRC rows are identical to
+        // the pre-widening output.
+        private static ConstraintRow FromVrc(VRCConstraintBase c)
+        {
+            var host = c.transform;
+            // Unity fake-null test, never ?? — ?? bypasses UnityEngine.Object's overloaded == and would
+            // read a destroyed TargetTransform as a live object instead of falling back to the host.
+            var driven = c.TargetTransform != null ? c.TargetTransform : host;
+            var sources = new List<(string, float)>();
+            var srcTransforms = new List<Transform>();
+            int count = c.Sources.Count;
+            for (int i = 0; i < count; i++)
+            {
+                var s = c.Sources[i];
+                // Null-check SourceTransform first: an unwired source slot is legal (seen on real avatars)
+                // and must render (none) rather than NRE mid-report.
+                sources.Add((s.SourceTransform != null ? GetHierarchyPath(s.SourceTransform) : "(none)", s.Weight));
+                if (s.SourceTransform != null) srcTransforms.Add(s.SourceTransform);
+            }
+            string axes = AxisMask(c, out bool miss);
+            return new ConstraintRow
+            {
+                Type = c.GetType().Name,
+                Driven = GetHierarchyPath(driven),
+                Sources = sources.ToArray(),
+                GlobalWeight = c.GlobalWeight,
+                Axes = axes,
+                AxisMiss = miss,
+                Note = ConstraintNote(c, host, driven),
+                DrivenTransform = driven,
+                SourceTransforms = srcTransforms.ToArray(),
+                Vrc = c,
+            };
+        }
+
+        // Unity IConstraint extractor. Unity constraints always drive their own host (no TargetTransform),
+        // have no FreezeToWorld/hold, and read axes from per-type Axis flags — so Note stays "" and AxisMiss
+        // stays false. Only the geometric feedback-loop observation (source ⊂ driven) transfers.
+        private static ConstraintRow FromUnity(IConstraint c)
+        {
+            var comp = (Component)c;
+            var host = comp.transform;
+            var sources = new List<(string, float)>();
+            var srcTransforms = new List<Transform>();
+            var list = new List<ConstraintSource>();
+            c.GetSources(list);
+            foreach (var s in list)
+            {
+                sources.Add((s.sourceTransform != null ? GetHierarchyPath(s.sourceTransform) : "(none)", s.weight));
+                if (s.sourceTransform != null) srcTransforms.Add(s.sourceTransform);
+            }
+            return new ConstraintRow
+            {
+                Type = comp.GetType().Name,
+                Driven = GetHierarchyPath(host),
+                Sources = sources.ToArray(),
+                GlobalWeight = c.weight,
+                Axes = UnityAxes(c),
+                AxisMiss = false,
+                Note = "",
+                DrivenTransform = host,
+                SourceTransforms = srcTransforms.ToArray(),
+                Vrc = null,
+            };
+        }
+
+        // Per-type Axis-flag mask for Unity constraints. Each type exposes its own flags; LookAt has none.
+        private static string UnityAxes(IConstraint c)
+        {
+            switch (c)
+            {
+                case ParentConstraint p:   return "pos:" + AxisFlags(p.translationAxis) + " rot:" + AxisFlags(p.rotationAxis);
+                case PositionConstraint p: return "pos:" + AxisFlags(p.translationAxis);
+                case RotationConstraint r: return "rot:" + AxisFlags(r.rotationAxis);
+                case ScaleConstraint s:    return "scale:" + AxisFlags(s.scalingAxis);
+                case AimConstraint a:      return "rot:" + AxisFlags(a.rotationAxis);
+                default:                   return "—"; // LookAtConstraint / unknown: no per-axis flags
+            }
+        }
+
+        private static string AxisFlags(Axis a)
+        {
+            if (a == Axis.None) return "off";
+            if (a == (Axis.X | Axis.Y | Axis.Z)) return "*";
+            return (a.HasFlag(Axis.X) ? "X" : "") + (a.HasFlag(Axis.Y) ? "Y" : "") + (a.HasFlag(Axis.Z) ? "Z" : "");
+        }
+
+        private static void AppendConstraints(StringBuilder sb, ConstraintRow[] rows)
         {
             sb.Append("\n## Constraints (edge-list: constrained → source)\n\n");
-            if (constraints.Length == 0) { sb.Append("_(none)_\n"); return; }
-            sb.Append("_source weights normalize by SUM (docs/runtime.md §Constraints) — a weight is not a clamped 0..1 absolute._\n\n");
+            if (rows.Length == 0) { sb.Append("_(none)_\n"); return; }
+            sb.Append("_source weights normalize by SUM (docs/runtime.md §Constraints) — a weight is not a clamped 0..1 absolute._\n");
+            sb.Append("_affected-axes form differs by family (the `type` column disambiguates): VRC omits an off group and writes `pos*`/`posXY`; Unity writes per-group `pos:*`/`pos:XZ`/`pos:off`._\n\n");
             sb.Append("| type | constrained transform | source transform | weight | affected axes | note |\n");
             sb.Append("|---|---|---|---|---|---|\n");
 
             var axisMissTypes = new HashSet<string>(); // fail-loud: types whose axis mask couldn't be read
-            foreach (var c in constraints)
+            foreach (var row in rows)
             {
-                var host = c.transform;
-                // Unity fake-null test, never ?? — ?? bypasses UnityEngine.Object's overloaded == and would
-                // read a destroyed TargetTransform as a live object instead of falling back to the host.
-                var driven = c.TargetTransform != null ? c.TargetTransform : host;
-                string type = c.GetType().Name;
-                string axes = AxisMask(c, out bool axisMiss);
-                if (axisMiss) axisMissTypes.Add(type);
-                string note = ConstraintNote(c, host, driven);
+                if (row.AxisMiss) axisMissTypes.Add(row.Type);
 
-                int count = c.Sources.Count;
-                if (count == 0)
+                if (row.Sources.Length == 0)
                 {
                     // Never invisible: a source-less constraint still gets a row (its note carries hold/anchor).
-                    Row(sb, type, GetHierarchyPath(driven), "(none)", "w=— g=" + F(c.GlobalWeight), axes, note);
+                    Row(sb, row.Type, row.Driven, "(none)", "w=— g=" + F(row.GlobalWeight), row.Axes, row.Note);
                     continue;
                 }
-                for (int i = 0; i < count; i++)
+                for (int i = 0; i < row.Sources.Length; i++)
                 {
-                    var s = c.Sources[i];
-                    // Null-check SourceTransform first: an unwired source slot is legal (seen on real avatars)
-                    // and must render (none) rather than NRE mid-report.
-                    string src = s.SourceTransform != null ? GetHierarchyPath(s.SourceTransform) : "(none)";
-                    string weight = "w=" + F(s.Weight) + " g=" + F(c.GlobalWeight);
+                    var s = row.Sources[i];
+                    string weight = "w=" + F(s.weight) + " g=" + F(row.GlobalWeight);
                     // Constraint-level note on the first row only (avoid N-fold repetition across sources).
-                    Row(sb, type, GetHierarchyPath(driven), src, weight, axes, i == 0 ? note : "");
+                    Row(sb, row.Type, row.Driven, s.src, weight, row.Axes, i == 0 ? row.Note : "");
                 }
             }
             foreach (var tn in axisMissTypes)
@@ -380,25 +522,24 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Observations (§6) — five mechanically-certain idioms, each a fact + docs pointer -------
 
-        private static int AppendObservations(StringBuilder sb, VRCConstraintBase[] constraints, List<Transform> applyHosts)
+        private static int AppendObservations(StringBuilder sb, ConstraintRow[] rows, List<Transform> applyHosts)
         {
             var lines = new List<string>();
-            foreach (var c in constraints)
+            foreach (var row in rows)
             {
-                var host = c.transform;
-                var driven = c.TargetTransform != null ? c.TargetTransform : host;
-                int count = c.Sources.Count;
+                var driven = row.DrivenTransform;
+                var c = row.Vrc; // null for Unity constraints — the VRC-only idioms below are skipped
 
-                // a. Per-client world anchor: FreezeToWorld && zero sources.
-                if (c.FreezeToWorld && count == 0)
+                // a. Per-client world anchor: FreezeToWorld && zero sources (VRC idiom only).
+                if (c != null && c.FreezeToWorld && row.Sources.Length == 0)
                     lines.Add("**per-client world anchor** — `" + Cell(GetHierarchyPath(driven)) + "` — docs/gimmicks.md §Constraint patterns · World anchors");
 
-                // b. Feedback loop: a non-null source that is a STRICT descendant of driven. The
-                //    source != driven guard is load-bearing — IsChildOf is self-inclusive and
-                //    self-as-source at partial weight is the "feel"-damping idiom, not a feedback cage.
-                for (int i = 0; i < count; i++)
+                // b. Feedback loop: a non-null source that is a STRICT descendant of driven. The one
+                //    geometric idiom that transfers to Unity constraints too. The source != driven guard
+                //    is load-bearing — IsChildOf is self-inclusive and self-as-source at partial weight is
+                //    the "feel"-damping idiom, not a feedback cage.
+                foreach (var src in row.SourceTransforms)
                 {
-                    var src = c.Sources[i].SourceTransform;
                     if (src != null && src != driven && src.IsChildOf(driven))
                     {
                         lines.Add("**feedback loop (self-referential constraint source)** — `" + Cell(GetHierarchyPath(driven)) + "` ← `" + Cell(GetHierarchyPath(src)) + "` — docs/gimmicks.md §Constraint patterns · Trilateration cage / Crawler servo");
@@ -406,15 +547,18 @@ namespace Ryan6Vrc.AgentTools.Editor
                     }
                 }
 
-                // c. TargetTransform indirection.
-                if (c.TargetTransform != null && c.TargetTransform != host)
-                    lines.Add("**TargetTransform indirection** — `" + Cell(GetHierarchyPath(driven)) + "` (host `" + Cell(host.name) + "`) — docs/runtime.md §Constraints");
+                // c. TargetTransform indirection (VRC idiom only).
+                if (c != null && c.TargetTransform != null && c.TargetTransform != c.transform)
+                    lines.Add("**TargetTransform indirection** — `" + Cell(GetHierarchyPath(driven)) + "` (host `" + Cell(c.transform.name) + "`) — docs/runtime.md §Constraints");
 
-                // d. Hold (label matches the §5.3 note — active world anchors are excluded; weight-based
-                //    holds carry the static-frame caveat; a pure zero-source hold does not).
-                string hold = HoldSuffix(c);
-                if (hold != null)
-                    lines.Add("**hold** — `" + Cell(GetHierarchyPath(driven)) + "`" + hold + " — docs/runtime.md §Constraints");
+                // d. Hold (VRC idiom only — label matches the §5.3 note; active world anchors are excluded;
+                //    weight-based holds carry the static-frame caveat; a pure zero-source hold does not).
+                if (c != null)
+                {
+                    string hold = HoldSuffix(c);
+                    if (hold != null)
+                        lines.Add("**hold** — `" + Cell(GetHierarchyPath(driven)) + "`" + hold + " — docs/runtime.md §Constraints");
+                }
             }
 
             // e. Editor/runtime swap (VRCFury ApplyDuringUpload host).
@@ -425,6 +569,109 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (lines.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in lines) sb.Append("- ").Append(l).Append('\n');
             return lines.Count;
+        }
+
+        // ----- Other components (tier-2 generic census) -------------------------------------------
+
+        // Tier-2 generic inventory. Domain-blind: names every component a tier-1 table didn't, plus MISSING
+        // scripts, with its object-ref seam and a SHALLOW scalar peek (one struct level, no array/asset
+        // expansion). Depth beyond that is AgentInspector's job. Returns the row count for other=N.
+        private static int AppendOther(StringBuilder sb, GameObject root, HashSet<Component> tier1)
+        {
+            sb.Append("\n## Other components\n\n");
+            sb.Append("_generic shallow inventory — type, host, object-reference attachments, and top-level scalar fields; for exhaustive/nested/asset depth use `AgentInspector.Snapshot(<host path>)`._\n\n");
+            int count = 0;
+            var rows = new StringBuilder();
+            foreach (var t in root.GetComponentsInChildren<Transform>(true))
+            {
+                // GetComponents<Component>() (not <MonoBehaviour>) so a MISSING script surfaces as null.
+                foreach (var comp in t.GetComponents<Component>())
+                {
+                    if (comp == null) { rows.Append("- **MISSING (broken script)** on `").Append(Cell(GetHierarchyPath(t))).Append("`\n"); count++; continue; }
+                    if (comp is Transform) continue;                 // excludes RectTransform too
+                    if (tier1.Contains(comp)) continue;              // physbones/contacts/colliders/constraints/VRCFury
+                    rows.Append("- **").Append(Cell(comp.GetType().FullName)).Append("** on `").Append(Cell(GetHierarchyPath(t))).Append("`\n");
+                    AppendShallowFields(rows, comp);
+                    count++;
+                }
+            }
+            if (count == 0) sb.Append("_(none)_\n"); else sb.Append(rows);
+            return count;
+        }
+
+        // One-struct-level peek: object refs (name + path + guid) and primitive/enum/string fields. Arrays
+        // render as name[N]; no recursion past one struct level; no asset-following; m_Script skipped.
+        private static void AppendShallowFields(StringBuilder sb, Component comp)
+        {
+            var so = new SerializedObject(comp);
+            var it = so.GetIterator();
+            bool enter = true;
+            while (it.NextVisible(enter))
+            {
+                enter = false; // top-level iteration; EmitField descends exactly one struct level itself
+                if (it.name == "m_Script") continue;
+                EmitField(sb, it, 1, allowStruct: true);
+            }
+        }
+
+        private static void EmitField(StringBuilder sb, SerializedProperty p, int indent, bool allowStruct)
+        {
+            string pad = new string(' ', indent * 2);
+            switch (p.propertyType)
+            {
+                case SerializedPropertyType.ObjectReference:
+                    var o = p.objectReferenceValue;
+                    if (o == null)
+                    {
+                        // Distinguish a clean-empty slot from a dangling ref (asset deleted) — same
+                        // empty-vs-broken idiom ReportController.MotionNullCell uses; a broken seam must
+                        // never collapse to invisible. Clean-null stays hidden (census noise).
+                        if (p.objectReferenceInstanceIDValue != 0)
+                            sb.Append(pad).Append("- ").Append(Cell(p.name)).Append(" → (broken: dangling reference)\n");
+                        return;
+                    }
+                    string path = AssetDatabase.GetAssetPath(o);
+                    // Asset ref → asset path; scene ref (Component or GameObject) → its hierarchy path.
+                    string handle = !string.IsNullOrEmpty(path) ? path
+                                  : o is Component oc ? GetHierarchyPath(oc.transform)
+                                  : o is GameObject go ? GetHierarchyPath(go.transform)
+                                  : "";
+                    AssetDatabase.TryGetGUIDAndLocalFileIdentifier(o, out string guid, out long _);
+                    sb.Append(pad).Append("- ").Append(Cell(p.name)).Append(" → `").Append(Cell(o.name)).Append('`');
+                    if (!string.IsNullOrEmpty(handle)) sb.Append(" (`").Append(Cell(handle)).Append("`)");
+                    if (!string.IsNullOrEmpty(guid) && guid != "00000000000000000000000000000000") sb.Append(" guid=").Append(guid);
+                    sb.Append('\n');
+                    return;
+                case SerializedPropertyType.Integer: case SerializedPropertyType.Boolean:
+                case SerializedPropertyType.Float:   case SerializedPropertyType.String:
+                case SerializedPropertyType.Enum:
+                    sb.Append(pad).Append("- ").Append(Cell(p.name)).Append(" = ").Append(Cell(ScalarText(p))).Append('\n');
+                    return;
+                default:
+                    if (p.isArray && p.propertyType != SerializedPropertyType.String)
+                        sb.Append(pad).Append("- ").Append(Cell(p.name)).Append('[').Append(p.arraySize).Append("]\n");
+                    else if (p.hasVisibleChildren && allowStruct)
+                    {
+                        sb.Append(pad).Append("- ").Append(Cell(p.name)).Append(":\n");
+                        var end = p.GetEndProperty(); var ch = p.Copy(); bool e = true;
+                        while (ch.NextVisible(e) && !SerializedProperty.EqualContents(ch, end))
+                        { e = false; EmitField(sb, ch.Copy(), indent + 1, allowStruct: false); } // exactly one level
+                    }
+                    return;
+            }
+        }
+
+        private static string ScalarText(SerializedProperty p)
+        {
+            switch (p.propertyType)
+            {
+                case SerializedPropertyType.Integer: return p.longValue.ToString();
+                case SerializedPropertyType.Boolean: return p.boolValue ? "true" : "false";
+                case SerializedPropertyType.Float:   return F((float)p.doubleValue);
+                case SerializedPropertyType.String:  string s = p.stringValue ?? ""; return s.Length > 120 ? s.Substring(0, 120) + "…" : s;
+                case SerializedPropertyType.Enum:    return p.enumValueIndex >= 0 && p.enumValueIndex < p.enumDisplayNames.Length ? p.enumDisplayNames[p.enumValueIndex] : p.intValue.ToString();
+                default: return p.propertyType.ToString();
+            }
         }
 
         // ----- Field renderers --------------------------------------------------------------------

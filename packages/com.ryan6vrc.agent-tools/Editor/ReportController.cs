@@ -22,7 +22,9 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// (a clip is only recoverable by GUID once its path rots), real parameter/state/motion names.
     /// The load-bearing motion distinction is EMPTY (a clean, intentional idiom) vs BROKEN (a dangling
     /// motion reference whose asset is gone) — the latter surfaces the raw dangling GUID, the only
-    /// surviving handle, recovered by parsing the controller YAML once (no C# API exposes it).
+    /// surviving handle, recovered by parsing the controller YAML once (no C# API exposes it). This
+    /// distinction is applied identically to top-level state motions AND blend-tree children (at any
+    /// nesting depth), both through the one <see cref="MotionNullCell"/> classifier.
     ///
     /// INSPECTION ONLY — never mutates. Emits one line carrying the artifact path in-band.
     /// </summary>
@@ -180,7 +182,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 // Expand a blend-tree motion inline (recursing nested trees).
                 if (motion is BlendTree bt)
-                    AppendBlendTree(bt, 0, sb);
+                    AppendBlendTree(bt, 0, sb, danglingGuids);
 
                 // Typed VRC behaviour decode (override behaviours for a synced layer).
                 AppendBehaviours(synced ? layer.GetOverrideBehaviours(st) : st.behaviours, sb);
@@ -202,10 +204,17 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static string StateMotion(AnimatorState st, AnimatorController controller, List<string> danglingGuids)
         {
             if (st.motion != null) return MotionLabel(st.motion);
-
-            // motion == null: distinguish a clean-empty idiom from a dangling (broken) reference.
             var mp = new SerializedObject(st).FindProperty("m_Motion");
-            bool dangling = mp != null && mp.objectReferenceInstanceIDValue != 0;
+            return MotionNullCell(mp, danglingGuids);
+        }
+
+        // Classify a null Motion slot: clean-empty idiom vs dangling (broken) reference. Shared by
+        // top-level state motions and blend-tree children so both speak one grammar. A null property
+        // (unexpected serialization shape / wrong key) is loud, never a silent "(empty)".
+        private static string MotionNullCell(SerializedProperty mMotion, List<string> danglingGuids)
+        {
+            if (mMotion == null) return "(broken: motion property unreadable)";
+            bool dangling = mMotion.objectReferenceInstanceIDValue != 0;
             if (!dangling) return "(empty)";
             if (danglingGuids.Count == 1) return "(broken: guid=" + danglingGuids[0] + ")";
             if (danglingGuids.Count > 1) return "(broken: dangling motion — see Broken motion GUIDs)";
@@ -234,11 +243,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             return m != null ? m.GetType().Name : "(empty)";
         }
 
-        private static void AppendBlendTree(BlendTree bt, int indent, StringBuilder sb)
+        private static void AppendBlendTree(BlendTree bt, int indent, StringBuilder sb, List<string> danglingGuids)
         {
             string pad = new string(' ', (indent + 1) * 2);
-            foreach (var ch in bt.children)
+            // Serialized child array is "m_Childs" (Unity's legacy misspelling), NOT "m_Children".
+            var childrenProp = new SerializedObject(bt).FindProperty("m_Childs");
+            var kids = bt.children;
+            for (int i = 0; i < kids.Length; i++)
             {
+                var ch = kids[i];
                 sb.Append(pad).Append("- ");
                 if (bt.blendType == BlendTreeType.Direct)
                     sb.Append("param=`").Append(ch.directBlendParameter).Append("` ");
@@ -247,11 +260,20 @@ namespace Ryan6Vrc.AgentTools.Editor
                 else
                     sb.Append("@").Append(F(ch.threshold)).Append(' ');
 
-                sb.Append(ch.motion != null ? MotionLabel(ch.motion) : "(empty)");
+                if (ch.motion != null)
+                    sb.Append(MotionLabel(ch.motion));
+                else
+                {
+                    var mMotion = childrenProp != null && i < childrenProp.arraySize
+                        ? childrenProp.GetArrayElementAtIndex(i).FindPropertyRelative("m_Motion")
+                        : null;
+                    sb.Append(MotionNullCell(mMotion, danglingGuids));
+                }
+
                 if (Math.Abs(ch.timeScale - 1f) > 1e-6f) sb.Append(" timeScale=").Append(F(ch.timeScale));
                 sb.Append('\n');
 
-                if (ch.motion is BlendTree childBt) AppendBlendTree(childBt, indent + 1, sb);
+                if (ch.motion is BlendTree childBt) AppendBlendTree(childBt, indent + 1, sb, danglingGuids);
             }
         }
 
