@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
@@ -87,66 +86,49 @@ namespace Ryan6Vrc.AvatarTools.Editor
             bool pass = drifted.Count == 0;
             string failReason = pass ? "" : " (stale bind: " + drifted[0] + "; re-run MatchHumanoidRig)";
 
-            string logPath = WriteRunLog(label, ourFbxPath, bonesChecked, drifted, pass);
-            string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CheckHumanoidRig] {0}: bonesChecked={1} drifted={2} => {3}{4}{5}",
-                label, bonesChecked, drifted.Count, pass ? "PASS" : "FAIL", failReason,
-                logPath != null ? " | log=" + logPath : "");
-
-            if (pass) Debug.Log(summary); else Debug.LogError(summary);
-            return summary;
+            string head = string.Format(CultureInfo.InvariantCulture,
+                "[CheckHumanoidRig] {0}: bonesChecked={1} drifted={2} => {3}{4}",
+                label, bonesChecked, drifted.Count, pass ? "PASS" : "FAIL", failReason);
+            return Finish(head, pass, label, ourFbxPath, bonesChecked, drifted);
         }
 
         // ── Helpers ─────────────────────────────────────────────────────────────────────────────
 
         private static string Fail(string label, string path, string why, int bonesChecked = 0)
         {
-            string logPath = WriteRunLog(label, path, bonesChecked, new List<string> { why }, false);
-            string summary = "[CheckHumanoidRig] " + label + ": => FAIL (" + why + ")"
-                + (logPath != null ? " | log=" + logPath : "");
-            Debug.LogError(summary);
-            return summary;
+            string head = "[CheckHumanoidRig] " + label + ": => FAIL (" + why + ")";
+            return Finish(head, false, label, path, bonesChecked, new List<string> { why });
         }
 
-        private static string WriteRunLog(string label, string path, int bonesChecked, List<string> drifted, bool pass)
+        /// <summary>Shared tail: JSON body → <see cref="RunLogFormat.WriteRunLog"/> (kind-prefixed
+        /// filename, honest write-failure degradation to a trailer-less bare FAIL — the old bespoke
+        /// writer swallowed a write failure into a warning and still asserted its verdict), then
+        /// severity-log. Filename was <c>reproportion_freshness_…</c>, a name inherited from the
+        /// tool's reproportion-flow origin that disagreed with its JSON <c>kind</c>.</summary>
+        private static string Finish(string head, bool pass, string label, string path, int bonesChecked, List<string> drifted)
         {
-            try
-            {
-                Directory.CreateDirectory(RunLogDir);
-                var sb = new StringBuilder();
-                sb.Append("{\n");
-                sb.Append("  \"kind\": \"check-humanoid-rig\",\n");
-                sb.Append("  \"unityVersion\": ").Append(Q(Application.unityVersion)).Append(",\n");
-                sb.Append("  \"timestampUtc\": ").Append(Q(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append(",\n");
-                sb.Append("  \"ourFbx\": ").Append(Q(path)).Append(",\n");
-                sb.Append("  \"bonesChecked\": ").Append(bonesChecked).Append(",\n");
-                sb.Append("  \"result\": ").Append(Q(pass ? "PASS" : "FAIL")).Append(",\n");
-                sb.Append("  \"drifted\": [");
-                for (int i = 0; i < drifted.Count; i++)
-                    sb.Append(i == 0 ? "" : ", ").Append(Q(drifted[i]));
-                sb.Append("]\n}");
+            var sb = new StringBuilder();
+            sb.Append("{\n");
+            sb.Append("  \"kind\": \"check-humanoid-rig\",\n");
+            sb.Append("  \"unityVersion\": ").Append(Q(Application.unityVersion)).Append(",\n");
+            sb.Append("  \"timestampUtc\": ").Append(Q(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append(",\n");
+            sb.Append("  \"ourFbx\": ").Append(Q(path)).Append(",\n");
+            sb.Append("  \"bonesChecked\": ").Append(bonesChecked).Append(",\n");
+            sb.Append("  \"result\": ").Append(Q(pass ? "PASS" : "FAIL")).Append(",\n");
+            sb.Append("  \"drifted\": [");
+            for (int i = 0; i < drifted.Count; i++)
+                sb.Append(i == 0 ? "" : ", ").Append(Q(drifted[i]));
+            sb.Append("]\n}");
 
-                var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-                var p = RunLogDir + "/reproportion_freshness_" + Sanitize(label) + "_" + stamp + ".json";
-                File.WriteAllText(p, sb.ToString());
-                AssetDatabase.Refresh();
-                return p;
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning("[CheckHumanoidRig] Could not write RunLog: " + ex.Message);
-                return null;
-            }
+            string res = RunLogFormat.WriteRunLog(RunLogDir, "check-humanoid-rig_" + label, head, sb.ToString(), ".json");
+            // Anchored to WriteRunLog's exact success contract (summary + " | log=" + path), not a
+            // floating substring.
+            bool wroteLog = res.StartsWith(head + " | log=", StringComparison.Ordinal);
+            if (pass && wroteLog) Debug.Log(res); else Debug.LogError(res);
+            return res;
         }
 
-        private static string Leaf(string assetPath)
-        {
-            var p = assetPath.TrimEnd('/');
-            int i = p.LastIndexOf('/');
-            return i >= 0 ? p.Substring(i + 1) : p;
-        }
-
-        private static string Sanitize(string s) => RunLogFormat.Sanitize(s);
+        private static string Leaf(string assetPath) => RunLogFormat.Leaf(assetPath);
 
         private static string Q(string s) => RunLogFormat.Q(s);
     }

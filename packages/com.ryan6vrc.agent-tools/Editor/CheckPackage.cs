@@ -235,7 +235,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append(r.Offenders.Count > 0 ? "\n  ]\n}" : "]\n}");
 
             var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-            var path = $"{RunLogDir}/verify_{Sanitize(label)}_{stamp}.json";
+            // Kind-prefixed filename matching the JSON "kind" (was verify_<label> — the drift #28
+            // accepted "until touched"; nothing globs the old prefix).
+            var path = $"{RunLogDir}/check-package_{Sanitize(label)}_{stamp}.json";
             File.WriteAllText(path, sb.ToString());
             AssetDatabase.Refresh();
             return path;

@@ -26,7 +26,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <paramref name="dir"/> under a <see cref="Sanitize"/>d-<paramref name="label"/> + timestamp +
         /// <paramref name="ext"/> filename; refreshes the AssetDatabase;
         /// and on success returns <paramref name="summary"/> with the in-band trailer appended
-        /// (<c>summary + " | log=" + path</c>). <paramref name="summary"/> is the one-line verdict WITHOUT
+        /// (<c>summary + " | log=" + path</c>). Filename convention: <paramref name="label"/> starts
+        /// with the artifact's <c>kind</c> (e.g. <c>check-package_&lt;target&gt;</c>), so anything
+        /// globbing a tool's artifacts finds them by the same name its JSON declares — the envelope
+        /// writer (TransplantCore.WriteRunLog) enforces this mechanically; callers here pass a
+        /// kind-prefixed label. <paramref name="summary"/> is the one-line verdict WITHOUT
         /// the trailer (ends <c>=&gt; RESULT</c>). On write failure returns a bare-FAIL summary with NO
         /// <c>| log=</c> trailer — the schema never points at an artifact that is not on disk. Does NOT
         /// log: the 5-param signature carries no PASS/FAIL flag, so each caller logs the returned summary
