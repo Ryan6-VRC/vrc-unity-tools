@@ -180,7 +180,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (alreadyOwned(clip)) { copiesReused++; continue; }
                     toOwn.Add(clip);
                 }
-                if (toOwn.Count > 0) EnsureFolderExists(outClean);
+                if (toOwn.Count > 0) TransplantCore.EnsureFolderExists(outClean);
                 foreach (var clip in toOwn)
                 {
                     string src = AssetDatabase.GetAssetPath(clip);
@@ -391,18 +391,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
-
-        static void EnsureFolderExists(string assetPath)
-        {
-            assetPath = assetPath.TrimEnd('/');
-            if (AssetDatabase.IsValidFolder(assetPath)) return;
-            int slash = assetPath.LastIndexOf('/');
-            if (slash < 0) return;
-            string parent = assetPath.Substring(0, slash);
-            string leaf = assetPath.Substring(slash + 1);
-            EnsureFolderExists(parent);
-            AssetDatabase.CreateFolder(parent, leaf);
-        }
 
         /// <summary>Route an argument-guard failure through the house RunLog grammar (summary + RunLog +
         /// LogError), like the sibling transplant tools — never a bare trailer-less line.</summary>

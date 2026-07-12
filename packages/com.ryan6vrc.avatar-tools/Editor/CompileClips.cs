@@ -184,7 +184,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         log.Note("clobbered diverged clip '" + name + "' (force)");
                 }
 
-                if (!whatIf) EnsureFolderExists(outClean);
+                if (!whatIf) TransplantCore.EnsureFolderExists(outClean);
 
                 // ── Write each clip GUID-stable in place (or, in whatIf, just record the intended path). ──
                 int created = 0, reused = 0;
@@ -419,19 +419,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             AnimationUtility.SetAnimationClipSettings(target, AnimationUtility.GetAnimationClipSettings(built));
             target.frameRate = built.frameRate; // else a reused .anim keeps a stale rate (BuildClipContent sets 60)
             EditorUtility.SetDirty(target);
-        }
-
-        // Recursively create an Assets/-relative folder chain (mirrors OwnControllerClips.EnsureFolderExists).
-        static void EnsureFolderExists(string assetPath)
-        {
-            assetPath = assetPath.TrimEnd('/');
-            if (AssetDatabase.IsValidFolder(assetPath)) return;
-            int slash = assetPath.LastIndexOf('/');
-            if (slash < 0) return;
-            string parent = assetPath.Substring(0, slash);
-            string leaf = assetPath.Substring(slash + 1);
-            EnsureFolderExists(parent);
-            AssetDatabase.CreateFolder(parent, leaf);
         }
 
         // Route a FAIL through the house RunLog grammar (summary + RunLog + LogError). Sets result/error and
