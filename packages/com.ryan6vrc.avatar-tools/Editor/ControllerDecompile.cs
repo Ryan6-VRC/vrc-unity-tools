@@ -819,7 +819,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return mp != null && mp.objectReferenceInstanceIDValue != 0;
             }
 
-            // ----- inline clips (invert ControllerEmit.BuildClip) -----
+            // ----- inline clips (invert ControllerEmit.BuildClipContent) -----
 
             private void RegisterInlineClip(AnimationClip clip, string loc)
             {
@@ -853,7 +853,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return spec;
                 }
 
-                // A hand-authored clip with ZERO curve bindings has no animatable content — ControllerEmit.BuildClip
+                // A hand-authored clip with ZERO curve bindings has no animatable content — ControllerEmit.BuildClipContent
                 // would reject the resulting empty ClipSpec (no content, no seconds). Refuse loudly here instead.
                 if (bindings.Length == 0)
                 {
