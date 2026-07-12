@@ -994,10 +994,14 @@ public class OwnMaterialTests
         StringAssert.Contains("=> PASS", s);
 
         var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/FlatUndeclared.mat");
-        Assert.IsTrue(o.IsKeywordEnabled(marker),
+        // Observe via the array getter, NOT IsKeywordEnabled: Unity's IsKeywordEnabled reports only
+        // shader-DECLARED (keyword-space) keywords and returns false for an undeclared one even when it's
+        // enabled and present — o.shaderKeywords is the only observable for it (same as
+        // Keywords_preserved_on_disk_after_fork). Against the pre-fix empty-seed flatten the marker was
+        // never re-applied, so it's absent here; the union fix carries it through.
+        CollectionAssert.Contains(o.shaderKeywords, marker,
             "flatten must union the array-getter's local overrides with the keywordSpace probe — an " +
             "undeclared EnableKeyword survives only via the array getter");
-        CollectionAssert.Contains(o.shaderKeywords, marker);
     }
 
     [Test] public void Nonvariant_own_is_unaffected_by_flatten()
