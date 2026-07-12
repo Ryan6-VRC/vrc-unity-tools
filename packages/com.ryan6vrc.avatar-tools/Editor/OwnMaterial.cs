@@ -19,8 +19,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// provenance table (<c>slots[]</c>) as the caller's verification gate.
     ///
     /// Full behavioral spec: <c>docs/superpowers/specs/2026-07-11-own-material-lean-design.md</c>. This
-    /// file currently implements Flow steps 1–2 only (arg guards + slot-name validation); routing,
-    /// copy, fork, normalize, and unlock land in later tasks.
+    /// file currently implements Flow steps 1–3: arg guards, slot-name validation, and target-identity
+    /// routing (own / branch / augment) with a copy-to-new deep copy. Forking, variant flatten, and
+    /// locked-poi unlock are not wired yet (Tasks 3/5/6) — every slot on a landed <c>O</c> reports
+    /// <c>vendor-ref</c> regardless of what was requested (a deliberate Task-2 stub; slot-name validation
+    /// still FAILs a typo'd request, it just doesn't fork a valid one yet).
     ///
     /// Call <see cref="Run"/> from MCP execute_code or a menu item.
     /// </summary>
@@ -64,9 +67,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 source = materialPath,
             };
 
-            // ── Slot-name validation (Flow step 2) — BEFORE any write. A copy preserves the shader, so
-            //    validating against S's texture properties == validating against O's; failing here means
-            //    a typo never leaves a half-made copy. ──
+            // ── Slot-name validation (Flow step 2) — BEFORE any write/routing (no mode resolved yet, so
+            //    this FAIL stays label-only). A copy preserves the shader, so validating against S's
+            //    texture properties == validating against O's; failing here means a typo never leaves a
+            //    half-made copy. ──
             var requestedSlots = forkTextureSlots ?? Array.Empty<string>();
             var shaderTexProps = mat.GetTexturePropertyNames();
             foreach (var slot in requestedSlots)
@@ -80,11 +84,132 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 data.error = "requested slot is not a texture property on the shader";
                 return Finish(data, label);
             }
+            var requested = new HashSet<string>(requestedSlots, StringComparer.Ordinal);
 
-            // Task 1 stops here by design (routing/copy/fork/normalize land in later tasks) — a
-            // deliberate FAIL so the FAIL path + RunLog shape are exercised for every valid call.
-            return Fail(data, label, "not implemented past guards");
+            // ── Routing (Flow step 3): targetPath is a pure function of target identity. From here on
+            //    the mode IS known, so every Fail/Finish call below prefixes it onto the label (the
+            //    mode-first one-liner: a wrong-mode run is catchable at a glance). ──
+            string sourcePath = materialPath.Replace('\\', '/');
+            bool outDirGiven = !string.IsNullOrEmpty(outDir);
+            string outClean = outDirGiven ? outDir.Replace('\\', '/').TrimEnd('/') : null;
+            string targetPath = outDirGiven
+                ? outClean + "/" + TransplantCore.Sanitize(!string.IsNullOrEmpty(newName) ? newName : mat.name) + ".mat"
+                : sourcePath;
+
+            bool inPlace = targetPath == sourcePath;
+            if (inPlace)
+            {
+                string modeLabel = "augment " + label;
+
+                // outDir given but resolves to the source: never a silent reroute — one signal
+                // (outDir present/absent), one meaning (copy-to-new vs. augment).
+                if (outDirGiven)
+                    return Fail(data, modeLabel, "outDir resolves to the source — omit outDir to augment in place");
+                // outDir omitted but newName given: closes the "meant to branch, forgot outDir, silently
+                // mutated the SOURCE" hole (DELTA 4 — attempt 1 did not have this guard).
+                if (!string.IsNullOrEmpty(newName))
+                    return Fail(data, modeLabel, "newName requires outDir; omit both to augment in place");
+                // A vendor source has nowhere writable to land — it must be OWNED first via an outDir.
+                if (!TransplantCore.IsWritableAsset(sourcePath))
+                    return Fail(data, modeLabel, "vendor source needs an outDir to own it into a writable bucket");
+                // In-place O (== S here) must be neither locked nor a variant — this tool never
+                // unlocks/flattens in place (that's the copy-to-new normalize step, Tasks 5/6).
+                if (IsLocked(mat))
+                    return Fail(data, modeLabel, "owned material is locked; unlock first");
+                if (mat.parent != null)
+                    return Fail(data, modeLabel, "owned material is a variant; OwnMaterial produces standalone materials");
+
+                // No fork/normalize yet (Task 2 scope) — O is already S; report the stub slot table and PASS.
+                BuildVendorRefSlots(mat, requested, data);
+                data.result = "PASS";
+                if (whatIf) data.Note("would augment '" + sourcePath + "' in place");
+                return Finish(data, modeLabel);
+            }
+
+            // ── Copy-to-new: own (S vendor) or branch (S owned) — same mechanics, RunLog names which. ──
+            string mode = TransplantCore.IsWritableAsset(sourcePath) ? "branch" : "own";
+            string coLabel = mode + " " + label;
+
+            if (!AssetDatabase.IsValidFolder(outClean) && File.Exists(outClean))
+                return Fail(data, coLabel, "outDir '" + outClean + "' resolves to a file, not a folder");
+
+            if (!TransplantCore.IsWritableAsset(targetPath))
+            {
+                if (force) data.Note("read-only target override (force): " + targetPath);
+                else
+                    return Fail(data, coLabel, "target '" + targetPath +
+                        "' is read-only (under Assets/Vendor or Packages): choose an owned outDir, or pass force=true");
+            }
+
+            if (AssetDatabase.LoadMainAssetAtPath(targetPath) != null)
+                return Fail(data, coLabel, "an owned material already exists at '" + targetPath +
+                    "' — pass it as materialPath to fork more slots, or choose another newName");
+
+            if (whatIf)
+            {
+                BuildVendorRefSlots(mat, requested, data);
+                data.result = "PASS";
+                data.Note("would create '" + targetPath + "'");
+                return Finish(data, coLabel);
+            }
+
+            EnsureFolderExists(outClean);
+            if (!AssetDatabase.CopyAsset(sourcePath, targetPath))
+                return Fail(data, coLabel, "CopyAsset failed: " + sourcePath + " -> " + targetPath);
+
+            var owned = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
+            if (owned == null)
+            {
+                AssetDatabase.DeleteAsset(targetPath);
+                return Fail(data, coLabel, "owned copy load failed immediately after CopyAsset: " + targetPath);
+            }
+
+            // No fork/normalize yet (Task 2 scope) — O is a byte-preserving deep copy of S; report the
+            // stub slot table (every slot vendor-ref) and PASS.
+            BuildVendorRefSlots(owned, requested, data);
+            data.result = "PASS";
+            return Finish(data, coLabel);
         }
+
+        // ── Task-2 stub slot table (replaced by the full fork disposition matrix in Task 3) ─────────
+
+        /// <summary>
+        /// Lists every shader texture slot on <paramref name="src"/> as <c>vendor-ref</c> — Task 2 does
+        /// not fork yet, so this is a deliberate placeholder: no slot is ever <c>forked</c>/
+        /// <c>already-owned</c>/<c>unforkable</c>/<c>owned-elsewhere</c>/<c>empty</c> here, regardless of
+        /// <paramref name="requested"/> (a requested slot still reports <c>vendor-ref</c> — the fork
+        /// disposition itself is Task 3's <c>BuildPlan</c>). Read-only: reads each slot's texture once
+        /// (never saved afterward in this stub path, so the getter-clears-keywords quirk never reaches
+        /// disk — see memory <c>unity-material-getter-clears-keywords</c>).
+        /// </summary>
+        static void BuildVendorRefSlots(Material src, HashSet<string> requested, RunData data)
+        {
+            foreach (var slot in src.GetTexturePropertyNames())
+            {
+                var tex = src.GetTexture(slot);
+                string texPath = tex != null ? AssetDatabase.GetAssetPath(tex) : null;
+                data.slots.Add(new SlotRow
+                {
+                    slot = slot,
+                    requested = requested.Contains(slot),
+                    disposition = "vendor-ref",
+                    sourcePath = texPath,
+                    ownedPath = null,
+                });
+            }
+            data.Count("slotsForked", 0);
+            data.Count("slotsAlreadyOwned", 0);
+            data.Count("slotsOwnedElsewhere", 0);
+            data.Count("slotsVendorRef", data.slots.Count);
+            data.Count("slotsBuiltin", 0);
+            data.Count("slotsEmpty", 0);
+        }
+
+        /// <summary>A material is locked iff its shader is one of Thry's generated <c>Hidden/Locked/…</c>
+        /// shaders. The full unlock mechanics land in Task 6; this predicate alone gates the in-place
+        /// augment guard (Task 2) — an owned material must never be locked before this tool touches it.</summary>
+        static bool IsLocked(Material m) =>
+            m.shader != null && m.shader.name.StartsWith("Hidden/Locked/", StringComparison.Ordinal);
 
         // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
@@ -220,8 +345,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── Data types ────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>One row of the per-slot provenance table (<see cref="RunData.slots"/>). <c>ownedPath</c>
-        /// is the owned texture's path for <c>forked</c>/<c>already-owned</c> slots; null otherwise.
-        /// Unused (always empty) until Task 3 wires the fork planner.</summary>
+        /// is the owned texture's path for <c>forked</c>/<c>already-owned</c> slots; null otherwise. Every
+        /// row reports <c>vendor-ref</c>/<c>ownedPath = null</c> until Task 3 wires the fork planner
+        /// (<see cref="OwnMaterial.BuildVendorRefSlots"/>).</summary>
         struct SlotRow
         {
             public string slot;
