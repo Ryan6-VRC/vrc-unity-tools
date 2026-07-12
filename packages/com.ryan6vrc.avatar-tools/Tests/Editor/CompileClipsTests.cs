@@ -4,6 +4,7 @@
 using System.IO;
 using NUnit.Framework;
 using UnityEditor;
+using UnityEditor.Animations;
 using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
@@ -210,5 +211,36 @@ public class CompileClipsTests
         string s = CompileClips.Compile(WriteYaml(TwoPoses), Out);
         StringAssert.Contains("FAIL", s);
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(Out + "/Wave.anim", "Human"), "unstamped human .anim protected (nothing written)");
+    }
+
+    // End-to-end: a CompileClips-emitted external .anim, referenced from a controller by `ref:{path}`,
+    // compiles and the state resolves to that STANDALONE external clip (not an embedded sub-asset).
+    [Test]
+    public void Controller_resolves_an_external_clip_by_ref_path()
+    {
+        string one = Head + "clips:\n  Wave: { set: { \"Arm/SkinnedMeshRenderer.blendShape.Wave\": 100 } }\n";
+        CompileClips.Compile(WriteYaml(one), Out);
+        string animPath = Out + "/Wave.anim";
+        Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(animPath), "external clip emitted");
+
+        string ctrlYaml =
+            "schema: 1\ncontroller: FxExt\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n" +
+            "      S: { motion: { ref: \"" + animPath + "\" } }\n" +
+            "    default: S\n";
+        string cyPath = Path.Combine(Path.GetTempPath(), "ctrl_" + System.Guid.NewGuid().ToString("N").Substring(0, 8) + ".yaml");
+        File.WriteAllText(cyPath, ctrlYaml);
+        try
+        {
+            string res = CompileController.Compile(cyPath, Out);
+            StringAssert.Contains("=> OK", res);
+            var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(Out + "/FxExt.controller");
+            Assert.IsNotNull(ctrl, "controller compiled");
+            var motion = ctrl.layers[0].stateMachine.states[0].state.motion as AnimationClip;
+            Assert.IsNotNull(motion, "state has a clip motion");
+            Assert.AreEqual(animPath, AssetDatabase.GetAssetPath(motion), "state resolves to the EXTERNAL clip by path");
+            Assert.IsFalse(AssetDatabase.IsSubAsset(motion), "external clip is a standalone asset, not embedded in the controller");
+        }
+        finally { File.Delete(cyPath); }
     }
 }
