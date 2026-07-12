@@ -63,6 +63,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static Vector3 SpecialPos(float[] xy, Vector3 fallback)
             => xy != null ? new Vector3(xy[0], xy[1], 0f) : fallback;
 
+        // Positional default names — the single source both BuildTree (emit) and DecodeTree (decompile) use to
+        // tell an auto-generated blend-tree name from a human-authored one.
+        internal static string AutoTreeName(string stateName) => stateName + "_BlendTree";
+        internal static string AutoChildName(string parentAppliedName, int index) => parentAppliedName + "_" + index;
+
         public sealed class EmitResult
         {
             public AnimatorController Controller;
@@ -468,7 +473,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (!string.IsNullOrEmpty(s.SpeedParam)) { ast.speedParameterActive = true; ast.speedParameter = s.SpeedParam; }
                     if (!string.IsNullOrEmpty(s.MotionTimeParam)) { ast.timeParameterActive = true; ast.timeParameter = s.MotionTimeParam; }
                     ast.mirror = s.Mirror;
-                    if (s.Motion != null) ast.motion = BuildMotion(s.Motion, s.Name + "_BlendTree", s.Name);
+                    if (s.Motion != null) ast.motion = BuildMotion(s.Motion, AutoTreeName(s.Name), s.Name);
                     EmitBehaviours(s.Behaviours, t => ast.AddStateMachineBehaviour(t));
                     scope.States[s.Name] = ast;
                 }
@@ -639,6 +644,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 tr.orderedInterruption = t.OrderedInterruption ?? true;
                 tr.mute = t.Mute;
                 tr.solo = t.Solo;
+                if (!string.IsNullOrEmpty(t.Name)) tr.name = t.Name;
                 foreach (var c in t.When) tr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param); // empty When = unconditional
             }
 
@@ -711,7 +717,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private BlendTree BuildTree(BlendTreeSpec spec, string name, string stateContext)
             {
-                var bt = new BlendTree { name = name, hideFlags = HideFlags.HideInHierarchy };
+                // A human-authored spec.Name overrides the positional default; children then derive from the
+                // APPLIED name, not the incoming positional one — otherwise a named parent's children would
+                // decompile as explicit gibberish (they'd carry the OLD auto default forever).
+                var applied = spec.Name ?? name;
+                var bt = new BlendTree { name = applied, hideFlags = HideFlags.HideInHierarchy };
                 bt.blendType = MapTreeKind(spec.Kind);
                 // A fresh 1D tree defaults to useAutomaticThresholds=true, which makes Unity OVERWRITE our
                 // explicit per-child thresholds with even spacing (0, 1/n, …). Disable it BEFORE adding children
@@ -734,7 +744,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 for (int i = 0; i < spec.Children.Count; i++)
                 {
                     var child = spec.Children[i];
-                    var childMotion = BuildMotion(child.Motion, name + "_" + i, stateContext);
+                    var childMotion = BuildMotion(child.Motion, AutoChildName(applied, i), stateContext);
                     switch (spec.Kind)
                     {
                         case TreeKind.OneD: bt.AddChild(childMotion, child.Threshold); break;

@@ -170,6 +170,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public bool ToExit;
         public List<Condition> When = new List<Condition>();
         public bool CanTransitionToSelf;        // AnyState ladder only
+        public string Name;                     // null ⇒ Unity's empty default; state/AnyState only (refused on entry)
         public bool Mute; public bool Solo;     // AnimatorStateTransition editor flags (state + AnyState ladders)
         // null == inherit Defaults:
         public float? Duration; public float? ExitTime; public bool? FixedDuration;
@@ -194,6 +195,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public string ParamY;                   // 2D only
         public bool? Normalized;                // Direct only: the "Normalized Blend Values" runtime toggle
                                                 // (sum-to-1 vs raw additive). null ⇒ Unity's construction default.
+        public string Name;                     // null ⇒ compiler auto-generates (<State>_BlendTree / <parent>_<i>)
         public List<TreeChild> Children = new List<TreeChild>();
     }
     public sealed class TreeChild

@@ -295,6 +295,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static void EmitTreeBlock(StringBuilder sb, BlendTreeSpec spec, int indent)
         {
             L(sb, Sp(indent) + "tree: " + TreeKindToken(spec.Kind));
+            if (!string.IsNullOrEmpty(spec.Name)) L(sb, Sp(indent) + "name: " + ScalarStr(spec.Name));
             if (!string.IsNullOrEmpty(spec.Param)) L(sb, Sp(indent) + "param: " + ScalarStr(spec.Param));
             if (!string.IsNullOrEmpty(spec.ParamY)) L(sb, Sp(indent) + "paramY: " + ScalarStr(spec.ParamY));
             if (spec.Normalized.HasValue) L(sb, Sp(indent) + "normalized: " + Bool(spec.Normalized.Value));
@@ -339,6 +340,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static List<string> TreeInner(BlendTreeSpec spec)
         {
             var parts = new List<string> { "tree: " + TreeKindToken(spec.Kind) };
+            if (!string.IsNullOrEmpty(spec.Name)) parts.Add("name: " + ScalarStr(spec.Name));
             if (!string.IsNullOrEmpty(spec.Param)) parts.Add("param: " + ScalarStr(spec.Param));
             if (!string.IsNullOrEmpty(spec.ParamY)) parts.Add("paramY: " + ScalarStr(spec.ParamY));
             if (spec.Normalized.HasValue) parts.Add("normalized: " + Bool(spec.Normalized.Value));
@@ -359,11 +361,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static string FlowTransition(Transition t, bool anyLadder)
         {
-            var parts = new List<string>
-            {
-                "to: " + (t.ToExit ? "Exit" : ScalarStr(t.To)),
-                "when: " + WhenList(t.When),
-            };
+            var parts = new List<string> { "to: " + (t.ToExit ? "Exit" : ScalarStr(t.To)) };
+            if (!string.IsNullOrEmpty(t.Name)) parts.Add("name: " + ScalarStr(t.Name));
+            parts.Add("when: " + WhenList(t.When));
             if (t.ExitTime.HasValue) parts.Add("exitTime: " + Num(t.ExitTime.Value));
             if (t.Duration.HasValue) parts.Add("duration: " + Num(t.Duration.Value));
             if (t.FixedDuration.HasValue) parts.Add("fixedDuration: " + Bool(t.FixedDuration.Value));
