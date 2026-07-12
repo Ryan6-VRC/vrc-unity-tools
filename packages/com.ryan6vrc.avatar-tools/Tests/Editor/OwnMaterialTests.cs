@@ -965,6 +965,41 @@ public class OwnMaterialTests
         Assert.AreEqual(new Vector2(0.1f, 0.2f), o.GetTextureOffset("_MainTex"), "texture offset carried");
     }
 
+    [Test] public void Variant_undeclared_local_keyword_survives_flatten()
+    {
+        // The old FlattenVariant rebuilt its keyword set ONLY by probing shader.keywordSpace.keywordNames +
+        // IsKeywordEnabled — a keyword enabled via EnableKeyword that is NOT declared in the shader's
+        // keyword space (common with Poiyomi/lilToon feature toggles) was invisible to that probe and got
+        // silently dropped on flatten. This marker is deliberately NOT a Standard-shader keyword (mirrors
+        // how Keywords_preserved_on_disk_after_fork uses OWNMAT_TEST_KEYWORD for the non-variant path) —
+        // this test fails against the keywordSpace-probe-only code and passes once the array getter
+        // (o.shaderKeywords, which preserves local overrides verbatim regardless of declared-ness) is
+        // unioned in.
+        const string marker = "OWNMAT_UNDECLARED_KW";
+        var parent = VendorMat("Base");              // Standard shader, under Vendor
+        EditorUtility.SetDirty(parent); AssetDatabase.SaveAssets();
+
+        // Same authoring order as Variant_source_is_flattened_on_own: create + save the bare variant first,
+        // then set overrides on the reloaded, asset-backed instance.
+        var variant = new Material(parent) { parent = parent };
+        string vp = VendorRoot + "/VarUndeclared.mat";
+        AssetDatabase.CreateAsset(variant, vp); AssetDatabase.SaveAssets();
+
+        var v = AssetDatabase.LoadAssetAtPath<Material>(vp);
+        v.EnableKeyword(marker);                     // local override, undeclared in the Standard shader's keywordSpace
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+        CollectionAssert.Contains(v.shaderKeywords, marker, "fixture: the variant must carry the marker before Run");
+
+        string s = OwnMaterial.Run(vp, Owned, System.Array.Empty<string>(), newName: "FlatUndeclared");
+        StringAssert.Contains("=> PASS", s);
+
+        var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/FlatUndeclared.mat");
+        Assert.IsTrue(o.IsKeywordEnabled(marker),
+            "flatten must union the array-getter's local overrides with the keywordSpace probe — an " +
+            "undeclared EnableKeyword survives only via the array getter");
+        CollectionAssert.Contains(o.shaderKeywords, marker);
+    }
+
     [Test] public void Nonvariant_own_is_unaffected_by_flatten()
     {
         var v = VendorMat("Dress");

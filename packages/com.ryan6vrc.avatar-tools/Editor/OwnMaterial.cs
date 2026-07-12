@@ -322,20 +322,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // material's in-memory shaderKeywords — memory unity-material-getter-clears-keywords). whatIf
             // saves nothing, but src is the caller's LIVE material instance; leaving it keyword-wiped would
             // be a real side effect of a call that promises to mutate nothing.
+            // Restore is in a finally — src is the caller's LIVE material, and whatIf promises to mutate
+            // nothing; if BuildPlan throws, a bare post-call restore would be skipped and leave src
+            // keyword-wiped with no RunLog (the execute path guards this exact case, see ForkSlotsAndPersist's
+            // finally).
             var kw = src.shaderKeywords;
-            var sourceToDst = new Dictionary<string, string>(StringComparer.Ordinal);
-            var claimedDstToSource = new Dictionary<string, string>(StringComparer.Ordinal);
-            var plan = BuildPlan(src, home, requested, data, sourceToDst, claimedDstToSource);
-            src.shaderKeywords = kw;
-
-            FillSlotsAndCounts(data, plan);
-            if (data.offenders.Count > 0)
+            try
             {
-                data.result = "FAIL";
-                data.error = "slot fork validation failed";
+                var sourceToDst = new Dictionary<string, string>(StringComparer.Ordinal);
+                var claimedDstToSource = new Dictionary<string, string>(StringComparer.Ordinal);
+                var plan = BuildPlan(src, home, requested, data, sourceToDst, claimedDstToSource);
+
+                FillSlotsAndCounts(data, plan);
+                if (data.offenders.Count > 0)
+                {
+                    data.result = "FAIL";
+                    data.error = "slot fork validation failed";
+                }
+                else data.result = "PASS";
+                return Finish(data, label);
             }
-            else data.result = "PASS";
-            return Finish(data, label);
+            finally { src.shaderKeywords = kw; }
         }
 
         /// <summary>
@@ -354,21 +361,39 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             var newlyWrittenTex = new List<string>();     // texture dsts where CopyAsset actually ran this run
             bool homeCreatedThisRun = false;               // did THIS run mkdir H(O)? (prune only then, only if empty)
+
+            // Hoisted above rollback (which needs `owned`/`slotBackup`) and above the try (so the finally
+            // can restore the keyword snapshot on EVERY exit path — early return, exception, or
+            // fall-through): for AUGMENT, rollback does NOT delete the caller's material, so a restore that
+            // only ran on some exits would leave the caller's LIVE in-memory material keyword-wiped with no
+            // recovery on any exit the restore forgot.
+            Material owned = null;
+            string[] keywordsBeforeFork = null;
+            List<(string slot, Texture tex, Vector2 scale, Vector2 offset)> slotBackup = null;
+
             Action rollback = () =>
             {
                 foreach (var t in newlyWrittenTex) AssetDatabase.DeleteAsset(t); // never a reused pre-existing texture
-                if (createdO) AssetDatabase.DeleteAsset(targetPath);
+                if (createdO)
+                {
+                    AssetDatabase.DeleteAsset(targetPath);
+                }
+                else if (owned != null && slotBackup != null)
+                {
+                    // Augment rollback restores the caller's live slot refs it mutated, since it (correctly)
+                    // never deletes the material — otherwise a later row's failure would leave the caller's
+                    // LIVE material pointing at textures rollback just deleted above.
+                    foreach (var b in slotBackup)
+                    {
+                        owned.SetTexture(b.slot, b.tex);
+                        owned.SetTextureScale(b.slot, b.scale);
+                        owned.SetTextureOffset(b.slot, b.offset);
+                    }
+                }
                 if (homeCreatedThisRun && AssetDatabase.IsValidFolder(textureHome) &&
                     AssetDatabase.FindAssets("", new[] { textureHome }).Length == 0)
                     AssetDatabase.DeleteAsset(textureHome);
             };
-
-            // Hoisted above the try so the finally can restore the keyword snapshot on EVERY exit path
-            // (early return, exception, or fall-through): for AUGMENT, rollback does NOT delete the
-            // caller's material, so a restore that only ran on some exits would leave the caller's LIVE
-            // in-memory material keyword-wiped with no recovery on any exit the restore forgot.
-            Material owned = null;
-            string[] keywordsBeforeFork = null;
 
             try
             {
@@ -385,6 +410,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // before the persist below. For augment, `owned` IS the caller's live in-scene material —
                 // this protects its LIVE keyword state, not just what lands on disk.
                 keywordsBeforeFork = owned.shaderKeywords;
+
+                if (!createdO)
+                {
+                    // Augment mutates the caller's pre-existing material's slots in place (below, per
+                    // successful forked row) — snapshot the requested slots' original refs so a LATER row's
+                    // failure can roll them back too, not just the textures this run wrote. Snapshotting via
+                    // GetTexture fires the keyword wipe, but keywordsBeforeFork above already covers that.
+                    slotBackup = new List<(string, Texture, Vector2, Vector2)>();
+                    foreach (var slot in requested)
+                        slotBackup.Add((slot, owned.GetTexture(slot), owned.GetTextureScale(slot), owned.GetTextureOffset(slot)));
+                }
 
                 // ── Fork rule (Flow step 5), off O (byte-identical to S pre-fork on copy-to-new; the
                 //    caller's already-owned material, possibly already forked, on in-place). ──
@@ -909,17 +945,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             var shader = o.shader;
 
-            // Resolved-enabled keyword set: a per-name IsKeywordEnabled probe over the shader's local
-            // keyword space. Kept BEFORE any shader-property Get/Set below — the first GetColor/GetFloat/
-            // GetVector/GetInt/GetTexture call on a Material instance silently clears its ENTIRE
-            // shaderKeywords array as a side effect (memory unity-material-getter-clears-keywords; renderQueue,
-            // parent, and IsKeywordEnabled itself do not trigger it), so keywords must be read first or lost
-            // outright. This is the memory's VARIANT EXCEPTION: a plain shaderKeywords array-getter snapshot
-            // (as ForkSlotsAndPersist takes for a non-variant O) would NOT include a keyword inherited-but-
-            // never-overridden from the parent — only a per-keyword IsKeywordEnabled probe over
-            // shader.keywordSpace resolves the full effective set through the (about-to-be-severed) parent
-            // chain.
-            var enabledKeywords = new HashSet<string>(StringComparer.Ordinal);
+            // Resolved-enabled keyword set: UNION of two sources, both read BEFORE any shader-property
+            // Get/Set below — the first GetColor/GetFloat/GetVector/GetInt/GetTexture call on a Material
+            // instance silently clears its ENTIRE shaderKeywords array as a side effect (memory
+            // unity-material-getter-clears-keywords; renderQueue, parent, the array getter itself, and
+            // IsKeywordEnabled itself do not trigger it), so keywords must be read first or lost outright.
+            //   - o.shaderKeywords (the array getter, as ForkSlotsAndPersist takes for a non-variant O):
+            //     LOCAL overrides only — but that includes keywords enabled via EnableKeyword that are NOT
+            //     in the shader's declared keyword space (common with Poiyomi/lilToon feature toggles),
+            //     which the probe below misses entirely.
+            //   - a per-name IsKeywordEnabled probe over shader.keywordSpace.keywordNames: resolves the
+            //     full effective set through the (about-to-be-severed) parent chain, so it also catches a
+            //     keyword inherited-but-never-locally-overridden — but only among shader-DECLARED names.
+            // Neither alone is complete; their union is. Residual gap: a keyword that is purely inherited
+            // from the parent AND not shader-declared is recoverable by neither method — rare (declared
+            // keywords are the normal case for inheritance) and strictly narrower than the old probe-only
+            // gap this fixes.
+            var enabledKeywords = new HashSet<string>(o.shaderKeywords, StringComparer.Ordinal);
             foreach (var kw in shader.keywordSpace.keywordNames)
                 if (o.IsKeywordEnabled(kw)) enabledKeywords.Add(kw);
 
