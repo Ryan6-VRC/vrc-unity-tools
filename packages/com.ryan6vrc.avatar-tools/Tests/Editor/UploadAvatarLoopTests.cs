@@ -16,4 +16,14 @@ public class UploadAvatarLoopTests
         }
         finally { Object.DestroyImmediate(go); }
     }
+
+    [Test]
+    public void CauReflect_AbsentIsGracefulNotThrowing()
+    {
+        Assert.DoesNotThrow(() => {
+            bool ok = CauReflect.TryBuildSetting(null, out _, out var why);
+            Assert.IsFalse(ok);
+            Assert.IsFalse(string.IsNullOrEmpty(why));
+        });
+    }
 }
