@@ -33,7 +33,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// controller-embedded sub-asset path only).</para>
     ///
     /// <para><b>DIVERGENCE GUARD.</b> Before writing, each existing target <c>.anim</c> is compared to the
-    /// content stamp WE last wrote for it (Task 3). A clip whose on-disk content diverges from its stamp — or
+    /// content stamp WE last wrote for it. A clip whose on-disk content diverges from its stamp — or
     /// carries no stamp at all — was touched OUT OF BAND (a human hand-edit, or a pre-existing hand-authored
     /// <c>.anim</c> we never emitted). Any divergence REFUSES the whole run writing nothing (batch-atomic),
     /// naming each offender — unless <paramref name="force"/>, which overwrites + re-stamps and notes each
@@ -146,7 +146,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 //    each already-existing target, `diverged` iff its on-disk content differs from the stamp WE
                 //    last wrote for it (ReadContentStamp == null → hand-authored/never emitted here; or hash !=
                 //    stamp → edited out of band since our last emit). This compares DISK to our own stamp, not to
-                //    the YAML: Task 3 stamps the disk hash, so recompiling our own untouched output — identical
+                //    the YAML: the stamp records the disk hash, so recompiling our own untouched output — identical
                 //    OR changed source — rehashes to the stamp and is NOT diverged (overwrites silently). Only a
                 //    human hand-edit or an unstamped pre-existing .anim trips this. force overrides: overwrite +
                 //    re-stamp (the reload-stamp loop below) + a loud per-clobber note. ──
@@ -212,7 +212,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // ── Content-provenance stamp. Reload each emitted clip FROM DISK and stamp the hash of THAT
                     //    on-disk clip — never the in-memory `built` clip. Float/tangent serialization can drift
                     //    subtly across the in-memory→.anim round-trip, so stamping the disk hash guarantees the
-                    //    stamp equals what a divergence check (Task 4) recomputes from the .anim; an unmodified
+                    //    stamp equals what the divergence guard recomputes from the .anim; an unmodified
                     //    clip can never read as diverged. Nothing to stamp under whatIf (nothing was written). ──
                     foreach (var spec in doc.Clips)
                     {
@@ -239,8 +239,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── Content-hash provenance ────────────────────────────────────────────────────────────────────
         //
         // A deterministic, order-INDEPENDENT hash over an emitted clip's CONTENT (curves, object refs, events,
-        // settings). Task 4 recomputes this from disk and refuses to clobber a clip whose content diverges from
-        // its stamp; this task only stamps + reads it back. Reuses ControllerEmit.SourceHash so the hash width /
+        // settings). The divergence guard recomputes this from disk and refuses to clobber a clip whose content
+        // diverges from its stamp; the stamp pass only writes + reads it back. Reuses ControllerEmit.SourceHash so the hash width /
         // format matches the sibling srchash provenance.
 
         /// <summary>Deterministic content hash of <paramref name="clip"/> — order-independent (binding lists
@@ -275,7 +275,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Object-reference (PPtr) curves — same sort; key times + STABLE target identity (RefId). Not
             // exercised by CompileClips' own output: the clips: grammar produces only float curves via
             // BuildClipContent. This branch exists so a hand-edited .anim carrying a PPtr curve hashes stably
-            // for Task 4's divergence check.
+            // for the divergence guard's check.
             foreach (var b in AnimationUtility.GetObjectReferenceCurveBindings(clip)
                          .OrderBy(x => x.path, StringComparer.Ordinal)
                          .ThenBy(x => x.type == null ? "" : x.type.FullName, StringComparer.Ordinal)
@@ -368,7 +368,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // Replace `target`'s content with `built`'s, clearing residual curves/object-refs/events FIRST so a
         // recompile of a mutated source leaves no stale binding behind. Editing IN PLACE (not a new asset) is
-        // what makes the write GUID-stable. Verbatim from the Task-2 design sketch.
+        // what makes the write GUID-stable.
         static void ClearAndCopy(AnimationClip target, AnimationClip built)
         {
             target.ClearCurves();

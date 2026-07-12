@@ -174,7 +174,7 @@ public class CompileClipsTests
         var c = AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim");
         Assert.AreEqual(h1, CompileClips.HashClipContent(c), "hash of the on-disk clip matches its stamp");
         string mutated = TwoPoses.Replace("blendShape.Wave", "blendShape.Salute");
-        CompileClips.Compile(WriteYaml(mutated), Out, force: true);     // force: content diverged from stamp (Task 4 not yet built, but force is safe)
+        CompileClips.Compile(WriteYaml(mutated), Out);                  // recompile with changed YAML: the on-disk clip still matches its stamp (no human edit), so it is NOT diverged and overwrites without force; the new content changes the hash
         Assert.AreNotEqual(h1, CompileClips.ReadContentStamp(Out + "/Wave.anim"), "hash changes when content changes");
     }
 
@@ -242,5 +242,18 @@ public class CompileClipsTests
             Assert.IsFalse(AssetDatabase.IsSubAsset(motion), "external clip is a standalone asset, not embedded in the controller");
         }
         finally { File.Delete(cyPath); }
+    }
+
+    [Test]
+    public void No_clips_is_refused()
+    {
+        // Valid doc that parses + validates (schema + a declared param) but carries no clips: — the
+        // doc.Clips.Count==0 guard refuses before any folder is created.
+        string body = "schema: 1\nbasis: avatar-root\ncontroller: Empty\nparameters:\n  P: { type: float }\n";
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("no clips")); // Finish logs Debug.LogError on FAIL
+        string s = CompileClips.Compile(WriteYaml(body), Out);
+        StringAssert.Contains("FAIL", s);
+        StringAssert.Contains("no clips", s);
+        Assert.IsFalse(AssetDatabase.IsValidFolder(Out), "nothing emitted");
     }
 }
