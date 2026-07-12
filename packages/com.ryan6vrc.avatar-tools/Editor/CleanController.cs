@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
-using System.Text;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
@@ -57,32 +55,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
 
-            if (sourceFx == null)
-            {
-                string err = "[CleanController] sourceFx is null => FAIL";
-                Debug.LogError(err);
-                return err;
-            }
-            if (ownedRoot == null)
-            {
-                string err = "[CleanController] ownedRoot is null => FAIL";
-                Debug.LogError(err);
-                return err;
-            }
-            if (string.IsNullOrEmpty(outDir))
-            {
-                string err = "[CleanController] outDir is null or empty => FAIL";
-                Debug.LogError(err);
-                return err;
-            }
+            if (sourceFx == null)          return ArgFail(label, whatIf, sourceFx, ownedRoot, "sourceFx is null");
+            if (ownedRoot == null)         return ArgFail(label, whatIf, sourceFx, ownedRoot, "ownedRoot is null");
+            if (string.IsNullOrEmpty(outDir)) return ArgFail(label, whatIf, sourceFx, ownedRoot, "outDir is null or empty");
 
             var data = new RunData
             {
-                SourceFxName = sourceFx.name,
-                InstanceName = ownedRoot.name,
-                OutDir       = outDir,
-                WhatIf       = whatIf,
+                source   = sourceFx.name,
+                instance = ownedRoot.name,
+                whatIf   = whatIf,
             };
+            // Noted up front so even an early FAIL's artifact carries the output location — the
+            // failure class where a bad outDir is the likely culprit (CopyAsset failed).
+            data.Note("outDir=" + outDir);
 
             try
             {
@@ -94,9 +79,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     string previewSourceFxPath = AssetDatabase.GetAssetPath(sourceFx);
                     if (string.IsNullOrEmpty(previewSourceFxPath))
                     {
-                        data.Result = "FAIL";
-                        data.Error  = "sourceFx has no asset path (runtime/in-memory controller not supported)";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "sourceFx has no asset path (runtime/in-memory controller not supported)");
                     }
 
                     string previewDestPath = outDir.TrimEnd('/') + "/" + sourceFx.name + "_Clean.controller";
@@ -107,9 +90,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // source, always valid, so only the reuse case is checkable at preview time).
                     if (data.CleanFxReused && AssetDatabase.LoadAssetAtPath<AnimatorController>(previewDestPath) == null)
                     {
-                        data.Result = "FAIL";
-                        data.Error  = "asset at " + previewDestPath + " exists but is not an AnimatorController";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "asset at " + previewDestPath + " exists but is not an AnimatorController");
                     }
 
                     // Keep-set from the SOURCE controller's layers. The source and the would-be-copied
@@ -121,9 +102,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     int[] previewKeepIdx = SelectLayersToKeep(previewAllNames, keepLayerNames, out previewSelErr);
                     if (previewKeepIdx == null)
                     {
-                        data.Result = "FAIL";
-                        data.Error  = previewSelErr;
-                        return FinishEarly(data, label);
+                        return Fail(data, label, previewSelErr);
                     }
                     var previewKeptNames = new string[previewKeepIdx.Length];
                     for (int i = 0; i < previewKeepIdx.Length; i++) previewKeptNames[i] = srcLayers[previewKeepIdx[i]].name;
@@ -160,24 +139,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // asset at the path; a fresh one is created empty and is always valid).
                     if (data.ParamsReused && AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(previewParamsPath) == null)
                     {
-                        data.Result = "FAIL";
-                        data.Error  = "asset at " + previewParamsPath + " exists but is not a VRCExpressionParameters";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "asset at " + previewParamsPath + " exists but is not a VRCExpressionParameters");
                     }
                     if (data.MenuReused && AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(previewMenuPath) == null)
                     {
-                        data.Result = "FAIL";
-                        data.Error  = "asset at " + previewMenuPath + " exists but is not a VRCExpressionsMenu";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "asset at " + previewMenuPath + " exists but is not a VRCExpressionsMenu");
                     }
 
                     var previewDesc = ownedRoot.GetComponent<VRCAvatarDescriptor>()
                                    ?? ownedRoot.GetComponentInChildren<VRCAvatarDescriptor>(true);
                     if (previewDesc == null)
                     {
-                        data.Result = "FAIL";
-                        data.Error  = "VRCAvatarDescriptor not found on ownedRoot (" + ownedRoot.name + ")";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "VRCAvatarDescriptor not found on ownedRoot (" + ownedRoot.name + ")");
                     }
 
                     // Slots we WOULD wire (reported under the (whatIf) marker): FX iff the descriptor
@@ -194,14 +167,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // FAILs "descriptor FX not wired". The preview verdict must equal that, not a blanket PASS.
                     if (!previewHasFxLayer)
                     {
-                        data.Result = "FAIL";
-                        data.Error  = "descriptor FX not wired to clean controller (no base FX layer to wire)";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "descriptor FX not wired to clean controller (no base FX layer to wire)");
                     }
 
-                    data.Result = "PASS";
-                    string previewLog = WriteRunLog(data, label);
-                    return BuildSummary(data, label, previewLog);
+                    data.result = "PASS";
+                    return FinishFull(data, label);
                 }
 
                 // ── Ensure outDir exists ───────────────────────────────────────────────────
@@ -216,9 +186,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string sourceFxPath = AssetDatabase.GetAssetPath(sourceFx);
                 if (string.IsNullOrEmpty(sourceFxPath))
                 {
-                    data.Result = "FAIL";
-                    data.Error  = "sourceFx has no asset path (runtime/in-memory controller not supported)";
-                    return FinishEarly(data, label);
+                    return Fail(data, label, "sourceFx has no asset path (runtime/in-memory controller not supported)");
                 }
 
                 string cleanName = sourceFx.name + "_Clean.controller";
@@ -233,9 +201,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     bool copied = AssetDatabase.CopyAsset(sourceFxPath, destPath);
                     if (!copied)
                     {
-                        data.Result = "FAIL";
-                        data.Error  = "AssetDatabase.CopyAsset failed: " + sourceFxPath + " -> " + destPath;
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "AssetDatabase.CopyAsset failed: " + sourceFxPath + " -> " + destPath);
                     }
                 }
                 data.CleanFxReused = ctrlExists;
@@ -243,9 +209,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(destPath);
                 if (ctrl == null)
                 {
-                    data.Result = "FAIL";
-                    data.Error  = "LoadAssetAtPath returned null for " + destPath;
-                    return FinishEarly(data, label);
+                    return Fail(data, label, "LoadAssetAtPath returned null for " + destPath);
                 }
                 data.CleanFxPath = destPath;
 
@@ -254,7 +218,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 for (int i = 0; i < ctrl.layers.Length; i++) allNames[i] = ctrl.layers[i].name;
                 string selErr;
                 int[] keepIdx = SelectLayersToKeep(allNames, keepLayerNames, out selErr);
-                if (keepIdx == null) { data.Result = "FAIL"; data.Error = selErr; return FinishEarly(data, label); }
+                if (keepIdx == null) return Fail(data, label, selErr);
                 var keepSet = new HashSet<int>(keepIdx);
                 for (int i = ctrl.layers.Length - 1; i >= 0; i--)
                     if (!keepSet.Contains(i)) ctrl.RemoveLayer(i);   // descending; ctrl.layers recomputed each access
@@ -289,9 +253,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     exprParams = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(paramsPath);
                     if (exprParams == null)
                     {
-                        data.Result = "FAIL";
-                        data.Error  = "asset at " + paramsPath + " exists but is not a VRCExpressionParameters";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "asset at " + paramsPath + " exists but is not a VRCExpressionParameters");
                     }
                     int preCount = exprParams.parameters != null ? exprParams.parameters.Length : 0;
                     if (preCount > 0)
@@ -321,9 +283,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     exprMenu = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(menuPath);
                     if (exprMenu == null)
                     {
-                        data.Result = "FAIL";
-                        data.Error  = "asset at " + menuPath + " exists but is not a VRCExpressionsMenu";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "asset at " + menuPath + " exists but is not a VRCExpressionsMenu");
                     }
                     int preCount = exprMenu.controls != null ? exprMenu.controls.Count : 0;
                     if (preCount > 0)
@@ -357,9 +317,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         ?? ownedRoot.GetComponentInChildren<VRCAvatarDescriptor>(true);
                 if (desc == null)
                 {
-                    data.Result = "FAIL";
-                    data.Error  = "VRCAvatarDescriptor not found on ownedRoot (" + ownedRoot.name + ")";
-                    return FinishEarly(data, label);
+                    return Fail(data, label, "VRCAvatarDescriptor not found on ownedRoot (" + ownedRoot.name + ")");
                 }
 
                 Undo.RecordObject(desc, "CleanController: wire clean controller + empty expressions");
@@ -436,9 +394,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                          && paramsVerified
                          && menuVerified;
 
-                data.Result = pass ? "PASS" : "FAIL";
+                data.result = pass ? "PASS" : "FAIL";
 
-                if (!pass && data.Error == null)
+                if (!pass && data.error == null)
                 {
                     var reasons = new List<string>();
                     if (!layersVerified)
@@ -449,17 +407,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         reasons.Add("expressionParameters not empty or not wired");
                     if (!menuVerified)
                         reasons.Add("expressionsMenu not empty or not wired");
-                    data.Error = string.Join("; ", reasons);
+                    foreach (var r in reasons) data.Offender(r);
+                    data.error = string.Join("; ", reasons);
                 }
             }
             catch (Exception ex)
             {
-                data.Result = "FAIL";
-                data.Error  = ex.GetType().Name + ": " + ex.Message;
+                data.result = "FAIL";
+                data.error  = ex.GetType().Name + ": " + ex.Message;
             }
 
-            string logPath = WriteRunLog(data, label);
-            return BuildSummary(data, label, logPath);
+            return FinishFull(data, label);
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────────────────────
@@ -625,24 +583,96 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        /// <summary>Write the RunLog and return the error summary line. BuildSummary already
-        /// Debug.LogErrors any non-PASS result, so this path must NOT log again — doing so
-        /// double-logged every early-abort FAIL (the end-of-Run FAIL path logs once via BuildSummary).</summary>
+        /// <summary>Route an argument-guard failure through the shared envelope tail — never a bare
+        /// trailer-less line (the guards previously returned one, with no RunLog at all).</summary>
+        private static string ArgFail(string label, bool whatIf, AnimatorController sourceFx, GameObject ownedRoot, string msg)
+        {
+            var data = new RunData
+            {
+                source   = sourceFx != null ? sourceFx.name : null,
+                instance = ownedRoot != null ? ownedRoot.name : null,
+                whatIf   = whatIf,
+            };
+            data.result = "FAIL";
+            data.error  = msg;
+            data.Offender(msg);
+            return TransplantCore.Finish(data, label);
+        }
+
+        /// <summary>Early-abort tail (precondition/mid-flow FAILs, both modes): name the offender from
+        /// <c>error</c>, flush the notes already accrued — including the output-path notes, because a
+        /// mid-execute FAIL can leave a created/trimmed controller behind and the artifact must say so —
+        /// and use the STANDARD envelope summary (the bespoke wiring summary would render zero-counts as
+        /// measurements when nothing completed). <see cref="TransplantCore.Finish"/> logs exactly once
+        /// (the old double-log trap).</summary>
         private static string FinishEarly(RunData data, string label)
         {
-            string logPath = WriteRunLog(data, label);
+            data.Offender(data.error);
+            FlushPathNotes(data);
+            if (data.ReuseNote != null) data.Note(data.ReuseNote);
+            return TransplantCore.Finish(data, label);
+        }
+
+        /// <summary>Mid-flow FAIL: set the verdict + error + finish in one call, so a call site can never
+        /// set <c>error</c> but forget <c>result</c> (which would ship a log whose verdict is still the
+        /// default PASS — a slip <see cref="TransplantRunLog.EnsureFailHasOffender"/> cannot catch).</summary>
+        private static string Fail(RunData data, string label, string msg)
+        {
+            data.result = "FAIL";
+            data.error  = msg;
+            return FinishEarly(data, label);
+        }
+
+        /// <summary>Completed-run tail (PASS or step-6 verify FAIL, both modes): flush the run's fields
+        /// into the envelope's counts/notes, enforce offenders⇔FAIL, write the shared-envelope RunLog,
+        /// and return the tool's bespoke wiring summary (kept deliberately — the
+        /// <c>controller=…(reuse)(layers=…), …, descriptorWired=FX|params|menu</c> line reports wiring
+        /// intent better than the flat <c>k=v</c> grammar; JSON and summary convergence are separable).</summary>
+        private static string FinishFull(RunData data, string label)
+        {
+            data.Count("layers", data.LayerCount);
+            data.Count("ctrlParamsKept", data.CtrlParamsKept);
+            data.Count("ctrlParamsDropped", data.CtrlParamsDropped);
+            data.Count("exprParams", data.ParamCount);
+            data.Count("menuControls", data.MenuControls);
+            FlushPathNotes(data);
+            if (!string.IsNullOrEmpty(data.LayerNames))
+                data.Note("layers kept: " + data.LayerNames);
+            if (!string.IsNullOrEmpty(data.CtrlParamsDroppedNames))
+                data.Note("ctrlParams dropped: " + data.CtrlParamsDroppedNames);
+            data.Note("descriptorWired=" + WiredString(data));
+            if (data.ReuseNote != null) data.Note(data.ReuseNote);
+
+            data.EnsureFailHasOffender();
+            string logPath = TransplantCore.WriteRunLog(data, label);
             return BuildSummary(data, label, logPath);
+        }
+
+        /// <summary>Output-path notes with reuse tags — shared by both tails so a mid-flow FAIL's
+        /// artifact still records any asset the run created/modified before aborting.</summary>
+        private static void FlushPathNotes(RunData data)
+        {
+            if (data.CleanFxPath != null)
+                data.Note("controller=" + data.CleanFxPath + (data.CleanFxReused ? " (reuse)" : " (new)"));
+            if (data.ParamsPath != null)
+                data.Note("params=" + data.ParamsPath + (data.ParamsReused ? " (reuse)" : " (new)"));
+            if (data.MenuPath != null)
+                data.Note("menu=" + data.MenuPath + (data.MenuReused ? " (reuse)" : " (new)"));
+        }
+
+        private static string WiredString(RunData data)
+        {
+            return (data.FxWired     ? "FX"      : "FX(MISSING)")
+                 + (data.ParamsWired ? "|params" : "|params(MISSING)")
+                 + (data.MenuWired   ? "|menu"   : "|menu(MISSING)");
         }
 
         private static string BuildSummary(RunData data, string label, string logPath)
         {
             // descriptorWired segment: show FX|params|menu with (MISSING) on anything unwired
-            string wiredFx     = data.FxWired     ? "FX"           : "FX(MISSING)";
-            string wiredParams = data.ParamsWired  ? "|params"      : "|params(MISSING)";
-            string wiredMenu   = data.MenuWired    ? "|menu"        : "|menu(MISSING)";
-            string wired       = wiredFx + wiredParams + wiredMenu;
+            string wired = WiredString(data);
 
-            string extra = data.Error != null ? " error=" + data.Error : "";
+            string extra = data.error != null ? " error=" + data.error : "";
             if (data.ReuseNote != null) extra += " note=" + data.ReuseNote;
 
             // reuse markers: (reuse) when we loaded an existing asset, (new) when we created it
@@ -650,11 +680,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string paramsTag = data.ParamsReused  ? "(reuse)" : "(new)";
             string menuTag   = data.MenuReused    ? "(reuse)" : "(new)";
 
-            string marker = data.WhatIf ? " (whatIf)" : "";
+            // Tagged [clean-controller] (the envelope kind), not the old [CleanController] — the
+            // guard/early-abort paths emit the envelope's standard line, and a per-path tag fork would
+            // make transcript greps miss exactly the FAILs.
+            string marker = data.whatIf ? " (whatIf)" : "";
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CleanController]" + marker + " {0}: controller={1}{2}(layers={3}: {4}; ctrlParams kept={5} dropped={6}), exprParams={7}{8}, menu={9}{10}, descriptorWired={11}{12} => {13} | log={14}",
+                "[clean-controller]" + marker + " {0}: controller={1}{2}(layers={3}: {4}; ctrlParams kept={5} dropped={6}), exprParams={7}{8}, menu={9}{10}, descriptorWired={11}{12} => {13} | log={14}",
                 label,
-                (data.SourceFxName ?? "?") + "_Clean",
+                (data.source ?? "?") + "_Clean",
                 ctrlTag,
                 data.LayerCount,
                 data.LayerNames  ?? "?",
@@ -666,63 +699,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 menuTag,
                 wired,
                 extra,
-                data.Result ?? "FAIL",
+                data.result ?? "FAIL",
                 logPath);
 
-            if (data.Result == "PASS") Debug.Log(summary); else Debug.LogError(summary);
+            if (data.result == "PASS") Debug.Log(summary); else Debug.LogError(summary);
             return summary;
-        }
-
-        // ── RunLog ────────────────────────────────────────────────────────────────────────────
-
-        private static string WriteRunLog(RunData data, string label)
-        {
-            Directory.CreateDirectory(TransplantCore.RunLogDir);
-            var sb = new StringBuilder();
-            sb.Append("{\n");
-            sb.Append("  \"kind\": \"clean-controller\",\n");
-            sb.Append("  \"unityVersion\": ").Append(TransplantCore.Q(Application.unityVersion)).Append(",\n");
-            sb.Append("  \"timestampUtc\": ").Append(TransplantCore.Q(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append(",\n");
-            sb.Append("  \"whatIf\": ").Append(data.WhatIf ? "true" : "false").Append(",\n");
-            sb.Append("  \"instance\": ").Append(TransplantCore.Q(data.InstanceName)).Append(",\n");
-            sb.Append("  \"sourceFx\": ").Append(TransplantCore.Q(data.SourceFxName)).Append(",\n");
-            sb.Append("  \"outDir\": ").Append(TransplantCore.Q(data.OutDir)).Append(",\n");
-            sb.Append("  \"cleanFxPath\": ").Append(TransplantCore.Q(data.CleanFxPath)).Append(",\n");
-            sb.Append("  \"cleanFxReused\": ").Append(data.CleanFxReused ? "true" : "false").Append(",\n");
-            sb.Append("  \"layerCount\": ").Append(data.LayerCount).Append(",\n");
-            sb.Append("  \"layerNames\": ").Append(TransplantCore.Q(data.LayerNames)).Append(",\n");
-            sb.Append("  \"ctrlParamsKept\": ").Append(data.CtrlParamsKept).Append(",\n");
-            sb.Append("  \"ctrlParamsDropped\": ").Append(data.CtrlParamsDropped).Append(",\n");
-            sb.Append("  \"ctrlParamsDroppedNames\": ").Append(TransplantCore.Q(data.CtrlParamsDroppedNames)).Append(",\n");
-            sb.Append("  \"paramsPath\": ").Append(TransplantCore.Q(data.ParamsPath)).Append(",\n");
-            sb.Append("  \"paramsReused\": ").Append(data.ParamsReused ? "true" : "false").Append(",\n");
-            sb.Append("  \"paramCount\": ").Append(data.ParamCount).Append(",\n");
-            sb.Append("  \"menuPath\": ").Append(TransplantCore.Q(data.MenuPath)).Append(",\n");
-            sb.Append("  \"menuReused\": ").Append(data.MenuReused ? "true" : "false").Append(",\n");
-            sb.Append("  \"menuControls\": ").Append(data.MenuControls).Append(",\n");
-            sb.Append("  \"reuseNote\": ").Append(TransplantCore.Q(data.ReuseNote)).Append(",\n");
-            sb.Append("  \"fxWired\": ").Append(data.FxWired     ? "true" : "false").Append(",\n");
-            sb.Append("  \"paramsWired\": ").Append(data.ParamsWired ? "true" : "false").Append(",\n");
-            sb.Append("  \"menuWired\": ").Append(data.MenuWired   ? "true" : "false").Append(",\n");
-            sb.Append("  \"result\": ").Append(TransplantCore.Q(data.Result)).Append(",\n");
-            sb.Append("  \"error\": ").Append(TransplantCore.Q(data.Error)).Append("\n");
-            sb.Append("}");
-
-            var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-            var path  = TransplantCore.RunLogDir + "/clean-controller_" + label + "_" + stamp + ".json";
-            File.WriteAllText(path, sb.ToString());
-            AssetDatabase.Refresh();
-            return path;
         }
 
         // ── Data type ─────────────────────────────────────────────────────────────────────────
 
-        private class RunData
+        /// <summary>The package RunLog envelope plus this tool's run fields — kept as fields (not
+        /// direct <c>Count</c>/<c>Note</c> calls) because the bespoke wiring summary renders them
+        /// structurally; <see cref="FinishFull"/> flushes them into the envelope's counts/notes.
+        /// JSON key rename vs the old bespoke writer: <c>sourceFx</c> → the envelope's
+        /// <c>source</c>.</summary>
+        private sealed class RunData : TransplantRunLog
         {
-            public string InstanceName;
-            public string SourceFxName;
-            public string OutDir;
-            public bool   WhatIf;
+            public RunData() : base("clean-controller") { }
+
             public string CleanFxPath;
             public bool   CleanFxReused;
             public int    LayerCount;
@@ -740,8 +734,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public bool   FxWired;
             public bool   ParamsWired;
             public bool   MenuWired;
-            public string Result;
-            public string Error;
         }
     }
 }
