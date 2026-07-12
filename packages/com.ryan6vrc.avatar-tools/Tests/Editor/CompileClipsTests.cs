@@ -12,7 +12,9 @@ public class CompileClipsTests
 {
     const string Root = "Assets/Agent/Scratch/CompileClips_NUnit";
     const string Out  = "Assets/Agent/Scratch/CompileClips_NUnit/clips";
+    const string VendorRoot = "Assets/Vendor/CompileClips_NUnit";
     string _yamlPath;
+    bool _createdVendor;
 
     [SetUp] public void SetUp() { AnimatorTestHelpers.EnsureFolder(Root); }
 
@@ -20,8 +22,19 @@ public class CompileClipsTests
     public void TearDown()
     {
         AssetDatabase.DeleteAsset(Root);
+        AssetDatabase.DeleteAsset(VendorRoot);
+        if (_createdVendor && AssetDatabase.IsValidFolder("Assets/Vendor")
+            && AssetDatabase.FindAssets("", new[] { "Assets/Vendor" }).Length == 0)
+            AssetDatabase.DeleteAsset("Assets/Vendor");
+        _createdVendor = false;
         if (_yamlPath != null && File.Exists(_yamlPath)) File.Delete(_yamlPath);
         _yamlPath = null;
+    }
+
+    void EnsureVendor()
+    {
+        if (!AssetDatabase.IsValidFolder("Assets/Vendor")) { AssetDatabase.CreateFolder("Assets", "Vendor"); _createdVendor = true; }
+        AnimatorTestHelpers.EnsureFolder(VendorRoot);
     }
 
     string WriteYaml(string body)
@@ -106,6 +119,39 @@ public class CompileClipsTests
         string s = CompileClips.Compile(WriteYaml(body), Out);
         StringAssert.Contains("FAIL", s);
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Good.anim"));
+    }
+
+    [Test]
+    public void Sanitized_filename_collision_is_refused()
+    {
+        // "Wave Left" and "Wave_Left" both sanitize to "Wave_Left.anim" — a silent clobber under a green
+        // PASS if unguarded. Fail loud naming both authored names; write nothing.
+        string body = Head + "clips:\n" +
+            "  \"Wave Left\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.A\": 100 } }\n" +
+            "  \"Wave_Left\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.B\": 100 } }\n";
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("collision"));
+        string s = CompileClips.Compile(WriteYaml(body), Out);
+        StringAssert.Contains("FAIL", s);
+        StringAssert.Contains("Wave Left", s);
+        StringAssert.Contains("Wave_Left", s);
+        Assert.IsNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave_Left.anim"), "nothing written");
+    }
+
+    [Test]
+    public void Readonly_outDir_fails_unless_force()
+    {
+        EnsureVendor();
+        string vendorOut = VendorRoot + "/out";
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("read-only outDir"));
+        string fail = CompileClips.Compile(WriteYaml(TwoPoses), vendorOut);
+        StringAssert.Contains("FAIL", fail);
+        StringAssert.Contains("read-only outDir", fail);
+        Assert.IsNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(vendorOut + "/Wave.anim"), "nothing written without force");
+
+        string forced = CompileClips.Compile(WriteYaml(TwoPoses), vendorOut, force: true);
+        StringAssert.Contains("=> PASS", forced);
+        StringAssert.Contains("read-only outDir override (force)", forced);
+        Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(vendorOut + "/Wave.anim"), "force writes into vendor outDir");
     }
 
     [Test]

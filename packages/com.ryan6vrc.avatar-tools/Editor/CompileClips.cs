@@ -39,8 +39,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>Compile the clips-file YAML at <paramref name="sourcePath"/> (a filesystem path) into
         /// external <c>.anim</c> assets under <paramref name="outDir"/> (an <c>Assets/…</c>-relative folder).
         /// With <paramref name="whatIf"/> nothing is written — the summary still carries every would-be ref
-        /// path. Returns the one-line PASS/FAIL summary with the RunLog path folded on (<c>… => RESULT |
-        /// log=&lt;path&gt;</c>).</summary>
+        /// path. <paramref name="force"/> = override safety guards; in Task 2 it overrides ONLY the
+        /// outDir-writability guard (write owned copies into read-only Assets/Vendor or Packages territory);
+        /// a later task widens it to also override the divergence-refuse. Returns the one-line PASS/FAIL
+        /// summary with the RunLog path folded on (<c>… => RESULT | log=&lt;path&gt;</c>).</summary>
         public static string Compile(string sourcePath, string outDir, bool force = false, bool whatIf = false)
         {
             var log = new TransplantRunLog("compile-clips") { whatIf = whatIf, source = sourcePath };
@@ -78,6 +80,43 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (doc.Clips.Count == 0)
                     return Fail(log, label, "no clips to emit");
 
+                string outClean = outDir.Replace('\\', '/').TrimEnd('/');
+
+                // ── outDir ownership guard: never write owned copies into read-only territory (Assets/Vendor
+                //    or Packages) — the "never alter vendor assets" invariant. force overrides (with a loud
+                //    note). Mirrors OwnControllerClips. ──
+                if (!TransplantCore.IsWritableAsset(outClean))
+                {
+                    if (force) log.Note("read-only outDir override (force): " + outClean);
+                    else
+                    {
+                        log.Offender("outDir '" + outClean +
+                            "' is read-only (under Assets/Vendor or Packages): choose an owned output folder, or pass force=true");
+                        return Fail(log, label, "read-only outDir (pass force=true to override)");
+                    }
+                }
+
+                // ── Sanitized-filename collision guard (fail-loud, rule 7). Two DISTINCT authored clip names
+                //    can sanitize to one filename (e.g. "Wave Left" and "Wave_Left" → "Wave_Left.anim"); the
+                //    later write would silently clobber the earlier clip's file under a green PASS. These are
+                //    AUTHORED names, so a collision is an authoring error to surface — FAIL naming the colliding
+                //    names + shared filename, writing NOTHING (consistent with batch-atomicity). We deliberately
+                //    do NOT guid-suffix like OwnControllerClips (that tool dedups vendor churn; here the intent
+                //    is legible authored filenames). ──
+                var byFile = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+                foreach (var spec in doc.Clips)
+                {
+                    string fname = TransplantCore.Sanitize(spec.Name) + ".anim";
+                    if (!byFile.TryGetValue(fname, out var names)) byFile[fname] = names = new List<string>();
+                    names.Add(spec.Name);
+                }
+                foreach (var kv in byFile)
+                    if (kv.Value.Count > 1)
+                        log.Offender("clip names {" + string.Join(", ", kv.Value) +
+                            "} all sanitize to one filename '" + kv.Key + "'");
+                if (log.offenders.Count > 0)
+                    return Fail(log, label, "sanitized-filename collision (nothing written)");
+
                 // The declared Animator-parameter names: the gate BuildClipContent uses to route a bare
                 // binding to an Animator-property curve (AAP) rather than a scene binding.
                 var paramNames = new HashSet<string>(doc.Parameters.Select(p => p.Name));
@@ -95,7 +134,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                string outClean = outDir.Replace('\\', '/').TrimEnd('/');
                 if (!whatIf) EnsureFolderExists(outClean);
 
                 // ── Write each clip GUID-stable in place (or, in whatIf, just record the intended path). ──
@@ -159,6 +197,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 AnimationUtility.SetObjectReferenceCurve(target, b, AnimationUtility.GetObjectReferenceCurve(built, b));
             AnimationUtility.SetAnimationEvents(target, AnimationUtility.GetAnimationEvents(built));
             AnimationUtility.SetAnimationClipSettings(target, AnimationUtility.GetAnimationClipSettings(built));
+            target.frameRate = built.frameRate; // else a reused .anim keeps a stale rate (BuildClipContent sets 60)
             EditorUtility.SetDirty(target);
         }
 
