@@ -15,8 +15,10 @@ namespace Ryan6Vrc.AvatarTools.Tests
     // transitions: a human-authored `name:` survives; an auto-named tree (the positional <State>_BlendTree /
     // <parent>_<i> default) or an unnamed transition stays nameless in YAML; a name that cannot round-trip the
     // line-based YAML (a line break) is refused, not mangled; a `name:` on an entry-ladder rung is refused at
-    // parse (the entry emit path never reads it). Run headless via tools/run-editmode-tests.ps1 (or the Test
-    // Runner window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
+    // parse (the entry emit path never reads it). Also covers the completeness sweep's per-type m_Name
+    // membership: a cosmetic entry-transition/SMB name is tolerated (not refused), and our own compiler never
+    // emits a named SMB (forward-safety). Run headless via tools/run-editmode-tests.ps1 (or the Test Runner
+    // window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
     public class ControllerNameRoundtripTests
     {
         private const string TestRoot = "Assets/Agent/Scratch/name_roundtrip_tests";
@@ -331,6 +333,44 @@ clips:
             var c1 = FixpointOracle.CompileTo(TestRoot, yamlA, "QuotedNames_Fx", "c1");
             string yamlB = FixpointOracle.Decode(c1);
             Assert.AreEqual(yamlA, yamlB, "a quoting-requiring name reaches a textual fixpoint");
+        }
+
+        // ── 11: a vendor entry transition and a vendor SMB carrying a cosmetic Inspector name decompile
+        //       WITHOUT refusal — the completeness sweep's m_Name membership now lives per-type (not a blanket
+        //       ignore), and entry/SMB names are deliberately in the "tolerated, not captured" half of that
+        //       split. This is the check that would FAIL if m_Name were removed from UniversalIgnore without
+        //       also being added to EntryTransitionAware and the SMB aware sets ─────────────────────────────
+        [Test]
+        public void NamedEntryTransitionAndNamedSmb_DecompileToleratesCosmeticNames()
+        {
+            string ctrlPath = TestRoot + "/CosmeticNames_Fx.controller";
+            var rc = AnimatorController.CreateAnimatorControllerAtPath(ctrlPath);
+            var sm = rc.layers[0].stateMachine;
+            var s = sm.AddState("S");
+            var et = sm.AddEntryTransition(s);
+            et.name = "SomeEntryName";
+            var drv = s.AddStateMachineBehaviour<VRC.SDK3.Avatars.Components.VRCAvatarParameterDriver>();
+            drv.name = "SomeSmbName";
+            AssetDatabase.SaveAssets();
+
+            var w = ControllerDecompile.Walk(rc);
+            Assert.IsEmpty(w.Refusals,
+                "cosmetic entry-transition/SMB names are tolerated (ignored), not refused: " + string.Join(" | ", w.Refusals));
+        }
+
+        // ── 12: forward-safety — an SMB emitted by OUR OWN compiler always carries an empty m_Name, so the
+        //       sweep (which ignores, not refuses, an SMB's m_Name) never trips on the compiler's own output ──
+        [Test]
+        public void CompilerEmittedSmb_HasEmptyName()
+        {
+            string yaml = FixpointOracle.ReadPackageText(FixDir + "/behaviours.yaml");
+            var c0 = FixpointOracle.CompileTo(TestRoot, yaml, "Behaviours_Fx", "c0");
+            string path = AssetDatabase.GetAssetPath(c0);
+            var behaviours = AssetDatabase.LoadAllAssetsAtPath(path).OfType<StateMachineBehaviour>().ToList();
+            Assert.IsNotEmpty(behaviours, "the behaviours fixture emits at least one SMB sub-asset");
+            foreach (var smb in behaviours)
+                Assert.IsTrue(string.IsNullOrEmpty(smb.name),
+                    $"compiler-emitted SMB '{smb.GetType().Name}' should have an empty m_Name, got '{smb.name}'");
         }
     }
 }

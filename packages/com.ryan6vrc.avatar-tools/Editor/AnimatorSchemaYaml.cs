@@ -711,8 +711,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // Entry / AnyState ladders are ordered transition lists. Only the AnyState ladder carries the fields of
-        // a real state transition (canTransitionToSelf, mute, solo) — an entry transition honors none of them,
-        // so both are refused on the entry ladder (fail loud, mirroring the canTransitionToSelf precedent).
+        // a real state transition (canTransitionToSelf, mute, solo, name) — an entry transition honors none of
+        // them, so all are refused on the entry ladder (fail loud, mirroring the canTransitionToSelf precedent).
         private static void BindLadder(List<Transition> into, List<object> list, bool anyLadder)
         {
             BindTransitions(into, list, allowSelf: anyLadder, allowMuteSolo: anyLadder);
@@ -775,8 +775,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // allowSelf defaults FALSE so a state-transition list (which calls this without the flag) refuses
         // canTransitionToSelf — a field only the AnyState ladder honors. The AnyState caller passes true.
-        // allowMuteSolo defaults TRUE: state and AnyState transitions honor mute/solo; only the entry ladder
-        // (which passes false) refuses them (the entry-emit path never reads them, so they'd silently drop).
+        // allowMuteSolo defaults TRUE: state and AnyState transitions honor mute/solo/name; only the entry
+        // ladder (which passes false) refuses them (the entry-emit path never reads them, so they'd silently
+        // drop).
         private static void BindTransitions(List<Transition> into, List<object> list, bool allowSelf = false, bool allowMuteSolo = true)
         {
             foreach (var item in list)

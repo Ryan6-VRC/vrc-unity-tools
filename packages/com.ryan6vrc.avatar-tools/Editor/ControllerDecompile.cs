@@ -500,32 +500,38 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 "m_ObjectHideFlags", "m_CorrespondingSourceObject", "m_PrefabInstance", "m_PrefabAsset",
                 "m_PrefabInternal", "m_GameObject", "m_Enabled", "m_EditorHideFlags", "m_Script",
-                "m_EditorClassIdentifier", "m_Name",
+                "m_EditorClassIdentifier",
             };
 
+            // m_Name is listed per-type below, not here: State's name is captured via its YAML map key;
+            // BlendTree's and StateTransition's are captured via the new `name:` schema field (MeaningfulName).
+            // Entry-transition and SMB names are editor-cosmetic — a live scan of vendor controllers found them
+            // always empty in practice — so they're tolerated (ignored) rather than captured. Listing m_Name
+            // per-type (instead of the old blanket UniversalIgnore exemption) means a FUTURE swept type that
+            // forgets to list it is refused loud, the same guarantee the sweep gives every other field.
             private static readonly HashSet<string> StateAware = new HashSet<string>
             {
                 "m_Speed", "m_Motion", "m_Transitions", "m_WriteDefaultValues", "m_Mirror",
                 "m_SpeedParameterActive", "m_MirrorParameterActive", "m_CycleOffsetParameterActive",
                 "m_TimeParameterActive", "m_SpeedParameter", "m_MirrorParameter", "m_CycleOffsetParameter",
-                "m_TimeParameter", "m_StateMachineBehaviours", "m_Position",
+                "m_TimeParameter", "m_StateMachineBehaviours", "m_Position", "m_Name",
             };
 
             private static readonly HashSet<string> StateTransitionAware = new HashSet<string>
             {
                 "m_Conditions", "m_DstState", "m_DstStateMachine", "m_TransitionDuration", "m_ExitTime",
                 "m_HasExitTime", "m_HasFixedDuration", "m_InterruptionSource", "m_OrderedInterruption",
-                "m_Mute", "m_Solo", "m_CanTransitionToSelf", "m_IsExit",
+                "m_Mute", "m_Solo", "m_CanTransitionToSelf", "m_IsExit", "m_Name",
             };
 
             private static readonly HashSet<string> EntryTransitionAware = new HashSet<string>
             {
-                "m_Conditions", "m_DstState", "m_DstStateMachine", "m_IsExit", "m_Mute", "m_Solo",
+                "m_Conditions", "m_DstState", "m_DstStateMachine", "m_IsExit", "m_Mute", "m_Solo", "m_Name",
             };
 
             private static readonly HashSet<string> BlendTreeAware = new HashSet<string>
             {
-                "m_BlendType", "m_BlendParameter", "m_BlendParameterY", "m_Childs",
+                "m_BlendType", "m_BlendParameter", "m_BlendParameterY", "m_Childs", "m_Name",
                 // m_MinThreshold/m_MaxThreshold/m_UseAutomaticThresholds are inert for the round-trip (child
                 // thresholds are read/emitted explicitly). m_NormalizedBlendValues IS consumed (Direct trees,
                 // above) — kept here so the sweep doesn't double-refuse it.
@@ -533,24 +539,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
             };
 
             // Per-SMB aware sets (VRC components are MonoBehaviours: public fields serialize under their own
-            // names, no m_ prefix; the MonoBehaviour internals are covered by UniversalIgnore). Each lists the
-            // fields its decoder consumes plus the editor-only debugString. A non-default field NOT here — one a
-            // decoder forgot, or a future SDK adds — is refused by the sweep.
-            private static readonly HashSet<string> DriverAware = new HashSet<string> { "parameters", "localOnly", "debugString" };
+            // names, no m_ prefix; the MonoBehaviour internals — INCLUDING its UnityEngine.Object-level name,
+            // still serialized as "m_Name" even on a MonoBehaviour — are covered by UniversalIgnore except for
+            // this one). Each lists the fields its decoder consumes plus the editor-only debugString, plus
+            // m_Name — an SMB's cosmetic Inspector name is tolerated (ignored), never captured. A non-default
+            // field NOT here — one a decoder forgot, or a future SDK adds — is refused by the sweep.
+            private static readonly HashSet<string> DriverAware = new HashSet<string> { "parameters", "localOnly", "debugString", "m_Name" };
             private static readonly HashSet<string> TrackingAware = new HashSet<string>
             {
                 "trackingHead", "trackingLeftHand", "trackingRightHand", "trackingHip", "trackingLeftFoot",
-                "trackingRightFoot", "trackingLeftFingers", "trackingRightFingers", "trackingEyes", "trackingMouth", "debugString",
+                "trackingRightFoot", "trackingLeftFingers", "trackingRightFingers", "trackingEyes", "trackingMouth",
+                "debugString", "m_Name",
             };
-            private static readonly HashSet<string> PlayableLayerAware = new HashSet<string> { "layer", "goalWeight", "blendDuration", "debugString" };
-            private static readonly HashSet<string> LocomotionAware = new HashSet<string> { "disableLocomotion", "debugString" };
-            private static readonly HashSet<string> PoseSpaceAware = new HashSet<string> { "enterPoseSpace", "fixedDelay", "delayTime", "debugString" };
-            private static readonly HashSet<string> LayerControlAware = new HashSet<string> { "playable", "layer", "goalWeight", "blendDuration", "debugString" };
+            private static readonly HashSet<string> PlayableLayerAware = new HashSet<string> { "layer", "goalWeight", "blendDuration", "debugString", "m_Name" };
+            private static readonly HashSet<string> LocomotionAware = new HashSet<string> { "disableLocomotion", "debugString", "m_Name" };
+            private static readonly HashSet<string> PoseSpaceAware = new HashSet<string> { "enterPoseSpace", "fixedDelay", "delayTime", "debugString", "m_Name" };
+            private static readonly HashSet<string> LayerControlAware = new HashSet<string> { "playable", "layer", "goalWeight", "blendDuration", "debugString", "m_Name" };
             private static readonly HashSet<string> PlayAudioAware = new HashSet<string>
             {
                 "SourcePath", "PlaybackOrder", "ParameterName", "Volume", "VolumeApplySettings", "Pitch",
                 "PitchApplySettings", "Loop", "LoopApplySettings", "Clips", "ClipsApplySettings", "DelayInSeconds",
-                "PlayOnEnter", "StopOnEnter", "PlayOnExit", "StopOnExit", "debugString",
+                "PlayOnEnter", "StopOnEnter", "PlayOnExit", "StopOnExit", "debugString", "m_Name",
             };
 
             private void CompletenessSweep(Object o, HashSet<string> aware, string kind, string loc)
@@ -639,7 +648,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string loc = "Entry in '" + PathLabel(srcSm) + "'";
                 // The entry ladder cannot express mute/solo (the parser refuses them there, and the emit path
                 // never reads them) — an entry transition carrying either would be a silent drop. Refuse it,
-                // the read-side mirror of the parser's entry mute/solo refusal.
+                // the read-side mirror of the parser's entry mute/solo refusal. NOT decoded here: m_Name — a
+                // vendor entry transition's cosmetic name is tolerated (ignored, via EntryTransitionAware), not
+                // refused, unlike mute/solo which the entry rung genuinely cannot express.
                 if (t.mute || t.solo)
                     _result.Refusals.Add($"transition from {loc}: entry transition carries mute/solo, which the entry ladder cannot express");
                 SetTarget(tr, t, srcSm, loc);
