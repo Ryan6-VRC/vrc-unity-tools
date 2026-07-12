@@ -858,6 +858,13 @@ public class OwnMaterialTests
         var parent = VendorMat("Base");             // Standard shader, under Vendor
         parent.SetFloat("_Glossiness", 0.9f);
         parent.SetOverrideTag("OwnMatTestTag", "vendor-tag-value");
+        // Texture + non-default scale/offset on the PARENT (inherited, never overridden on the variant —
+        // mirrors the inherited-_Glossiness axis) so all three of GetTexture/GetTextureScale/
+        // GetTextureOffset — the most elaborate branch in FlattenVariant — are exercised through flatten.
+        var mainTex = MakeTexture(VendorRoot, "Body");
+        parent.SetTexture("_MainTex", mainTex);
+        parent.SetTextureScale("_MainTex", new Vector2(2, 3));
+        parent.SetTextureOffset("_MainTex", new Vector2(0.1f, 0.2f));
         parent.EnableKeyword("_EMISSION");
         EditorUtility.SetDirty(parent); AssetDatabase.SaveAssets();
 
@@ -893,6 +900,12 @@ public class OwnMaterialTests
         Assert.AreEqual(0.9f, o.GetFloat("_Glossiness"), 1e-4f, "inherited value baked");
         Assert.AreEqual(2100, o.renderQueue, "renderQueue carried");
         Assert.AreEqual("vendor-tag-value", o.GetTag("OwnMatTestTag", false, ""), "override tag carried");
+        // Texture triple: GetTexture + GetTextureScale + GetTextureOffset all baked from the parent onto
+        // the standalone (the inherited texture reference plus its non-default tiling/offset).
+        Assert.AreEqual(AssetDatabase.GetAssetPath(mainTex), AssetDatabase.GetAssetPath(o.GetTexture("_MainTex")),
+            "inherited texture reference baked");
+        Assert.AreEqual(new Vector2(2, 3), o.GetTextureScale("_MainTex"), "texture scale carried");
+        Assert.AreEqual(new Vector2(0.1f, 0.2f), o.GetTextureOffset("_MainTex"), "texture offset carried");
     }
 
     [Test] public void Nonvariant_own_is_unaffected_by_flatten()
