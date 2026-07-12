@@ -84,7 +84,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
             seed(rc);
             AssetDatabase.SaveAssets();
 
-            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
             string yamlOut = TestRoot + "/refuse_" + tag + ".yaml";
             string res = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
 

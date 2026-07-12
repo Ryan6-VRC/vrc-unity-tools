@@ -146,8 +146,8 @@ public class FixpointAcceptanceTests
         return d;
     }
 
-    // Named refusal (the acceptance's fail-loud arm): an out-of-vocabulary construct → the door returns a
-    // bare `[DecompileController] FAIL:` naming the construct, and writes NO .yaml. A Trigger parameter has
+    // Named refusal (the acceptance's fail-loud arm): an out-of-vocabulary construct → the door returns
+    // `[DecompileController] … => FAIL | log=` naming the construct, and writes NO .yaml. A Trigger parameter has
     // no schema representation (the vocabulary is Bool/Int/Float) and is refused PERMANENTLY.
     [Test]
     public void Refusal_TriggerParam_Fails_And_Writes_No_Yaml()
@@ -157,7 +157,7 @@ public class FixpointAcceptanceTests
         rc.AddParameter("T", AnimatorControllerParameterType.Trigger); // out of vocabulary
         AssetDatabase.SaveAssets();
 
-        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
         string yamlOut = TestRoot + "/refuse_trigger.yaml";
         string res = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
 

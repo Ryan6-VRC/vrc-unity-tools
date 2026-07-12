@@ -180,7 +180,7 @@ clips:
             idle.motion = bt;
             AssetDatabase.SaveAssets();
 
-            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
             string yamlOut = TestRoot + "/newlinename.yaml";
             string res = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
 
@@ -283,7 +283,7 @@ layers:
             tr.name = "Bad\nName";
             AssetDatabase.SaveAssets();
 
-            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
             string yamlOut = TestRoot + "/newlinetransitionname.yaml";
             string res = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
 
