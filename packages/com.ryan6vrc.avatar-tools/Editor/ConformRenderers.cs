@@ -1,8 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
-using System.IO;
-using System.Text;
 using UnityEditor;
 using UnityEngine;
 using Ryan6Vrc.AgentTools.Editor;
@@ -50,9 +47,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             var data = new RunData
             {
-                InstanceName  = ownedRoot.name,
-                SourceName    = source.name,
-                WhatIf        = whatIf,
+                instance = ownedRoot.name,
+                source   = source.name,
+                whatIf   = whatIf,
             };
 
             // Execute-path Undo group: collapse the analysis+mutation into one undo step. Preview
@@ -86,45 +83,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                          && data.DefaultMatSlots == 0
                          && data.BoundsSet == data.SmrTotal
                          && data.AnchorWarning == null;
-                data.Result = pass ? "PASS" : "FAIL";
+                data.result = pass ? "PASS" : "FAIL";
             }
             catch (Exception ex)
             {
-                data.Result = "FAIL";
-                data.Error  = ex.Message;
+                data.result = "FAIL";
+                data.error  = ex.Message;
             }
             finally
             {
                 if (!whatIf) Undo.CollapseUndoOperations(undoGroup);
             }
 
-            string logPath = WriteRunLog(data, label);
-
-            string warnSeg = "";
-            if (data.Overrides > 0) warnSeg += " overrides=" + data.Overrides;
-            if (data.AmbiguousMatches > 0 || data.SlotCountWarnings > 0)
-                warnSeg += " warnings=[ambiguous=" + data.AmbiguousMatches + ", slotCount=" + data.SlotCountWarnings + "]";
-            if (data.AnchorsSet > 0 || data.AnchorsPreserved > 0)
-                warnSeg += " anchors=[set=" + data.AnchorsSet + ", preserved=" + data.AnchorsPreserved + "]";
-            if (data.BoundsKeptLarger > 0)
-                warnSeg += " boundsKeptLarger=" + data.BoundsKeptLarger;
-
-            string marker = whatIf ? " (whatIf)" : "";
-            string summary = string.Format(CultureInfo.InvariantCulture,
-                "[ConformRenderers]" + marker + " {0}: meshes matched={1}/{2}, nullSlots={3}, defaultMat={4}, boundsSet={5}/{6}, anchor={7}{8}{9}{10}{11} => {12} | log={13}",
-                label,
-                data.Matched, data.OurRendererCount,
-                data.NullSlots, data.DefaultMatSlots,
-                data.BoundsSet, data.SmrTotal,
-                data.AnchorWarning == null ? "Hips" : "none",
-                warnSeg,
-                data.AnchorNote != null ? " anchorNote=" + data.AnchorNote : "",
-                data.AnchorWarning != null ? " anchorWarn=" + data.AnchorWarning : "",
-                data.Error != null ? " error=" + data.Error : "",
-                data.Result, logPath);
-
-            if (data.Result == "PASS") Debug.Log(summary); else Debug.LogError(summary);
-            return summary;
+            return Finish(data, label);
         }
 
         // ── Material assignment ───────────────────────────────────────────────────────────────
@@ -188,14 +159,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (!sourceMap.TryGetValue(lookupKey, out Material[] sourceMats))
                 {
                     data.Unmatched++;
-                    data.Mismatches.Add(new Mismatch
-                    {
-                        RendererName = rend.name,
-                        Kind         = "unmatched",
-                        Detail       = overridden
-                            ? "override maps '" + rend.name + "' → '" + lookupKey + "' but the source has no renderer with that name"
-                            : "no source renderer with name '" + rend.name + "' (lowercased: '" + ourKey + "')"
-                    });
+                    data.Offender("unmatched: renderer '" + rend.name + "' — " + (overridden
+                        ? "override maps '" + rend.name + "' → '" + lookupKey + "' but the source has no renderer with that name"
+                        : "no source renderer with name '" + rend.name + "' (lowercased: '" + ourKey + "')"));
                     continue;
                 }
 
@@ -207,13 +173,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (duplicateNames.Contains(lookupKey))
                 {
                     data.AmbiguousMatches++;
-                    data.Mismatches.Add(new Mismatch
-                    {
-                        RendererName = rend.name,
-                        Kind         = "ambiguous-source-name",
-                        Detail       = "source has multiple renderers named '" + lookupKey +
-                                       "'; first-wins may be the wrong material set"
-                    });
+                    data.Warning("ambiguous-source-name: renderer '" + rend.name + "' — source has multiple renderers named '" +
+                                 lookupKey + "'; first-wins may be the wrong material set");
                 }
 
                 // Slot-count parity: source material count vs our renderer's submesh count.
@@ -221,13 +182,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (ourSlots >= 0 && sourceMats.Length != ourSlots)
                 {
                     data.SlotCountWarnings++;
-                    data.Mismatches.Add(new Mismatch
-                    {
-                        RendererName = rend.name,
-                        Kind         = "slot-count",
-                        Detail       = "source has " + sourceMats.Length + " material(s) but our mesh has " +
-                                       ourSlots + " submesh slot(s)"
-                    });
+                    data.Warning("slot-count: renderer '" + rend.name + "' — source has " + sourceMats.Length +
+                                 " material(s) but our mesh has " + ourSlots + " submesh slot(s)");
                 }
 
                 // Record the change for Undo and mark dirty; do not save scene
@@ -247,22 +203,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (mat == null)
                     {
                         data.NullSlots++;
-                        data.Mismatches.Add(new Mismatch
-                        {
-                            RendererName = rend.name,
-                            Kind         = "null-slot",
-                            Detail       = "null material slot after assignment"
-                        });
+                        data.Offender("null-slot: renderer '" + rend.name + "' — null material slot after assignment");
                     }
                     else if (mat.name == "Default-Material")
                     {
                         data.DefaultMatSlots++;
-                        data.Mismatches.Add(new Mismatch
-                        {
-                            RendererName = rend.name,
-                            Kind         = "default-material",
-                            Detail       = "slot contains Unity built-in Default-Material (likely unassigned)"
-                        });
+                        data.Offender("default-material: renderer '" + rend.name +
+                                      "' — slot contains Unity built-in Default-Material (likely unassigned)");
                     }
                 }
             }
@@ -360,13 +307,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (boundsKeptLarger)
                 {
                     data.BoundsKeptLarger++;
-                    data.Mismatches.Add(new Mismatch
-                    {
-                        RendererName = smr.name,
-                        Kind         = "bounds-kept-larger",
-                        Detail       = "existing bounds exceed the standard (extents " +
-                                       ensuredBounds.extents.ToString("F2") + "); kept — verify intended"
-                    });
+                    data.Warning("bounds-kept-larger: renderer '" + smr.name + "' — existing bounds exceed the standard (extents " +
+                                 ensuredBounds.extents.ToString("F2") + "); kept — verify intended");
                 }
 
                 // Anchor — repair only an invalid ref (null, or points outside ownedRoot); preserve a
@@ -379,25 +321,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         data.AnchorsSet++;
                         if (smr.probeAnchor != null)   // was non-null but external → a stale ref got repaired
-                            data.Mismatches.Add(new Mismatch
-                            {
-                                RendererName = smr.name,
-                                Kind         = "anchor-repaired-external",
-                                Detail       = "probeAnchor '" + smr.probeAnchor.name +
-                                               "' pointed outside ownedRoot; re-pointed to Hips — investigate the stale ref"
-                            });
+                            data.Warning("anchor-repaired-external: renderer '" + smr.name + "' — probeAnchor '" +
+                                         smr.probeAnchor.name + "' pointed outside ownedRoot; re-pointed to Hips — investigate the stale ref");
                     }
                     else
                     {
                         data.AnchorsPreserved++;
                         if (smr.probeAnchor != hips)   // valid internal anchor that is not the avatar Hips
-                            data.Mismatches.Add(new Mismatch
-                            {
-                                RendererName = smr.name,
-                                Kind         = "anchor-preserved-nonhips",
-                                Detail       = "preserved internal anchor '" + smr.probeAnchor.name +
-                                               "' (not Hips); verify no light/reflection-probe seam vs the body"
-                            });
+                            data.Warning("anchor-preserved-nonhips: renderer '" + smr.name + "' — preserved internal anchor '" +
+                                         smr.probeAnchor.name + "' (not Hips); verify no light/reflection-probe seam vs the body");
                     }
                 }
 
@@ -444,86 +376,60 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── RunLog output ─────────────────────────────────────────────────────────────────────
 
-        /// <summary>Route an argument-guard failure through the house RunLog grammar (summary + RunLog +
-        /// LogError), like the sibling tools — never a bare trailer-less line. Uses this tool's own
-        /// RunData/WriteRunLog (its RunLog shape is bespoke), with the <c>error=… =&gt; FAIL | log=…</c>
-        /// tail matching the main summary's grammar.</summary>
+        /// <summary>Route an argument-guard failure through the shared envelope tail — never a bare
+        /// trailer-less line. <see cref="TransplantRunLog.EnsureFailHasOffender"/> names the offender
+        /// from <c>error</c>.</summary>
         private static string ArgFail(string label, bool whatIf, GameObject ownedRoot, GameObject source, string msg)
         {
             var data = new RunData
             {
-                InstanceName = ownedRoot != null ? ownedRoot.name : null,
-                SourceName   = source != null ? source.name : null,
-                WhatIf       = whatIf,
-                Result       = "FAIL",
-                Error        = msg,
+                instance = ownedRoot != null ? ownedRoot.name : null,
+                source   = source != null ? source.name : null,
+                whatIf   = whatIf,
+                result   = "FAIL",
+                error    = msg,
             };
-            string logPath = WriteRunLog(data, label);
-            string summary = "[ConformRenderers]" + (whatIf ? " (whatIf)" : "") + " " + label +
-                             ": error=" + msg + " => FAIL | log=" + logPath;
-            Debug.LogError(summary);
-            return summary;
+            return Finish(data, label);
         }
 
-        private static string WriteRunLog(RunData data, string label)
+        /// <summary>Flush the run's int counters into the envelope's ordered <c>counts</c> (core
+        /// disposition always; anomaly counters only when nonzero — each nonzero one is already named
+        /// by an offender/warning row), fold the anchor verdict into offender/note grammar, then the
+        /// shared envelope tail (<see cref="TransplantCore.Finish"/>).</summary>
+        private static string Finish(RunData data, string label)
         {
-            Directory.CreateDirectory(TransplantCore.RunLogDir);
-            var sb = new StringBuilder();
-            sb.Append("{\n");
-            sb.Append("  \"kind\": \"conform-renderers\",\n");
-            sb.Append("  \"unityVersion\": ").Append(TransplantCore.Q(Application.unityVersion)).Append(",\n");
-            sb.Append("  \"timestampUtc\": ").Append(TransplantCore.Q(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append(",\n");
-            sb.Append("  \"whatIf\": ").Append(data.WhatIf ? "true" : "false").Append(",\n");
-            sb.Append("  \"instance\": ").Append(TransplantCore.Q(data.InstanceName)).Append(",\n");
-            sb.Append("  \"source\": ").Append(TransplantCore.Q(data.SourceName)).Append(",\n");
-            sb.Append("  \"result\": ").Append(TransplantCore.Q(data.Result)).Append(",\n");
-            sb.Append("  \"error\": ").Append(TransplantCore.Q(data.Error)).Append(",\n");
-            sb.Append("  \"sourceRenderers\": ").Append(data.SourceRendererCount).Append(",\n");
-            sb.Append("  \"ourRenderers\": ").Append(data.OurRendererCount).Append(",\n");
-            sb.Append("  \"matched\": ").Append(data.Matched).Append(",\n");
-            sb.Append("  \"overrides\": ").Append(data.Overrides).Append(",\n");
-            sb.Append("  \"unmatched\": ").Append(data.Unmatched).Append(",\n");
-            sb.Append("  \"nullSlots\": ").Append(data.NullSlots).Append(",\n");
-            sb.Append("  \"defaultMatSlots\": ").Append(data.DefaultMatSlots).Append(",\n");
-            sb.Append("  \"smrTotal\": ").Append(data.SmrTotal).Append(",\n");
-            sb.Append("  \"boundsSet\": ").Append(data.BoundsSet).Append(",\n");
-            sb.Append("  \"duplicateSourceNames\": ").Append(data.DuplicateSourceNames).Append(",\n");
-            sb.Append("  \"ambiguousMatches\": ").Append(data.AmbiguousMatches).Append(",\n");
-            sb.Append("  \"slotCountWarnings\": ").Append(data.SlotCountWarnings).Append(",\n");
-            sb.Append("  \"anchorWarning\": ").Append(TransplantCore.Q(data.AnchorWarning)).Append(",\n");
-            sb.Append("  \"anchorNote\": ").Append(TransplantCore.Q(data.AnchorNote)).Append(",\n");
-            sb.Append("  \"anchorsSet\": ").Append(data.AnchorsSet).Append(",\n");
-            sb.Append("  \"anchorsPreserved\": ").Append(data.AnchorsPreserved).Append(",\n");
-            sb.Append("  \"boundsKeptLarger\": ").Append(data.BoundsKeptLarger).Append(",\n");
-            sb.Append("  \"mismatches\": [");
+            data.Count("sourceRenderers", data.SourceRendererCount);
+            data.Count("ourRenderers", data.OurRendererCount);
+            data.Count("matched", data.Matched);
+            data.Count("unmatched", data.Unmatched);
+            data.Count("nullSlots", data.NullSlots);
+            data.Count("defaultMatSlots", data.DefaultMatSlots);
+            data.Count("smrTotal", data.SmrTotal);
+            data.Count("boundsSet", data.BoundsSet);
+            data.Count("anchorsSet", data.AnchorsSet);
+            data.Count("anchorsPreserved", data.AnchorsPreserved);
+            if (data.Overrides > 0)            data.Count("overrides", data.Overrides);
+            if (data.DuplicateSourceNames > 0) data.Count("duplicateSourceNames", data.DuplicateSourceNames);
+            if (data.AmbiguousMatches > 0)     data.Count("ambiguousMatches", data.AmbiguousMatches);
+            if (data.SlotCountWarnings > 0)    data.Count("slotCountWarnings", data.SlotCountWarnings);
+            if (data.BoundsKeptLarger > 0)     data.Count("boundsKeptLarger", data.BoundsKeptLarger);
 
-            for (int i = 0; i < data.Mismatches.Count; i++)
-            {
-                var m = data.Mismatches[i];
-                sb.Append(i == 0 ? "\n" : ",\n");
-                sb.Append("    { \"renderer\": ").Append(TransplantCore.Q(m.RendererName))
-                  .Append(", \"kind\": ").Append(TransplantCore.Q(m.Kind))
-                  .Append(", \"detail\": ").Append(TransplantCore.Q(m.Detail)).Append(" }");
-            }
+            if (data.AnchorWarning != null) data.Offender("anchor: " + data.AnchorWarning);
+            if (data.AnchorNote != null)    data.Note("anchor: " + data.AnchorNote);
 
-            sb.Append(data.Mismatches.Count > 0 ? "\n  ]\n}" : "]\n}");
-
-            var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-            var path  = TransplantCore.RunLogDir + "/conform-renderers_" + label + "_" + stamp + ".json";
-            File.WriteAllText(path, sb.ToString());
-            AssetDatabase.Refresh();
-            return path;
+            return TransplantCore.Finish(data, label);
         }
 
         // ── Data types ────────────────────────────────────────────────────────────────────────
 
-        private class RunData
+        /// <summary>The package RunLog envelope plus this tool's run counters (flushed into
+        /// <c>counts</c> by <see cref="Finish"/> — they are incremented mid-run, which the envelope's
+        /// append-only counts list can't do). <c>AnchorWarning</c> stays a field because the PASS gate
+        /// consults it; <see cref="Finish"/> folds it into offender grammar.</summary>
+        private sealed class RunData : TransplantRunLog
         {
-            public string InstanceName;
-            public string SourceName;
-            public bool   WhatIf;
-            public string Result;
-            public string Error;
+            public RunData() : base("conform-renderers") { }
+
             public string AnchorWarning;
             public string AnchorNote;
             public int SourceRendererCount;
@@ -541,14 +447,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public int AnchorsSet;
             public int AnchorsPreserved;
             public int BoundsKeptLarger;
-            public readonly List<Mismatch> Mismatches = new List<Mismatch>();
-        }
-
-        private struct Mismatch
-        {
-            public string RendererName;
-            public string Kind;
-            public string Detail;
         }
     }
 }
