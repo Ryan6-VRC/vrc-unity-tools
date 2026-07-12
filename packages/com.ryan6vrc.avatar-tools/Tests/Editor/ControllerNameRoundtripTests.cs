@@ -372,5 +372,105 @@ clips:
                 Assert.IsTrue(string.IsNullOrEmpty(smb.name),
                     $"compiler-emitted SMB '{smb.GetType().Name}' should have an empty m_Name, got '{smb.name}'");
         }
+
+        // ── 13: a `name:` on a CLIP tree child is refused at parse — tree-only keys (param/paramY/children/
+        //       normalized/name) are only meaningful when the child is itself a nested tree; on a clip/ref
+        //       child they must be refused, not silently dropped (council #31 fail-loud gap) ────────────────
+        [Test]
+        public void ClipChildName_ThrowsAtParse()
+        {
+            const string yaml = @"schema: 1
+controller: BadClipChildName_Fx
+basis: avatar-root
+role: fx
+parameters:
+  Blend: { type: float, default: 0.0 }
+layers:
+  - name: L
+    states:
+      Idle:
+        motion:
+          tree: 1d
+          param: Blend
+          children:
+            - { clip: a, name: WaveClip, threshold: 0.0 }
+    default: Idle
+clips:
+  a: { seconds: 0.1 }
+";
+            var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(yaml, "test"));
+            StringAssert.Contains("name", ex.Message);
+            StringAssert.Contains("nested-tree child", ex.Message);
+        }
+
+        // ── 14: a `param:` on a CLIP tree child is refused too — proves the pre-existing sibling gap
+        //       (param/paramY/children/normalized) is closed by the same hasTree guard, not just 'name' ──────
+        [Test]
+        public void ClipChildParam_ThrowsAtParse()
+        {
+            const string yaml = @"schema: 1
+controller: BadClipChildParam_Fx
+basis: avatar-root
+role: fx
+parameters:
+  Blend: { type: float, default: 0.0 }
+layers:
+  - name: L
+    states:
+      Idle:
+        motion:
+          tree: 1d
+          param: Blend
+          children:
+            - { clip: a, param: Blend, threshold: 0.0 }
+    default: Idle
+clips:
+  a: { seconds: 0.1 }
+";
+            var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(yaml, "test"));
+            StringAssert.Contains("param", ex.Message);
+            StringAssert.Contains("nested-tree child", ex.Message);
+        }
+
+        // ── 15: regression — a `name:` on a NESTED-TREE child (the valid case the hasTree guard must not
+        //       break) still parses and round-trips, mirroring test 2's direct→1d nesting with a name added
+        //       to the nested child itself ───────────────────────────────────────────────────────────────
+        [Test]
+        public void NamedNestedTreeChild_Roundtrips()
+        {
+            string yaml = @"schema: 1
+controller: NamedNestedChild_Fx
+basis: avatar-root
+role: fx
+parameters:
+  Dir: { type: float, default: 0.0 }
+  W1:  { type: float, default: 0.5 }
+layers:
+  - name: L
+    states:
+      Idle:
+        motion:
+          tree: direct
+          children:
+            - directWeight: W1
+              tree: 1d
+              name: SubTree
+              param: Dir
+              children:
+                - { clip: a, threshold: 0.0 }
+                - { clip: b, threshold: 1.0 }
+    default: Idle
+clips:
+  a: { seconds: 0.1 }
+  b: { seconds: 0.1 }
+";
+            var c0 = FixpointOracle.CompileTo(TestRoot, yaml, "NamedNestedChild_Fx", "c0");
+            string yamlA = FixpointOracle.Decode(c0);
+            StringAssert.Contains("name: SubTree", yamlA, "the nested child's authored name survives decode");
+
+            var c1 = FixpointOracle.CompileTo(TestRoot, yamlA, "NamedNestedChild_Fx", "c1");
+            string yamlB = FixpointOracle.Decode(c1);
+            Assert.AreEqual(yamlA, yamlB, "a named nested-tree child reaches a textual fixpoint");
+        }
     }
 }

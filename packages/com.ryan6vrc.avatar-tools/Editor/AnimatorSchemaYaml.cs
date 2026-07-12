@@ -965,7 +965,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 switch (kv.Key)
                 {
                     case "clip": case "ref": case "tree": break;   // motion, handled above
-                    case "param": case "paramY": case "children": case "normalized": case "name": break; // consumed by nested tree motion
+                    case "param": case "paramY": case "children": case "normalized": case "name":
+                        if (!hasTree) throw new SchemaException($"{ctx} tree child: '{kv.Key}' is only valid on a nested-tree child");
+                        break; // consumed by nested tree motion
                     case "threshold": child.Threshold = ToNumber(kv.Value, $"{ctx} tree child threshold"); break;
                     case "x": case "posX": child.PosX = ToNumber(kv.Value, $"{ctx} tree child posX"); break;
                     case "y": case "posY": child.PosY = ToNumber(kv.Value, $"{ctx} tree child posY"); break;
