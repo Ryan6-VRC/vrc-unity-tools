@@ -387,6 +387,29 @@ public class OwnMaterialTests
         Assert.AreEqual(beforeGuid, afterGuid, "augment must not create a new asset — O resolves to S in place");
     }
 
+    // The spec calls out that `force` has NO effect on the in-place augment route (the target is the
+    // already-owned source — nothing to write-guard, so nothing to override). A force:true augment must
+    // fork identically to force:false and emit no force-override note.
+    [Test] public void Force_is_inert_on_in_place_augment()
+    {
+        var owned = OwnedMat("Base");
+        var tex = MakeTexture(VendorRoot, "Body");
+        owned.SetTexture("_MainTex", tex);
+        EditorUtility.SetDirty(owned); AssetDatabase.SaveAssets();
+
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(owned), null, new[] { "_MainTex" }, force: true);
+        StringAssert.Contains("=> PASS", s);
+        StringAssert.Contains("augment", s);
+
+        // Fork landed under H(O) exactly as a force:false augment would (Owned/Base/Body.png).
+        var reloaded = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Base.mat");
+        StringAssert.StartsWith(Owned + "/Base/", AssetDatabase.GetAssetPath(reloaded.GetTexture("_MainTex")));
+
+        // No copy-to-new write-guard was consulted, so no force-override note was recorded.
+        string json = File.ReadAllText(ExtractLogPath(s));
+        StringAssert.DoesNotContain("force", json, "force must be inert on the augment route — no override note");
+    }
+
     // ── whatIf parity: reproduces every routing FAIL, creates nothing ─────────────────────────────
 
     [Test] public void WhatIf_own_creates_no_asset_on_disk()
@@ -638,6 +661,40 @@ public class OwnMaterialTests
         string second = OwnMaterial.Run(AssetDatabase.GetAssetPath(owned), null, new[] { "_DetailAlbedoMap" });
         StringAssert.Contains("=> FAIL", second);
         StringAssert.Contains("prior run", second);
+    }
+
+    // whatIf parity for the CROSS-run case (mirrors Same_run_collision_whatIf_refuses_identically): a
+    // preview that would hit an on-disk different-source collision refuses exactly as execute would, and
+    // writes nothing (the on-disk existence + byte-compare in PlanFork step c is pure read-only).
+    [Test] public void Cross_run_collision_whatIf_refuses_identically()
+    {
+        var v = VendorMat("Dress");
+        var texA = MakeTexture(VendorRoot + "/A", "Tex");
+        v.SetTexture("_MainTex", texA);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string first = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
+        StringAssert.Contains("=> PASS", first);
+
+        // A NEW slot whose source shares the "Tex" basename but has different bytes — H(O)/Tex.png is
+        // already on disk from the first run. Previewing the augment must refuse the same way.
+        var texB = MakeTexture(VendorRoot + "/B", "Tex");
+        var owned = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
+        owned.SetTexture("_DetailAlbedoMap", texB);
+        EditorUtility.SetDirty(owned); AssetDatabase.SaveAssets();
+
+        string dstBefore = AssetDatabase.GetAssetPath(
+            AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat").GetTexture("_MainTex"));
+
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
+        string second = OwnMaterial.Run(AssetDatabase.GetAssetPath(owned), null, new[] { "_DetailAlbedoMap" }, whatIf: true);
+        StringAssert.Contains("=> FAIL", second);
+        StringAssert.Contains("prior run", second);
+
+        // whatIf wrote nothing: the first run's Tex.png is untouched (same GUID) and no B-sourced copy landed.
+        string dstAfter = AssetDatabase.GetAssetPath(
+            AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat").GetTexture("_MainTex"));
+        Assert.AreEqual(dstBefore, dstAfter, "whatIf must not overwrite the prior run's forked texture");
     }
 
     [Test] public void Cross_run_augment_reuses_dst_for_same_source_no_recopy()
