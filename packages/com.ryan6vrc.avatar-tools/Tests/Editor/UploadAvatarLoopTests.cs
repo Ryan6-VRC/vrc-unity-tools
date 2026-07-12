@@ -140,7 +140,7 @@ public class UploadAvatarLoopTests
     class FakeApiException : System.Exception
     {
         public int StatusCode { get; set; }
-        public FakeApiException(int s, string m) : base(m) { StatusCode = s; }
+        public FakeApiException(int s, string m, System.Exception inner = null) : base(m, inner) { StatusCode = s; }
     }
 
     [Test]
@@ -150,5 +150,27 @@ public class UploadAvatarLoopTests
         Assert.AreEqual("rate-limit", UploadAvatarLogic.Classify(o429.httpStatus, o429.isValidation, o429.isTimeout));
         var o400 = UploadAvatar.FailedFromException(new FakeApiException(400, "bad"));
         Assert.AreEqual("real", UploadAvatarLogic.Classify(o400.httpStatus, o400.isValidation, o400.isTimeout));
+    }
+
+    [Test]
+    public void FailedFromException_StatusOnOuter_WrappingInner_StillClassifies()
+    {
+        // The exact A bug: 429 on the outer, an inner transport cause present.
+        var o = UploadAvatar.FailedFromException(new FakeApiException(429, "rate limited", new System.Exception("transport")));
+        Assert.AreEqual("rate-limit", UploadAvatarLogic.Classify(o.httpStatus, o.isValidation, o.isTimeout));
+    }
+
+    [Test]
+    public void FailedFromException_StatusOnInner_IsFound()
+    {
+        var o = UploadAvatar.FailedFromException(new System.Exception("wrapper", new FakeApiException(400, "bad")));
+        Assert.AreEqual("real", UploadAvatarLogic.Classify(o.httpStatus, o.isValidation, o.isTimeout));
+    }
+
+    [Test]
+    public void FailedFromException_NoSignal_IsNonRetryableReal()
+    {
+        var o = UploadAvatar.FailedFromException(new System.InvalidOperationException("CAU drift"));
+        Assert.AreEqual("real", o.forcedClass);   // fail-safe default, not transient
     }
 }

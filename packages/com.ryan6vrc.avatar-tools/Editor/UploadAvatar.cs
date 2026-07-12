@@ -282,12 +282,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// against a fake exception without the live SDK.</summary>
         internal static UploadOutcome FailedFromException(Exception e)
         {
-            var inner = e.InnerException ?? e;
-            return UploadOutcome.Failed(
-                httpStatus:   ExtractHttpStatus(inner),
-                isValidation: inner.GetType().Name.IndexOf("Validation", StringComparison.OrdinalIgnoreCase) >= 0,
-                isTimeout:    inner is TimeoutException,
-                message:      inner.Message);
+            // e is already normalized by CauReflect.UploadOne (no TargetInvocationException / AggregateException
+            // wrapper). The status may sit on the outer SDK exception OR an inner transport cause, so walk the
+            // chain and classify from the first link that exposes a signal — do NOT blindly take one inner layer.
+            for (var cur = e; cur != null; cur = cur.InnerException)
+            {
+                int? status = ExtractHttpStatus(cur);
+                bool isValidation = cur.GetType().Name.IndexOf("Validation", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool isTimeout = cur is TimeoutException;
+                if (status.HasValue || isValidation || isTimeout)
+                    return UploadOutcome.Failed(httpStatus: status, isValidation: isValidation,
+                                                isTimeout: isTimeout, message: e.Message);
+            }
+            // No classifiable signal anywhere in the chain → fail-safe: non-retryable. Never auto-retry an
+            // unknown failure against a real account (covers CAU-drift InvalidOperationException, status-less
+            // transport faults, a null/unexpected return). Requires an operator decision, not a silent retry.
+            return UploadOutcome.Failed(message: e.Message, forcedClass: "real");
         }
 
         /// <summary>Best-effort HTTP status off an SDK exception: an int / HttpStatusCode property named
