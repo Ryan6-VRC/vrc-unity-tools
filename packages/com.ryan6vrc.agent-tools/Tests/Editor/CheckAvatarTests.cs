@@ -16,10 +16,11 @@ using VRC.SDK3.Avatars.Components;
 //
 // CheckAvatar.Inspect resolves scene paths against the ACTIVE scene (its local FindByHierarchyPath), so —
 // like CheckAnimatorRefactorTests — fixtures live in the active scene and are torn down in place. Nothing is
-// saved: temp controllers/clips + the emitted RunLog are deleted in TearDown; the real scene file is never
-// written. MA/VRCFury are the REAL installed types (reflection AddComponent), the same path the tool detects
-// them on. The internal test seams are flipped via reflection (Tests is a separate assembly), which is also
-// how they are exercised live via execute_code.
+// saved: temp controllers/clips + the emitted RunLog are deleted in TearDown (the no-dirty test saves the
+// throwaway scene into TmpDir, which TearDown removes); the real scene file is never written. MA/VRCFury are
+// the REAL installed types (reflection AddComponent), the same path the tool detects them on. The internal
+// test seams are flipped via reflection (Tests is a separate assembly), which is also how they are exercised
+// live via execute_code.
 public class CheckAvatarTests
 {
     private const string TmpDir = "Assets/AgentCheckAvatarTmp";
@@ -27,20 +28,18 @@ public class CheckAvatarTests
 
     private GameObject _avatar;
     private string _logPath;
-    private Scene _tmpScene;
-    private Scene _prevActive;
     private object _origBoxed, _origResolve, _origAnchor;
 
     [SetUp]
     public void SetUp()
     {
         LogAssert.ignoreFailingMessages = true; // CLASSIFY logs a warning; degrade paths log warnings — expected
+        // B4: build fixtures in a Single throwaway scene, never a real saved scene (same pattern as
+        // CheckSeamTests): NewScene(Additive) throws whenever the active scene is untitled AND dirty — the
+        // batchmode boot state once any earlier test has touched it — so additive is order-dependent.
+        // Capture the seam delegates so TearDown restores the real behaviour.
+        EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", "AgentCheckAvatarTmp");
-        // B4: build fixtures in a throwaway additive scene, never the real active scene (Plum-Remy is Ryan's
-        // real project). Capture the seam delegates so TearDown restores the real behaviour.
-        _prevActive = EditorSceneManager.GetActiveScene();
-        _tmpScene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
-        EditorSceneManager.SetActiveScene(_tmpScene);
         _origBoxed = GetSeam("GetBoxedValue");
         _origResolve = GetSeam("ResolveGetOverload");
         _origAnchor = GetSeam("FrameAnchorOverride");
@@ -49,14 +48,11 @@ public class CheckAvatarTests
     [TearDown]
     public void TearDown()
     {
-        _avatar = null; // owned by _tmpScene; CloseScene(remove) tears it down
+        _avatar = null; // owned by the throwaway scene; the next Single NewScene discards it
         ResetSeams();
-        // Close the temp scene BEFORE deleting TmpDir (the no-dirty test saves the scene into TmpDir).
-        if (_tmpScene.IsValid())
-        {
-            if (_prevActive.IsValid() && _prevActive.isLoaded) EditorSceneManager.SetActiveScene(_prevActive);
-            EditorSceneManager.CloseScene(_tmpScene, true); // remove, UNSAVED — never persists to the real project
-        }
+        // The no-dirty test saves the throwaway scene into TmpDir; replace it with a fresh Single scene so
+        // the file being deleted with TmpDir below is never the loaded active scene.
+        EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         if (!string.IsNullOrEmpty(_logPath)) AssetDatabase.DeleteAsset(_logPath);
         _logPath = null;
         if (AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.DeleteAsset(TmpDir);
@@ -475,8 +471,9 @@ public class CheckAvatarTests
         // B4: save the temp scene so the baseline is genuinely CLEAN — otherwise the fixture build leaves it
         // dirty and the assertion would only prove Inspect preserves an already-dirty scene.
         string scenePath = TmpDir + "/NoDirtyScene.unity";
-        EditorSceneManager.SaveScene(_tmpScene, scenePath);
-        Assert.IsFalse(_tmpScene.isDirty, "baseline must be a clean scene");
+        var scene = EditorSceneManager.GetActiveScene();
+        EditorSceneManager.SaveScene(scene, scenePath);
+        Assert.IsFalse(scene.isDirty, "baseline must be a clean scene");
         long animMtime = File.GetLastWriteTimeUtc(TmpDir + "/NoDirtyClip.anim").Ticks;
 
         var r = Inspect("LintNoDirty");

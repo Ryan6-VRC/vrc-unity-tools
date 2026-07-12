@@ -1,6 +1,8 @@
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 
 // Synthetic probes — the test assembly does not reference the VRC SDK, so graft is exercised with plain
@@ -126,6 +128,9 @@ public class GraftHierarchyTests
         Child(vendor, "Menu");
         var ours = new GameObject("V");
 
+        // The refusal's FAIL summary is emitted via Debug.LogError — expected, or the runner flags an
+        // unhandled error log.
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
         var summary = GraftHierarchy.Run(ours, vendor, new[] { "NoSuchSubtree" }, whatIf: false);
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("NoSuchSubtree", summary);
@@ -222,6 +227,7 @@ public class GraftHierarchyTests
         var ours = new GameObject("V");
 
         var badMap = new Dictionary<string, string> { { "Armature", "X" }, { "Other", "X" } };
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL")); // refusal logs its FAIL summary — expected
         var summary = GraftHierarchy.Run(ours, vendor, new[] { "Menu" }, badMap, whatIf: false);
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("non-injective", summary);

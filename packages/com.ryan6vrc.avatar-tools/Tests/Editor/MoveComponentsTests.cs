@@ -1,5 +1,7 @@
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 
 // A resolvable non-VRC Component whose VrcComponentTable.Lookup is null (no row) — used to exercise
@@ -44,6 +46,9 @@ public class MoveComponentsTests
         // This is exactly how Relocate refuses MA/VRCFury/NDMF and Unity built-in constraints.
         var inst = new GameObject("Inst");
         var root = inst.transform;
+        // The refusal's FAIL summary is emitted via Debug.LogError — expected, or the runner flags an
+        // unhandled error log.
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
         var summary = MoveComponents.Run(inst, root, new[] { "RcNoAnchorProbe" }, "X");
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("RcNoAnchorProbe", summary);
@@ -57,6 +62,7 @@ public class MoveComponentsTests
         // A name that resolves to no Component at all is also a loud FAIL (the other refusal path).
         var inst = new GameObject("Inst");
         var root = inst.transform;
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL")); // refusal logs its FAIL summary — expected
         var summary = MoveComponents.Run(inst, root, new[] { "NoSuchComponentTypeXyz" }, "X");
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("NoSuchComponentTypeXyz", summary);

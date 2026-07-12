@@ -31,9 +31,9 @@ public class CheckSeamTests
         LogAssert.ignoreFailingMessages = true; // REFUSE paths log at error/warning — expected in negative tests
         // Batchmode boots on an untitled, unsaved scene; NewScene(Additive) throws against that ("Cannot create
         // a new scene additively with an untitled scene unsaved") and a freshly created untitled scene is itself
-        // dirty, so additive is never allowed when a test runs in isolation (CheckAvatarTests only survives it
-        // because an earlier full-suite fixture leaves a saved scene active). Use a Single throwaway scene: our
-        // fixtures live in it (the active scene, which is exactly what CheckSeam.Resolve searches). Never saved.
+        // dirty, so additive is order-dependent — never allowed when a test runs in isolation. Use a Single
+        // throwaway scene (CheckAvatarTests uses the same pattern): our fixtures live in it (the active scene,
+        // which is exactly what CheckSeam.Resolve searches). Never saved.
         EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         _root = new GameObject("CheckSeamTestRoot");
         _origResolveSeam = GetSeam("ResolveSeam");

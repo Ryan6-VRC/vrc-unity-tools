@@ -1,6 +1,8 @@
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 
 // NOTE: the planner's deep tier keys off the VRC table (VRCPhysBone/Collider/Contact/Constraint), which
@@ -216,6 +218,9 @@ public class CopyComponentsPlanTests
         int before = ours.transform.childCount;
 
         var badMap = new Dictionary<string, string> { { "A", "X" }, { "B", "X" } };   // two keys → one value
+        // The refusal's FAIL summary is emitted via Debug.LogError — expected, or the runner flags an
+        // unhandled error log.
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
         var summary = CopyComponents.Run(ours, vendor, new[] { "CcProbeA" }, null, badMap, whatIf: false);
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("non-injective", summary);
