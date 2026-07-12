@@ -18,8 +18,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// door: a clean run returns the one-line summary with the RunLog path in-band
     /// (<c>… =&gt; OK | log=&lt;path&gt;</c>) and writes the <c>.yaml</c> at <paramref name="outPath"/>; a
     /// <paramref name="whatIf"/> preview writes NO <c>.yaml</c> and returns <c>… =&gt; OK (whatIf) | log=…</c>
-    /// (still recording the RunLog, like the compile door's whatIf); any refusal is a bare
-    /// <c>[DecompileController] FAIL: &lt;named + located constructs&gt;</c> with no trailer and NOTHING written.
+    /// (still recording the RunLog, like the compile door's whatIf); any refusal is
+    /// <c>[DecompileController] &lt;controller-leaf&gt;: &lt;named + located constructs&gt; =&gt; FAIL | log=&lt;path&gt;</c>
+    /// — a Snapshot artifact records the failure, and NO <c>.yaml</c> is written.
     ///
     /// <para>A refusal is the walk surfacing an out-of-vocabulary or malformed construct
     /// (<see cref="ControllerDecompile.WalkResult.Refusals"/>) — refuse loudly rather than emit a lossy
@@ -42,21 +43,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// one-line summary (see class docs).</summary>
         public static string Decompile(string controllerPath, string outPath, bool whatIf = false, bool stripLayout = false)
         {
+            // One refusal label per run: the controller asset's leaf (the thing being decompiled).
+            // Path.GetFileName throws on invalid-char paths (Mono/2022.3) — the door must refuse,
+            // not crash, so use the non-throwing asset-path leaf.
+            string failLabel = RunLogFormat.Leaf(controllerPath);
+            if (failLabel.Length == 0) failLabel = "unknown";
+
             // ── Arg guards (mirror CompileController) ─────────────────────────────────────────────────
-            if (string.IsNullOrEmpty(controllerPath)) return Fail("controllerPath is empty");
-            if (string.IsNullOrEmpty(outPath)) return Fail("outPath is empty");
+            if (string.IsNullOrEmpty(controllerPath)) return Fail(failLabel, controllerPath, "controllerPath is empty");
+            if (string.IsNullOrEmpty(outPath)) return Fail(failLabel, controllerPath, "outPath is empty");
 
             var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
-            if (controller == null) return Fail("controller not found at: " + controllerPath);
+            if (controller == null) return Fail(failLabel, controllerPath, "controller not found at: " + controllerPath);
 
             // ── Reachability walk ─────────────────────────────────────────────────────────────────────
             ControllerDecompile.WalkResult walk;
             try { walk = ControllerDecompile.Walk(controller, stripLayout); }
-            catch (Exception e) { return Fail("walk: " + e.GetType().Name + ": " + e.Message); }
+            catch (Exception e) { return Fail(failLabel, controllerPath, "walk: " + e.GetType().Name + ": " + e.Message); }
 
-            // A refusal is fail-loud: name every out-of-vocabulary construct, write nothing.
+            // A refusal is fail-loud: name every out-of-vocabulary construct, write no .yaml.
             if (walk.Refusals.Count > 0)
-                return Fail(string.Join("  ", walk.Refusals));
+                return Fail(failLabel, controllerPath, string.Join("  ", walk.Refusals));
 
             var doc = walk.Doc;
 
@@ -79,7 +86,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     File.WriteAllText(outPath, yaml);
                     AssetDatabase.Refresh();
                 }
-                catch (Exception e) { return Fail("could not write '" + outPath + "': " + e.Message); }
+                catch (Exception e) { return Fail(failLabel, controllerPath, "could not write '" + outPath + "': " + e.Message); }
             }
 
             // ── Summary + body → Snapshot RunLog (written in whatIf too, mirroring CompileController) ──
@@ -122,11 +129,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return sb.ToString();
         }
 
-        private static string Fail(string why)
+        /// <summary>Refusal tail, mirror of <see cref="CompileController"/>'s: the house grammar —
+        /// a named one-line verdict ending <c>=&gt; FAIL | log=</c> plus a minimal artifact on this
+        /// tool's channel (<see cref="RunLogFormat.SnapshotDir"/>, where its success log goes) —
+        /// replacing the old bare trailer-less line. NOTHING is written at <c>outPath</c> —
+        /// unchanged; the artifact is the verdict record.</summary>
+        private static string Fail(string label, string controllerPath, string why)
         {
-            string err = "[DecompileController] FAIL: " + why;
-            Debug.LogError(err);
-            return err;
+            // Keep the one-line verdict one line (refusal strings can embed raw asset names, which
+            // can carry newlines); the artifact body keeps `why` raw.
+            string oneLineWhy = why.Replace("\r", " ").Replace("\n", " ");
+            string summary = "[DecompileController] " + label + ": " + oneLineWhy + " => FAIL";
+            string body = "# DecompileController FAIL\n\n- controller: " + (string.IsNullOrEmpty(controllerPath) ? "(null)" : controllerPath) + "\n- reason: " + why + "\n";
+            string res = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "decompilecontroller_" + label, summary, body, ".md");
+            Debug.LogError(res);
+            return res;
         }
     }
 

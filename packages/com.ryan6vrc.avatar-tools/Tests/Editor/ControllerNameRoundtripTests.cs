@@ -180,13 +180,14 @@ clips:
             idle.motion = bt;
             AssetDatabase.SaveAssets();
 
-            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
             string yamlOut = TestRoot + "/newlinename.yaml";
             string res = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
 
             StringAssert.Contains("FAIL", res);
             StringAssert.Contains("line break", res, "the refusal names the offending construct");
             Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
+            AnimatorTestHelpers.DeleteRefusalArtifact(res);
         }
 
         // ── 6: a named STATE-ladder transition round-trips ──────────────────────────────────────────────
@@ -283,13 +284,14 @@ layers:
             tr.name = "Bad\nName";
             AssetDatabase.SaveAssets();
 
-            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
             string yamlOut = TestRoot + "/newlinetransitionname.yaml";
             string res = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
 
             StringAssert.Contains("FAIL", res);
             StringAssert.Contains("line break", res, "the refusal names the offending construct");
             Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
+            AnimatorTestHelpers.DeleteRefusalArtifact(res);
         }
 
         // ── 10: a name requiring YAML quoting (a colon) round-trips intact — the first feature to put

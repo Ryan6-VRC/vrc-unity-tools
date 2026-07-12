@@ -98,7 +98,8 @@ public class DecompileControllerTests
         StringAssert.Contains("=> OK", rec);
     }
 
-    // A controller carrying an out-of-vocabulary construct (a Trigger parameter) -> bare FAIL, no .yaml.
+    // A controller carrying an out-of-vocabulary construct (a Trigger parameter) -> named FAIL
+    // (house grammar, Snapshot artifact + | log= trailer), no .yaml.
     [Test]
     public void Decompile_Refusal_Fails_And_Writes_No_Yaml()
     {
@@ -107,13 +108,17 @@ public class DecompileControllerTests
         rc.AddParameter("T", AnimatorControllerParameterType.Trigger); // out of vocabulary
         AssetDatabase.SaveAssets();
 
-        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
         string yamlOut = TestRoot + "/refuse.yaml";
         string res = DecompileController.Decompile(refusingCtrlPath, yamlOut, whatIf: false);
 
         StringAssert.Contains("FAIL", res);
         StringAssert.Contains("Trigger", res, "the refusal names the offending construct");
         Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
+        StringAssert.Contains("| log=", res, "a refusal carries the in-band artifact trailer (R4)");
+        string artifact = res.Substring(res.IndexOf("log=") + 4);
+        Assert.IsTrue(File.Exists(artifact), "the refusal artifact is on disk: " + artifact);
+        AssetDatabase.DeleteAsset(artifact);
     }
 
     // stripLayout: true decompiles an ARRANGED controller (a node dragged off-grid) to a .yaml with no
@@ -141,9 +146,10 @@ public class DecompileControllerTests
     [Test]
     public void Empty_ControllerPath_Fails()
     {
-        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
         string res = DecompileController.Decompile("", TestRoot + "/x.yaml", whatIf: false);
         StringAssert.Contains("FAIL", res);
+        AnimatorTestHelpers.DeleteRefusalArtifact(res);
     }
 
     [Test]
@@ -153,16 +159,18 @@ public class DecompileControllerTests
         ControllerEmit.Build(src, TestRoot + "/emit", "src", out var emitted);
         string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
 
-        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
         string res = DecompileController.Decompile(ctrlPath, "", whatIf: false);
         StringAssert.Contains("FAIL", res);
+        AnimatorTestHelpers.DeleteRefusalArtifact(res);
     }
 
     [Test]
     public void Nonexistent_Controller_Fails()
     {
-        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
         string res = DecompileController.Decompile(TestRoot + "/nope.controller", TestRoot + "/x.yaml", whatIf: false);
         StringAssert.Contains("FAIL", res);
+        AnimatorTestHelpers.DeleteRefusalArtifact(res);
     }
 }

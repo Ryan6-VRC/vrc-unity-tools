@@ -110,13 +110,14 @@ public class CompileControllerRobustnessTests
             "clips:\n  hide: { set: { \"Panel/Image.enabled\": 0 } }\n");
 
         string outDir = TestRoot + "/out_ui";
-        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] FAIL: emit:.*Image"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*emit:.*Image.*=> FAIL"));
         string result = CompileController.Compile(src, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
         StringAssert.Contains("UnityEngine", result,
             "the refusal names the UnityEngine-namespace scope limit so it reads as intentional");
         Assert.IsFalse(File.Exists(outDir + "/Ui_Fx.controller"), "no controller written on the refused binding");
+        AnimatorTestHelpers.DeleteRefusalArtifact(result);
     }
 
     // ── Gap 4 — "nothing written on failure" extends to FOLDERS. A fresh compile into a not-yet-existing
@@ -134,11 +135,12 @@ public class CompileControllerRobustnessTests
             "schema: 1\ncontroller: BadFresh_Fx\nbasis: avatar-root\nrole: fx\n" +
             "layers:\n  - name: L\n    states:\n      S:\n        transitions:\n          - { to: NoSuchState }\n    default: S\n");
 
-        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] FAIL: emit:"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*emit:.*=> FAIL"));
         string result = CompileController.Compile(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
         Assert.IsFalse(AssetDatabase.IsValidFolder(outDir), "freshly-created leaf folder removed on a failed compile");
         Assert.IsFalse(AssetDatabase.IsValidFolder(TestRoot + "/g4_new"), "freshly-created ancestor folder removed too");
+        AnimatorTestHelpers.DeleteRefusalArtifact(result);
     }
 }

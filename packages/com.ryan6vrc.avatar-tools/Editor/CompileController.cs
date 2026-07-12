@@ -19,8 +19,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// emit (<see cref="ControllerEmit"/>) → graph lint (<see cref="ControllerRules"/>) → atomic persist →
     /// RunLog. Pure PASS/FAIL contract: a real compile returns the one-line summary with the RunLog path
     /// in-band (<c>… =&gt; OK | log=&lt;path&gt;</c>); a whatIf preview leaves NOTHING on disk and returns
-    /// <c>… =&gt; OK (whatIf) | log=&lt;path&gt;</c>; any refusal is a bare
-    /// <c>[CompileController] FAIL: &lt;reason / named offenders&gt;</c> with no trailer and no asset written.
+    /// <c>… =&gt; OK (whatIf) | log=&lt;path&gt;</c>; any refusal is
+    /// <c>[CompileController] &lt;source-leaf&gt;: &lt;reason / named offenders&gt; =&gt; FAIL | log=&lt;path&gt;</c>
+    /// — a RunLog artifact records the failure, and no compile output is written.
     ///
     /// <para>ATOMICITY: nothing reaches <c>outDir</c> unless parse + validate + emit + graph-lint all pass. Parse
     /// or validate failure writes no asset (emission never runs). A whatIf run emits to a scratch temp, lints
@@ -49,26 +50,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// return — the outDir is never touched. Returns the one-line summary (see class docs).</summary>
         public static string Compile(string sourcePath, string outDir, bool whatIf = false)
         {
+            // One refusal label per run: the source file's leaf (pre-parse stages don't know the
+            // controller name; on failure the source is the thing to name).
+            string failLabel = SafeLeaf(sourcePath);
+
             // ── 1. Read the source file ──────────────────────────────────────────────────────────────
-            if (string.IsNullOrEmpty(sourcePath)) return Fail("sourcePath is empty");
-            if (!File.Exists(sourcePath)) return Fail("source file not found: " + sourcePath);
+            if (string.IsNullOrEmpty(sourcePath)) return Fail(failLabel, sourcePath, "sourcePath is empty");
+            if (!File.Exists(sourcePath)) return Fail(failLabel, sourcePath, "source file not found: " + sourcePath);
             string text;
             try { text = File.ReadAllText(sourcePath); }
-            catch (Exception e) { return Fail("could not read source '" + sourcePath + "': " + e.Message); }
+            catch (Exception e) { return Fail(failLabel, sourcePath, "could not read source '" + sourcePath + "': " + e.Message); }
 
             // ── 2. Parse (throws SchemaException on malformed text — no asset written) ────────────────
             AnimDocument doc;
             try { doc = AnimatorSchemaYaml.Parse(text, sourcePath); }
-            catch (SchemaException se) { return Fail("parse: " + se.Message); }
-            catch (Exception e) { return Fail("parse: " + e.GetType().Name + ": " + e.Message); }
+            catch (SchemaException se) { return Fail(failLabel, sourcePath, "parse: " + se.Message); }
+            catch (Exception e) { return Fail(failLabel, sourcePath, "parse: " + e.GetType().Name + ": " + e.Message); }
 
-            if (string.IsNullOrEmpty(doc.ControllerName)) return Fail("document declares no controller name");
-            if (string.IsNullOrEmpty(outDir)) return Fail("outDir is empty");
+            if (string.IsNullOrEmpty(doc.ControllerName)) return Fail(failLabel, sourcePath, "document declares no controller name");
+            if (string.IsNullOrEmpty(outDir)) return Fail(failLabel, sourcePath, "outDir is empty");
 
             // ── 3. Document validation (named offenders → FAIL, nothing written) ─────────────────────
             var vErrors = SchemaValidation.Validate(doc);
             if (vErrors.Count > 0)
-                return Fail("validation failed (" + vErrors.Count + "): " + string.Join("  ", vErrors));
+                return Fail(failLabel, sourcePath, "validation failed (" + vErrors.Count + "): " + string.Join("  ", vErrors));
 
             string name = doc.ControllerName;
             string cleanOut = NormalizeDir(outDir);
@@ -88,7 +93,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string proofDir = ScratchTemp();
                 string proofFail = ProofCompile(doc, proofDir, text);
                 AssetDatabase.DeleteAsset(proofDir);
-                if (proofFail != null) return Fail(proofFail); // prior controller left untouched
+                if (proofFail != null) return Fail(failLabel, sourcePath, proofFail); // prior controller left untouched
             }
 
             string tempFolder = whatIf ? ScratchTemp() : null;
@@ -106,8 +111,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ── 4b. Emit into the target (real outDir, or the whatIf temp) ────────────────────────────
             ControllerEmit.EmitResult built;
             try { ControllerEmit.Build(doc, emitDir, text, out built); }
-            catch (ControllerEmit.EmitException ee) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders); return Fail("emit: " + ee.Message); }
-            catch (Exception e) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders); return Fail("emit: " + e.GetType().Name + ": " + e.Message); }
+            catch (ControllerEmit.EmitException ee) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders); return Fail(failLabel, sourcePath, "emit: " + ee.Message); }
+            catch (Exception e) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders); return Fail(failLabel, sourcePath, "emit: " + e.GetType().Name + ": " + e.Message); }
 
             // Persist the VRCExpressionParameters side-asset (ControllerEmit builds it in-memory only). REUSE an
             // existing asset IN PLACE — overwrite its parameters, never delete+recreate — so its GUID survives a
@@ -130,7 +135,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 CleanupAfterLint(whatIf, tempFolder, finalPath, paramsPath, controllerPreExisted, paramsPreExisted, newFolders);
                 string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
-                return Fail("post-emit graph lint (" + lint.Errors.Count + "): " + offenders);
+                return Fail(failLabel, sourcePath, "post-emit graph lint (" + lint.Errors.Count + "): " + offenders);
             }
 
             // ── 6. Compile-only advisories (into the RunLog body; never fail the compile) ────────────
@@ -455,11 +460,34 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        private static string Fail(string why)
+        /// <summary>Refusal tail: the house grammar — a named one-line verdict ending
+        /// <c>=&gt; FAIL | log=</c> plus a minimal RunLog artifact — replacing the old bare
+        /// trailer-less line that left failed compiles with no artifact at all (high-traffic door:
+        /// every animator build). Nothing reaches <c>outDir</c> — the artifact is the verdict
+        /// record, not a compile output. <paramref name="label"/> is the source file's leaf,
+        /// uniform across every refusal stage (pre-parse stages don't know the controller name).</summary>
+        private static string Fail(string label, string sourcePath, string why)
         {
-            string err = "[CompileController] FAIL: " + why;
-            Debug.LogError(err);
-            return err;
+            // The one-line verdict must stay one line: exception messages / asset names inside `why`
+            // can carry raw newlines. Flatten in the summary only; the artifact body keeps `why` raw.
+            string oneLineWhy = why.Replace("\r", " ").Replace("\n", " ");
+            string summary = "[CompileController] " + label + ": " + oneLineWhy + " => FAIL";
+            string body = "# CompileController FAIL\n\n- source: " + (string.IsNullOrEmpty(sourcePath) ? "(null)" : sourcePath) + "\n- reason: " + why + "\n";
+            string res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "compilecontroller_" + label, summary, body, ".md");
+            Debug.LogError(res);
+            return res;
+        }
+
+        /// <summary>Non-throwing leaf of a filesystem path — <c>Path.GetFileName</c> throws
+        /// <c>ArgumentException</c> on invalid-char paths (Mono/2022.3), which would crash the door
+        /// before its guards can refuse; splits on both separators (filesystem paths carry
+        /// backslashes, unlike <see cref="RunLogFormat.Leaf"/>'s asset paths).</summary>
+        private static string SafeLeaf(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return "unknown";
+            int i = path.LastIndexOfAny(new[] { '/', '\\' });
+            string leaf = i >= 0 ? path.Substring(i + 1) : path;
+            return leaf.Length == 0 ? "unknown" : leaf;
         }
     }
 

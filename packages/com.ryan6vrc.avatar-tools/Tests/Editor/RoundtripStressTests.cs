@@ -84,13 +84,14 @@ namespace Ryan6Vrc.AvatarTools.Tests
             seed(rc);
             AssetDatabase.SaveAssets();
 
-            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] FAIL:"));
+            LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
             string yamlOut = TestRoot + "/refuse_" + tag + ".yaml";
             string res = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
 
             StringAssert.Contains("FAIL", res);
             StringAssert.Contains(expectedToken, res, "the refusal names the offending construct: " + expectedToken);
             Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
+            AnimatorTestHelpers.DeleteRefusalArtifact(res);
         }
 
         [Test] public void Refusal_SyncedLayer() =>

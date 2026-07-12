@@ -76,11 +76,16 @@ public class CompileControllerTests
         string outDir = TestRoot + "/out_bad";
         // The door reports a refusal via Debug.LogError; declare it so the test framework doesn't count the
         // intentional error log as a failure.
-        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] FAIL: validation failed"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*validation failed.*=> FAIL"));
         string result = CompileController.Compile(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
         Assert.IsFalse(File.Exists(outDir + "/Debounce_Fx.controller"), "no controller on validation failure");
+        StringAssert.Contains("| log=", result, "a refusal carries the in-band artifact trailer (R4)");
+        string artifact = result.Substring(result.IndexOf("log=") + 4);
+        Assert.IsTrue(File.Exists(artifact), "the refusal artifact is on disk: " + artifact);
+        StringAssert.Contains("validation failed", File.ReadAllText(artifact), "the artifact names the reason");
+        AssetDatabase.DeleteAsset(artifact);
     }
 
     [Test]
@@ -105,7 +110,7 @@ public class CompileControllerTests
             "parameters:\n  P: { type: float }\n" +
             "layers:\n  - name: L\n    states:\n      S:\n        transitions:\n          - { to: NoSuchState }\n    default: S\n");
         // The failing recompile reports its refusal via Debug.LogError; declare it as expected.
-        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] FAIL: emit:"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*emit:.*=> FAIL"));
         string result = CompileController.Compile(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
@@ -114,6 +119,7 @@ public class CompileControllerTests
         var after = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
         Assert.IsNotNull(after, "prior controller still loads");
         Assert.AreEqual(layersBefore, after.layers.Length, "prior controller was NOT stripped by the failed recompile");
+        AnimatorTestHelpers.DeleteRefusalArtifact(result);
     }
 
     [Test]
