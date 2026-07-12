@@ -68,8 +68,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string bsErr = CheckBlendshapeParity(
                     ownedRoot, vendorSource,
                     out string ourFaceMesh, out string vendorFaceMesh);
-                if (ourFaceMesh != null && vendorFaceMesh != null)
-                    data.Note("faces: ours='" + ourFaceMesh + "' vendor='" + vendorFaceMesh + "'");
+                // Note each side independently — on a one-sided parity FAIL the side that WAS found is
+                // the diagnostic separating "wrong vendor object" from "our copy broken".
+                if (ourFaceMesh != null)    data.Note("ourFaceMesh='" + ourFaceMesh + "'");
+                if (vendorFaceMesh != null) data.Note("vendorFaceMesh='" + vendorFaceMesh + "'");
                 if (bsErr != null)
                     return Fail(data, label, "gate blendshape parity: " + bsErr);
 
@@ -193,6 +195,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                          && lostRefs == 0
                          && string.IsNullOrEmpty(blueprintId);
                 data.result = pass ? "PASS" : "FAIL";
+                if (!pass)
+                {
+                    // The per-item offenders above carry the detail; error carries the joined headline
+                    // so a FAIL RunLog never reads "error": null (and matches CleanController's verify FAIL).
+                    var reasons = new List<string>();
+                    if (leaks > 0)    reasons.Add("leaks=" + leaks);
+                    if (lostRefs > 0) reasons.Add("lostRefs=" + lostRefs);
+                    if (!string.IsNullOrEmpty(blueprintId)) reasons.Add("blueprintId not cleared");
+                    data.error = string.Join("; ", reasons);
+                }
 
                 // ── Viewpoint recompute (C6, NON-fatal) ────────────────────────────────────────────
                 // After the leak/lostRef gates, recompute ViewPosition from the vendor reference + the

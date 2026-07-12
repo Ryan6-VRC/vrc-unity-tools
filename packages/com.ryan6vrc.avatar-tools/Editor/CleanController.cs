@@ -65,6 +65,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 instance = ownedRoot.name,
                 whatIf   = whatIf,
             };
+            // Noted up front so even an early FAIL's artifact carries the output location — the
+            // failure class where a bad outDir is the likely culprit (CopyAsset failed).
+            data.Note("outDir=" + outDir);
 
             try
             {
@@ -76,9 +79,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     string previewSourceFxPath = AssetDatabase.GetAssetPath(sourceFx);
                     if (string.IsNullOrEmpty(previewSourceFxPath))
                     {
-                        data.result = "FAIL";
-                        data.error  = "sourceFx has no asset path (runtime/in-memory controller not supported)";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "sourceFx has no asset path (runtime/in-memory controller not supported)");
                     }
 
                     string previewDestPath = outDir.TrimEnd('/') + "/" + sourceFx.name + "_Clean.controller";
@@ -89,9 +90,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // source, always valid, so only the reuse case is checkable at preview time).
                     if (data.CleanFxReused && AssetDatabase.LoadAssetAtPath<AnimatorController>(previewDestPath) == null)
                     {
-                        data.result = "FAIL";
-                        data.error  = "asset at " + previewDestPath + " exists but is not an AnimatorController";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "asset at " + previewDestPath + " exists but is not an AnimatorController");
                     }
 
                     // Keep-set from the SOURCE controller's layers. The source and the would-be-copied
@@ -103,9 +102,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     int[] previewKeepIdx = SelectLayersToKeep(previewAllNames, keepLayerNames, out previewSelErr);
                     if (previewKeepIdx == null)
                     {
-                        data.result = "FAIL";
-                        data.error  = previewSelErr;
-                        return FinishEarly(data, label);
+                        return Fail(data, label, previewSelErr);
                     }
                     var previewKeptNames = new string[previewKeepIdx.Length];
                     for (int i = 0; i < previewKeepIdx.Length; i++) previewKeptNames[i] = srcLayers[previewKeepIdx[i]].name;
@@ -142,24 +139,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // asset at the path; a fresh one is created empty and is always valid).
                     if (data.ParamsReused && AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(previewParamsPath) == null)
                     {
-                        data.result = "FAIL";
-                        data.error  = "asset at " + previewParamsPath + " exists but is not a VRCExpressionParameters";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "asset at " + previewParamsPath + " exists but is not a VRCExpressionParameters");
                     }
                     if (data.MenuReused && AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(previewMenuPath) == null)
                     {
-                        data.result = "FAIL";
-                        data.error  = "asset at " + previewMenuPath + " exists but is not a VRCExpressionsMenu";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "asset at " + previewMenuPath + " exists but is not a VRCExpressionsMenu");
                     }
 
                     var previewDesc = ownedRoot.GetComponent<VRCAvatarDescriptor>()
                                    ?? ownedRoot.GetComponentInChildren<VRCAvatarDescriptor>(true);
                     if (previewDesc == null)
                     {
-                        data.result = "FAIL";
-                        data.error  = "VRCAvatarDescriptor not found on ownedRoot (" + ownedRoot.name + ")";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "VRCAvatarDescriptor not found on ownedRoot (" + ownedRoot.name + ")");
                     }
 
                     // Slots we WOULD wire (reported under the (whatIf) marker): FX iff the descriptor
@@ -176,9 +167,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // FAILs "descriptor FX not wired". The preview verdict must equal that, not a blanket PASS.
                     if (!previewHasFxLayer)
                     {
-                        data.result = "FAIL";
-                        data.error  = "descriptor FX not wired to clean controller (no base FX layer to wire)";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "descriptor FX not wired to clean controller (no base FX layer to wire)");
                     }
 
                     data.result = "PASS";
@@ -197,9 +186,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string sourceFxPath = AssetDatabase.GetAssetPath(sourceFx);
                 if (string.IsNullOrEmpty(sourceFxPath))
                 {
-                    data.result = "FAIL";
-                    data.error  = "sourceFx has no asset path (runtime/in-memory controller not supported)";
-                    return FinishEarly(data, label);
+                    return Fail(data, label, "sourceFx has no asset path (runtime/in-memory controller not supported)");
                 }
 
                 string cleanName = sourceFx.name + "_Clean.controller";
@@ -214,9 +201,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     bool copied = AssetDatabase.CopyAsset(sourceFxPath, destPath);
                     if (!copied)
                     {
-                        data.result = "FAIL";
-                        data.error  = "AssetDatabase.CopyAsset failed: " + sourceFxPath + " -> " + destPath;
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "AssetDatabase.CopyAsset failed: " + sourceFxPath + " -> " + destPath);
                     }
                 }
                 data.CleanFxReused = ctrlExists;
@@ -224,9 +209,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(destPath);
                 if (ctrl == null)
                 {
-                    data.result = "FAIL";
-                    data.error  = "LoadAssetAtPath returned null for " + destPath;
-                    return FinishEarly(data, label);
+                    return Fail(data, label, "LoadAssetAtPath returned null for " + destPath);
                 }
                 data.CleanFxPath = destPath;
 
@@ -235,7 +218,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 for (int i = 0; i < ctrl.layers.Length; i++) allNames[i] = ctrl.layers[i].name;
                 string selErr;
                 int[] keepIdx = SelectLayersToKeep(allNames, keepLayerNames, out selErr);
-                if (keepIdx == null) { data.result = "FAIL"; data.error = selErr; return FinishEarly(data, label); }
+                if (keepIdx == null) return Fail(data, label, selErr);
                 var keepSet = new HashSet<int>(keepIdx);
                 for (int i = ctrl.layers.Length - 1; i >= 0; i--)
                     if (!keepSet.Contains(i)) ctrl.RemoveLayer(i);   // descending; ctrl.layers recomputed each access
@@ -270,9 +253,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     exprParams = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(paramsPath);
                     if (exprParams == null)
                     {
-                        data.result = "FAIL";
-                        data.error  = "asset at " + paramsPath + " exists but is not a VRCExpressionParameters";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "asset at " + paramsPath + " exists but is not a VRCExpressionParameters");
                     }
                     int preCount = exprParams.parameters != null ? exprParams.parameters.Length : 0;
                     if (preCount > 0)
@@ -302,9 +283,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     exprMenu = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(menuPath);
                     if (exprMenu == null)
                     {
-                        data.result = "FAIL";
-                        data.error  = "asset at " + menuPath + " exists but is not a VRCExpressionsMenu";
-                        return FinishEarly(data, label);
+                        return Fail(data, label, "asset at " + menuPath + " exists but is not a VRCExpressionsMenu");
                     }
                     int preCount = exprMenu.controls != null ? exprMenu.controls.Count : 0;
                     if (preCount > 0)
@@ -338,9 +317,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         ?? ownedRoot.GetComponentInChildren<VRCAvatarDescriptor>(true);
                 if (desc == null)
                 {
-                    data.result = "FAIL";
-                    data.error  = "VRCAvatarDescriptor not found on ownedRoot (" + ownedRoot.name + ")";
-                    return FinishEarly(data, label);
+                    return Fail(data, label, "VRCAvatarDescriptor not found on ownedRoot (" + ownedRoot.name + ")");
                 }
 
                 Undo.RecordObject(desc, "CleanController: wire clean controller + empty expressions");
@@ -623,14 +600,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>Early-abort tail (precondition/mid-flow FAILs, both modes): name the offender from
-        /// <c>error</c>, flush any notes already accrued, and use the STANDARD envelope summary — the
-        /// bespoke wiring summary would render zero-counts as measurements when nothing completed.
-        /// <see cref="TransplantCore.Finish"/> logs exactly once (the old double-log trap).</summary>
+        /// <c>error</c>, flush the notes already accrued — including the output-path notes, because a
+        /// mid-execute FAIL can leave a created/trimmed controller behind and the artifact must say so —
+        /// and use the STANDARD envelope summary (the bespoke wiring summary would render zero-counts as
+        /// measurements when nothing completed). <see cref="TransplantCore.Finish"/> logs exactly once
+        /// (the old double-log trap).</summary>
         private static string FinishEarly(RunData data, string label)
         {
             data.Offender(data.error);
+            FlushPathNotes(data);
             if (data.ReuseNote != null) data.Note(data.ReuseNote);
             return TransplantCore.Finish(data, label);
+        }
+
+        /// <summary>Mid-flow FAIL: set the verdict + error + finish in one call, so a call site can never
+        /// set <c>error</c> but forget <c>result</c> (which would ship a log whose verdict is still the
+        /// default PASS — a slip <see cref="TransplantRunLog.EnsureFailHasOffender"/> cannot catch).</summary>
+        private static string Fail(RunData data, string label, string msg)
+        {
+            data.result = "FAIL";
+            data.error  = msg;
+            return FinishEarly(data, label);
         }
 
         /// <summary>Completed-run tail (PASS or step-6 verify FAIL, both modes): flush the run's fields
@@ -645,12 +635,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             data.Count("ctrlParamsDropped", data.CtrlParamsDropped);
             data.Count("exprParams", data.ParamCount);
             data.Count("menuControls", data.MenuControls);
-            if (data.CleanFxPath != null)
-                data.Note("controller=" + data.CleanFxPath + (data.CleanFxReused ? " (reuse)" : " (new)"));
-            if (data.ParamsPath != null)
-                data.Note("params=" + data.ParamsPath + (data.ParamsReused ? " (reuse)" : " (new)"));
-            if (data.MenuPath != null)
-                data.Note("menu=" + data.MenuPath + (data.MenuReused ? " (reuse)" : " (new)"));
+            FlushPathNotes(data);
             if (!string.IsNullOrEmpty(data.LayerNames))
                 data.Note("layers kept: " + data.LayerNames);
             if (!string.IsNullOrEmpty(data.CtrlParamsDroppedNames))
@@ -661,6 +646,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
             data.EnsureFailHasOffender();
             string logPath = TransplantCore.WriteRunLog(data, label);
             return BuildSummary(data, label, logPath);
+        }
+
+        /// <summary>Output-path notes with reuse tags — shared by both tails so a mid-flow FAIL's
+        /// artifact still records any asset the run created/modified before aborting.</summary>
+        private static void FlushPathNotes(RunData data)
+        {
+            if (data.CleanFxPath != null)
+                data.Note("controller=" + data.CleanFxPath + (data.CleanFxReused ? " (reuse)" : " (new)"));
+            if (data.ParamsPath != null)
+                data.Note("params=" + data.ParamsPath + (data.ParamsReused ? " (reuse)" : " (new)"));
+            if (data.MenuPath != null)
+                data.Note("menu=" + data.MenuPath + (data.MenuReused ? " (reuse)" : " (new)"));
         }
 
         private static string WiredString(RunData data)
@@ -683,9 +680,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string paramsTag = data.ParamsReused  ? "(reuse)" : "(new)";
             string menuTag   = data.MenuReused    ? "(reuse)" : "(new)";
 
+            // Tagged [clean-controller] (the envelope kind), not the old [CleanController] — the
+            // guard/early-abort paths emit the envelope's standard line, and a per-path tag fork would
+            // make transcript greps miss exactly the FAILs.
             string marker = data.whatIf ? " (whatIf)" : "";
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CleanController]" + marker + " {0}: controller={1}{2}(layers={3}: {4}; ctrlParams kept={5} dropped={6}), exprParams={7}{8}, menu={9}{10}, descriptorWired={11}{12} => {13} | log={14}",
+                "[clean-controller]" + marker + " {0}: controller={1}{2}(layers={3}: {4}; ctrlParams kept={5} dropped={6}), exprParams={7}{8}, menu={9}{10}, descriptorWired={11}{12} => {13} | log={14}",
                 label,
                 (data.source ?? "?") + "_Clean",
                 ctrlTag,

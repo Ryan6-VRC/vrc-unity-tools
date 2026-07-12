@@ -218,7 +218,8 @@ public class CleanControllerMutationTests
     {
         var src = BuildSourceFx(Root + "/Src.controller");
         _avatar = new GameObject("NoDesc");
-        // FinishEarly and the Step-6-verify FAIL path both log exactly once (via BuildSummary) — one Expect.
+        // FinishEarly (via TransplantCore.Finish) and the Step-6-verify FAIL path (via BuildSummary)
+        // both log exactly once — one Expect.
         LogAssert.Expect(LogType.Error, new Regex("VRCAvatarDescriptor not found"));
         string s = CleanController.Run(src, _avatar, Root, new[] { "GestureLeft" });
         StringAssert.Contains("=> FAIL", s);
@@ -254,7 +255,7 @@ public class CleanControllerMutationTests
         // path instead, which is where the "wrong-typed asset FAILs loud" contract actually has that
         // phrasing to assert against.
         AnimatorTestHelpers.MakeClip(Root + "/VRCExpressionParameters_Empty.asset");
-        // FinishEarly logs the FAIL summary exactly once (via BuildSummary) — one Expect.
+        // FinishEarly logs the FAIL summary exactly once (via TransplantCore.Finish) — one Expect.
         LogAssert.Expect(LogType.Error, new Regex("exists but is not a VRCExpressionParameters"));
         string s = CleanController.Run(src, _avatar, Root, new[] { "GestureLeft" });
         StringAssert.Contains("=> FAIL", s);
