@@ -121,7 +121,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("]\n}");
 
             string res = RunLogFormat.WriteRunLog(RunLogDir, "check-humanoid-rig_" + label, head, sb.ToString(), ".json");
-            if (pass && res.Contains(" | log=")) Debug.Log(res); else Debug.LogError(res);
+            // Anchored to WriteRunLog's exact success contract (summary + " | log=" + path), not a
+            // floating substring.
+            bool wroteLog = res.StartsWith(head + " | log=", StringComparison.Ordinal);
+            if (pass && wroteLog) Debug.Log(res); else Debug.LogError(res);
             return res;
         }
 
