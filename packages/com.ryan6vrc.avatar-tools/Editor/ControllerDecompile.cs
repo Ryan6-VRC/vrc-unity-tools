@@ -454,7 +454,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     _result.Refusals.Add($"state '{ast.name}': cycleOffset-parameter binding '{ast.cycleOffsetParameter}' is out of vocabulary");
 
                 if (ast.motion != null)
-                    st.Motion = DecodeMotion(ast.motion, "state '" + ast.name + "'");
+                    st.Motion = DecodeMotion(ast.motion, "state '" + ast.name + "'", ControllerEmit.AutoTreeName(ast.name));
                 else if (HasDanglingMotion(ast))
                 {
                     string guid = NextDanglingGuid(ast);
@@ -727,7 +727,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ----- motions / blend trees -----
 
-            private MotionRef DecodeMotion(Motion m, string loc)
+            // A human-authored name survives decode ONLY when it differs from the positional default (the
+            // shared ControllerEmit.AutoTreeName/AutoChildName the compiler would have applied) AND can
+            // round-trip the line-based YAML — a name containing a line break is refused, not mangled.
+            private string MeaningfulName(string actual, string autoDefault, string loc)
+            {
+                if (string.IsNullOrEmpty(actual) || actual == autoDefault) return null;
+                if (actual.IndexOf('\n') >= 0 || actual.IndexOf('\r') >= 0)
+                {
+                    _result.Refusals.Add($"{loc}: a name contains a line break, which cannot round-trip the YAML");
+                    return null;
+                }
+                return actual;
+            }
+
+            private MotionRef DecodeMotion(Motion m, string loc, string expectedTreeName)
             {
                 if (m == null) return null;
                 if (m is AnimationClip clip)
@@ -752,15 +766,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return new MotionRef { RefPath = p }; // standalone project .anim
                 }
                 if (m is BlendTree bt)
-                    return new MotionRef { Tree = DecodeTree(bt, loc) };
+                    return new MotionRef { Tree = DecodeTree(bt, loc, expectedTreeName) };
 
                 _result.Refusals.Add($"motion in {loc}: unsupported Motion type '{m.GetType().Name}'");
                 return null;
             }
 
-            private BlendTreeSpec DecodeTree(BlendTree bt, string loc)
+            private BlendTreeSpec DecodeTree(BlendTree bt, string loc, string expectedName)
             {
                 var spec = new BlendTreeSpec { Kind = MapTreeKind(bt.blendType, loc) };
+                spec.Name = MeaningfulName(bt.name, expectedName, loc);
                 bool direct = spec.Kind == TreeKind.Direct;
                 bool twoD = Is2D(bt.blendType);
                 if (!direct)
@@ -791,7 +806,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             Mirror = ch.mirror,
                             CycleOffset = ch.cycleOffset,
                         };
-                        if (ch.motion != null) tc.Motion = DecodeMotion(ch.motion, childLoc);
+                        if (ch.motion != null) tc.Motion = DecodeMotion(ch.motion, childLoc, ControllerEmit.AutoChildName(bt.name, i));
                         else if (ChildHasDanglingMotion(childs, i))
                         {
                             // Owner is the blend tree itself: its m_Childs danglers drain in child order,

@@ -914,6 +914,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 switch (kv.Key)
                 {
                     case "tree": break;   // the discriminator, already read
+                    case "name": spec.Name = ToStr(kv.Value, $"{ctx} tree.name"); break;
                     case "param": spec.Param = ToStr(kv.Value, $"{ctx} tree.param"); break;
                     case "paramY": spec.ParamY = ToStr(kv.Value, $"{ctx} tree.paramY"); break;
                     case "normalized": spec.Normalized = ToBool(kv.Value, $"{ctx} tree.normalized"); break;
@@ -959,7 +960,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 switch (kv.Key)
                 {
                     case "clip": case "ref": case "tree": break;   // motion, handled above
-                    case "param": case "paramY": case "children": case "normalized": break; // consumed by nested tree motion
+                    case "param": case "paramY": case "children": case "normalized": case "name": break; // consumed by nested tree motion
                     case "threshold": child.Threshold = ToNumber(kv.Value, $"{ctx} tree child threshold"); break;
                     case "x": case "posX": child.PosX = ToNumber(kv.Value, $"{ctx} tree child posX"); break;
                     case "y": case "posY": child.PosY = ToNumber(kv.Value, $"{ctx} tree child posY"); break;
