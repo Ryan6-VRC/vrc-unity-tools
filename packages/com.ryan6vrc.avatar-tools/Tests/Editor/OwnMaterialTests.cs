@@ -780,6 +780,73 @@ public class OwnMaterialTests
         Assert.IsFalse(AssetDatabase.IsValidFolder(Owned), "whatIf must not even create the outDir folder");
     }
 
+    // ── Task 4: augment idempotent + additive incremental fork ────────────────────────────────────
+
+    [Test] public void Augment_is_idempotent_and_additive()
+    {
+        var v = VendorMat("Dress");
+        var mainTex = MakeTexture(VendorRoot, "Body");
+        var bumpTex = MakeTexture(VendorRoot, "Bump");
+        v.SetTexture("_MainTex", mainTex);
+        v.SetTexture("_BumpMap", bumpTex);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string first = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" }); // first own
+        StringAssert.Contains("=> PASS", first);
+        string ownedPath = Owned + "/Dress.mat";
+        string mainTexPathBefore = AssetDatabase.GetAssetPath(
+            AssetDatabase.LoadAssetAtPath<Material>(ownedPath).GetTexture("_MainTex"));
+        string mainTexGuidBefore = AssetDatabase.AssetPathToGUID(mainTexPathBefore);
+
+        // AUGMENT in place (no outDir): re-request the already-forked _MainTex plus a NEW _BumpMap.
+        string s = OwnMaterial.Run(ownedPath, null, new[] { "_MainTex", "_BumpMap" });
+        StringAssert.Contains("=> PASS", s);
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(s, "slotsForked"));       // _BumpMap
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(s, "slotsAlreadyOwned")); // _MainTex: re-requested, already under H(O)
+
+        var o = AssetDatabase.LoadAssetAtPath<Material>(ownedPath);
+        string mainTexPathAfter = AssetDatabase.GetAssetPath(o.GetTexture("_MainTex"));
+        Assert.AreEqual(mainTexPathBefore, mainTexPathAfter, "already-owned _MainTex must not move");
+        Assert.AreEqual(mainTexGuidBefore, AssetDatabase.AssetPathToGUID(mainTexPathAfter),
+            "already-owned _MainTex must not be re-copied (same GUID) — idempotent");
+        StringAssert.StartsWith(Owned + "/Dress/", AssetDatabase.GetAssetPath(o.GetTexture("_BumpMap")));
+
+        string logPath = ExtractLogPath(s);
+        string json = File.ReadAllText(logPath);
+        StringAssert.Contains("\"slot\": \"_MainTex\", \"requested\": true, \"disposition\": \"already-owned\"", json);
+        StringAssert.Contains("\"slot\": \"_BumpMap\", \"requested\": true, \"disposition\": \"forked\"", json);
+    }
+
+    [Test] public void Augment_whatIf_reports_would_augment_and_would_fork_without_mutating()
+    {
+        var v = VendorMat("Dress");
+        var mainTex = MakeTexture(VendorRoot, "Body");
+        var bumpTex = MakeTexture(VendorRoot, "Bump");
+        v.SetTexture("_MainTex", mainTex);
+        v.SetTexture("_BumpMap", bumpTex);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" }); // own; _BumpMap still vendor on O
+        string ownedPath = Owned + "/Dress.mat";
+        var before = AssetDatabase.GetAssetPath(
+            AssetDatabase.LoadAssetAtPath<Material>(ownedPath).GetTexture("_BumpMap"));
+
+        string s = OwnMaterial.Run(ownedPath, null, new[] { "_MainTex", "_BumpMap" }, whatIf: true);
+        StringAssert.Contains("=> PASS", s);
+        StringAssert.IsMatch(@"\[own-material\] \(whatIf\) augment ", s);
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(s, "slotsForked"));       // _BumpMap would fork
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(s, "slotsAlreadyOwned")); // _MainTex would reuse
+        Assert.IsFalse(File.Exists(Owned + "/Dress/Bump.png"), "whatIf wrote no owned _BumpMap texture");
+
+        var after = AssetDatabase.GetAssetPath(
+            AssetDatabase.LoadAssetAtPath<Material>(ownedPath).GetTexture("_BumpMap"));
+        Assert.AreEqual(before, after, "whatIf left the owned _BumpMap slot unchanged");
+
+        string logPath = ExtractLogPath(s);
+        string json = File.ReadAllText(logPath);
+        StringAssert.Contains("would augment", json);
+    }
+
     static string ExtractLogPath(string summary)
     {
         int i = summary.IndexOf("log=");
