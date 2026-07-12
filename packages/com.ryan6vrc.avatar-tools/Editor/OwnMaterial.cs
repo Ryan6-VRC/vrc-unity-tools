@@ -243,9 +243,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     AssetDatabase.DeleteAsset(textureHome);
             };
 
+            // Hoisted above the try so the catch can restore the keyword snapshot on the unanticipated-
+            // exception route: for AUGMENT, rollback does NOT delete the caller's material, so an exception
+            // thrown after the snapshot but before a restore point would otherwise leave the caller's LIVE
+            // in-memory material keyword-wiped with no recovery.
+            Material owned = null;
+            string[] keywordsBeforeFork = null;
+
             try
             {
-                var owned = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
+                owned = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
                 if (owned == null)
                 {
                     rollback();
@@ -257,7 +264,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // effect (memory unity-material-getter-clears-keywords) — snapshot now, restore right
                 // before the persist below. For augment, `owned` IS the caller's live in-scene material —
                 // this protects its LIVE keyword state, not just what lands on disk.
-                var keywordsBeforeFork = owned.shaderKeywords;
+                keywordsBeforeFork = owned.shaderKeywords;
 
                 // ── Fork rule (Flow step 5), off O (byte-identical to S pre-fork on copy-to-new; the
                 //    caller's already-owned material, possibly already forked, on in-place). ──
@@ -379,6 +386,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             catch (Exception ex)
             {
+                // Restore the keyword snapshot BEFORE rollback (if we got far enough to take it): rollback
+                // spares the caller's material on the augment path, so without this the live in-memory
+                // material would keep the getter-wiped keywords with no recovery. Harmless on copy-to-new
+                // (rollback deletes O anyway).
+                if (owned != null && keywordsBeforeFork != null) owned.shaderKeywords = keywordsBeforeFork;
                 data.result = "FAIL";
                 data.error = ex.GetType().Name + ": " + ex.Message;
                 data.Offender("unexpected exception during fork: " + ex.GetType().Name + ": " + ex.Message);
