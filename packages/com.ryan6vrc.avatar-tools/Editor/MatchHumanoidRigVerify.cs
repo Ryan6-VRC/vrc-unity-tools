@@ -177,11 +177,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
+        // Canonical leaf mechanics; only the "(none)" display sentinel for a missing path is local.
         private static string Leaf(string p)
         {
-            if (string.IsNullOrEmpty(p)) return "(none)";
-            int i = p.TrimEnd('/').LastIndexOf('/');
-            return i >= 0 ? p.Substring(i + 1) : p;
+            var leaf = Ryan6Vrc.AgentTools.Editor.RunLogFormat.Leaf(p);
+            return leaf.Length == 0 ? "(none)" : leaf;
         }
 
         private static string Done(string label, string result, string detail)
