@@ -276,7 +276,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             sb.Append("\n## Constraints (edge-list: constrained → source)\n\n");
             if (rows.Length == 0) { sb.Append("_(none)_\n"); return; }
-            sb.Append("_source weights normalize by SUM (docs/runtime.md §Constraints) — a weight is not a clamped 0..1 absolute._\n\n");
+            sb.Append("_source weights normalize by SUM (docs/runtime.md §Constraints) — a weight is not a clamped 0..1 absolute._\n");
+            sb.Append("_affected-axes form differs by family (the `type` column disambiguates): VRC omits an off group and writes `pos*`/`posXY`; Unity writes per-group `pos:*`/`pos:XZ`/`pos:off`._\n\n");
             sb.Append("| type | constrained transform | source transform | weight | affected axes | note |\n");
             sb.Append("|---|---|---|---|---|---|\n");
 
@@ -499,7 +500,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var c = row.Vrc; // null for Unity constraints — the VRC-only idioms below are skipped
 
                 // a. Per-client world anchor: FreezeToWorld && zero sources (VRC idiom only).
-                if (c != null && c.FreezeToWorld && c.Sources.Count == 0)
+                if (c != null && c.FreezeToWorld && row.Sources.Length == 0)
                     lines.Add("**per-client world anchor** — `" + Cell(GetHierarchyPath(driven)) + "` — docs/gimmicks.md §Constraint patterns · World anchors");
 
                 // b. Feedback loop: a non-null source that is a STRICT descendant of driven. The one

@@ -30,13 +30,17 @@ public class ReportGimmickWidenTests
         var src = new GameObject("Src"); src.transform.SetParent(root.transform);
         var pc = driven.AddComponent<ParentConstraint>();
         pc.AddSource(new ConstraintSource { sourceTransform = src.transform, weight = 1f });
+        // Distinct partial/full masks so the assertions prove AxisFlags' letter assembly, not just the prefix.
+        pc.translationAxis = Axis.X | Axis.Z;
+        pc.rotationAxis = Axis.X | Axis.Y | Axis.Z;
 
         string report = ReadReport("Rig");
         StringAssert.Contains("ParentConstraint", report);
         StringAssert.Contains("Rig/Src", report);
-        // Unity per-type Axis-flag mask rendered (VRC path would emit "pos*"/"—", never the colon form).
-        StringAssert.Contains("pos:", report);
-        StringAssert.Contains("rot:", report);
+        // Unity per-type Axis-flag mask rendered, exact letters (VRC path would emit "pos*"/"—", never the
+        // colon form): a partial mask spells its axes, an all-on group collapses to "*".
+        StringAssert.Contains("pos:XZ", report);
+        StringAssert.Contains("rot:*", report);
         // The false-READ-MISS this task exists to prevent: a Unity constraint routed through the VRC
         // reflection helpers would resolve zero groups and emit this note.
         StringAssert.DoesNotContain("could not read the affected-axis mask", report);
