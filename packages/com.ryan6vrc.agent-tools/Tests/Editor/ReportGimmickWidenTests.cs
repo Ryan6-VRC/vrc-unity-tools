@@ -4,6 +4,8 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.Animations;
 using Ryan6Vrc.AgentTools.Editor;
+using nadena.dev.modular_avatar.core;
+using VRC.SDK3.Avatars.ScriptableObjects;
 
 // Widening coverage: Unity IConstraint components must land in ReportGimmick's constraint edge-list with
 // their per-type Axis-flag mask and NO false READ-MISS note, and the geometric feedback-loop observation
@@ -60,5 +62,87 @@ public class ReportGimmickWidenTests
 
         string report = ReadReport("Rig");
         StringAssert.Contains("feedback loop", report);
+    }
+
+    // ----- Tier-2 generic "Other components" census (F18b) -------------------------------------
+
+    // A component outside every tier-1 family (custom gimmick script here) must still be named, with its
+    // object-reference seam (field → target name + hierarchy path) and its top-level scalar fields peeked.
+    private class TierTwoProbe : MonoBehaviour
+    {
+        public UnityEngine.Object reference;
+        public string label;
+    }
+
+    [Test]
+    public void CustomMonoBehaviour_ObjectRefAndScalar_SurfaceInOtherCensus()
+    {
+        var root = new GameObject("Rig");
+        var target = new GameObject("Target"); target.transform.SetParent(root.transform);
+        var host = new GameObject("Host"); host.transform.SetParent(root.transform);
+        var probe = host.AddComponent<TierTwoProbe>();
+        probe.reference = target.transform; // a Component → the object-ref seam renders its hierarchy path
+        probe.label = "peek-me";
+
+        string report = ReadReport("Rig");
+        StringAssert.Contains("Other components", report);
+        StringAssert.Contains("TierTwoProbe", report);            // type
+        StringAssert.Contains("Rig/Host", report);                // host
+        StringAssert.Contains("reference", report);               // object-ref field name
+        StringAssert.Contains("Rig/Target", report);              // object-ref seam: resolved hierarchy path
+        StringAssert.Contains("peek-me", report);                 // scalar string peek
+        StringAssert.Contains("other=1", report);                 // header/summary count
+    }
+
+    [Test]
+    public void ModularAvatarMenuItem_ControlNameAndType_SurfaceInPeek()
+    {
+        var root = new GameObject("Rig");
+        var host = new GameObject("MenuHost"); host.transform.SetParent(root.transform);
+        var mi = host.AddComponent<ModularAvatarMenuItem>();
+        // Control is one struct level below the component; its top-level scalars (name, type) surface in the
+        // shallow peek. parameter.name is a SECOND struct level (the documented boundary) and does not.
+        mi.Control = new VRCExpressionsMenu.Control
+        {
+            name = "MyToggleControl",
+            type = VRCExpressionsMenu.Control.ControlType.Toggle,
+            parameter = new VRCExpressionsMenu.Control.Parameter { name = "MyDrivenParam" },
+            value = 1f,
+        };
+
+        string report = ReadReport("Rig");
+        StringAssert.Contains("ModularAvatarMenuItem", report);
+        StringAssert.Contains("MyToggleControl", report);         // control name (one struct level)
+        StringAssert.Contains("Toggle", report);                  // control type enum (one struct level)
+    }
+
+    [Test]
+    public void ModularAvatarMergeArmature_ReferencePath_SurfacesOneStructLevel()
+    {
+        var root = new GameObject("Rig");
+        var host = new GameObject("Outfit"); host.transform.SetParent(root.transform);
+        var ma = host.AddComponent<ModularAvatarMergeArmature>();
+        ma.mergeTarget.referencePath = "Armature/Hips"; // AvatarObjectReference is one struct level under mergeTarget
+
+        string report = ReadReport("Rig");
+        StringAssert.Contains("ModularAvatarMergeArmature", report);
+        StringAssert.Contains("referencePath", report);           // the path-string field name
+        StringAssert.Contains("Armature/Hips", report);           // its value, one struct level deep
+    }
+
+    [Test]
+    public void OtherCount_ExcludesTierOneAndTransforms()
+    {
+        var root = new GameObject("Rig");
+        var a = new GameObject("A"); a.transform.SetParent(root.transform);
+        a.AddComponent<TierTwoProbe>();
+        var b = new GameObject("B"); b.transform.SetParent(root.transform);
+        b.AddComponent<ModularAvatarMenuItem>();
+        // A tier-1 Unity constraint AND four Transforms are present; neither must inflate other=N.
+        var c = new GameObject("C"); c.transform.SetParent(root.transform);
+        c.AddComponent<PositionConstraint>();
+
+        string report = ReadReport("Rig");
+        StringAssert.Contains("other=2", report);                 // probe + menuitem only; constraint + Transforms excluded
     }
 }

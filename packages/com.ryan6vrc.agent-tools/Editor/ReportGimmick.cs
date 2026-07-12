@@ -28,6 +28,16 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// but predicts no bake output — no prefix rewrite, no sync-bit tally, no bake diff (J's domain).
     /// No verdict, no heuristic/"suspected" tier: it is a digest like ReportController, not a lint.
     ///
+    /// SUBTREE-COMPLETE BY CONSTRUCTION: the tier-1 tables above interpret the known gimmick families
+    /// (contacts, physbones+colliders, VRC/Unity constraints, VRCFury), and a generic tier-2 "Other
+    /// components" census then names EVERY remaining component (Modular Avatar, VRCLens, custom scripts)
+    /// plus every MISSING/broken-script slot — with its object-reference seam and a SHALLOW scalar peek
+    /// (top-level + one struct level; arrays as `name[N]`; no asset-following, no deep recursion). Nothing
+    /// in the subtree is invisible. AgentInspector is the door to exhaustive/nested/asset depth beyond
+    /// that shallow peek. VRCFury stays tier-1 (not folded into tier-2) because its seam is a nested
+    /// polymorphic `content[]` managed-reference array that a generic top-level walk renders as noise;
+    /// MA and most scripts expose their seam as top-level fields the shallow peek reads directly.
+    ///
     /// INSPECTION ONLY — never mutates. Emits one line carrying the artifact path in-band.
     /// </summary>
     [AgentTool]
@@ -68,27 +78,45 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (mb != null && mb.GetType().FullName == "VF.Model.VRCFury") fury.Add(mb);
 
             var body = new StringBuilder();
-            body.Append("# ReportGimmick: ").Append(root.name).Append('\n');
-            body.Append("root: `").Append(GetHierarchyPath(root.transform)).Append("`  \n");
-            body.Append("_transform handles are full scene-root-absolute paths; under first-match resolution a duplicate-named sibling makes a handle non-unique (a pre-existing family caveat, surfaced here because the interior walk can hit duplicate-named bones)._\n");
+
+            // Tier-1 exclusion set for the tier-2 census: every component a table above already interprets.
+            var tier1 = new HashSet<Component>();
+            foreach (var a in senders) tier1.Add(a);
+            foreach (var a in receivers) tier1.Add(a);
+            foreach (var a in physbones) tier1.Add(a);
+            foreach (var a in colliders) tier1.Add(a);
+            foreach (var a in constraints) tier1.Add(a);
+            foreach (var a in unityConstraints) tier1.Add((Component)a);
+            foreach (var a in fury) tier1.Add(a);
 
             int contactCount = senders.Length + receivers.Length;
-            body.Append("\ncontacts=").Append(contactCount)
-                .Append(" physbones=").Append(physbones.Length)
-                .Append(" constraints=").Append(constraintCount)
-                .Append(" vrcfury=").Append(fury.Count).Append('\n');
-
+            // Header count line is emitted AFTER the tier-1 tables/observations run, because `other` is only
+            // known once AppendOther has walked the subtree — so build the digest body first, then prepend.
             AppendContacts(body, senders, receivers);
             AppendPhysBones(body, physbones, colliders);
             AppendConstraints(body, constraintRows);
             var applyDuringUploadHosts = AppendVrcFury(body, fury);
             int obsCount = AppendObservations(body, constraintRows, applyDuringUploadHosts);
+            int other = AppendOther(body, root, tier1);
+
+            var header = new StringBuilder();
+            header.Append("# ReportGimmick: ").Append(root.name).Append('\n');
+            header.Append("root: `").Append(GetHierarchyPath(root.transform)).Append("`  \n");
+            header.Append("_transform handles are full scene-root-absolute paths; under first-match resolution a duplicate-named sibling makes a handle non-unique (a pre-existing family caveat, surfaced here because the interior walk can hit duplicate-named bones)._\n");
+            header.Append("\ncontacts=").Append(contactCount)
+                  .Append(" physbones=").Append(physbones.Length)
+                  .Append(" constraints=").Append(constraintCount)
+                  .Append(" vrcfury=").Append(fury.Count)
+                  .Append(" other=").Append(other).Append('\n');
+            header.Append(body);
+            body = header;
 
             var summary = "[ReportGimmick] " + root.name
                         + ": contacts=" + contactCount
                         + " physbones=" + physbones.Length
                         + " constraints=" + constraintCount
                         + " vrcfury=" + fury.Count
+                        + " other=" + other
                         + " observations=" + obsCount + " => OK";
             var result = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "gimmick_" + root.name, summary, body.ToString(), ".md");
             Debug.Log(result);
@@ -538,6 +566,97 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (lines.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in lines) sb.Append("- ").Append(l).Append('\n');
             return lines.Count;
+        }
+
+        // ----- Other components (tier-2 generic census) -------------------------------------------
+
+        // Tier-2 generic inventory. Domain-blind: names every component a tier-1 table didn't, plus MISSING
+        // scripts, with its object-ref seam and a SHALLOW scalar peek (one struct level, no array/asset
+        // expansion). Depth beyond that is AgentInspector's job. Returns the row count for other=N.
+        private static int AppendOther(StringBuilder sb, GameObject root, HashSet<Component> tier1)
+        {
+            sb.Append("\n## Other components\n\n");
+            sb.Append("_generic shallow inventory — type, host, object-reference attachments, and top-level scalar fields; for exhaustive/nested/asset depth use `AgentInspector.Snapshot(<host path>)`._\n\n");
+            int count = 0;
+            var rows = new StringBuilder();
+            foreach (var t in root.GetComponentsInChildren<Transform>(true))
+            {
+                // GetComponents<Component>() (not <MonoBehaviour>) so a MISSING script surfaces as null.
+                foreach (var comp in t.GetComponents<Component>())
+                {
+                    if (comp == null) { rows.Append("- **MISSING (broken script)** on `").Append(Cell(GetHierarchyPath(t))).Append("`\n"); count++; continue; }
+                    if (comp is Transform) continue;                 // excludes RectTransform too
+                    if (tier1.Contains(comp)) continue;              // physbones/contacts/colliders/constraints/VRCFury
+                    rows.Append("- **").Append(Cell(comp.GetType().FullName)).Append("** on `").Append(Cell(GetHierarchyPath(t))).Append("`\n");
+                    AppendShallowFields(rows, comp);
+                    count++;
+                }
+            }
+            if (count == 0) sb.Append("_(none)_\n"); else sb.Append(rows);
+            return count;
+        }
+
+        // One-struct-level peek: object refs (name + path + guid) and primitive/enum/string fields. Arrays
+        // render as name[N]; no recursion past one struct level; no asset-following; m_Script skipped.
+        private static void AppendShallowFields(StringBuilder sb, Component comp)
+        {
+            var so = new SerializedObject(comp);
+            var it = so.GetIterator();
+            bool enter = true;
+            while (it.NextVisible(enter))
+            {
+                enter = false; // top-level iteration; EmitField descends exactly one struct level itself
+                if (it.name == "m_Script") continue;
+                EmitField(sb, it, 1, allowStruct: true);
+            }
+        }
+
+        private static void EmitField(StringBuilder sb, SerializedProperty p, int indent, bool allowStruct)
+        {
+            string pad = new string(' ', indent * 2);
+            switch (p.propertyType)
+            {
+                case SerializedPropertyType.ObjectReference:
+                    var o = p.objectReferenceValue;
+                    if (o == null) return;
+                    string path = AssetDatabase.GetAssetPath(o);
+                    string handle = string.IsNullOrEmpty(path) && o is Component oc ? GetHierarchyPath(oc.transform) : path;
+                    AssetDatabase.TryGetGUIDAndLocalFileIdentifier(o, out string guid, out long _);
+                    sb.Append(pad).Append("- ").Append(Cell(p.name)).Append(" → `").Append(Cell(o.name)).Append('`');
+                    if (!string.IsNullOrEmpty(handle)) sb.Append(" (`").Append(Cell(handle)).Append("`)");
+                    if (!string.IsNullOrEmpty(guid) && guid != "00000000000000000000000000000000") sb.Append(" guid=").Append(guid);
+                    sb.Append('\n');
+                    return;
+                case SerializedPropertyType.Integer: case SerializedPropertyType.Boolean:
+                case SerializedPropertyType.Float:   case SerializedPropertyType.String:
+                case SerializedPropertyType.Enum:
+                    sb.Append(pad).Append("- ").Append(Cell(p.name)).Append(" = ").Append(Cell(ScalarText(p))).Append('\n');
+                    return;
+                default:
+                    if (p.isArray && p.propertyType != SerializedPropertyType.String)
+                        sb.Append(pad).Append("- ").Append(Cell(p.name)).Append('[').Append(p.arraySize).Append("]\n");
+                    else if (p.hasVisibleChildren && allowStruct)
+                    {
+                        sb.Append(pad).Append("- ").Append(Cell(p.name)).Append(":\n");
+                        var end = p.GetEndProperty(); var ch = p.Copy(); bool e = true;
+                        while (ch.NextVisible(e) && !SerializedProperty.EqualContents(ch, end))
+                        { e = false; EmitField(sb, ch.Copy(), indent + 1, allowStruct: false); } // exactly one level
+                    }
+                    return;
+            }
+        }
+
+        private static string ScalarText(SerializedProperty p)
+        {
+            switch (p.propertyType)
+            {
+                case SerializedPropertyType.Integer: return p.longValue.ToString();
+                case SerializedPropertyType.Boolean: return p.boolValue ? "true" : "false";
+                case SerializedPropertyType.Float:   return F((float)p.doubleValue);
+                case SerializedPropertyType.String:  string s = p.stringValue ?? ""; return s.Length > 120 ? s.Substring(0, 120) + "…" : s;
+                case SerializedPropertyType.Enum:    return p.enumValueIndex >= 0 && p.enumValueIndex < p.enumDisplayNames.Length ? p.enumDisplayNames[p.enumValueIndex] : p.intValue.ToString();
+                default: return p.propertyType.ToString();
+            }
         }
 
         // ----- Field renderers --------------------------------------------------------------------
