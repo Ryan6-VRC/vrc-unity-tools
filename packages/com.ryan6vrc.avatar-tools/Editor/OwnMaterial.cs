@@ -243,10 +243,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     AssetDatabase.DeleteAsset(textureHome);
             };
 
-            // Hoisted above the try so the catch can restore the keyword snapshot on the unanticipated-
-            // exception route: for AUGMENT, rollback does NOT delete the caller's material, so an exception
-            // thrown after the snapshot but before a restore point would otherwise leave the caller's LIVE
-            // in-memory material keyword-wiped with no recovery.
+            // Hoisted above the try so the finally can restore the keyword snapshot on EVERY exit path
+            // (early return, exception, or fall-through): for AUGMENT, rollback does NOT delete the
+            // caller's material, so a restore that only ran on some exits would leave the caller's LIVE
+            // in-memory material keyword-wiped with no recovery on any exit the restore forgot.
             Material owned = null;
             string[] keywordsBeforeFork = null;
 
@@ -273,7 +273,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var plan = BuildPlan(owned, textureHome, requested, data, sourceToDst, claimedDstToSource);
                 if (data.offenders.Count > 0)
                 {
-                    owned.shaderKeywords = keywordsBeforeFork; // restore even on the validation-fail exit
                     FillSlotsAndCounts(data, plan); // self-legible slots[]/counts even on a plan-validation FAIL
                     rollback();
                     data.result = "FAIL";
@@ -314,7 +313,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 if (data.offenders.Count > 0)
                 {
-                    owned.shaderKeywords = keywordsBeforeFork;
                     FillSlotsAndCounts(data, plan);
                     rollback();
                     data.result = "FAIL";
@@ -386,15 +384,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             catch (Exception ex)
             {
-                // Restore the keyword snapshot BEFORE rollback (if we got far enough to take it): rollback
-                // spares the caller's material on the augment path, so without this the live in-memory
-                // material would keep the getter-wiped keywords with no recovery. Harmless on copy-to-new
-                // (rollback deletes O anyway).
-                if (owned != null && keywordsBeforeFork != null) owned.shaderKeywords = keywordsBeforeFork;
                 data.result = "FAIL";
                 data.error = ex.GetType().Name + ": " + ex.Message;
                 data.Offender("unexpected exception during fork: " + ex.GetType().Name + ": " + ex.Message);
                 rollback();
+            }
+            finally
+            {
+                // Runs on every non-save exit (return or exception) and harmlessly-redundantly after the
+                // success path's own pre-save restore — structurally covers early returns without a manual
+                // repeat at each one (rollback spares the caller's material on the augment path, so without
+                // this the live in-memory material would keep the getter-wiped keywords with no recovery).
+                if (owned != null && keywordsBeforeFork != null) owned.shaderKeywords = keywordsBeforeFork;
             }
             return Finish(data, label);
         }
