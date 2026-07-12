@@ -74,7 +74,7 @@ public class ConformRenderersBoundsAnchorTests
         Assert.IsNull(smrs[0].probeAnchor, "precondition: anchor starts null");
         var summary = Conform(owned);
         Assert.AreSame(hips, smrs[0].probeAnchor, "null anchor repaired to Hips");
-        StringAssert.Contains("set=1", summary);
+        StringAssert.Contains("anchorsSet=1", summary);
         Object.DestroyImmediate(owned);
     }
 
@@ -86,7 +86,7 @@ public class ConformRenderersBoundsAnchorTests
         smrs[0].probeAnchor = chest;
         var summary = Conform(owned);
         Assert.AreSame(chest, smrs[0].probeAnchor, "valid internal anchor preserved, not rewritten to Hips");
-        StringAssert.Contains("preserved=1", summary);
+        StringAssert.Contains("anchorsPreserved=1", summary);
         Object.DestroyImmediate(owned);
     }
 
@@ -98,7 +98,7 @@ public class ConformRenderersBoundsAnchorTests
         smrs[0].probeAnchor = external.transform;
         var summary = Conform(owned);
         Assert.AreSame(hips, smrs[0].probeAnchor, "external anchor repaired to Hips");
-        StringAssert.Contains("set=1", summary);
+        StringAssert.Contains("anchorsSet=1", summary);
         Object.DestroyImmediate(external);
         Object.DestroyImmediate(owned);
     }
@@ -111,8 +111,27 @@ public class ConformRenderersBoundsAnchorTests
         var summary = Conform(owned, whatIf: true);                              // anchor null → would be set
         Assert.IsNull(smrs[0].probeAnchor, "whatIf did not set the anchor");
         Assert.AreEqual(new Vector3(1.5f, 1.5f, 1.5f), smrs[0].localBounds.extents, "whatIf did not change bounds");
-        StringAssert.Contains("set=1", summary);
+        StringAssert.Contains("anchorsSet=1", summary);
         StringAssert.Contains("boundsKeptLarger=1", summary);
+        Object.DestroyImmediate(owned);
+    }
+
+    [Test]
+    public void Unmatched_renderer_lands_in_the_envelope_offender_grammar()
+    {
+        var owned = BuildOwned(1, out _, out _); // "Mesh0" has no counterpart in the empty source
+        var summary = Conform(owned);
+        StringAssert.Contains("offenders=[", summary);
+        StringAssert.Contains("unmatched: renderer 'Mesh0'", summary);
+
+        // The written RunLog is the shared envelope, not the old bespoke shape.
+        var path = summary.Substring(summary.IndexOf("log=") + 4);
+        var json = System.IO.File.ReadAllText(path);
+        StringAssert.Contains("\"kind\": \"conform-renderers\"", json);
+        StringAssert.Contains("\"offenders\": [", json);
+        StringAssert.Contains("unmatched: renderer 'Mesh0'", json);
+        StringAssert.DoesNotContain("\"mismatches\"", json);
+        UnityEditor.AssetDatabase.DeleteAsset(path);
         Object.DestroyImmediate(owned);
     }
 
