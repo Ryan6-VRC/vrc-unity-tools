@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
@@ -20,22 +21,35 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// provenance table (<c>slots[]</c>) as the caller's verification gate.
     ///
     /// Full behavioral spec: <c>docs/superpowers/specs/2026-07-11-own-material-lean-design.md</c>. This
-    /// file implements Flow steps 1–6: arg guards, slot-name validation, target-identity routing
+    /// file implements the full Flow: arg guards, slot-name validation, target-identity routing
     /// (own / branch / augment) with a copy-to-new deep copy, the copy-to-new normalize step (a variant
-    /// source is flattened into a standalone material BEFORE the Task-6 unlock seam — Thry's unlock
-    /// selects <c>GetRoot()</c>, so an un-flattened variant would unlock the vendor root instead of O),
-    /// and the selective texture fork engine — requested slots resolve into the per-material texture home
-    /// <c>H(O) = &lt;O.folder&gt;/&lt;Sanitize(O.name)&gt;/</c> via a run-local claimed-<c>dst</c> map
-    /// (reuse/refuse, never a content-hash dedup pass or GUID-suffix collision escape), untouched slots
-    /// report their current reference, and the disk-truthful post-condition rebuilds <c>slots[]</c> from
-    /// the reloaded asset. Locked-poi unlock is not wired yet (Task 6) — a copy-to-new source is assumed
-    /// already unlocked.
+    /// source is flattened into a standalone material BEFORE the unlock seam — Thry's unlock selects
+    /// <c>GetRoot()</c>, so an un-flattened variant would unlock the vendor root instead of O — then a
+    /// locked O is unlocked via reflection into <c>Thry.ThryEditor.ShaderOptimizer.UnlockMaterials</c>,
+    /// avatar-tools never referencing <c>com.poiyomi.toon</c>, gated by a dialog guard that refuses rather
+    /// than risk Thry's blocking <c>DisplayDialog</c> when the original-shader tag can't resolve, and a
+    /// still-locked backstop that force-reimports a locked vendor source after unlocking its copy and
+    /// asserts the vendor is untouched), and the selective texture fork engine — requested slots resolve
+    /// into the per-material texture home <c>H(O) = &lt;O.folder&gt;/&lt;Sanitize(O.name)&gt;/</c> via a
+    /// run-local claimed-<c>dst</c> map (reuse/refuse, never a content-hash dedup pass or GUID-suffix
+    /// collision escape), untouched slots report their current reference, and the disk-truthful
+    /// post-condition rebuilds <c>slots[]</c> from the reloaded asset. The unlock's actual success path is
+    /// verified live in Task 7 (TestEditor has no Poiyomi package, so only detection and the
+    /// refuse-when-Thry-absent path are unit-testable here).
     ///
     /// Call <see cref="Run"/> from MCP execute_code or a menu item.
     /// </summary>
     [AgentTool]
     public static class OwnMaterial
     {
+        // ── Thry (Poiyomi ShaderOptimizer) reflection constants — confirmed against
+        // Packages/com.poiyomi.toon/_PoiyomiShaders/Scripts/ThryEditor/Editor/ShaderOptimizer.cs: the type
+        // lives in namespace Thry.ThryEditor (not bare Thry). Tag names match ShaderOptimizer's own TAG_*
+        // consts verbatim. ──
+        const string ThryShaderOptimizerTypeName = "Thry.ThryEditor.ShaderOptimizer";
+        const string ThryTagOriginalShader = "OriginalShader";
+        const string ThryTagOriginalShaderGuid = "OriginalShaderGUID";
+
         /// <summary>
         /// Bring <paramref name="materialPath"/> into ownership and fork <paramref name="forkTextureSlots"/>
         /// (shader texture-property names, e.g. <c>_MainTex</c>) into the resulting owned material's own
@@ -167,6 +181,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (whatIf)
             {
                 data.Note("would create '" + targetPath + "'");
+                // Reproduce the locked-source-but-Thry-unresolvable FAIL read-only — checked on S directly
+                // (copy-to-new preserves the shader, so IsLocked(S) == IsLocked(O) pre-fork). Only the
+                // Thry-resolve check previews here; the dialog guard and the unlock itself are never
+                // reached under whatIf (nothing is unlocked or written).
+                if (IsLocked(mat) && !TryResolvePoiUnlock(out _, out _, out string wiReason))
+                    return Fail(data, coLabel, ThryUnresolvedMessage(wiReason));
                 return WhatIfPreview(mat, textureHome, requested, data, coLabel);
             }
 
@@ -176,9 +196,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ── Normalize O (Flow step 4, copy-to-new only — an in-place O is already normal since the
             //    in-place guard above FAILs a variant/locked owned source before we ever get here).
-            //    Flatten a variant into a standalone material BEFORE the unlock seam below: Thry's unlock
-            //    (Task 6) selects m.GetRoot(), so an un-flattened variant would resolve to S's root and
-            //    unlock THAT (a vendor mutation) instead of O. ──
+            //    Flatten a variant into a standalone material BEFORE the unlock below: Thry's unlock
+            //    selects m.GetRoot(), so an un-flattened variant would resolve to S's root and unlock THAT
+            //    (a vendor mutation) instead of O. ──
             var normalizeTarget = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
             if (normalizeTarget == null)
             {
@@ -194,8 +214,66 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 data.Note("flattened variant source into a standalone material before forking");
             }
 
-            // ── Unlock O if locked seam (Task 6) attaches HERE — gated on O's own state (post-flatten, so
-            //    GetRoot() == O), so an already-unlocked branch source no-ops. ──
+            // ── Unlock O if locked (Flow step 4, second half) — gated on O's own state (post-flatten, so
+            //    GetRoot() == O), so an already-unlocked branch source no-ops. Thry-resolve check FIRST
+            //    (poi simply absent is the common real-world FAIL — surfaces immediately naming Thry,
+            //    without ever popping Thry's own modal), THEN the dialog guard (refuses rather than risk
+            //    UnlockConcrete's blocking EditorUtility.DisplayDialog when the original-shader tag can't
+            //    resolve). Any FAIL here rolls back the just-created O (copy-to-new orphan). ──
+            if (IsLocked(normalizeTarget))
+            {
+                if (!TryResolvePoiUnlock(out _, out _, out string resolveReason))
+                {
+                    AssetDatabase.DeleteAsset(targetPath);
+                    return Fail(data, coLabel, ThryUnresolvedMessage(resolveReason));
+                }
+
+                bool hasOriginalShaderTag = !string.IsNullOrEmpty(normalizeTarget.GetTag(ThryTagOriginalShader, false, "")) ||
+                    !string.IsNullOrEmpty(normalizeTarget.GetTag(ThryTagOriginalShaderGuid, false, ""));
+                if (!hasOriginalShaderTag)
+                {
+                    AssetDatabase.DeleteAsset(targetPath);
+                    return Fail(data, coLabel, "locked material has no saved original shader; cannot unlock safely");
+                }
+
+                var (unlocked, unlockReason) = PoiUnlock(normalizeTarget);
+                if (!unlocked)
+                {
+                    AssetDatabase.DeleteAsset(targetPath);
+                    return Fail(data, coLabel, "locked poi material but Thry ShaderOptimizer unlock failed: " +
+                        unlockReason + " — is com.poiyomi.toon installed?");
+                }
+
+                var reloadedO = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
+                if (reloadedO == null || reloadedO.shader == null ||
+                    reloadedO.shader.name.StartsWith("Hidden/Locked/", StringComparison.Ordinal))
+                {
+                    AssetDatabase.DeleteAsset(targetPath);
+                    return Fail(data, coLabel, "unlock claimed success but O still reports a locked shader");
+                }
+
+                // Still-locked backstop (replaces the cut vendor-byte gate — see the spec's "Cut from
+                // attempt 1"): when S was a locked VENDOR material, force-reimport it and assert it is
+                // STILL locked. A root-unlock via GetRoot() (an un-flattened variant, which can't happen
+                // here — flatten already ran above) or a deleted shared locked-shader folder both change
+                // S's shader name, but a folder deletion only surfaces after a reimport — a plain cached
+                // load would false-PASS. Never reached in the SDK venue (Thry never resolves, so unlock
+                // never succeeds this far); exercised live in Task 7.
+                if (!TransplantCore.IsWritableAsset(sourcePath))
+                {
+                    AssetDatabase.ImportAsset(sourcePath, ImportAssetOptions.ForceUpdate);
+                    var reloadedS = AssetDatabase.LoadAssetAtPath<Material>(sourcePath);
+                    if (reloadedS == null || !IsLocked(reloadedS))
+                    {
+                        AssetDatabase.DeleteAsset(targetPath);
+                        return Fail(data, coLabel, "still-locked backstop failed: vendor source '" + sourcePath +
+                            "' is no longer locked after unlocking its copy — unlock reached the shared vendor " +
+                            "material (root-unlock via GetRoot, or a deleted shared locked-shader folder)");
+                    }
+                }
+
+                data.Note("unlocked locked-poi material via Thry.ShaderOptimizer.UnlockMaterials");
+            }
 
             // O now exists on disk (createdO=true) — any FAIL from here rolls it back (see
             // ForkSlotsAndPersist's rollback closure).
@@ -673,10 +751,95 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>A material is locked iff its shader is one of Thry's generated <c>Hidden/Locked/…</c>
-        /// shaders. The full unlock mechanics land in Task 6; this predicate alone gates the in-place
-        /// augment guard (Task 2) — an owned material must never be locked before this tool touches it.</summary>
+        /// shaders — shader-name ONLY. Real vendor poi materials carry a STALE non-empty
+        /// <c>AllLockedGUIDS</c> tag while fully UNLOCKED (a normal <c>.poiyomi/…</c> shader, live-confirmed
+        /// on the AvatarProject corpus — Thry's own <c>IsMaterialLocked</c> returns false there too), so the
+        /// tag is never a lock signal; only the shader name counts. Gates both the in-place augment guard
+        /// (an owned material must never be locked before this tool touches it) and the copy-to-new unlock
+        /// seam below.</summary>
         static bool IsLocked(Material m) =>
             m.shader != null && m.shader.name.StartsWith("Hidden/Locked/", StringComparison.Ordinal);
+
+        static string ThryUnresolvedMessage(string reason) =>
+            "locked poi material but Thry ShaderOptimizer not found — is com.poiyomi.toon installed? (" + reason + ")";
+
+        /// <summary>
+        /// Reflection-resolve <c>Thry.ThryEditor.ShaderOptimizer.UnlockMaterials(IEnumerable&lt;Material&gt;,
+        /// ProgressBar)</c> without avatar-tools referencing <c>com.poiyomi.toon</c>: scan every loaded
+        /// assembly (mirrors <see cref="TransplantCore.ResolveTypes"/>'s assembly scan) for the type by
+        /// full name, then find the public static <c>UnlockMaterials</c> overload whose second parameter is
+        /// an enum (Thry's <c>ProgressBar</c>) and whose first accepts a <c>Material[]</c>. Never throws —
+        /// any miss is folded into <paramref name="reason"/> and the method returns false.
+        /// </summary>
+        static bool TryResolvePoiUnlock(out MethodInfo method, out Type progressBarType, out string reason)
+        {
+            method = null;
+            progressBarType = null;
+
+            Type shaderOptimizerType = null;
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type t = null;
+                try { t = asm.GetType(ThryShaderOptimizerTypeName, false); } catch { /* malformed/dynamic assembly — skip */ }
+                if (t != null) { shaderOptimizerType = t; break; }
+            }
+            if (shaderOptimizerType == null)
+            {
+                reason = "type '" + ThryShaderOptimizerTypeName + "' not found in any loaded assembly";
+                return false;
+            }
+
+            foreach (var m in shaderOptimizerType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (m.Name != "UnlockMaterials") continue;
+                var ps = m.GetParameters();
+                if (ps.Length != 2 || !ps[1].ParameterType.IsEnum) continue;
+                if (!ps[0].ParameterType.IsAssignableFrom(typeof(Material[]))) continue;
+                method = m;
+                progressBarType = ps[1].ParameterType;
+                break;
+            }
+            if (method == null)
+            {
+                reason = "method 'UnlockMaterials(IEnumerable<Material>, ProgressBar)' not found on " + ThryShaderOptimizerTypeName;
+                return false;
+            }
+
+            reason = null;
+            return true;
+        }
+
+        /// <summary>
+        /// Unlock <paramref name="o"/> only, via <see cref="TryResolvePoiUnlock"/> + reflection invoke with
+        /// the enum's <c>None</c> (=0) member (no progress bar, no cancel). Any reflection miss or thrown
+        /// inner exception (<c>TargetInvocationException</c> unwrapped) becomes <c>(false, reason)</c> —
+        /// this method never throws out of <see cref="Run"/>.
+        /// </summary>
+        static (bool ok, string reason) PoiUnlock(Material o)
+        {
+            try
+            {
+                if (!TryResolvePoiUnlock(out var method, out var progressBarType, out string resolveReason))
+                    return (false, resolveReason);
+
+                object none = Enum.ToObject(progressBarType, 0);
+                object result;
+                try
+                {
+                    result = method.Invoke(null, new object[] { new[] { o }, none });
+                }
+                catch (TargetInvocationException tie)
+                {
+                    var inner = tie.InnerException ?? (Exception)tie;
+                    return (false, inner.GetType().Name + ": " + inner.Message);
+                }
+                return (result is bool ok && ok) ? (true, null) : (false, "UnlockMaterials returned false");
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.GetType().Name + ": " + ex.Message);
+            }
+        }
 
         // ── Normalize: variant flatten (Flow step 4) ────────────────────────────────────────────────────
 

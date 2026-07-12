@@ -932,4 +932,70 @@ public class OwnMaterialTests
         Assert.GreaterOrEqual(i, 0, "summary missing 'log=' trailer: " + summary);
         return summary.Substring(i + 4);
     }
+
+    // ── Task 6: locked-poi detection + Thry reflection unlock ──────────────────────────────────────
+    // TestEditor has no Poiyomi package, so Thry.ThryEditor.ShaderOptimizer can never resolve — these
+    // tests exercise the copy-to-new locked-detection + the refuse-when-Thry-absent FAIL path (named,
+    // whatIf-parity) and the shader-name-only IsLocked predicate (stale AllLockedGUIDS tag on a normal
+    // shader must NOT read as locked). Unlock success + the still-locked backstop's happy path are
+    // live-only, verified in Task 7 (AvatarProject, which has poi installed).
+
+    [Test] public void Locked_source_without_thry_fails_named()
+    {
+        // A REAL Hidden/Locked/… shader is what IsLocked keys on. TestEditor has no Poiyomi, so
+        // Thry.ThryEditor.ShaderOptimizer won't resolve -> FAIL naming Thry (the common real case: poi
+        // absent; the Thry-resolve check fires before the dialog guard, so the missing original-shader
+        // tag is never reached).
+        var m = VendorMat("LockedVendor");
+        m.shader = LockedShader();
+        EditorUtility.SetDirty(m); AssetDatabase.SaveAssets();
+
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(m), Owned, System.Array.Empty<string>(), newName: "L");
+        StringAssert.Contains("=> FAIL", s);
+        StringAssert.Contains("Thry", s);
+        Assert.IsNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/L.mat"), "no orphan on unlock FAIL");
+    }
+
+    [Test] public void WhatIf_locked_without_thry_previews_fail()
+    {
+        // whatIf detects on the SOURCE S, so S carries the real Hidden/Locked shader — same FAIL as
+        // execute (the Thry-resolve check runs read-only in whatIf too).
+        var m = VendorMat("LockedVendor2");
+        m.shader = LockedShader();
+        EditorUtility.SetDirty(m); AssetDatabase.SaveAssets();
+
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(m), Owned, System.Array.Empty<string>(), newName: "L2", whatIf: true);
+        StringAssert.Contains("=> FAIL", s);
+        StringAssert.Contains("Thry", s);
+        Assert.IsNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/L2.mat"), "whatIf wrote nothing");
+    }
+
+    // Regression for the live-found false-positive: real vendor poi materials carry a STALE non-empty
+    // AllLockedGUIDS tag while fully UNLOCKED (normal shader). Detection must NOT treat the tag as
+    // locked (only the Hidden/Locked/… shader name counts) — else the tool runs an unnecessary Thry
+    // unlock (and, with poi absent, FAILs) on a perfectly ownable material.
+    [Test] public void Stale_alllockedguids_tag_with_normal_shader_is_not_locked()
+    {
+        var v = VendorMat("StaleTag");                    // Standard shader (normal, resolvable)
+        v.SetOverrideTag("AllLockedGUIDS", "deadbeef");   // stale tag, as unlocked vendor poi materials carry
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, System.Array.Empty<string>(), newName: "StaleOwned");
+        StringAssert.Contains("=> PASS", s);              // owned as a normal material, no Thry attempt
+        Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/StaleOwned.mat"));
+    }
+
+    [Test] public void Normal_material_unaffected_by_locked_detection()
+    {
+        var v = VendorMat("PlainDress");
+        var tex = MakeTexture(VendorRoot, "PlainBody");
+        v.SetTexture("_MainTex", tex);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
+        StringAssert.Contains("=> PASS", s);
+        Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/PlainDress.mat"));
+    }
 }
