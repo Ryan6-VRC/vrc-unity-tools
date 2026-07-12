@@ -377,8 +377,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── RunLog output ─────────────────────────────────────────────────────────────────────
 
         /// <summary>Route an argument-guard failure through the shared envelope tail — never a bare
-        /// trailer-less line. <see cref="TransplantRunLog.EnsureFailHasOffender"/> names the offender
-        /// from <c>error</c>.</summary>
+        /// trailer-less line. Skips the count flush (nothing was measured; zero-counts would read as
+        /// measurements) and names the offender explicitly, like OwnMaterial's ArgFail.</summary>
         private static string ArgFail(string label, bool whatIf, GameObject ownedRoot, GameObject source, string msg)
         {
             var data = new RunData
@@ -389,13 +389,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 result   = "FAIL",
                 error    = msg,
             };
-            return Finish(data, label);
+            data.Offender(msg);
+            return TransplantCore.Finish(data, label);
         }
 
         /// <summary>Flush the run's int counters into the envelope's ordered <c>counts</c> (core
-        /// disposition always; anomaly counters only when nonzero — each nonzero one is already named
-        /// by an offender/warning row), fold the anchor verdict into offender/note grammar, then the
-        /// shared envelope tail (<see cref="TransplantCore.Finish"/>).</summary>
+        /// disposition always; anomaly counters only when nonzero — the mismatch-class ones are also
+        /// named by offender/warning rows), fold the anchor verdict into offender/note grammar, then
+        /// the shared envelope tail (<see cref="TransplantCore.Finish"/>).</summary>
         private static string Finish(RunData data, string label)
         {
             data.Count("sourceRenderers", data.SourceRendererCount);
