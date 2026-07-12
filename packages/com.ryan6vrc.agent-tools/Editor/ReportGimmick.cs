@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Animations;
 using UnityEngine.SceneManagement;
 using VRC.Dynamics;
 using VRC.SDK3.Dynamics.Contact.Components;
@@ -53,6 +54,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             var physbones   = root.GetComponentsInChildren<VRCPhysBone>(true);
             var colliders   = root.GetComponentsInChildren<VRCPhysBoneCollider>(true);
             var constraints = root.GetComponentsInChildren<VRCConstraintBase>(true);
+            // Interface query, not a concrete-type union: Unity constraints derive from Behaviour (not
+            // MonoBehaviour), so a per-type list would let an unlisted Unity constraint slip through. VRC
+            // constraints do NOT implement UnityEngine's IConstraint, so the two families never overlap.
+            var unityConstraints = root.GetComponentsInChildren<IConstraint>(true);
+            var constraintRows = BuildConstraintRows(constraints, unityConstraints);
+            int constraintCount = constraints.Length + unityConstraints.Length;
 
             // VRCFury is read untyped (no asmdef ref): match the component by full type name, decode via
             // SerializedObject. A project without VRCFury simply finds none and the section is _(none)_.
@@ -68,19 +75,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             int contactCount = senders.Length + receivers.Length;
             body.Append("\ncontacts=").Append(contactCount)
                 .Append(" physbones=").Append(physbones.Length)
-                .Append(" constraints=").Append(constraints.Length)
+                .Append(" constraints=").Append(constraintCount)
                 .Append(" vrcfury=").Append(fury.Count).Append('\n');
 
             AppendContacts(body, senders, receivers);
             AppendPhysBones(body, physbones, colliders);
-            AppendConstraints(body, constraints);
+            AppendConstraints(body, constraintRows);
             var applyDuringUploadHosts = AppendVrcFury(body, fury);
-            int obsCount = AppendObservations(body, constraints, applyDuringUploadHosts);
+            int obsCount = AppendObservations(body, constraintRows, applyDuringUploadHosts);
 
             var summary = "[ReportGimmick] " + root.name
                         + ": contacts=" + contactCount
                         + " physbones=" + physbones.Length
-                        + " constraints=" + constraints.Length
+                        + " constraints=" + constraintCount
                         + " vrcfury=" + fury.Count
                         + " observations=" + obsCount + " => OK";
             var result = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "gimmick_" + root.name, summary, body.ToString(), ".md");
@@ -151,42 +158,145 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Constraints edge-list (§5.3) -------------------------------------------------------
 
-        private static void AppendConstraints(StringBuilder sb, VRCConstraintBase[] constraints)
+        // One edge-list row's worth of constraint facts, family-neutral. VRC and Unity constraints fill
+        // this through separate extractors — they share the rendered Row(), never each other's readers.
+        private struct ConstraintRow
+        {
+            public string Type;
+            public string Driven;                        // hierarchy path of the driven transform
+            public (string src, float weight)[] Sources; // src="(none)" when unwired; empty => source-less
+            public float GlobalWeight;
+            public string Axes;                          // rendered mask, or "—"
+            public bool AxisMiss;                        // VRC-only; Unity never sets this
+            public string Note;                          // VRC-only idioms; "" for Unity
+            public Transform DrivenTransform;            // for the feedback-loop observation
+            public Transform[] SourceTransforms;         // for the feedback-loop observation
+            public VRCConstraintBase Vrc;                // family discriminator; null for Unity constraints
+        }
+
+        // Normalize both constraint families into one row list. Order is VRC-first, then Unity — VRC output
+        // stays byte-for-byte what it was (VRC rows render through the same reads as before).
+        private static ConstraintRow[] BuildConstraintRows(VRCConstraintBase[] vrc, IConstraint[] unity)
+        {
+            var rows = new List<ConstraintRow>(vrc.Length + unity.Length);
+            foreach (var c in vrc) rows.Add(FromVrc(c));
+            foreach (var c in unity) rows.Add(FromUnity(c));
+            return rows.ToArray();
+        }
+
+        // VRC extractor — reuses the EXISTING VRC reads (TargetTransform-or-host driven, Sources with
+        // (none) for unwired slots, AxisMask, ConstraintNote) unchanged, so VRC rows are identical to
+        // the pre-widening output.
+        private static ConstraintRow FromVrc(VRCConstraintBase c)
+        {
+            var host = c.transform;
+            // Unity fake-null test, never ?? — ?? bypasses UnityEngine.Object's overloaded == and would
+            // read a destroyed TargetTransform as a live object instead of falling back to the host.
+            var driven = c.TargetTransform != null ? c.TargetTransform : host;
+            var sources = new List<(string, float)>();
+            var srcTransforms = new List<Transform>();
+            int count = c.Sources.Count;
+            for (int i = 0; i < count; i++)
+            {
+                var s = c.Sources[i];
+                // Null-check SourceTransform first: an unwired source slot is legal (seen on real avatars)
+                // and must render (none) rather than NRE mid-report.
+                sources.Add((s.SourceTransform != null ? GetHierarchyPath(s.SourceTransform) : "(none)", s.Weight));
+                if (s.SourceTransform != null) srcTransforms.Add(s.SourceTransform);
+            }
+            string axes = AxisMask(c, out bool miss);
+            return new ConstraintRow
+            {
+                Type = c.GetType().Name,
+                Driven = GetHierarchyPath(driven),
+                Sources = sources.ToArray(),
+                GlobalWeight = c.GlobalWeight,
+                Axes = axes,
+                AxisMiss = miss,
+                Note = ConstraintNote(c, host, driven),
+                DrivenTransform = driven,
+                SourceTransforms = srcTransforms.ToArray(),
+                Vrc = c,
+            };
+        }
+
+        // Unity IConstraint extractor. Unity constraints always drive their own host (no TargetTransform),
+        // have no FreezeToWorld/hold, and read axes from per-type Axis flags — so Note stays "" and AxisMiss
+        // stays false. Only the geometric feedback-loop observation (source ⊂ driven) transfers.
+        private static ConstraintRow FromUnity(IConstraint c)
+        {
+            var comp = (Component)c;
+            var host = comp.transform;
+            var sources = new List<(string, float)>();
+            var srcTransforms = new List<Transform>();
+            var list = new List<ConstraintSource>();
+            c.GetSources(list);
+            foreach (var s in list)
+            {
+                sources.Add((s.sourceTransform != null ? GetHierarchyPath(s.sourceTransform) : "(none)", s.weight));
+                if (s.sourceTransform != null) srcTransforms.Add(s.sourceTransform);
+            }
+            return new ConstraintRow
+            {
+                Type = comp.GetType().Name,
+                Driven = GetHierarchyPath(host),
+                Sources = sources.ToArray(),
+                GlobalWeight = c.weight,
+                Axes = UnityAxes(c),
+                AxisMiss = false,
+                Note = "",
+                DrivenTransform = host,
+                SourceTransforms = srcTransforms.ToArray(),
+                Vrc = null,
+            };
+        }
+
+        // Per-type Axis-flag mask for Unity constraints. Each type exposes its own flags; LookAt has none.
+        private static string UnityAxes(IConstraint c)
+        {
+            switch (c)
+            {
+                case ParentConstraint p:   return "pos:" + AxisFlags(p.translationAxis) + " rot:" + AxisFlags(p.rotationAxis);
+                case PositionConstraint p: return "pos:" + AxisFlags(p.translationAxis);
+                case RotationConstraint r: return "rot:" + AxisFlags(r.rotationAxis);
+                case ScaleConstraint s:    return "scale:" + AxisFlags(s.scalingAxis);
+                case AimConstraint a:      return "rot:" + AxisFlags(a.rotationAxis);
+                default:                   return "—"; // LookAtConstraint / unknown: no per-axis flags
+            }
+        }
+
+        private static string AxisFlags(Axis a)
+        {
+            if (a == Axis.None) return "off";
+            if (a == (Axis.X | Axis.Y | Axis.Z)) return "*";
+            return (a.HasFlag(Axis.X) ? "X" : "") + (a.HasFlag(Axis.Y) ? "Y" : "") + (a.HasFlag(Axis.Z) ? "Z" : "");
+        }
+
+        private static void AppendConstraints(StringBuilder sb, ConstraintRow[] rows)
         {
             sb.Append("\n## Constraints (edge-list: constrained → source)\n\n");
-            if (constraints.Length == 0) { sb.Append("_(none)_\n"); return; }
+            if (rows.Length == 0) { sb.Append("_(none)_\n"); return; }
             sb.Append("_source weights normalize by SUM (docs/runtime.md §Constraints) — a weight is not a clamped 0..1 absolute._\n\n");
             sb.Append("| type | constrained transform | source transform | weight | affected axes | note |\n");
             sb.Append("|---|---|---|---|---|---|\n");
 
             var axisMissTypes = new HashSet<string>(); // fail-loud: types whose axis mask couldn't be read
-            foreach (var c in constraints)
+            foreach (var row in rows)
             {
-                var host = c.transform;
-                // Unity fake-null test, never ?? — ?? bypasses UnityEngine.Object's overloaded == and would
-                // read a destroyed TargetTransform as a live object instead of falling back to the host.
-                var driven = c.TargetTransform != null ? c.TargetTransform : host;
-                string type = c.GetType().Name;
-                string axes = AxisMask(c, out bool axisMiss);
-                if (axisMiss) axisMissTypes.Add(type);
-                string note = ConstraintNote(c, host, driven);
+                if (row.AxisMiss) axisMissTypes.Add(row.Type);
 
-                int count = c.Sources.Count;
-                if (count == 0)
+                if (row.Sources.Length == 0)
                 {
                     // Never invisible: a source-less constraint still gets a row (its note carries hold/anchor).
-                    Row(sb, type, GetHierarchyPath(driven), "(none)", "w=— g=" + F(c.GlobalWeight), axes, note);
+                    Row(sb, row.Type, row.Driven, "(none)", "w=— g=" + F(row.GlobalWeight), row.Axes, row.Note);
                     continue;
                 }
-                for (int i = 0; i < count; i++)
+                for (int i = 0; i < row.Sources.Length; i++)
                 {
-                    var s = c.Sources[i];
-                    // Null-check SourceTransform first: an unwired source slot is legal (seen on real avatars)
-                    // and must render (none) rather than NRE mid-report.
-                    string src = s.SourceTransform != null ? GetHierarchyPath(s.SourceTransform) : "(none)";
-                    string weight = "w=" + F(s.Weight) + " g=" + F(c.GlobalWeight);
+                    var s = row.Sources[i];
+                    string weight = "w=" + F(s.weight) + " g=" + F(row.GlobalWeight);
                     // Constraint-level note on the first row only (avoid N-fold repetition across sources).
-                    Row(sb, type, GetHierarchyPath(driven), src, weight, axes, i == 0 ? note : "");
+                    Row(sb, row.Type, row.Driven, s.src, weight, row.Axes, i == 0 ? row.Note : "");
                 }
             }
             foreach (var tn in axisMissTypes)
@@ -380,25 +490,24 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Observations (§6) — five mechanically-certain idioms, each a fact + docs pointer -------
 
-        private static int AppendObservations(StringBuilder sb, VRCConstraintBase[] constraints, List<Transform> applyHosts)
+        private static int AppendObservations(StringBuilder sb, ConstraintRow[] rows, List<Transform> applyHosts)
         {
             var lines = new List<string>();
-            foreach (var c in constraints)
+            foreach (var row in rows)
             {
-                var host = c.transform;
-                var driven = c.TargetTransform != null ? c.TargetTransform : host;
-                int count = c.Sources.Count;
+                var driven = row.DrivenTransform;
+                var c = row.Vrc; // null for Unity constraints — the VRC-only idioms below are skipped
 
-                // a. Per-client world anchor: FreezeToWorld && zero sources.
-                if (c.FreezeToWorld && count == 0)
+                // a. Per-client world anchor: FreezeToWorld && zero sources (VRC idiom only).
+                if (c != null && c.FreezeToWorld && c.Sources.Count == 0)
                     lines.Add("**per-client world anchor** — `" + Cell(GetHierarchyPath(driven)) + "` — docs/gimmicks.md §Constraint patterns · World anchors");
 
-                // b. Feedback loop: a non-null source that is a STRICT descendant of driven. The
-                //    source != driven guard is load-bearing — IsChildOf is self-inclusive and
-                //    self-as-source at partial weight is the "feel"-damping idiom, not a feedback cage.
-                for (int i = 0; i < count; i++)
+                // b. Feedback loop: a non-null source that is a STRICT descendant of driven. The one
+                //    geometric idiom that transfers to Unity constraints too. The source != driven guard
+                //    is load-bearing — IsChildOf is self-inclusive and self-as-source at partial weight is
+                //    the "feel"-damping idiom, not a feedback cage.
+                foreach (var src in row.SourceTransforms)
                 {
-                    var src = c.Sources[i].SourceTransform;
                     if (src != null && src != driven && src.IsChildOf(driven))
                     {
                         lines.Add("**feedback loop (self-referential constraint source)** — `" + Cell(GetHierarchyPath(driven)) + "` ← `" + Cell(GetHierarchyPath(src)) + "` — docs/gimmicks.md §Constraint patterns · Trilateration cage / Crawler servo");
@@ -406,15 +515,18 @@ namespace Ryan6Vrc.AgentTools.Editor
                     }
                 }
 
-                // c. TargetTransform indirection.
-                if (c.TargetTransform != null && c.TargetTransform != host)
-                    lines.Add("**TargetTransform indirection** — `" + Cell(GetHierarchyPath(driven)) + "` (host `" + Cell(host.name) + "`) — docs/runtime.md §Constraints");
+                // c. TargetTransform indirection (VRC idiom only).
+                if (c != null && c.TargetTransform != null && c.TargetTransform != c.transform)
+                    lines.Add("**TargetTransform indirection** — `" + Cell(GetHierarchyPath(driven)) + "` (host `" + Cell(c.transform.name) + "`) — docs/runtime.md §Constraints");
 
-                // d. Hold (label matches the §5.3 note — active world anchors are excluded; weight-based
-                //    holds carry the static-frame caveat; a pure zero-source hold does not).
-                string hold = HoldSuffix(c);
-                if (hold != null)
-                    lines.Add("**hold** — `" + Cell(GetHierarchyPath(driven)) + "`" + hold + " — docs/runtime.md §Constraints");
+                // d. Hold (VRC idiom only — label matches the §5.3 note; active world anchors are excluded;
+                //    weight-based holds carry the static-frame caveat; a pure zero-source hold does not).
+                if (c != null)
+                {
+                    string hold = HoldSuffix(c);
+                    if (hold != null)
+                        lines.Add("**hold** — `" + Cell(GetHierarchyPath(driven)) + "`" + hold + " — docs/runtime.md §Constraints");
+                }
             }
 
             // e. Editor/runtime swap (VRCFury ApplyDuringUpload host).
