@@ -186,6 +186,34 @@ public class CleanControllerMutationTests
     }
 
     [Test]
+    public void RunLog_is_the_shared_envelope()
+    {
+        var src = BuildSourceFx(Root + "/Src.controller");
+        BuildAvatarWithFxSlot();
+        string s = CleanController.Run(src, _avatar, Root, new[] { "GestureLeft" });
+        StringAssert.Contains("=> PASS", s);
+        var path = s.Substring(s.IndexOf("log=") + 4);
+        var json = System.IO.File.ReadAllText(path);
+        StringAssert.Contains("\"kind\": \"clean-controller\"", json);
+        StringAssert.Contains("\"source\": \"Src\"", json);
+        StringAssert.DoesNotContain("\"sourceFx\"", json, "old bespoke key renamed to the envelope's source");
+        StringAssert.Contains("\"ctrlParamsKept\"", json);
+        UnityEditor.AssetDatabase.DeleteAsset(path);
+    }
+
+    [Test]
+    public void Null_sourceFx_fails_through_the_runlog_grammar_not_a_bare_line()
+    {
+        BuildAvatarWithFxSlot();
+        LogAssert.Expect(LogType.Error, new Regex("sourceFx is null"));
+        string s = CleanController.Run(null, _avatar, Root, new string[0]);
+        StringAssert.Contains("error=sourceFx is null => FAIL | log=", s);
+        var path = s.Substring(s.IndexOf("log=") + 4);
+        Assert.IsTrue(System.IO.File.Exists(path), "guard FAIL must write a RunLog: " + path);
+        UnityEditor.AssetDatabase.DeleteAsset(path);
+    }
+
+    [Test]
     public void Fails_when_no_descriptor()
     {
         var src = BuildSourceFx(Root + "/Src.controller");

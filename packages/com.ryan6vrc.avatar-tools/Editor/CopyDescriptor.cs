@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
@@ -43,26 +42,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public static string Run(GameObject ownedRoot, GameObject vendorSource, bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
-            string marker = whatIf ? " (whatIf)" : "";
 
-            if (ownedRoot == null)
-            {
-                string err = "[CopyDescriptor] ownedRoot is null => FAIL";
-                Debug.LogError(err);
-                return err;
-            }
-            if (vendorSource == null)
-            {
-                string err = "[CopyDescriptor] vendorSource is null => FAIL";
-                Debug.LogError(err);
-                return err;
-            }
+            if (ownedRoot == null)     return ArgFail(label, whatIf, ownedRoot, vendorSource, "ownedRoot is null");
+            if (vendorSource == null)  return ArgFail(label, whatIf, ownedRoot, vendorSource, "vendorSource is null");
 
             var data = new RunData
             {
-                InstanceName = ownedRoot.name,
-                SourceName   = vendorSource.name,
-                WhatIf       = whatIf,
+                instance = ownedRoot.name,
+                source   = vendorSource.name,
+                whatIf   = whatIf,
             };
 
             // Execute-path Undo group handle. Stays -1 until the group is opened (after the gates,
@@ -74,43 +62,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // ── Gate A: scale / orientation ────────────────────────────────────────────
                 string scaleErr = CheckScaleAndOrientation(ownedRoot.transform, vendorSource.transform);
                 if (scaleErr != null)
-                {
-                    data.Result    = "FAIL";
-                    data.GateError = "scale/orientation: " + scaleErr;
-                    data.Error     = data.GateError;
-                    string logPath = WriteRunLog(data, label);
-                    string s = "[CopyDescriptor]" + marker + " GATE FAIL (" + data.GateError + ") => FAIL | log=" + logPath;
-                    Debug.LogError(s);
-                    return s;
-                }
+                    return Fail(data, label, "gate scale/orientation: " + scaleErr);
 
                 // ── Gate B: blendshape parity ──────────────────────────────────────────────
                 string bsErr = CheckBlendshapeParity(
                     ownedRoot, vendorSource,
-                    out data.OurFaceMesh, out data.VendorFaceMesh);
+                    out string ourFaceMesh, out string vendorFaceMesh);
+                if (ourFaceMesh != null && vendorFaceMesh != null)
+                    data.Note("faces: ours='" + ourFaceMesh + "' vendor='" + vendorFaceMesh + "'");
                 if (bsErr != null)
-                {
-                    data.Result    = "FAIL";
-                    data.GateError = "blendshape parity: " + bsErr;
-                    data.Error     = data.GateError;
-                    string logPath = WriteRunLog(data, label);
-                    string s = "[CopyDescriptor]" + marker + " GATE FAIL (" + data.GateError + ") => FAIL | log=" + logPath;
-                    Debug.LogError(s);
-                    return s;
-                }
+                    return Fail(data, label, "gate blendshape parity: " + bsErr);
 
                 // ── Find vendor descriptor ─────────────────────────────────────────────────
                 var vendorDesc = vendorSource.GetComponent<VRCAvatarDescriptor>()
                               ?? vendorSource.GetComponentInChildren<VRCAvatarDescriptor>(true);
                 if (vendorDesc == null)
-                {
-                    data.Result = "FAIL";
-                    data.Error  = "VRCAvatarDescriptor not found on vendorSource (" + vendorSource.name + ")";
-                    string logPath = WriteRunLog(data, label);
-                    string s = "[CopyDescriptor]" + marker + " FAIL: " + data.Error + " => FAIL | log=" + logPath;
-                    Debug.LogError(s);
-                    return s;
-                }
+                    return Fail(data, label, "VRCAvatarDescriptor not found on vendorSource (" + vendorSource.name + ")");
 
                 // ── Snapshot critical scene refs on the VENDOR descriptor ──────────────────
                 // Before copying, record every ObjectReference property on the vendor descriptor
@@ -128,9 +95,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // remap/blueprint-clear.
                 if (whatIf)
                 {
-                    data.CriticalRefCount = criticalPaths.Count;
-                    data.PreviewNote = "gates passed; vendor descriptor found; " + criticalPaths.Count +
-                        " critical scene-ref(s) to remap; blueprintId would be cleared; remapped/nulled/leaks/lostRefs realized only on execute";
+                    data.Count("criticalRefs", criticalPaths.Count);
+                    data.Note("gates passed; vendor descriptor found; blueprintId would be cleared; " +
+                        "remapped/nulled/leaks/lostRefs realized only on execute");
 
                     // C2 — preview the viewpoint recompute WITHOUT requiring the not-yet-added owned
                     // descriptor. referenceVpIsBaseline: true so oldVP == the vendorVP the copy will land in
@@ -139,22 +106,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     try
                     {
                         var vpPrev = FixViewpoint.Recompute(ownedRoot, vendorSource, whatIf: true, referenceVpIsBaseline: true);
-                        data.ViewpointNote = vpPrev.ok
+                        data.Note("viewpoint: " + (vpPrev.ok
                             ? vpPrev.note
-                            : "verify — viewpoint would NOT recompute (" + vpPrev.failReason + "); ViewPosition would stay at copied vendor value";
+                            : "verify — viewpoint would NOT recompute (" + vpPrev.failReason + "); ViewPosition would stay at copied vendor value"));
                     }
                     catch (Exception vex)
                     {
-                        data.ViewpointNote = "verify — viewpoint preview errored (" + vex.Message + "); ViewPosition would stay at copied vendor value";
+                        data.Note("viewpoint: verify — viewpoint preview errored (" + vex.Message + "); ViewPosition would stay at copied vendor value");
                     }
 
-                    data.Result = "PASS";   // gates passed + descriptor found => preview go
-                    string logP = WriteRunLog(data, label);
-                    string sPrev = "[CopyDescriptor] (whatIf) " + label + ": gates=passed descriptorFound criticalRefs=" +
-                        criticalPaths.Count + " wouldClearBlueprint=yes (remap/leak/lostRef counts realized on execute) viewpoint=[" +
-                        data.ViewpointNote + "] => PASS | log=" + logP;
-                    Debug.Log(sPrev);
-                    return sPrev;
+                    data.result = "PASS";   // gates passed + descriptor found => preview go
+                    return TransplantCore.Finish(data, label);
                 }
 
                 // ── Execute-path Undo group: descriptor add/overwrite + CopySerialized +
@@ -184,55 +146,53 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var so          = new SerializedObject(ourDesc);
                 var remapResult = RemapReferencesByPath.Remap(so, vendorSource.transform, ownedRoot.transform);
                 so.ApplyModifiedPropertiesWithoutUndo();
-                data.Remapped = remapResult.remapped;
-                data.Nulled   = remapResult.nulled;
+                data.Count("remapped", remapResult.remapped);
+                data.Count("nulled", remapResult.nulled);
 
                 // ── Fresh PipelineManager (never keep vendor's blueprintId) ────────────────
-                data.BlueprintId = ClearOrCreatePipelineManager(ownedRoot);
+                string blueprintId = ClearOrCreatePipelineManager(ownedRoot);
+                data.Note("blueprint=" + (string.IsNullOrEmpty(blueprintId) ? "<empty>" : blueprintId));
 
                 // ── Lost-reference check (general; subsumes viseme/eyes/eyelids) ────────────
                 // For every critical vendor scene ref snapshotted above, our descriptor must now
                 // hold a non-null value at the same property path. A null means the path-remap
                 // silently dropped a scene ref — the worst failure mode — so record the property
                 // path as an offender and gate PASS on lostRefs == 0.
-                data.LostRefs = CountLostRefs(ourDesc, criticalPaths, data.LostRefPaths);
+                var lostRefPaths = new List<string>();
+                int lostRefs = CountLostRefs(ourDesc, criticalPaths, lostRefPaths);
+                data.Count("lostRefs", lostRefs);
+                foreach (var p in lostRefPaths)
+                    data.Offender("lostRef: '" + p + "' nulled by the remap (broken lip-sync/eye-tracking/collider ref)");
 
                 // ── Leak check ─────────────────────────────────────────────────────────────
                 // Any remaining ObjectReference still under vendorSource is a missed remap.
-                data.Leaks = CountLeaks(ourDesc, vendorSource.transform);
+                int leaks = CountLeaks(ourDesc, vendorSource.transform);
+                data.Count("leaks", leaks);
+                if (leaks > 0)
+                    data.Offender("leaks=" + leaks + ": descriptor ref(s) still point into the vendor hierarchy (missed remap)");
 
                 // ── Playable layers confirmation ────────────────────────────────────────────
                 // Controllers are asset refs; remap leaves them untouched. Confirm they survived.
-                data.PlayableLayers = ReportPlayableLayers(ourDesc);
+                data.Note("layers=[" + ReportPlayableLayers(ourDesc) + "]");
 
                 // ── Spot-checks: viseme mesh + eye transforms (report only) ────────────────
                 // These names are reported for legibility; correctness is now enforced generically
                 // by the lostRefs check above (a nulled viseme/eye ref shows up there as an offender).
-                var visemeSMR  = ourDesc.VisemeSkinnedMesh;
-                data.VisemeMesh = visemeSMR != null ? visemeSMR.name : "(null)";
+                var visemeSMR = ourDesc.VisemeSkinnedMesh;
+                data.Note("viseme=" + (visemeSMR != null ? visemeSMR.name : "(null)"));
 
                 var eyeLeft   = ourDesc.customEyeLookSettings.leftEye;
                 var eyeRight  = ourDesc.customEyeLookSettings.rightEye;
-                data.LeftEye  = eyeLeft  != null ? eyeLeft.name  : "(null)";
-                data.RightEye = eyeRight != null ? eyeRight.name : "(null)";
+                data.Note("leftEye=" + (eyeLeft != null ? eyeLeft.name : "(null)")
+                        + " rightEye=" + (eyeRight != null ? eyeRight.name : "(null)"));
 
                 // ── PASS/FAIL ──────────────────────────────────────────────────────────────
-                bool pass = data.Leaks == 0
-                         && data.LostRefs == 0
-                         && string.IsNullOrEmpty(data.BlueprintId);
-                data.Result = pass ? "PASS" : "FAIL";
-
-                if (!pass && data.Error == null)
-                {
-                    var reasons = new List<string>();
-                    if (data.Leaks > 0)
-                        reasons.Add("leaks=" + data.Leaks);
-                    if (data.LostRefs > 0)
-                        reasons.Add("lostRefs=" + data.LostRefs + " [" + string.Join(", ", data.LostRefPaths) + "]");
-                    if (!string.IsNullOrEmpty(data.BlueprintId))
-                        reasons.Add("blueprintId not empty: " + data.BlueprintId);
-                    data.Error = string.Join("; ", reasons);
-                }
+                if (!string.IsNullOrEmpty(blueprintId))
+                    data.Offender("blueprintId not cleared: " + blueprintId);
+                bool pass = leaks == 0
+                         && lostRefs == 0
+                         && string.IsNullOrEmpty(blueprintId);
+                data.result = pass ? "PASS" : "FAIL";
 
                 // ── Viewpoint recompute (C6, NON-fatal) ────────────────────────────────────────────
                 // After the leak/lostRef gates, recompute ViewPosition from the vendor reference + the
@@ -245,19 +205,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 try
                 {
                     var vp = FixViewpoint.Recompute(ownedRoot, vendorSource, whatIf: false, referenceVpIsBaseline: true);
-                    data.ViewpointNote = vp.ok
+                    data.Note("viewpoint: " + (vp.ok
                         ? vp.note
-                        : "verify — viewpoint NOT recomputed (" + vp.failReason + "); ViewPosition left at copied vendor value";
+                        : "verify — viewpoint NOT recomputed (" + vp.failReason + "); ViewPosition left at copied vendor value"));
                 }
                 catch (Exception vex)
                 {
-                    data.ViewpointNote = "verify — viewpoint recompute errored (" + vex.Message + "); ViewPosition left at copied vendor value";
+                    data.Note("viewpoint: verify — viewpoint recompute errored (" + vex.Message + "); ViewPosition left at copied vendor value");
                 }
             }
             catch (Exception ex)
             {
-                data.Result = "FAIL";
-                data.Error  = ex.Message;
+                data.result = "FAIL";
+                data.error  = ex.Message;
             }
             finally
             {
@@ -267,21 +227,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (undoGroup != -1) Undo.CollapseUndoOperations(undoGroup);
             }
 
-            string logPath2 = WriteRunLog(data, label);
-
-            string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CopyDescriptor]" + marker + " {0}: remapped={1}, nulled={2}, leaks={3}, lostRefs={4}, viseme={5}, leftEye={6}, rightEye={7}, blueprint={8}, layers=[{9}], viewpoint=[{10}]{11} => {12} | log={13}",
-                label,
-                data.Remapped, data.Nulled, data.Leaks, data.LostRefs,
-                data.VisemeMesh, data.LeftEye, data.RightEye,
-                string.IsNullOrEmpty(data.BlueprintId) ? "<empty>" : data.BlueprintId,
-                data.PlayableLayers,
-                data.ViewpointNote ?? "(not run)",
-                data.Error != null ? " error=" + data.Error : "",
-                data.Result, logPath2);
-
-            if (data.Result == "PASS") Debug.Log(summary); else Debug.LogError(summary);
-            return summary;
+            return TransplantCore.Finish(data, label);
         }
 
         // ── Gate A: scale / orientation ───────────────────────────────────────────────────────
@@ -513,128 +459,42 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // ── RunLog output ─────────────────────────────────────────────────────────────────────
+        // The shared envelope replaces the old dual writers (execute-shaped + whatIf-shaped): counts
+        // are emitted only where added, so the whatIf log honestly omits the execute-only counters
+        // (remapped/nulled/leaks/lostRefs are unknowable without copying) with a single writer.
 
-        private static string WriteRunLog(RunData data, string label)
+        /// <summary>Route an argument-guard failure through the shared envelope tail — never a bare
+        /// trailer-less line (the guards previously returned one, with no RunLog at all).</summary>
+        private static string ArgFail(string label, bool whatIf, GameObject ownedRoot, GameObject source, string msg)
         {
-            // whatIf writes a preview-shaped log that OMITS the execute-only counters (remapped/nulled/leaks/
-            // lostRefs and the post-copy scene-ref reports) — those are unknowable without copying, so emitting
-            // them as zeros would lie. The execute writer below is left byte-for-byte unchanged.
-            if (data.WhatIf) return WriteWhatIfRunLog(data, label);
-
-            Directory.CreateDirectory(TransplantCore.RunLogDir);
-            var sb = new StringBuilder();
-            sb.Append("{\n");
-            sb.Append("  \"kind\": \"copy-descriptor\",\n");
-            sb.Append("  \"unityVersion\": ").Append(TransplantCore.Q(Application.unityVersion)).Append(",\n");
-            sb.Append("  \"timestampUtc\": ").Append(TransplantCore.Q(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append(",\n");
-            sb.Append("  \"whatIf\": ").Append(data.WhatIf ? "true" : "false").Append(",\n");
-            sb.Append("  \"instance\": ").Append(TransplantCore.Q(data.InstanceName)).Append(",\n");
-            sb.Append("  \"source\": ").Append(TransplantCore.Q(data.SourceName)).Append(",\n");
-            sb.Append("  \"result\": ").Append(TransplantCore.Q(data.Result)).Append(",\n");
-            sb.Append("  \"gateError\": ").Append(TransplantCore.Q(data.GateError)).Append(",\n");
-            sb.Append("  \"error\": ").Append(TransplantCore.Q(data.Error)).Append(",\n");
-            sb.Append("  \"ourFaceMesh\": ").Append(TransplantCore.Q(data.OurFaceMesh)).Append(",\n");
-            sb.Append("  \"vendorFaceMesh\": ").Append(TransplantCore.Q(data.VendorFaceMesh)).Append(",\n");
-            sb.Append("  \"remapped\": ").Append(data.Remapped).Append(",\n");
-            sb.Append("  \"nulled\": ").Append(data.Nulled).Append(",\n");
-            sb.Append("  \"leaks\": ").Append(data.Leaks).Append(",\n");
-            sb.Append("  \"lostRefs\": ").Append(data.LostRefs).Append(",\n");
-            sb.Append("  \"lostRefPaths\": [");
-            for (int i = 0; i < data.LostRefPaths.Count; i++)
+            var data = new RunData
             {
-                sb.Append(i == 0 ? "" : ", ").Append(TransplantCore.Q(data.LostRefPaths[i]));
-            }
-            sb.Append("],\n");
-            sb.Append("  \"blueprintId\": ").Append(TransplantCore.Q(data.BlueprintId)).Append(",\n");
-            sb.Append("  \"visemeMesh\": ").Append(TransplantCore.Q(data.VisemeMesh)).Append(",\n");
-            sb.Append("  \"leftEye\": ").Append(TransplantCore.Q(data.LeftEye)).Append(",\n");
-            sb.Append("  \"rightEye\": ").Append(TransplantCore.Q(data.RightEye)).Append(",\n");
-            sb.Append("  \"playableLayers\": ").Append(TransplantCore.Q(data.PlayableLayers)).Append(",\n");
-            sb.Append("  \"viewpointNote\": ").Append(TransplantCore.Q(data.ViewpointNote)).Append("\n");
-            sb.Append("}");
-
-            var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-            var path  = TransplantCore.RunLogDir + "/copy-descriptor_" + label + "_" + stamp + ".json";
-            File.WriteAllText(path, sb.ToString());
-            AssetDatabase.Refresh();
-            return path;
+                instance = ownedRoot != null ? ownedRoot.name : null,
+                source   = source != null ? source.name : null,
+                whatIf   = whatIf,
+            };
+            return Fail(data, label, msg);
         }
 
-        /// <summary>
-        /// whatIf RunLog: only the keys the preview can honestly populate — the gate verdict and, when the
-        /// gates passed and the snapshot was taken, descriptorFound / criticalRefCount / wouldClearBlueprint /
-        /// previewNote. The execute-only counters (remapped/nulled/leaks/lostRefs and the post-copy scene-ref
-        /// reports) are OMITTED, not zeroed, because they are unknowable without actually copying.
-        /// </summary>
-        private static string WriteWhatIfRunLog(RunData data, string label)
+        /// <summary>Fail an in-flight run (gate / missing-descriptor stage) through the same grammar:
+        /// named offender + <c>error</c>, shared envelope tail.</summary>
+        private static string Fail(RunData data, string label, string msg)
         {
-            Directory.CreateDirectory(TransplantCore.RunLogDir);
-            var sb = new StringBuilder();
-            sb.Append("{\n");
-            sb.Append("  \"kind\": \"copy-descriptor\",\n");
-            sb.Append("  \"unityVersion\": ").Append(TransplantCore.Q(Application.unityVersion)).Append(",\n");
-            sb.Append("  \"timestampUtc\": ").Append(TransplantCore.Q(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append(",\n");
-            sb.Append("  \"whatIf\": true,\n");
-            sb.Append("  \"instance\": ").Append(TransplantCore.Q(data.InstanceName)).Append(",\n");
-            sb.Append("  \"source\": ").Append(TransplantCore.Q(data.SourceName)).Append(",\n");
-            sb.Append("  \"result\": ").Append(TransplantCore.Q(data.Result)).Append(",\n");
-            sb.Append("  \"gateError\": ").Append(TransplantCore.Q(data.GateError)).Append(",\n");
-            sb.Append("  \"error\": ").Append(TransplantCore.Q(data.Error)).Append(",\n");
-            sb.Append("  \"ourFaceMesh\": ").Append(TransplantCore.Q(data.OurFaceMesh)).Append(",\n");
-            // PreviewNote is set only when the gates passed and the snapshot was taken; on a gate FAIL the
-            // preview never reached the descriptor, so the go-preview keys are omitted (no misleading zeros).
-            if (data.PreviewNote != null)
-            {
-                sb.Append("  \"vendorFaceMesh\": ").Append(TransplantCore.Q(data.VendorFaceMesh)).Append(",\n");
-                sb.Append("  \"descriptorFound\": true,\n");
-                sb.Append("  \"criticalRefCount\": ").Append(data.CriticalRefCount).Append(",\n");
-                sb.Append("  \"wouldClearBlueprint\": true,\n");
-                sb.Append("  \"viewpointNote\": ").Append(TransplantCore.Q(data.ViewpointNote)).Append(",\n");
-                sb.Append("  \"previewNote\": ").Append(TransplantCore.Q(data.PreviewNote)).Append("\n");
-            }
-            else
-            {
-                sb.Append("  \"vendorFaceMesh\": ").Append(TransplantCore.Q(data.VendorFaceMesh)).Append("\n");
-            }
-            sb.Append("}");
-
-            var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-            var path  = TransplantCore.RunLogDir + "/copy-descriptor_" + label + "_" + stamp + ".json";
-            File.WriteAllText(path, sb.ToString());
-            AssetDatabase.Refresh();
-            return path;
+            data.result = "FAIL";
+            data.error  = msg;
+            data.Offender(msg);
+            return TransplantCore.Finish(data, label);
         }
 
         // ── Data type ─────────────────────────────────────────────────────────────────────────
 
-        private class RunData
+        /// <summary>The package RunLog envelope; counts/offenders/notes are added at the site that
+        /// computes them (state assertions — viseme/eyes/blueprint/layers/viewpoint — ride as notes,
+        /// so the one-line summary still carries them; the viewpoint note is the NON-fatal
+        /// state-asserting FixViewpoint fold that never flips the verdict).</summary>
+        private sealed class RunData : TransplantRunLog
         {
-            public string InstanceName;
-            public string SourceName;
-            public bool   WhatIf;
-            public int    CriticalRefCount;
-            public string PreviewNote;
-            public string Result;
-            public string GateError;
-            public string Error;
-            public string OurFaceMesh;
-            public string VendorFaceMesh;
-            public int    Remapped;
-            public int    Nulled;
-            public int    Leaks;
-            public int    LostRefs;
-            public readonly List<string> LostRefPaths = new List<string>();
-            public string BlueprintId;
-            public string VisemeMesh;
-            public string LeftEye;
-            public string RightEye;
-            public string PlayableLayers;
-            /// <summary>
-            /// State-asserting FixViewpoint fold note (NON-fatal — never flips the verdict). Success →
-            /// "viewpoint recomputed: …"; a miss → "verify — viewpoint NOT recomputed (…); ViewPosition left
-            /// at copied vendor value", so a CopyDescriptor PASS is never misread as "viewpoint correct".
-            /// </summary>
-            public string ViewpointNote;
+            public RunData() : base("copy-descriptor") { }
         }
     }
 }
