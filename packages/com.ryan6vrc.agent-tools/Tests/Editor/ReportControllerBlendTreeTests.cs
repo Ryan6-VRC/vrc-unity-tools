@@ -79,7 +79,10 @@ public class ReportControllerBlendTreeTests
         var reloaded = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
 
         string report = File.ReadAllText(PathFrom(ReportController.Report(reloaded)));
-        StringAssert.Contains("broken", report);
-        StringAssert.Contains("deadbeefdeadbeefdeadbeefdeadbeef", report);
+        // Pin the CHILD cell directly, not merely the top-level "Broken motion GUIDs" list —
+        // RecoverDanglingMotionGuids fills that list from the raw YAML regardless of how the child
+        // renders, so asserting the guid alone is vacuous. The @0 child must render broken, not (empty).
+        StringAssert.Contains("@0 (broken: guid=deadbeefdeadbeefdeadbeefdeadbeef)", report);
+        StringAssert.DoesNotContain("@0 (empty)", report);
     }
 }

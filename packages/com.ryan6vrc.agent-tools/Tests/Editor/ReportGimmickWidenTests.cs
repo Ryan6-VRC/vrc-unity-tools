@@ -94,6 +94,24 @@ public class ReportGimmickWidenTests
         StringAssert.Contains("other=1", report);                 // header/summary count
     }
 
+    // A dangling object reference (asset deleted while a field still points at it) must render broken,
+    // not collapse to invisible like a clean-empty slot — same empty-vs-dangling idiom the F11 fix uses.
+    [Test]
+    public void DanglingObjectRef_RendersBroken_NotDropped()
+    {
+        var root = new GameObject("Rig");
+        var host = new GameObject("Host"); host.transform.SetParent(root.transform);
+        var probe = host.AddComponent<TierTwoProbe>();
+        var clip = new AnimationClip { name = "doomed" };
+        const string assetPath = "Assets/Agent/_rbs_dangling.anim";
+        UnityEditor.AssetDatabase.CreateAsset(clip, assetPath);
+        probe.reference = clip;
+        UnityEditor.AssetDatabase.DeleteAsset(assetPath); // probe.reference is now a dangling (missing) ref
+
+        string report = ReadReport("Rig");
+        StringAssert.Contains("(broken: dangling reference)", report);
+    }
+
     [Test]
     public void ModularAvatarMenuItem_ControlNameAndType_SurfaceInPeek()
     {

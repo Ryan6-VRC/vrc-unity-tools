@@ -21,7 +21,9 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// indirection made explicit), and its VRCFury AUTHORING inventory — plus a short Observations index
     /// naming only the five mechanically-certain structural idioms (world anchor, feedback loop,
     /// TargetTransform indirection, hold, editor/runtime swap), each carrying a docs/ pointer. So an
-    /// agent can hold a whole gimmick in a few thousand tokens.
+    /// agent can hold a gimmick subtree in a few thousand tokens — the digest scales with component
+    /// count (the tier-2 census names renderers/animators too), so a whole-avatar subtree is a
+    /// proportionally large, honest digest, not a compact one; scope the root to the gimmick.
     ///
     /// Two seams are deliberately NOT crossed: it reports a contact/physbone's DECLARED `parameter`
     /// field but never traces it into an animator (H's domain), and it reports VRCFury features verbatim
@@ -619,7 +621,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 case SerializedPropertyType.ObjectReference:
                     var o = p.objectReferenceValue;
-                    if (o == null) return;
+                    if (o == null)
+                    {
+                        // Distinguish a clean-empty slot from a dangling ref (asset deleted) — same
+                        // empty-vs-broken idiom ReportController.MotionNullCell uses; a broken seam must
+                        // never collapse to invisible. Clean-null stays hidden (census noise).
+                        if (p.objectReferenceInstanceIDValue != 0)
+                            sb.Append(pad).Append("- ").Append(Cell(p.name)).Append(" → (broken: dangling reference)\n");
+                        return;
+                    }
                     string path = AssetDatabase.GetAssetPath(o);
                     // Asset ref → asset path; scene ref (Component or GameObject) → its hierarchy path.
                     string handle = !string.IsNullOrEmpty(path) ? path
