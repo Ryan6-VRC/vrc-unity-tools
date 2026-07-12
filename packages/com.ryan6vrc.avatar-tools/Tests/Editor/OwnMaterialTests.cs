@@ -761,8 +761,11 @@ public class OwnMaterialTests
         string logPath = ExtractLogPath(s);
         string json = File.ReadAllText(logPath);
         StringAssert.Contains("\"slot\": \"_BumpMap\", \"requested\": false, \"disposition\": \"owned-elsewhere\"", json);
-        StringAssert.Contains("\"notes\": [", json);
-        StringAssert.Contains(ownedBaseTexPath, json);
+        // Assert the ACTUAL note text (not the always-present "notes": [ header, and not the path alone
+        // which also appears in the slot row's sourcePath) so deleting the Note() call would fail this test.
+        StringAssert.Contains(
+            "slot '_BumpMap' references another material's owned texture (shared, not requested): " + ownedBaseTexPath,
+            json);
     }
 
     [Test] public void WhatIf_own_with_fork_request_reports_slotsForked_and_creates_no_asset()
@@ -826,7 +829,8 @@ public class OwnMaterialTests
         v.SetTexture("_BumpMap", bumpTex);
         EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
 
-        OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" }); // own; _BumpMap still vendor on O
+        string own = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" }); // own; _BumpMap still vendor on O
+        StringAssert.Contains("=> PASS", own);
         string ownedPath = Owned + "/Dress.mat";
         var before = AssetDatabase.GetAssetPath(
             AssetDatabase.LoadAssetAtPath<Material>(ownedPath).GetTexture("_BumpMap"));
