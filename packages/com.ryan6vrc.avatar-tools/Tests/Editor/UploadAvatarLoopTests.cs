@@ -70,7 +70,9 @@ public class UploadAvatarLoopTests
             () => saveCalls++).GetAwaiter().GetResult();
         Assert.AreEqual("A", report.rows[0].handle); Assert.AreEqual("uploaded", report.rows[0].result);
         Assert.AreEqual("failed", report.rows[1].result); Assert.AreEqual("transient", report.rows[1].cls);
-        Assert.AreEqual(2, report.rows.Count);
+        // C was never attempted — the halt appends a not-attempted tail so the report is complete.
+        Assert.AreEqual(3, report.rows.Count);
+        Assert.AreEqual("not-attempted", report.rows[2].result);
         Assert.AreEqual(1, saveCalls);
         foreach (var g in avatars) UnityEngine.Object.DestroyImmediate(g);
     }
@@ -109,5 +111,44 @@ public class UploadAvatarLoopTests
         StringAssert.DoesNotContain("avtr_", report.rows[0].error);
         StringAssert.DoesNotContain("usr_",  report.rows[0].error);
         UnityEngine.Object.DestroyImmediate(a);
+    }
+
+    [Test]
+    public void Loop_ForcedClassRealForLocalFailure()
+    {
+        var a = MakeAvatar("A","");
+        var report = UploadAvatar.RunCore(new[]{a},
+            _ => System.Threading.Tasks.Task.FromResult(
+                UploadAvatar.UploadOutcome.Failed(message:"no descriptor", forcedClass:"real")),
+            () => {}).GetAwaiter().GetResult();
+        Assert.AreEqual("real", report.rows[0].cls);
+        UnityEngine.Object.DestroyImmediate(a);
+    }
+
+    [Test]
+    public void ClassifyAvatar_NullReturnsNamedRow_NoThrow()
+    {
+        Assert.DoesNotThrow(() => {
+            var r = UploadAvatar.ClassifyAvatar(null);
+            Assert.AreEqual("unknown", r.state);
+            Assert.AreEqual("(null)", r.publishName);
+        });
+    }
+
+    // A fake SDK exception exposing an int StatusCode — proves the now-reachable classification path
+    // (CauReflect.UploadOne no longer swallows, so RealUploadOne's catch actually runs).
+    class FakeApiException : System.Exception
+    {
+        public int StatusCode { get; set; }
+        public FakeApiException(int s, string m) : base(m) { StatusCode = s; }
+    }
+
+    [Test]
+    public void FailedFromException_MapsStatus()
+    {
+        var o429 = UploadAvatar.FailedFromException(new FakeApiException(429, "rate limited avtr_x"));
+        Assert.AreEqual("rate-limit", UploadAvatarLogic.Classify(o429.httpStatus, o429.isValidation, o429.isTimeout));
+        var o400 = UploadAvatar.FailedFromException(new FakeApiException(400, "bad"));
+        Assert.AreEqual("real", UploadAvatarLogic.Classify(o400.httpStatus, o400.isValidation, o400.isTimeout));
     }
 }

@@ -143,29 +143,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>Invoke CAU's <c>Uploader.UploadSingle(setting, builder, uploadRetryCount:0, ct)</c> and
-        /// await the returned Task. Returns true on completion, false on any reflection/invoke/await failure
-        /// (the caller classifies REFUSE vs FAIL). Raw exception text is deliberately not logged here — the
-        /// Task-4 tool layer redacts. LIVE binding: not verifiable headless, deferred to Task 8.</summary>
-        internal static async Task<bool> UploadOne(object setting, object builder, CancellationToken ct)
+        /// await the returned Task. Does NOT swallow: a faulted upload throws the REAL SDK exception (so the
+        /// tool layer can classify 429/validation/etc. and redact) rather than collapsing to a bool — a
+        /// swallowed exception would erase the whole failure taxonomy. A missing/unresolved member throws
+        /// InvalidOperationException (CAU drift). LIVE binding: not verifiable headless, deferred to Task 8.</summary>
+        internal static async Task UploadOne(object setting, object builder, CancellationToken ct)
         {
-            var uploaderType = Uploader;
-            if (uploaderType == null) return false;
+            var m = Uploader?.GetMethod("UploadSingle", BindingFlags.Public | BindingFlags.Static);
+            if (m == null) throw new InvalidOperationException("CAU UploadSingle not resolved (CAU drift)");
 
-            // Uploader is internal; the method is public-static on it.
-            var uploadSingle = uploaderType.GetMethod("UploadSingle", BindingFlags.Public | BindingFlags.Static);
-            if (uploadSingle == null) return false;
+            object taskObj;
+            // Unwrap the reflection wrapper so the real SDK exception (not TargetInvocationException) surfaces.
+            try { taskObj = m.Invoke(null, new object[] { setting, builder, 0, ct }); }
+            catch (TargetInvocationException tie) { throw tie.InnerException ?? tie; }
 
-            try
-            {
-                var task = uploadSingle.Invoke(null, new object[] { setting, builder, 0, ct }) as Task;
-                if (task == null) return false;
-                await task;
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
+            await (Task)taskObj; // a faulted upload throws the real exception here
         }
     }
 }

@@ -39,17 +39,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
             internal bool isValidation;
             internal bool isTimeout;
             internal string message;
+            // Bypasses Classify — for deterministic LOCAL failures (missing descriptor, setting-build
+            // fail, ceiling) that are always "real", never transient/retryable.
+            internal string forcedClass;
 
             public static UploadOutcome Uploaded()
                 => new UploadOutcome { kind = Kind.Uploaded };
             public static UploadOutcome ReservedNoBundle()
                 => new UploadOutcome { kind = Kind.ReservedNoBundle };
             public static UploadOutcome Failed(int? httpStatus = null, bool isValidation = false,
-                                               bool isTimeout = false, string message = null)
+                                               bool isTimeout = false, string message = null,
+                                               string forcedClass = null)
                 => new UploadOutcome
                 {
                     kind = Kind.Failed, httpStatus = httpStatus,
-                    isValidation = isValidation, isTimeout = isTimeout, message = message
+                    isValidation = isValidation, isTimeout = isTimeout,
+                    message = message, forcedClass = forcedClass
                 };
         }
 
@@ -73,6 +78,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // The in-flight execute batch. Run fires RunCore and returns immediately; the editor update loop
         // pumps CAU's async continuations. The agent polls Status() until it stops reporting "running".
         static System.Threading.Tasks.Task<UploadReport> _inflight;
+        // The terminal summary, memoized so Status() is idempotent — the RunLog is written exactly once
+        // when the batch first reaches a terminal state, not on every poll. Reset when a new batch starts.
+        static string _terminalSummary;
 
         // ── The loop (pure, injectable, fully unit-tested) ──────────────────────────────────────
 
@@ -99,6 +107,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     report.rows.Add(new Row { handle = "(null)", state = "unknown",
                                               result = "failed", error = "null avatar entry" });
                     report.result = "FAIL";
+                    AppendNotAttempted(report, avatars, i + 1);
                     return report;
                 }
 
@@ -116,22 +125,35 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         report.rows.Add(new Row { handle = go.name, state = state,
                                                   result = "reserved-no-bundle" });
                         report.result = "FAIL";
+                        AppendNotAttempted(report, avatars, i + 1);
                         return report;
 
                     case UploadOutcome.Kind.Failed:
                         report.rows.Add(new Row
                         {
                             handle = go.name, state = state, result = "failed",
-                            cls = UploadAvatarLogic.Classify(outcome.httpStatus, outcome.isValidation, outcome.isTimeout),
+                            cls = outcome.forcedClass ??
+                                  UploadAvatarLogic.Classify(outcome.httpStatus, outcome.isValidation, outcome.isTimeout),
                             error = UploadAvatarLogic.RedactIds(outcome.message),
                         });
                         report.result = "FAIL";
+                        AppendNotAttempted(report, avatars, i + 1);
                         return report;
                 }
             }
 
             report.result = "PASS";
             return report;
+        }
+
+        /// <summary>On a halt (null entry, ReservedNoBundle, or Failed) record a <c>not-attempted</c> row for
+        /// every remaining avatar so the report is complete — the skill re-feeds the failed + not-attempted
+        /// tail. Reads only names; performs no upload and dirties nothing.</summary>
+        static void AppendNotAttempted(UploadReport report, GameObject[] avatars, int startExclusive)
+        {
+            for (int j = startExclusive; j < avatars.Length; j++)
+                report.rows.Add(new Row { handle = avatars[j] != null ? avatars[j].name : "(null)",
+                                          state = "unknown", result = "not-attempted" });
         }
 
         // ── Entry point ─────────────────────────────────────────────────────────────────────────
@@ -171,6 +193,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return Refuse("an upload batch is already in flight — poll UploadAvatar.Status()");
             if (!CauReflect.TryGetBuilder(out var builder, out var whyBuilder))
                 return Refuse(whyBuilder);
+            _terminalSummary = null;
             _inflight = RunCore(avatars, go => RealUploadOne(go, builder), () => AssetDatabase.SaveAssets());
             return "[upload-avatar] batch started (" + (avatars != null ? avatars.Length : 0) +
                    " avatar(s)); poll UploadAvatar.Status()";
@@ -178,19 +201,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>Poll the in-flight execute batch. The upload is async-driven — Run returns immediately and
         /// the editor's update loop pumps CAU's continuations; the agent polls this until it stops reporting
-        /// "running". Writes the RunLog + returns the final summary once complete.</summary>
+        /// "running". The RunLog is written (and the summary memoized) exactly once at the terminal state, so
+        /// repeated polling is idempotent — including the FAULTED path, which also gets a RunLog.</summary>
         public static string Status()
         {
             if (_inflight == null) return "[upload-avatar] no batch started";
             if (!_inflight.IsCompleted) return "[upload-avatar] running…";
+            if (_terminalSummary != null) return _terminalSummary;
+
             if (_inflight.IsFaulted)
             {
                 var ex = _inflight.Exception != null ? _inflight.Exception.GetBaseException() : null;
-                return "[upload-avatar] batch FAULTED: " + UploadAvatarLogic.RedactIds(ex != null ? ex.Message : "unknown");
+                var redacted = UploadAvatarLogic.RedactIds(ex != null ? ex.Message : "unknown");
+                var fault = new UploadReport { result = "FAIL" };
+                fault.rows.Add(new Row { handle = "(batch)", state = "unknown", result = "failed",
+                                         cls = "real", error = redacted });
+                string faultLog = WriteRunLog(fault, false, "all");
+                _terminalSummary = "[upload-avatar] batch FAULTED: " + redacted + " | log=" + faultLog;
+                return _terminalSummary;
             }
+
             var report = _inflight.Result;
-            string logPath = WriteRunLog(report, false, "all");
-            return BuildSummary(report, false, logPath);
+            _terminalSummary = BuildSummary(report, false, WriteRunLog(report, false, "all"));
+            return _terminalSummary;
         }
 
         /// <summary>The REAL per-avatar upload: attempt-ceiling gate → build the CAU setting →
@@ -206,52 +239,61 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// from <see cref="Run"/> and the editor update loop pumps CAU's continuations; poll <see cref="Status"/>.</summary>
         static async System.Threading.Tasks.Task<UploadOutcome> RealUploadOne(GameObject go, object builder)
         {
-            string handle = go.name;
+            // Ledger key is the instance id (names collide across avatars); go.name stays in messages/rows.
+            string key = go.GetInstanceID().ToString();
 
-            if (!_ledger.MayAttempt(handle))
-                return UploadOutcome.Failed(message:
-                    "attempt ceiling (" + UploadAvatarLogic.AttemptLedger.MaxAttempts +
-                    ") reached for '" + handle + "'; not re-attempting");
-            _ledger.Record(handle);
-
+            // Deterministic LOCAL pre-checks: always "real" (never retryable) and they do NOT burn a ledger
+            // slot — the ceiling exists to stop hammering a failing UPLOAD, not to cap local misconfig.
             var desc = go.GetComponent<VRCAvatarDescriptor>();
             if (desc == null)
-                return UploadOutcome.Failed(message: "no VRCAvatarDescriptor on '" + handle + "'");
-
+                return UploadOutcome.Failed(message: "no VRCAvatarDescriptor on '" + go.name + "'", forcedClass: "real");
             if (!CauReflect.TryBuildSetting(desc, out var setting, out var why))
-                return UploadOutcome.Failed(message: why);
+                return UploadOutcome.Failed(message: why, forcedClass: "real");
+            if (!_ledger.MayAttempt(key))
+                return UploadOutcome.Failed(message:
+                    "attempt ceiling (" + UploadAvatarLogic.AttemptLedger.MaxAttempts +
+                    ") reached for '" + go.name + "'", forcedClass: "real");
 
+            _ledger.Record(key);
             bool wasFirstUpload = ClassifyAvatar(go).state == "first-upload";
 
             try
             {
                 // Async-driven: the editor update loop pumps CAU's continuations (blocking the main
                 // thread here deadlocks — CAU's continuations need it). See Run/Status for the drive.
-                bool ok = await CauReflect.UploadOne(setting, builder, CancellationToken.None);
-                if (!ok)
-                    return UploadOutcome.Failed(message: "CAU UploadSingle returned false");
+                // A faulted upload throws the real SDK exception → classified below (not swallowed).
+                await CauReflect.UploadOne(setting, builder, CancellationToken.None);
 
                 AssetDatabase.SaveAssets();
                 if (wasFirstUpload && ClassifyAvatar(go).state == "first-upload")
                     return UploadOutcome.ReservedNoBundle();
-                _ledger.Clear(handle); // success resets the ceiling — it counts only consecutive failures
+                _ledger.Clear(key); // success resets the ceiling — it counts only consecutive failures
                 return UploadOutcome.Uploaded();
             }
             catch (Exception e)
             {
-                var inner = e.InnerException ?? e;
-                return UploadOutcome.Failed(
-                    httpStatus:   ExtractHttpStatus(inner),
-                    isValidation: inner.GetType().Name.IndexOf("Validation", StringComparison.OrdinalIgnoreCase) >= 0,
-                    isTimeout:    inner is TimeoutException,
-                    message:      inner.Message);
+                return FailedFromException(e);
             }
+        }
+
+        /// <summary>Map a thrown upload exception to a classified <see cref="UploadOutcome.Failed"/>: unwrap
+        /// one layer of wrapping, pull the HTTP status, flag validation (by type name) / timeout. This is the
+        /// path that keeps 429/validation from being mislabeled transient — kept internal so it is unit-tested
+        /// against a fake exception without the live SDK.</summary>
+        internal static UploadOutcome FailedFromException(Exception e)
+        {
+            var inner = e.InnerException ?? e;
+            return UploadOutcome.Failed(
+                httpStatus:   ExtractHttpStatus(inner),
+                isValidation: inner.GetType().Name.IndexOf("Validation", StringComparison.OrdinalIgnoreCase) >= 0,
+                isTimeout:    inner is TimeoutException,
+                message:      inner.Message);
         }
 
         /// <summary>Best-effort HTTP status off an SDK exception: an int / HttpStatusCode property named
         /// <c>StatusCode</c> or <c>Status</c>, else null. The exact SDK exception shape is a Task-8
         /// live-validation item — this is a reflective placeholder, not a proven mapping.</summary>
-        static int? ExtractHttpStatus(Exception e)
+        internal static int? ExtractHttpStatus(Exception e)
         {
             foreach (var name in new[] { "StatusCode", "Status", "HttpStatusCode" })
             {
@@ -267,8 +309,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
+        // Scrub at the choke point: TryGetBuilder/TryBuildSetting embed SDK exception .Message into reason.
         static string Refuse(string reason)
-            => "[upload-avatar] all => REFUSE error=" + reason;
+            => "[upload-avatar] all => REFUSE error=" + UploadAvatarLogic.RedactIds(reason);
 
         // ── Classification / preconditions ──────────────────────────────────────────────────────
 
@@ -277,6 +320,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// → treated as first-upload (its absence means the avatar was never uploaded). Mutates nothing.</summary>
         public static (string state, string publishName) ClassifyAvatar(GameObject go)
         {
+            if (go == null) return ("unknown", "(null)");
             var pm = go.GetComponent<PipelineManager>();
             if (pm == null) return (UploadAvatarLogic.ClassifyBlueprint(null), go.name);
             var prop = new SerializedObject(pm).FindProperty("blueprintId");
@@ -307,8 +351,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var c = Counts(report);
             string marker = whatIf ? " (whatIf)" : "";
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[upload-avatar]{0} all: uploaded={1} reserved={2} failed={3} (transient={4} rate-limit={5} real={6}) => {7} | log={8}",
-                marker, c["uploaded"], c["reserved"], c["failed"],
+                "[upload-avatar]{0} all: uploaded={1} reserved={2} failed={3} not-attempted={4} (transient={5} rate-limit={6} real={7}) => {8} | log={9}",
+                marker, c["uploaded"], c["reserved"], c["failed"], c["not-attempted"],
                 c["transient"], c["rate-limit"], c["real"], report.result, logPath);
             if (report.result == "PASS") Debug.Log(summary); else Debug.LogError(summary);
             return summary;
@@ -318,7 +362,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             var c = new Dictionary<string, int>
             {
-                ["uploaded"] = 0, ["reserved"] = 0, ["failed"] = 0,
+                ["uploaded"] = 0, ["reserved"] = 0, ["failed"] = 0, ["not-attempted"] = 0,
                 ["transient"] = 0, ["rate-limit"] = 0, ["real"] = 0,
             };
             foreach (var r in report.rows)
@@ -326,6 +370,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (r.result == "uploaded") c["uploaded"]++;
                 else if (r.result == "reserved-no-bundle") c["reserved"]++;
                 else if (r.result == "failed") c["failed"]++;
+                else if (r.result == "not-attempted") c["not-attempted"]++;
                 if (r.cls == "transient") c["transient"]++;
                 else if (r.cls == "rate-limit") c["rate-limit"]++;
                 else if (r.cls == "real") c["real"]++;
@@ -354,6 +399,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("  \"uploaded\": ").Append(c["uploaded"]).Append(",\n");
             sb.Append("  \"reserved\": ").Append(c["reserved"]).Append(",\n");
             sb.Append("  \"failed\": ").Append(c["failed"]).Append(",\n");
+            sb.Append("  \"not-attempted\": ").Append(c["not-attempted"]).Append(",\n");
             sb.Append("  \"transient\": ").Append(c["transient"]).Append(",\n");
             sb.Append("  \"rate-limit\": ").Append(c["rate-limit"]).Append(",\n");
             sb.Append("  \"real\": ").Append(c["real"]).Append(",\n");
