@@ -851,6 +851,68 @@ public class OwnMaterialTests
         StringAssert.Contains("would augment", json);
     }
 
+    // ── Task 5: variant flatten on copy-to-new, before the (Task 6) unlock seam ───────────────────────
+
+    [Test] public void Variant_source_is_flattened_on_own()
+    {
+        var parent = VendorMat("Base");             // Standard shader, under Vendor
+        parent.SetFloat("_Glossiness", 0.9f);
+        parent.SetOverrideTag("OwnMatTestTag", "vendor-tag-value");
+        parent.EnableKeyword("_EMISSION");
+        EditorUtility.SetDirty(parent); AssetDatabase.SaveAssets();
+
+        // Create + save the bare variant BEFORE setting any override on it, then set overrides on the
+        // reloaded, asset-backed instance — matches how a Variant is actually authored (Inspector edits
+        // always hit an asset-backed object; touching properties on a never-saved Variant collapses its
+        // inherited keyword state immediately, in-memory — a Unity scripting quirk unrelated to this tool).
+        var variant = new Material(parent) { parent = parent };
+        string vp = VendorRoot + "/Var.mat";
+        AssetDatabase.CreateAsset(variant, vp); AssetDatabase.SaveAssets();
+
+        var v = AssetDatabase.LoadAssetAtPath<Material>(vp);
+        v.SetColor("_Color", Color.red);            // child override
+        // 2100: a valid custom queue for the Standard shader's default Opaque blend mode.
+        v.renderQueue = 2100;
+        // Re-affirm _EMISSION LAST, right before saving: touching another property value first (SetColor/
+        // renderQueue above) silently drops a Variant's purely-inherited (never locally-touched) keyword
+        // state — re-asserting it makes it this child's own local override, which then survives.
+        v.EnableKeyword("_EMISSION");
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string s = OwnMaterial.Run(vp, Owned, System.Array.Empty<string>(), newName: "Flat");
+        StringAssert.Contains("=> PASS", s);
+
+        var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Flat.mat");
+        // Keyword FIRST: the first GetColor/GetFloat/GetTexture call on a freshly-loaded Material instance
+        // silently clears its shaderKeywords as a side effect (memory unity-material-getter-clears-
+        // keywords' variant exception) — IsKeywordEnabled/parent don't trigger it, but reading the keyword
+        // AFTER another property getter already has would falsely fail.
+        Assert.IsTrue(o.IsKeywordEnabled("_EMISSION"), "keyword carried");
+        Assert.IsNull(o.parent, "flattened to standalone");
+        Assert.AreEqual(Color.red, o.GetColor("_Color"), "child override carried");
+        Assert.AreEqual(0.9f, o.GetFloat("_Glossiness"), 1e-4f, "inherited value baked");
+        Assert.AreEqual(2100, o.renderQueue, "renderQueue carried");
+        Assert.AreEqual("vendor-tag-value", o.GetTag("OwnMatTestTag", false, ""), "override tag carried");
+    }
+
+    [Test] public void Nonvariant_own_is_unaffected_by_flatten()
+    {
+        var v = VendorMat("Dress");
+        var tex = MakeTexture(VendorRoot, "Body");
+        v.SetTexture("_MainTex", tex);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
+        StringAssert.Contains("=> PASS", s);
+
+        var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
+        Assert.IsNull(o.parent, "non-variant stays parentless (was already null — flatten never runs)");
+
+        string logPath = ExtractLogPath(s);
+        string json = File.ReadAllText(logPath);
+        StringAssert.DoesNotContain("flattened variant", json, "flatten path must not run for a non-variant copy");
+    }
+
     static string ExtractLogPath(string summary)
     {
         int i = summary.IndexOf("log=");

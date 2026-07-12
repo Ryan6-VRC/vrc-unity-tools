@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Rendering;
 using Ryan6Vrc.AgentTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Editor
@@ -20,13 +21,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
     ///
     /// Full behavioral spec: <c>docs/superpowers/specs/2026-07-11-own-material-lean-design.md</c>. This
     /// file implements Flow steps 1–6: arg guards, slot-name validation, target-identity routing
-    /// (own / branch / augment) with a copy-to-new deep copy, and the selective texture fork engine —
-    /// requested slots resolve into the per-material texture home <c>H(O) = &lt;O.folder&gt;/
-    /// &lt;Sanitize(O.name)&gt;/</c> via a run-local claimed-<c>dst</c> map (reuse/refuse, never a
-    /// content-hash dedup pass or GUID-suffix collision escape), untouched slots report their current
-    /// reference, and the disk-truthful post-condition rebuilds <c>slots[]</c> from the reloaded asset.
-    /// Variant flatten and locked-poi unlock are not wired yet (Tasks 5/6) — a copy-to-new source is
-    /// assumed already standalone/unlocked.
+    /// (own / branch / augment) with a copy-to-new deep copy, the copy-to-new normalize step (a variant
+    /// source is flattened into a standalone material BEFORE the Task-6 unlock seam — Thry's unlock
+    /// selects <c>GetRoot()</c>, so an un-flattened variant would unlock the vendor root instead of O),
+    /// and the selective texture fork engine — requested slots resolve into the per-material texture home
+    /// <c>H(O) = &lt;O.folder&gt;/&lt;Sanitize(O.name)&gt;/</c> via a run-local claimed-<c>dst</c> map
+    /// (reuse/refuse, never a content-hash dedup pass or GUID-suffix collision escape), untouched slots
+    /// report their current reference, and the disk-truthful post-condition rebuilds <c>slots[]</c> from
+    /// the reloaded asset. Locked-poi unlock is not wired yet (Task 6) — a copy-to-new source is assumed
+    /// already unlocked.
     ///
     /// Call <see cref="Run"/> from MCP execute_code or a menu item.
     /// </summary>
@@ -170,6 +173,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
             EnsureFolderExists(outClean);
             if (!AssetDatabase.CopyAsset(sourcePath, targetPath))
                 return Fail(data, coLabel, "CopyAsset failed: " + sourcePath + " -> " + targetPath);
+
+            // ── Normalize O (Flow step 4, copy-to-new only — an in-place O is already normal since the
+            //    in-place guard above FAILs a variant/locked owned source before we ever get here).
+            //    Flatten a variant into a standalone material BEFORE the unlock seam below: Thry's unlock
+            //    (Task 6) selects m.GetRoot(), so an un-flattened variant would resolve to S's root and
+            //    unlock THAT (a vendor mutation) instead of O. ──
+            var normalizeTarget = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
+            if (normalizeTarget == null)
+            {
+                AssetDatabase.DeleteAsset(targetPath);
+                return Fail(data, coLabel, "owned copy load failed immediately after CopyAsset: " + targetPath);
+            }
+            if (normalizeTarget.parent != null)
+            {
+                FlattenVariant(normalizeTarget);
+                EditorUtility.SetDirty(normalizeTarget);
+                AssetDatabase.SaveAssets();
+                AssetDatabase.ImportAsset(targetPath, ImportAssetOptions.ForceUpdate);
+                data.Note("flattened variant source into a standalone material before forking");
+            }
+
+            // ── Unlock O if locked seam (Task 6) attaches HERE — gated on O's own state (post-flatten, so
+            //    GetRoot() == O), so an already-unlocked branch source no-ops. ──
 
             // O now exists on disk (createdO=true) — any FAIL from here rolls it back (see
             // ForkSlotsAndPersist's rollback closure).
@@ -651,6 +677,119 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// augment guard (Task 2) — an owned material must never be locked before this tool touches it.</summary>
         static bool IsLocked(Material m) =>
             m.shader != null && m.shader.name.StartsWith("Hidden/Locked/", StringComparison.Ordinal);
+
+        // ── Normalize: variant flatten (Flow step 4) ────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Bake a Material Variant into a standalone material: the resolved shader-keyword set,
+        /// <c>renderQueue</c>, and every override tag (walking the WHOLE parent chain for tag names, since
+        /// a tag never overridden on <paramref name="o"/> itself lives only in an ancestor's own
+        /// <c>stringTagMap</c>) are captured FIRST, before touching any shader property value — the first
+        /// GetColor/GetFloat/GetVector/GetInt/GetTexture call on a Material instance silently clears its
+        /// ENTIRE <c>shaderKeywords</c> array as a side effect (a Unity engine quirk confirmed empirically,
+        /// independent of variants, shaders, or this tool); reading keywords/queue/tags before ever touching
+        /// a property sidesteps it. Every shader property (float/range/color/vector/int/texture +
+        /// tiling/offset) is read off <paramref name="o"/> next — still resolving through its parent chain —
+        /// then <c>o.parent</c> is severed and everything is re-applied as <paramref name="o"/>'s own
+        /// explicit values. Un-timed: caller still owns <c>SetDirty</c>/<c>SaveAssets</c>/reimport.
+        /// </summary>
+        static void FlattenVariant(Material o)
+        {
+            var shader = o.shader;
+
+            // Resolved-enabled keyword set: a per-name IsKeywordEnabled probe over the shader's local
+            // keyword space. Kept BEFORE any shader-property Get/Set below — the first GetColor/GetFloat/
+            // GetVector/GetInt/GetTexture call on a Material instance silently clears its ENTIRE
+            // shaderKeywords array as a side effect (memory unity-material-getter-clears-keywords; renderQueue,
+            // parent, and IsKeywordEnabled itself do not trigger it), so keywords must be read first or lost
+            // outright. This is the memory's VARIANT EXCEPTION: a plain shaderKeywords array-getter snapshot
+            // (as ForkSlotsAndPersist takes for a non-variant O) would NOT include a keyword inherited-but-
+            // never-overridden from the parent — only a per-keyword IsKeywordEnabled probe over
+            // shader.keywordSpace resolves the full effective set through the (about-to-be-severed) parent
+            // chain.
+            var enabledKeywords = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var kw in shader.keywordSpace.keywordNames)
+                if (o.IsKeywordEnabled(kw)) enabledKeywords.Add(kw);
+
+            int renderQueue = o.renderQueue;
+            var tags = CaptureOverrideTags(o);
+
+            var floats = new List<(string name, float val)>();
+            var colors = new List<(string name, Color val)>();
+            var vectors = new List<(string name, Vector4 val)>();
+            var ints = new List<(string name, int val)>();
+            var textures = new List<(string name, Texture tex, Vector2 scale, Vector2 offset)>();
+
+            int propCount = shader.GetPropertyCount();
+            for (int i = 0; i < propCount; i++)
+            {
+                string name = shader.GetPropertyName(i);
+                switch (shader.GetPropertyType(i))
+                {
+                    case ShaderPropertyType.Color:
+                        colors.Add((name, o.GetColor(name)));
+                        break;
+                    case ShaderPropertyType.Vector:
+                        vectors.Add((name, o.GetVector(name)));
+                        break;
+                    case ShaderPropertyType.Float:
+                    case ShaderPropertyType.Range:
+                        floats.Add((name, o.GetFloat(name)));
+                        break;
+                    case ShaderPropertyType.Int:
+                        ints.Add((name, o.GetInt(name)));
+                        break;
+                    case ShaderPropertyType.Texture:
+                        textures.Add((name, o.GetTexture(name), o.GetTextureScale(name), o.GetTextureOffset(name)));
+                        break;
+                }
+            }
+
+            o.parent = null;
+
+            foreach (var p in floats) o.SetFloat(p.name, p.val);
+            foreach (var p in colors) o.SetColor(p.name, p.val);
+            foreach (var p in vectors) o.SetVector(p.name, p.val);
+            foreach (var p in ints) o.SetInt(p.name, p.val);
+            foreach (var p in textures)
+            {
+                o.SetTexture(p.name, p.tex);
+                o.SetTextureScale(p.name, p.scale);
+                o.SetTextureOffset(p.name, p.offset);
+            }
+            var kwArray = new string[enabledKeywords.Count];
+            enabledKeywords.CopyTo(kwArray);
+            o.shaderKeywords = kwArray;
+            o.renderQueue = renderQueue;
+            foreach (var kv in tags) o.SetOverrideTag(kv.Key, kv.Value);
+        }
+
+        /// <summary>
+        /// Every override-tag NAME ever set anywhere up <paramref name="o"/>'s parent chain (a tag never
+        /// overridden on <paramref name="o"/> itself lives only in an ancestor's own serialized
+        /// <c>stringTagMap</c> — walking the chain is the only way to find its name; there is no public
+        /// enumeration API), each resolved to <paramref name="o"/>'s own effective value via
+        /// <c>GetTag(name, false, "")</c> (Thry's own <c>DeleteTags</c> uses this exact
+        /// <c>SerializedObject</c>/<c>stringTagMap</c> walk to enumerate tag names).
+        /// </summary>
+        static List<KeyValuePair<string, string>> CaptureOverrideTags(Material o)
+        {
+            var tagNames = new HashSet<string>(StringComparer.Ordinal);
+            for (var m = o; m != null; m = m.parent)
+            {
+                var it = new SerializedObject(m).GetIterator();
+                while (it.Next(true))
+                {
+                    if (it.name != "stringTagMap") continue;
+                    for (int i = 0; i < it.arraySize; i++)
+                        tagNames.Add(it.GetArrayElementAtIndex(i).displayName);
+                }
+            }
+            var tags = new List<KeyValuePair<string, string>>();
+            foreach (var name in tagNames)
+                tags.Add(new KeyValuePair<string, string>(name, o.GetTag(name, false, "")));
+            return tags;
+        }
 
         // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
