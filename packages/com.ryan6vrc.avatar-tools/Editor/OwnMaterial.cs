@@ -181,12 +181,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (whatIf)
             {
                 data.Note("would create '" + targetPath + "'");
-                // Reproduce the locked-source-but-Thry-unresolvable FAIL read-only — checked on S directly
-                // (copy-to-new preserves the shader, so IsLocked(S) == IsLocked(O) pre-fork). Only the
-                // Thry-resolve check previews here; the dialog guard and the unlock itself are never
-                // reached under whatIf (nothing is unlocked or written).
-                if (IsLocked(mat) && !TryResolvePoiUnlock(out _, out _, out string wiReason))
-                    return Fail(data, coLabel, ThryUnresolvedMessage(wiReason));
+                if (mat.parent != null)
+                    data.Note("would flatten variant source into a standalone material before forking");
+
+                // Reproduce every read-only normalize FAIL on S directly (copy-to-new preserves the
+                // shader + tags, so IsLocked(S)/the tag resolution == O's pre-fork). The Thry-resolve
+                // check AND the dialog-guard's OriginalShaderResolves are both pure read-only (tags +
+                // GUIDToAssetPath/LoadAssetAtPath/Shader.Find, no Thry, no dialog risk), so both preview
+                // here — the only un-previewable step is the unlock's actual mutation. On mat (parent
+                // chain intact), matching execute's post-flatten computation.
+                if (IsLocked(mat))
+                {
+                    if (!TryResolvePoiUnlock(out _, out _, out string wiReason))
+                        return Fail(data, coLabel, ThryUnresolvedMessage(wiReason));
+                    if (!OriginalShaderResolves(mat, out string wiTag))
+                        return Fail(data, coLabel, UnresolvableOriginalShaderMessage(wiTag));
+                    data.Note("would unlock locked-poi material via Thry.ThryEditor.ShaderOptimizer.UnlockMaterials");
+                }
                 return WhatIfPreview(mat, textureHome, requested, data, coLabel);
             }
 
@@ -236,8 +247,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (!OriginalShaderResolves(normalizeTarget, out string origTag))
                 {
                     AssetDatabase.DeleteAsset(targetPath);
-                    return Fail(data, coLabel, "locked poi material's original-shader tag ('" + origTag +
-                        "') does not resolve to a shader — cannot safely unlock");
+                    return Fail(data, coLabel, UnresolvableOriginalShaderMessage(origTag));
                 }
 
                 var (unlocked, unlockReason) = PoiUnlock(normalizeTarget);
@@ -768,6 +778,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         static string ThryUnresolvedMessage(string reason) =>
             "locked poi material but Thry ShaderOptimizer not found — is com.poiyomi.toon installed? (" + reason + ")";
+
+        static string UnresolvableOriginalShaderMessage(string tag) =>
+            "locked poi material's original-shader tag ('" + tag + "') does not resolve to a shader — cannot safely unlock";
 
         /// <summary>
         /// Does <paramref name="m"/>'s saved original-shader tag resolve to a REAL shader? Mirrors Thry's
