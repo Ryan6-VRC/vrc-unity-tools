@@ -733,6 +733,53 @@ public class OwnMaterialTests
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat"), "FAIL must roll back the created O");
     }
 
+    // ── Coverage gaps folded in from Task 3's review ────────────────────────────────────────────────
+
+    [Test] public void Untouched_slot_pointing_at_another_owned_materials_texture_reports_owned_elsewhere_with_note()
+    {
+        // First material: fork a texture, so it has an owned copy under its own H(O).
+        var baseMat = VendorMat("Base");
+        var baseTex = MakeTexture(VendorRoot, "BaseTex");
+        baseMat.SetTexture("_MainTex", baseTex);
+        EditorUtility.SetDirty(baseMat); AssetDatabase.SaveAssets();
+        string baseSummary = OwnMaterial.Run(AssetDatabase.GetAssetPath(baseMat), Owned, new[] { "_MainTex" });
+        StringAssert.Contains("=> PASS", baseSummary);
+        var ownedBase = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Base.mat");
+        var ownedBaseTex = ownedBase.GetTexture("_MainTex");
+        string ownedBaseTexPath = AssetDatabase.GetAssetPath(ownedBaseTex);
+        StringAssert.StartsWith(Owned + "/Base/", ownedBaseTexPath);
+
+        // Second material: an UNtouched slot (not requested) points at the FIRST material's owned
+        // texture — a texture under a DIFFERENT owned material's H(O).
+        var dress = VendorMat("Dress");
+        dress.SetTexture("_BumpMap", ownedBaseTex);
+        EditorUtility.SetDirty(dress); AssetDatabase.SaveAssets();
+
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(dress), Owned); // fork nothing on Dress
+        StringAssert.Contains("=> PASS", s);
+
+        string logPath = ExtractLogPath(s);
+        string json = File.ReadAllText(logPath);
+        StringAssert.Contains("\"slot\": \"_BumpMap\", \"requested\": false, \"disposition\": \"owned-elsewhere\"", json);
+        StringAssert.Contains("\"notes\": [", json);
+        StringAssert.Contains(ownedBaseTexPath, json);
+    }
+
+    [Test] public void WhatIf_own_with_fork_request_reports_slotsForked_and_creates_no_asset()
+    {
+        var v = VendorMat("Dress");
+        var tex = MakeTexture(VendorRoot, "Diffuse");
+        v.SetTexture("_MainTex", tex);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" }, whatIf: true);
+        StringAssert.Contains("=> PASS", s);
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(s, "slotsForked"), "a real forkTextureSlots request previews as a would-fork");
+        Assert.IsNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat"), "whatIf must create no owned material");
+        Assert.IsFalse(File.Exists(Owned + "/Dress/Diffuse.png"), "whatIf must create no owned texture");
+        Assert.IsFalse(AssetDatabase.IsValidFolder(Owned), "whatIf must not even create the outDir folder");
+    }
+
     static string ExtractLogPath(string summary)
     {
         int i = summary.IndexOf("log=");
