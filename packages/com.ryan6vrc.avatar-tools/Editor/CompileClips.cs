@@ -32,8 +32,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// VISIBLE main assets — never <see cref="HideFlags.HideInHierarchy"/> (that flag is for the
     /// controller-embedded sub-asset path only).</para>
     ///
-    /// <para>The <paramref name="force"/> divergence guard (refuse to clobber an out-of-band-edited clip) is
-    /// a LATER task — for now <c>force</c> is accepted but the in-place write always overwrites.</para>
+    /// <para><b>DIVERGENCE GUARD.</b> Before writing, each existing target <c>.anim</c> is compared to the
+    /// content stamp WE last wrote for it (Task 3). A clip whose on-disk content diverges from its stamp — or
+    /// carries no stamp at all — was touched OUT OF BAND (a human hand-edit, or a pre-existing hand-authored
+    /// <c>.anim</c> we never emitted). Any divergence REFUSES the whole run writing nothing (batch-atomic),
+    /// naming each offender — unless <paramref name="force"/>, which overwrites + re-stamps and notes each
+    /// clobber. This compares disk-to-stamp, NOT to the YAML: recompiling our own untouched output (identical
+    /// OR changed source) rehashes to the stamp and is never diverged, so only a human edit trips the guard.</para>
     /// </summary>
     [AgentTool]
     public static class CompileClips
@@ -41,10 +46,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>Compile the clips-file YAML at <paramref name="sourcePath"/> (a filesystem path) into
         /// external <c>.anim</c> assets under <paramref name="outDir"/> (an <c>Assets/…</c>-relative folder).
         /// With <paramref name="whatIf"/> nothing is written — the summary still carries every would-be ref
-        /// path. <paramref name="force"/> = override safety guards; in Task 2 it overrides ONLY the
-        /// outDir-writability guard (write owned copies into read-only Assets/Vendor or Packages territory);
-        /// a later task widens it to also override the divergence-refuse. Returns the one-line PASS/FAIL
-        /// summary with the RunLog path folded on (<c>… => RESULT | log=&lt;path&gt;</c>).</summary>
+        /// path. <paramref name="force"/> = override safety guards: it overrides BOTH the outDir-writability
+        /// guard (write owned copies into read-only Assets/Vendor or Packages territory) AND the divergence
+        /// guard (overwrite a hand-edited / unstamped existing <c>.anim</c> instead of refusing). Returns the
+        /// one-line PASS/FAIL summary with the RunLog path folded on (<c>… => RESULT | log=&lt;path&gt;</c>).</summary>
         public static string Compile(string sourcePath, string outDir, bool force = false, bool whatIf = false)
         {
             var log = new TransplantRunLog("compile-clips") { whatIf = whatIf, source = sourcePath };
@@ -134,6 +139,38 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         log.Offender("clip '" + spec.Name + "': " + ee.Message);
                         return Fail(log, label, "clip build failed (batch-atomic; nothing written)");
                     }
+                }
+
+                // ── Divergence guard (force-gated), scanned as its OWN pass BEFORE any write so a refusal
+                //    leaves every .anim untouched (batch-atomic, like the collision/bad-binding guards). For
+                //    each already-existing target, `diverged` iff its on-disk content differs from the stamp WE
+                //    last wrote for it (ReadContentStamp == null → hand-authored/never emitted here; or hash !=
+                //    stamp → edited out of band since our last emit). This compares DISK to our own stamp, not to
+                //    the YAML: Task 3 stamps the disk hash, so recompiling our own untouched output — identical
+                //    OR changed source — rehashes to the stamp and is NOT diverged (overwrites silently). Only a
+                //    human hand-edit or an unstamped pre-existing .anim trips this. force overrides: overwrite +
+                //    re-stamp (the reload-stamp loop below) + a loud per-clobber note. ──
+                var diverged = new List<string>(); // authored names whose on-disk .anim diverges from our stamp
+                foreach (var spec in doc.Clips)
+                {
+                    string path = outClean + "/" + TransplantCore.Sanitize(spec.Name) + ".anim";
+                    var onDisk = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
+                    if (onDisk == null) continue; // absent target — nothing to clobber
+                    string stamp = ReadContentStamp(path);
+                    if (stamp == null || HashClipContent(onDisk) != stamp) diverged.Add(spec.Name);
+                }
+                if (diverged.Count > 0)
+                {
+                    if (!force)
+                    {
+                        foreach (var name in diverged)
+                            log.Offender("clip '" + name + "' at " + outClean + "/" + TransplantCore.Sanitize(name) +
+                                ".anim looks hand-edited (on-disk content diverges from its last-emit stamp): pass " +
+                                "force=true to overwrite it, or promote it by removing it from the clips file");
+                        return Fail(log, label, "refusing to clobber " + diverged.Count + " diverged clip(s)");
+                    }
+                    foreach (var name in diverged)
+                        log.Note("clobbered diverged clip '" + name + "' (force)");
                 }
 
                 if (!whatIf) EnsureFolderExists(outClean);

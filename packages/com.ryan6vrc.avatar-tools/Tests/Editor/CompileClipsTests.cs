@@ -176,4 +176,39 @@ public class CompileClipsTests
         CompileClips.Compile(WriteYaml(mutated), Out, force: true);     // force: content diverged from stamp (Task 4 not yet built, but force is safe)
         Assert.AreNotEqual(h1, CompileClips.ReadContentStamp(Out + "/Wave.anim"), "hash changes when content changes");
     }
+
+    [Test]
+    public void Refuses_to_clobber_a_hand_edit()
+    {
+        CompileClips.Compile(WriteYaml(TwoPoses), Out);                  // emit + stamp Wave (a PASS)
+        var wave = AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim");
+        AnimatorTestHelpers.AddFloatCurve(wave, "HandEdited", typeof(Transform), "m_LocalPosition.x");
+        AnimatorTestHelpers.Save(wave, Out + "/Wave.anim");             // human edit lands on disk (stamp now stale)
+
+        // No-force recompile: Wave's on-disk hash no longer matches its stamp → refuse, write nothing. Point's
+        // does match → not named. FAIL routes through Finish's Debug.LogError.
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("refusing to clobber"));
+        string s = CompileClips.Compile(WriteYaml(TwoPoses), Out);
+        StringAssert.Contains("FAIL", s);
+        StringAssert.Contains("Wave", s);
+        Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(Out + "/Wave.anim", "HandEdited"), "hand-edit preserved (refused, nothing written)");
+
+        string s2 = CompileClips.Compile(WriteYaml(TwoPoses), Out, force: true);   // force overrides → overwrite + re-stamp
+        StringAssert.Contains("=> PASS", s2);
+        Assert.IsFalse(AnimatorTestHelpers.ClipHasBinding(Out + "/Wave.anim", "HandEdited"), "force reverts to YAML content");
+    }
+
+    [Test]
+    public void Adopting_an_unstamped_anim_refuses_without_force()
+    {
+        AnimatorTestHelpers.EnsureFolder(Out);
+        var pre = AnimatorTestHelpers.MakeClip(Out + "/Wave.anim");
+        AnimatorTestHelpers.AddFloatCurve(pre, "Human", typeof(Transform), "m_LocalPosition.x");
+        AnimatorTestHelpers.Save(pre, Out + "/Wave.anim");             // pre-existing human .anim, never stamped by us
+        // ReadContentStamp == null → diverged → refuse; nothing written (Point never created either).
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("refusing to clobber"));
+        string s = CompileClips.Compile(WriteYaml(TwoPoses), Out);
+        StringAssert.Contains("FAIL", s);
+        Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(Out + "/Wave.anim", "Human"), "unstamped human .anim protected (nothing written)");
+    }
 }
