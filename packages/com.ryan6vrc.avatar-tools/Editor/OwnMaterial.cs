@@ -19,11 +19,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// provenance table (<c>slots[]</c>) as the caller's verification gate.
     ///
     /// Full behavioral spec: <c>docs/superpowers/specs/2026-07-11-own-material-lean-design.md</c>. This
-    /// file currently implements Flow steps 1–3: arg guards, slot-name validation, and target-identity
-    /// routing (own / branch / augment) with a copy-to-new deep copy. Forking, variant flatten, and
-    /// locked-poi unlock are not wired yet (Tasks 3/5/6) — every slot on a landed <c>O</c> reports
-    /// <c>vendor-ref</c> regardless of what was requested (a deliberate Task-2 stub; slot-name validation
-    /// still FAILs a typo'd request, it just doesn't fork a valid one yet).
+    /// file implements Flow steps 1–6: arg guards, slot-name validation, target-identity routing
+    /// (own / branch / augment) with a copy-to-new deep copy, and the selective texture fork engine —
+    /// requested slots resolve into the per-material texture home <c>H(O) = &lt;O.folder&gt;/
+    /// &lt;Sanitize(O.name)&gt;/</c> via a run-local claimed-<c>dst</c> map (reuse/refuse, never a
+    /// content-hash dedup pass or GUID-suffix collision escape), untouched slots report their current
+    /// reference, and the disk-truthful post-condition rebuilds <c>slots[]</c> from the reloaded asset.
+    /// Variant flatten and locked-poi unlock are not wired yet (Tasks 5/6) — a copy-to-new source is
+    /// assumed already standalone/unlocked.
     ///
     /// Call <see cref="Run"/> from MCP execute_code or a menu item.
     /// </summary>
@@ -92,8 +95,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string sourcePath = materialPath.Replace('\\', '/');
             bool outDirGiven = !string.IsNullOrEmpty(outDir);
             string outClean = outDirGiven ? outDir.Replace('\\', '/').TrimEnd('/') : null;
+            string oName = !string.IsNullOrEmpty(newName) ? newName : mat.name;
             string targetPath = outDirGiven
-                ? outClean + "/" + TransplantCore.Sanitize(!string.IsNullOrEmpty(newName) ? newName : mat.name) + ".mat"
+                ? outClean + "/" + TransplantCore.Sanitize(oName) + ".mat"
                 : sourcePath;
 
             bool inPlace = targetPath == sourcePath;
@@ -119,11 +123,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (mat.parent != null)
                     return Fail(data, modeLabel, "owned material is a variant; OwnMaterial produces standalone materials");
 
-                // No fork/normalize yet (Task 2 scope) — O is already S; report the stub slot table and PASS.
-                BuildVendorRefSlots(mat, requested, data);
-                data.result = "PASS";
-                if (whatIf) data.Note("would augment '" + sourcePath + "' in place");
-                return Finish(data, modeLabel);
+                // H(O) for the in-place route: O IS S, so O's folder is S's own folder — augment never
+                // renames or relocates, unlike the copy-to-new oName/outClean pairing below.
+                string inPlaceHome = InPlaceTextureHome(sourcePath, mat.name);
+
+                if (whatIf)
+                {
+                    data.Note("would augment '" + sourcePath + "' in place");
+                    return WhatIfPreview(mat, inPlaceHome, requested, data, modeLabel);
+                }
+
+                // Augment: O = S already exists — createdO=false so a FAIL below never deletes the
+                // pre-existing (possibly hand-edited) material; only newly-copied textures roll back.
+                return ForkSlotsAndPersist(sourcePath, inPlaceHome, requested, data, modeLabel, createdO: false);
             }
 
             // ── Copy-to-new: own (S vendor) or branch (S owned) — same mechanics, RunLog names which. ──
@@ -145,64 +157,480 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return Fail(data, coLabel, "an owned material already exists at '" + targetPath +
                     "' — pass it as materialPath to fork more slots, or choose another newName");
 
+            // H(O) = <O.folder>/<Sanitize(O.name)>/ — same oName used to build targetPath above, so O's
+            // eventual on-disk name always matches the home this plans against.
+            string textureHome = outClean + "/" + TransplantCore.Sanitize(oName);
+
             if (whatIf)
             {
-                BuildVendorRefSlots(mat, requested, data);
-                data.result = "PASS";
                 data.Note("would create '" + targetPath + "'");
-                return Finish(data, coLabel);
+                return WhatIfPreview(mat, textureHome, requested, data, coLabel);
             }
 
             EnsureFolderExists(outClean);
             if (!AssetDatabase.CopyAsset(sourcePath, targetPath))
                 return Fail(data, coLabel, "CopyAsset failed: " + sourcePath + " -> " + targetPath);
 
-            var owned = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
-            if (owned == null)
-            {
-                AssetDatabase.DeleteAsset(targetPath);
-                return Fail(data, coLabel, "owned copy load failed immediately after CopyAsset: " + targetPath);
-            }
-
-            // No fork/normalize yet (Task 2 scope) — O is a byte-preserving deep copy of S; report the
-            // stub slot table (every slot vendor-ref) and PASS.
-            BuildVendorRefSlots(owned, requested, data);
-            data.result = "PASS";
-            return Finish(data, coLabel);
+            // O now exists on disk (createdO=true) — any FAIL from here rolls it back (see
+            // ForkSlotsAndPersist's rollback closure).
+            return ForkSlotsAndPersist(targetPath, textureHome, requested, data, coLabel, createdO: true);
         }
 
-        // ── Task-2 stub slot table (replaced by the full fork disposition matrix in Task 3) ─────────
+        // ── Slot forking (Flow steps 5–6) ───────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Lists every shader texture slot on <paramref name="src"/> as <c>vendor-ref</c> — Task 2 does
-        /// not fork yet, so this is a deliberate placeholder: no slot is ever <c>forked</c>/
-        /// <c>already-owned</c>/<c>unforkable</c>/<c>owned-elsewhere</c>/<c>empty</c> here, regardless of
-        /// <paramref name="requested"/> (a requested slot still reports <c>vendor-ref</c> — the fork
-        /// disposition itself is Task 3's <c>BuildPlan</c>). Read-only: reads each slot's texture once
-        /// (never saved afterward in this stub path, so the getter-clears-keywords quirk never reaches
-        /// disk — see memory <c>unity-material-getter-clears-keywords</c>).
+        /// <c>H(O) = &lt;O.folder&gt;/&lt;Sanitize(O.name)&gt;/</c> for the in-place route, where O's folder
+        /// is S's own folder (no <c>outDir</c>/<c>newName</c> — augment never renames or relocates).
         /// </summary>
-        static void BuildVendorRefSlots(Material src, HashSet<string> requested, RunData data)
+        static string InPlaceTextureHome(string sourcePath, string matName)
         {
+            int slash = sourcePath.LastIndexOf('/');
+            string folder = slash >= 0 ? sourcePath.Substring(0, slash) : "";
+            return folder + "/" + TransplantCore.Sanitize(matName);
+        }
+
+        /// <summary>
+        /// Read-only preview shared by both routes: full slot dispositioning off <paramref name="src"/>
+        /// (S for copy-to-new — an as-yet-uncreated O is byte-identical to it; the caller's owned material
+        /// for in-place) against <paramref name="home"/>. Mutates nothing on disk; reproduces every
+        /// read-only slot offender identically to execute (same <see cref="BuildPlan"/> call, a fresh
+        /// claimed-map — same-run collisions resolve the same way in both modes).
+        /// </summary>
+        static string WhatIfPreview(Material src, string home, HashSet<string> requested, RunData data, string label)
+        {
+            // Snapshot BEFORE the first texture-slot getter BuildPlan fires (GetTexture silently wipes the
+            // material's in-memory shaderKeywords — memory unity-material-getter-clears-keywords). whatIf
+            // saves nothing, but src is the caller's LIVE material instance; leaving it keyword-wiped would
+            // be a real side effect of a call that promises to mutate nothing.
+            var kw = src.shaderKeywords;
+            var sourceToDst = new Dictionary<string, string>(StringComparer.Ordinal);
+            var claimedDstToSource = new Dictionary<string, string>(StringComparer.Ordinal);
+            var plan = BuildPlan(src, home, requested, data, sourceToDst, claimedDstToSource);
+            src.shaderKeywords = kw;
+
+            FillSlotsAndCounts(data, plan);
+            if (data.offenders.Count > 0)
+            {
+                data.result = "FAIL";
+                data.error = "slot fork validation failed";
+            }
+            else data.result = "PASS";
+            return Finish(data, label);
+        }
+
+        /// <summary>
+        /// Shared mutating span for both copy-to-new (own/branch, <paramref name="createdO"/>=true — O was
+        /// just created by <c>CopyAsset</c> at <paramref name="targetPath"/>) and in-place (augment,
+        /// <paramref name="createdO"/>=false — <paramref name="targetPath"/> IS the caller's pre-existing
+        /// owned material): loads O, runs the fork rule (Flow step 5) against <paramref name="textureHome"/>,
+        /// persists, then rebuilds the disk-truthful <c>slots[]</c> table from the reloaded asset (Flow step 6).
+        /// An unexpected throw still rolls back and emits a FAIL RunLog, never propagates. <c>rollback</c>
+        /// ALWAYS cleans up textures <em>this run</em> wrote (never a reused pre-existing texture) but deletes
+        /// the material itself only when <paramref name="createdO"/> is true — a FAIL augmenting a
+        /// pre-existing owned material must never delete it.
+        /// </summary>
+        static string ForkSlotsAndPersist(string targetPath, string textureHome, HashSet<string> requested,
+                                          RunData data, string label, bool createdO)
+        {
+            var newlyWrittenTex = new List<string>();     // texture dsts where CopyAsset actually ran this run
+            bool homeCreatedThisRun = false;               // did THIS run mkdir H(O)? (prune only then, only if empty)
+            Action rollback = () =>
+            {
+                foreach (var t in newlyWrittenTex) AssetDatabase.DeleteAsset(t); // never a reused pre-existing texture
+                if (createdO) AssetDatabase.DeleteAsset(targetPath);
+                if (homeCreatedThisRun && AssetDatabase.IsValidFolder(textureHome) &&
+                    AssetDatabase.FindAssets("", new[] { textureHome }).Length == 0)
+                    AssetDatabase.DeleteAsset(textureHome);
+            };
+
+            try
+            {
+                var owned = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
+                if (owned == null)
+                {
+                    rollback();
+                    return Fail(data, label, "owned copy load failed (or wrong type): " + targetPath);
+                }
+
+                // Snapshot BEFORE any texture-slot getter fires (BuildPlan's classification reads every
+                // slot). GetTexture silently wipes the material's ENTIRE shaderKeywords array as a side
+                // effect (memory unity-material-getter-clears-keywords) — snapshot now, restore right
+                // before the persist below. For augment, `owned` IS the caller's live in-scene material —
+                // this protects its LIVE keyword state, not just what lands on disk.
+                var keywordsBeforeFork = owned.shaderKeywords;
+
+                // ── Fork rule (Flow step 5), off O (byte-identical to S pre-fork on copy-to-new; the
+                //    caller's already-owned material, possibly already forked, on in-place). ──
+                var sourceToDst = new Dictionary<string, string>(StringComparer.Ordinal);
+                var claimedDstToSource = new Dictionary<string, string>(StringComparer.Ordinal);
+                var plan = BuildPlan(owned, textureHome, requested, data, sourceToDst, claimedDstToSource);
+                if (data.offenders.Count > 0)
+                {
+                    owned.shaderKeywords = keywordsBeforeFork; // restore even on the validation-fail exit
+                    FillSlotsAndCounts(data, plan); // self-legible slots[]/counts even on a plan-validation FAIL
+                    rollback();
+                    data.result = "FAIL";
+                    data.error = "slot fork validation failed";
+                    return Finish(data, label);
+                }
+
+                bool anyForkNeeded = false;
+                foreach (var row in plan) if (row.disposition == "forked" && row.needsCopy) { anyForkNeeded = true; break; }
+                if (anyForkNeeded)
+                {
+                    homeCreatedThisRun = !AssetDatabase.IsValidFolder(textureHome);
+                    EnsureFolderExists(textureHome);
+                }
+
+                foreach (var row in plan)
+                {
+                    if (row.disposition != "forked") continue;
+                    if (row.needsCopy)
+                    {
+                        if (!AssetDatabase.CopyAsset(row.sourcePath, row.ownedPath))
+                        {
+                            data.Offender("CopyAsset failed (texture): " + row.sourcePath + " -> " + row.ownedPath);
+                            continue;
+                        }
+                        newlyWrittenTex.Add(row.ownedPath);
+                    }
+                    var ownedTex = AssetDatabase.LoadAssetAtPath<Texture>(row.ownedPath);
+                    if (ownedTex == null)
+                    {
+                        data.Offender("owned texture copy failed to load (or wrong type): " + row.ownedPath);
+                        continue;
+                    }
+                    owned.SetTexture(row.slot, ownedTex);
+                    if (string.Equals(Path.GetExtension(row.ownedPath), ".psd", StringComparison.OrdinalIgnoreCase))
+                        data.Warning("slot '" + row.slot + "' owned copy is a .psd (" + row.ownedPath +
+                            ") — export a PNG per the own-material skill's follow-up");
+                }
+                if (data.offenders.Count > 0)
+                {
+                    owned.shaderKeywords = keywordsBeforeFork;
+                    FillSlotsAndCounts(data, plan);
+                    rollback();
+                    data.result = "FAIL";
+                    data.error = "texture fork failed";
+                    return Finish(data, label);
+                }
+
+                // Re-assert the pre-fork keyword snapshot (see the note by its capture): every texture-slot
+                // read/write since then may have silently wiped shaderKeywords.
+                owned.shaderKeywords = keywordsBeforeFork;
+
+                EditorUtility.SetDirty(owned);
+                AssetDatabase.SaveAssets();
+
+                // ── Disk-truthful post-condition (Flow step 6): reimport + reload, then rebuild slots[] and
+                //    the counts from the RELOADED O — never from pre-write intent. ──
+                AssetDatabase.ImportAsset(targetPath, ImportAssetOptions.ForceUpdate);
+                var reloaded = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
+                if (reloaded == null)
+                {
+                    rollback();
+                    return Fail(data, label, "owned material failed to reload after save: " + targetPath);
+                }
+
+                foreach (var row in plan)
+                {
+                    string disposition = row.disposition;
+                    string ownedPathFinal = row.ownedPath;
+
+                    if (row.requested && (disposition == "forked" || disposition == "already-owned"))
+                    {
+                        var rt = reloaded.GetTexture(row.slot);
+                        string rp = rt != null ? AssetDatabase.GetAssetPath(rt) : null;
+                        bool landed = rt != null && UnderHome(rp, textureHome);
+                        if (!landed)
+                        {
+                            data.Offender("fork did not land: slot '" + row.slot + "'" +
+                                (rt != null ? " (still " + rp + ")" : " (empty)"));
+                            disposition = "unforkable";
+                            ownedPathFinal = null;
+                        }
+                        else
+                        {
+                            ownedPathFinal = rp;
+                        }
+                    }
+
+                    data.slots.Add(new SlotRow
+                    {
+                        slot = row.slot,
+                        requested = row.requested,
+                        disposition = disposition,
+                        sourcePath = row.sourcePath,
+                        ownedPath = ownedPathFinal,
+                    });
+                    TallyDisposition(data, disposition);
+                }
+                EmitDispositionCounts(data);
+
+                if (data.offenders.Count > 0)
+                {
+                    rollback();
+                    data.result = "FAIL";
+                    data.error = "fork did not land (post-condition)";
+                    return Finish(data, label);
+                }
+                data.result = "PASS";
+                return Finish(data, label);
+            }
+            catch (Exception ex)
+            {
+                data.result = "FAIL";
+                data.error = ex.GetType().Name + ": " + ex.Message;
+                data.Offender("unexpected exception during fork: " + ex.GetType().Name + ": " + ex.Message);
+                rollback();
+            }
+            return Finish(data, label);
+        }
+
+        /// <summary>One planned/observed outcome for a single shader texture slot — the unit <see cref="BuildPlan"/>
+        /// produces and both the whatIf preview and the execute writer/rebuild consume.</summary>
+        struct PlanRow
+        {
+            public string slot;
+            public bool requested;
+            public string disposition; // forked | already-owned | unforkable | vendor-ref | owned-elsewhere | empty
+            public string sourcePath;
+            public string ownedPath;   // intended dst for forked/already-owned; else null
+            public bool needsCopy;     // meaningful only when disposition == "forked"
+        }
+
+        /// <summary>
+        /// Classify every texture slot on <paramref name="src"/> (S pre-copy for whatIf/copy-to-new-preview;
+        /// the freshly-copied O for copy-to-new execute — byte-identical at this point; the caller's
+        /// already-owned material for augment) into exactly one final disposition, recording offenders
+        /// (empty/built-in/non-Texture2D/sub-asset/collision on a REQUESTED slot) and notes (unrequested
+        /// owned-elsewhere) onto <paramref name="data"/>. Requested, forkable slots get a planned destination
+        /// via <see cref="PlanFork"/>, threading <paramref name="sourceToDst"/>/<paramref name="claimedDstToSource"/>
+        /// so two slots sharing one source land on ONE planned copy and whatIf/execute agree on the fork
+        /// count. Read-only — never touches disk beyond the read-only existence/content check in
+        /// <see cref="PlanFork"/> (never mid-plan <c>File.Exists</c> for a same-run collision — the claimed
+        /// map is the sole same-run authority; this run's first copy hasn't landed yet).
+        /// </summary>
+        static List<PlanRow> BuildPlan(Material src, string textureHome, HashSet<string> requested, RunData data,
+                                       Dictionary<string, string> sourceToDst, Dictionary<string, string> claimedDstToSource)
+        {
+            var rows = new List<PlanRow>();
             foreach (var slot in src.GetTexturePropertyNames())
             {
                 var tex = src.GetTexture(slot);
+                bool isReq = requested.Contains(slot);
                 string texPath = tex != null ? AssetDatabase.GetAssetPath(tex) : null;
-                data.slots.Add(new SlotRow
+
+                string disposition; string ownedPath = null; bool needsCopy = false;
+
+                if (tex == null)
                 {
-                    slot = slot,
-                    requested = requested.Contains(slot),
-                    disposition = "vendor-ref",
-                    sourcePath = texPath,
-                    ownedPath = null,
+                    disposition = "empty";
+                    if (isReq)
+                    {
+                        data.Offender("slot '" + slot + "' is empty — nothing to fork");
+                        disposition = "unforkable";
+                    }
+                }
+                else if (IsBuiltinPath(texPath))
+                {
+                    disposition = "empty";
+                    if (isReq)
+                    {
+                        data.Offender("slot '" + slot + "' references a built-in texture (" + texPath + ") — not forkable");
+                        disposition = "unforkable";
+                    }
+                }
+                else if (!(tex is Texture2D))
+                {
+                    disposition = "empty";
+                    if (isReq)
+                    {
+                        data.Offender("slot '" + slot + "' is a " + tex.GetType().Name + ", not a Texture2D — not forkable");
+                        disposition = "unforkable";
+                    }
+                }
+                else
+                {
+                    bool subAsset = !AssetDatabase.IsMainAsset(tex);
+                    bool underHome = UnderHome(texPath, textureHome);
+                    string natural = underHome ? "already-owned"
+                        : (TransplantCore.IsWritableAsset(texPath) ? "owned-elsewhere" : "vendor-ref");
+
+                    if (!isReq)
+                    {
+                        disposition = natural;
+                        if (natural == "already-owned") ownedPath = texPath;
+                        if (natural == "owned-elsewhere")
+                            data.Note("slot '" + slot + "' references another material's owned texture (shared, not requested): " + texPath);
+                    }
+                    else if (subAsset)
+                    {
+                        data.Offender("slot '" + slot + "' texture is a sub-asset (embedded, e.g. inside an FBX) — not forkable");
+                        disposition = "unforkable";
+                    }
+                    else if (natural == "already-owned")
+                    {
+                        disposition = "already-owned";
+                        ownedPath = texPath;
+                    }
+                    else
+                    {
+                        var resolution = PlanFork(texPath, textureHome, sourceToDst, claimedDstToSource);
+                        if (resolution.refused)
+                        {
+                            data.Offender(resolution.refuseReason);
+                            disposition = "unforkable";
+                        }
+                        else
+                        {
+                            disposition = "forked";
+                            ownedPath = resolution.dstPath;
+                            needsCopy = resolution.needsCopy;
+                        }
+                    }
+                }
+
+                rows.Add(new PlanRow
+                {
+                    slot = slot, requested = isReq, disposition = disposition,
+                    sourcePath = texPath, ownedPath = ownedPath, needsCopy = needsCopy,
                 });
             }
-            data.Count("slotsForked", 0);
-            data.Count("slotsAlreadyOwned", 0);
-            data.Count("slotsOwnedElsewhere", 0);
-            data.Count("slotsVendorRef", data.slots.Count);
-            data.Count("slotsBuiltin", 0);
-            data.Count("slotsEmpty", 0);
+            return rows;
+        }
+
+        /// <summary>Outcome of <see cref="PlanFork"/>: either a resolved destination (<paramref name="refused"/>
+        /// false) or a refusal naming the occupying <c>dst</c> and the fix (<paramref name="refused"/> true;
+        /// <see cref="dstPath"/>/<see cref="needsCopy"/> undefined).</summary>
+        struct ForkResolution
+        {
+            public string dstPath;
+            public bool needsCopy;
+            public bool refused;
+            public string refuseReason;
+        }
+
+        /// <summary>
+        /// Resolve the destination for forking <paramref name="sourceTexPath"/> into <paramref name="textureHome"/>
+        /// against the run-local claimed set, in the spec's fixed order — the SOLE collision authority in both
+        /// whatIf and execute, so a collision refuses (or doesn't) identically in both:
+        /// (a) this SAME source already claimed a <c>dst</c> this run (two slots, one source) → reuse it;
+        /// (b) the <c>dst</c> leaf is already claimed by a DIFFERENT source this run → refuse (same-run
+        ///     collision) — never <c>File.Exists</c> here, this run's first copy hasn't landed yet;
+        /// (c) <c>dst</c> exists on disk from a PRIOR run (incremental augment) → byte-compare: equal ⇒ reuse
+        ///     (don't re-copy), different ⇒ refuse (cross-run collision) — the single pairwise byte-compare
+        ///     this tool ever does, not a general dedup pass;
+        /// (d) else claim it (<c>dstLeaf → source</c>) and plan a copy.
+        /// Read-only.
+        /// </summary>
+        static ForkResolution PlanFork(string sourceTexPath, string textureHome,
+                                       Dictionary<string, string> sourceToDst, Dictionary<string, string> claimedDstToSource)
+        {
+            if (sourceToDst.TryGetValue(sourceTexPath, out var existingDst))
+                return new ForkResolution { dstPath = existingDst, needsCopy = false };
+
+            string leaf = Path.GetFileName(sourceTexPath);
+            string dst = textureHome + "/" + leaf;
+
+            if (claimedDstToSource.TryGetValue(dst, out var claimant) && claimant != sourceTexPath)
+            {
+                return new ForkResolution
+                {
+                    refused = true,
+                    refuseReason = "two different source textures named '" + leaf + "' collide in '" + textureHome +
+                        "' ('" + claimant + "' already claimed '" + dst + "' this run, '" + sourceTexPath +
+                        "' also wants it) — fork them into separate owned materials, or leave one slot unforked",
+                };
+            }
+
+            if (File.Exists(dst))
+            {
+                if (BytesEqual(dst, sourceTexPath))
+                {
+                    sourceToDst[sourceTexPath] = dst;
+                    claimedDstToSource[dst] = sourceTexPath;
+                    return new ForkResolution { dstPath = dst, needsCopy = false };
+                }
+                return new ForkResolution
+                {
+                    refused = true,
+                    refuseReason = "'" + dst + "' already exists on disk from a prior run with content different from '" +
+                        sourceTexPath + "' — two different source textures collide at this owned path; fork into a " +
+                        "different owned material, or delete/reconcile the stale texture at '" + dst + "'",
+                };
+            }
+
+            sourceToDst[sourceTexPath] = dst;
+            claimedDstToSource[dst] = sourceTexPath;
+            return new ForkResolution { dstPath = dst, needsCopy = true };
+        }
+
+        /// <summary>Fill <c>data.slots</c> + the six <c>slotsX</c> counts straight from a whatIf plan (nothing
+        /// was written, so there is no reload to rebuild from — the plan IS the preview).</summary>
+        static void FillSlotsAndCounts(RunData data, List<PlanRow> plan)
+        {
+            foreach (var row in plan)
+            {
+                data.slots.Add(new SlotRow
+                {
+                    slot = row.slot, requested = row.requested, disposition = row.disposition,
+                    sourcePath = row.sourcePath, ownedPath = row.ownedPath,
+                });
+                TallyDisposition(data, row.disposition);
+            }
+            EmitDispositionCounts(data);
+        }
+
+        /// <summary>Accumulate one slot's final disposition into <c>data</c>'s running tally. Paired with
+        /// <see cref="EmitDispositionCounts"/> (which flushes the tally into the six ordered counts) — the
+        /// single tally/emit both the whatIf preview and the execute post-reload rebuild share.</summary>
+        static void TallyDisposition(RunData data, string disposition)
+        {
+            data.tally.TryGetValue(disposition, out long n);
+            data.tally[disposition] = n + 1;
+        }
+
+        /// <summary>Flush the disposition tally into the six <c>slotsX</c> counts, in the spec's fixed order
+        /// (a disposition never seen this run emits 0). No <c>slotsBuiltin</c> key — a built-in/non-Texture2D
+        /// untouched slot collapses into <c>empty</c>; a requested one is an <c>unforkable</c> offender.</summary>
+        static void EmitDispositionCounts(RunData data)
+        {
+            long Get(string d) { data.tally.TryGetValue(d, out long n); return n; }
+            data.Count("slotsForked", Get("forked"));
+            data.Count("slotsAlreadyOwned", Get("already-owned"));
+            data.Count("slotsUnforkable", Get("unforkable"));
+            data.Count("slotsOwnedElsewhere", Get("owned-elsewhere"));
+            data.Count("slotsVendorRef", Get("vendor-ref"));
+            data.Count("slotsEmpty", Get("empty"));
+        }
+
+        static bool IsBuiltinPath(string texPath) =>
+            string.IsNullOrEmpty(texPath) ||
+            texPath.StartsWith("Resources/", StringComparison.Ordinal) ||
+            texPath.IndexOf("unity_builtin_extra", StringComparison.Ordinal) >= 0;
+
+        /// <summary>Segment-boundary containment: <paramref name="path"/> IS <paramref name="home"/> or is
+        /// nested under it — never a bare string-prefix match (no false hit on a sibling stem, e.g. "Dress"
+        /// vs "Dress_White").</summary>
+        static bool UnderHome(string path, string home) =>
+            !string.IsNullOrEmpty(path) && (path == home || path.StartsWith(home + "/", StringComparison.Ordinal));
+
+        /// <summary>Byte-for-byte content equality (never GUID identity — a copied asset always mints a
+        /// fresh GUID). Any read failure is treated as unequal (forces a refusal, never a silent overwrite).
+        /// The single pairwise compare this tool ever does — at an actual on-disk cross-run collision.</summary>
+        static bool BytesEqual(string pathA, string pathB)
+        {
+            byte[] a, b;
+            try
+            {
+                if (new FileInfo(pathA).Length != new FileInfo(pathB).Length) return false; // cheap size gate
+                a = File.ReadAllBytes(pathA); b = File.ReadAllBytes(pathB);
+            }
+            catch { return false; }
+            if (a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
         }
 
         /// <summary>A material is locked iff its shader is one of Thry's generated <c>Hidden/Locked/…</c>
@@ -345,9 +773,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── Data types ────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>One row of the per-slot provenance table (<see cref="RunData.slots"/>). <c>ownedPath</c>
-        /// is the owned texture's path for <c>forked</c>/<c>already-owned</c> slots; null otherwise. Every
-        /// row reports <c>vendor-ref</c>/<c>ownedPath = null</c> until Task 3 wires the fork planner
-        /// (<see cref="OwnMaterial.BuildVendorRefSlots"/>).</summary>
+        /// is the owned texture's path for <c>forked</c>/<c>already-owned</c> slots; null otherwise. The six
+        /// dispositions: <c>forked</c> / <c>already-owned</c> / <c>unforkable</c> (requested slots only) and
+        /// <c>vendor-ref</c> / <c>owned-elsewhere</c> / <c>empty</c> (untouched slots) — see
+        /// <see cref="OwnMaterial.BuildPlan"/>.</summary>
         struct SlotRow
         {
             public string slot;
@@ -373,6 +802,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public readonly List<string> notes = new List<string>();
             public readonly List<string> warnings = new List<string>();
             public readonly List<SlotRow> slots = new List<SlotRow>();
+            /// <summary>Running disposition tally (<see cref="OwnMaterial.TallyDisposition"/>), flushed into
+            /// the six ordered <c>slotsX</c> counts by <see cref="OwnMaterial.EmitDispositionCounts"/>.</summary>
+            public readonly Dictionary<string, long> tally = new Dictionary<string, long>(StringComparer.Ordinal);
 
             public void Count(string name, long value) => counts.Add(new KeyValuePair<string, long>(name, value));
             public void Offender(string msg) { if (!string.IsNullOrEmpty(msg)) offenders.Add(msg); }

@@ -89,6 +89,44 @@ public class OwnMaterialTests
         return AssetDatabase.LoadAssetAtPath<Shader>(path);
     }
 
+    // Distinct-content PNG fixture per call (varying fill color) — real bytes on disk so the claimed-map's
+    // cross-run byte-compare (PlanFork step c) has genuine content to compare, not a placeholder.
+    static int _texFill;
+    Texture2D MakeTexture(string folder, string name)
+    {
+        AnimatorTestHelpers.EnsureFolder(folder);
+        var tex = new Texture2D(4, 4, TextureFormat.RGBA32, false);
+        var c = new Color32((byte)(40 + (_texFill++ * 53) % 200), 120, 200, 255);
+        var pixels = new Color32[16];
+        for (int i = 0; i < pixels.Length; i++) pixels[i] = c;
+        tex.SetPixels32(pixels);
+        tex.Apply();
+        byte[] png = tex.EncodeToPNG();
+        Object.DestroyImmediate(tex);
+        string path = folder + "/" + name + ".png";
+        File.WriteAllBytes(path, png);
+        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport);
+        return AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+    }
+
+    // A plain ScriptableObject "container" asset so we can embed a Texture2D as a NON-main sub-asset
+    // (AssetDatabase.IsMainAsset == false) without needing a real FBX import — the same shape an
+    // FBX-embedded texture takes for the "sub-asset — not forkable" disposition.
+    class SubAssetHolder : ScriptableObject { }
+
+    Texture2D SubAssetTex(string path, string subName)
+    {
+        var holder = ScriptableObject.CreateInstance<SubAssetHolder>();
+        AssetDatabase.CreateAsset(holder, path);
+        var tex = new Texture2D(2, 2) { name = subName };
+        AssetDatabase.AddObjectToAsset(tex, holder);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport);
+        foreach (var o in AssetDatabase.LoadAllAssetsAtPath(path))
+            if (o is Texture2D t && t.name == subName) return t;
+        return null;
+    }
+
     // ── Arg guards (Flow step 1) — unchanged from Task 1 ────────────────────────────────────────────
 
     [Test] public void Null_material_path_fails()
@@ -143,9 +181,13 @@ public class OwnMaterialTests
     [Test] public void Real_texture_slot_passes_slot_validation()
     {
         // A real Standard-shader texture property (_MainTex) must clear slot validation and reach routing
-        // (own, PASS) — never the slot-offender FAIL. Task 2 doesn't fork yet, so the requested slot still
-        // reports vendor-ref (Task 3 wires the fork disposition); this only proves validation didn't block.
+        // (own, PASS) — never the slot-offender FAIL. A requested slot needs an actual texture assigned to
+        // be forkable (an empty requested slot is an unforkable offender), so assign one.
         var v = VendorMat("Dress");
+        var tex = MakeTexture(VendorRoot, "Diffuse");
+        v.SetTexture("_MainTex", tex);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
         string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
         StringAssert.Contains("=> PASS", s);
         StringAssert.DoesNotContain("no texture property", s);
@@ -168,10 +210,12 @@ public class OwnMaterialTests
     [Test] public void Own_vendor_source_creates_standalone_copy_all_vendor_ref()
     {
         var v = VendorMat("Dress");
+        var mainTex = MakeTexture(VendorRoot, "Diffuse");
+        v.SetTexture("_MainTex", mainTex);
         v.SetFloat("_Metallic", 0.73f);
         EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
 
-        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned);
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned); // no forkTextureSlots — fork nothing
         StringAssert.Contains("=> PASS", s);
 
         var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
@@ -180,6 +224,8 @@ public class OwnMaterialTests
             AssetDatabase.AssetPathToGUID(Owned + "/Dress.mat"), "copy must be a standalone asset (fresh GUID)");
         Assert.AreEqual(v.shader.name, o.shader.name, "copy preserves the source shader");
         Assert.AreEqual(0.73f, o.GetFloat("_Metallic"), 0.0001f, "copy byte-preserves the source's property edits");
+        Assert.AreEqual(AssetDatabase.GetAssetPath(mainTex), AssetDatabase.GetAssetPath(o.GetTexture("_MainTex")),
+            "fork-nothing keeps every slot on its current (vendor) reference");
 
         string logPath = ExtractLogPath(s);
         string json = File.ReadAllText(logPath);
@@ -435,6 +481,256 @@ public class OwnMaterialTests
         StringAssert.Contains("\"warnings\": [", json);
         StringAssert.Contains("\"slots\": []", json); // fails before any slot listing runs
         StringAssert.Contains("_NotASlot", json);
+    }
+
+    // ── Fork engine (Task 3): H(O), the claimed-map collision resolution, disk-truthful slots[] ──────
+
+    [Test] public void Fork_one_slot_disk_truthful()
+    {
+        var v = VendorMat("Dress");
+        var mainTex = MakeTexture(VendorRoot, "Diffuse");
+        var bumpTex = MakeTexture(VendorRoot, "Normal");
+        v.SetTexture("_MainTex", mainTex);
+        v.SetTexture("_BumpMap", bumpTex);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
+        StringAssert.Contains("=> PASS", s);
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(s, "slotsForked"));
+
+        var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
+        Assert.IsNotNull(o);
+        string home = Owned + "/Dress";
+
+        var ownedMain = o.GetTexture("_MainTex");
+        Assert.IsNotNull(ownedMain, "requested slot must resolve to an owned texture");
+        string ownedMainPath = AssetDatabase.GetAssetPath(ownedMain);
+        StringAssert.StartsWith(home + "/", ownedMainPath);
+        Assert.AreEqual("Diffuse.png", Path.GetFileName(ownedMainPath), "forked leaf keeps the source basename");
+        Assert.AreNotEqual(AssetDatabase.AssetPathToGUID(VendorRoot + "/Diffuse.png"),
+            AssetDatabase.AssetPathToGUID(ownedMainPath), "forked texture is a standalone copy (fresh GUID)");
+
+        var ownedBump = o.GetTexture("_BumpMap");
+        Assert.AreEqual(AssetDatabase.GetAssetPath(bumpTex), AssetDatabase.GetAssetPath(ownedBump),
+            "untouched slot keeps its vendor GUID reference");
+
+        string logPath = ExtractLogPath(s);
+        string json = File.ReadAllText(logPath);
+        StringAssert.Contains("\"slot\": \"_MainTex\", \"requested\": true, \"disposition\": \"forked\"", json);
+        StringAssert.Contains("\"disposition\": \"vendor-ref\"", json);
+    }
+
+    [Test] public void Two_slots_one_source_share_one_copy()
+    {
+        var v = VendorMat("Dress");
+        var tex = MakeTexture(VendorRoot, "Shared");
+        v.SetTexture("_MainTex", tex);
+        v.SetTexture("_DetailAlbedoMap", tex);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex", "_DetailAlbedoMap" });
+        StringAssert.Contains("=> PASS", s);
+        Assert.AreEqual(2, AnimatorTestHelpers.Count(s, "slotsForked"), "both requested slots report forked");
+
+        var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
+        string p1 = AssetDatabase.GetAssetPath(o.GetTexture("_MainTex"));
+        string p2 = AssetDatabase.GetAssetPath(o.GetTexture("_DetailAlbedoMap"));
+        Assert.AreEqual(p1, p2, "two slots sharing one source share one owned copy (claimed-map reuse)");
+
+        string home = Owned + "/Dress";
+        Assert.AreEqual(1, AssetDatabase.FindAssets("t:Texture2D", new[] { home }).Length,
+            "only one texture file landed in H(O)");
+    }
+
+    [Test] public void Two_materials_forking_one_vendor_texture_get_independent_copies()
+    {
+        var tex = MakeTexture(VendorRoot, "Shared");
+        var v1 = VendorMat("DressA"); v1.SetTexture("_MainTex", tex); EditorUtility.SetDirty(v1); AssetDatabase.SaveAssets();
+        var v2 = VendorMat("DressB"); v2.SetTexture("_MainTex", tex); EditorUtility.SetDirty(v2); AssetDatabase.SaveAssets();
+
+        string s1 = OwnMaterial.Run(AssetDatabase.GetAssetPath(v1), Owned, new[] { "_MainTex" });
+        string s2 = OwnMaterial.Run(AssetDatabase.GetAssetPath(v2), Owned, new[] { "_MainTex" });
+        StringAssert.Contains("=> PASS", s1);
+        StringAssert.Contains("=> PASS", s2);
+
+        var o1 = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/DressA.mat");
+        var o2 = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/DressB.mat");
+        string p1 = AssetDatabase.GetAssetPath(o1.GetTexture("_MainTex"));
+        string p2 = AssetDatabase.GetAssetPath(o2.GetTexture("_MainTex"));
+        Assert.AreNotEqual(p1, p2, "each owned material forks the shared vendor texture into its own H(O)");
+        StringAssert.Contains("/DressA/", p1);
+        StringAssert.Contains("/DressB/", p2);
+    }
+
+    [Test] public void Keywords_preserved_on_disk_after_fork()
+    {
+        // An arbitrary marker string, not "_EMISSION" — the memory's array getter (mat.shaderKeywords)
+        // preserves ANY enabled keyword string verbatim, including ones outside the shader's own
+        // keywordSpace, so a synthetic marker exercises the exact array-preservation mechanism under
+        // test without depending on the Standard shader's own emission-toggle keyword semantics.
+        const string marker = "OWNMAT_TEST_KEYWORD";
+        var v = VendorMat("Dress");
+        var tex = MakeTexture(VendorRoot, "Emit");
+        v.SetTexture("_EmissionMap", tex);
+        v.EnableKeyword(marker);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+        CollectionAssert.Contains(v.shaderKeywords, marker, "fixture: the source material must carry the marker before Run");
+
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_EmissionMap" });
+        StringAssert.Contains("=> PASS", s);
+
+        var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
+        CollectionAssert.Contains(o.shaderKeywords, marker,
+            "fork must not wipe shaderKeywords (memory: unity-material-getter-clears-keywords)");
+    }
+
+    [Test] public void Same_run_collision_refuses_and_names_occupying_dst()
+    {
+        var v = VendorMat("Dress");
+        var texA = MakeTexture(VendorRoot + "/A", "Tex");
+        var texB = MakeTexture(VendorRoot + "/B", "Tex"); // same leaf "Tex.png", different source/content
+        v.SetTexture("_MainTex", texA);
+        v.SetTexture("_DetailAlbedoMap", texB);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex", "_DetailAlbedoMap" });
+        StringAssert.Contains("=> FAIL", s);
+        StringAssert.Contains("collide", s);
+        StringAssert.Contains("Tex", s);
+        Assert.IsNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat"), "FAIL must roll back the created O");
+    }
+
+    [Test] public void Same_run_collision_whatIf_refuses_identically()
+    {
+        var v = VendorMat("Dress");
+        var texA = MakeTexture(VendorRoot + "/A", "Tex");
+        var texB = MakeTexture(VendorRoot + "/B", "Tex");
+        v.SetTexture("_MainTex", texA);
+        v.SetTexture("_DetailAlbedoMap", texB);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex", "_DetailAlbedoMap" }, whatIf: true);
+        StringAssert.Contains("=> FAIL", s);
+        StringAssert.Contains("collide", s);
+        Assert.IsFalse(AssetDatabase.IsValidFolder(Owned), "whatIf must create nothing — not even the outDir folder");
+    }
+
+    [Test] public void Cross_run_collision_refuses()
+    {
+        var v = VendorMat("Dress");
+        var texA = MakeTexture(VendorRoot + "/A", "Tex");
+        v.SetTexture("_MainTex", texA);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string first = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
+        StringAssert.Contains("=> PASS", first);
+
+        // Augment with a NEW slot whose source shares the "Tex" basename but has different bytes — the
+        // second call's plan sees H(O)/Tex.png already on disk from the first run.
+        var texB = MakeTexture(VendorRoot + "/B", "Tex");
+        var owned = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
+        owned.SetTexture("_DetailAlbedoMap", texB);
+        EditorUtility.SetDirty(owned); AssetDatabase.SaveAssets();
+
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
+        string second = OwnMaterial.Run(AssetDatabase.GetAssetPath(owned), null, new[] { "_DetailAlbedoMap" });
+        StringAssert.Contains("=> FAIL", second);
+        StringAssert.Contains("prior run", second);
+    }
+
+    [Test] public void Cross_run_augment_reuses_dst_for_same_source_no_recopy()
+    {
+        var v = VendorMat("Dress");
+        var texA = MakeTexture(VendorRoot, "Tex");
+        v.SetTexture("_MainTex", texA);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string first = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
+        StringAssert.Contains("=> PASS", first);
+        var owned = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
+        string dstPath = AssetDatabase.GetAssetPath(owned.GetTexture("_MainTex"));
+        string dstGuid = AssetDatabase.AssetPathToGUID(dstPath);
+
+        // A second, DIFFERENT slot pointing at the SAME (still-vendor) source texA — the prior run already
+        // landed H(O)/Tex.png with texA's bytes, so this is a byte-EQUAL cross-run collision → reuse.
+        owned.SetTexture("_DetailAlbedoMap", texA);
+        EditorUtility.SetDirty(owned); AssetDatabase.SaveAssets();
+
+        string second = OwnMaterial.Run(AssetDatabase.GetAssetPath(owned), null, new[] { "_DetailAlbedoMap" });
+        StringAssert.Contains("=> PASS", second);
+
+        var reloaded = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
+        string dst2 = AssetDatabase.GetAssetPath(reloaded.GetTexture("_DetailAlbedoMap"));
+        Assert.AreEqual(dstPath, dst2, "second call reuses the prior run's dst for the same source");
+        Assert.AreEqual(dstGuid, AssetDatabase.AssetPathToGUID(dst2), "reuse must not re-copy (same GUID)");
+    }
+
+    [Test] public void Forked_psd_leaf_warns_but_still_forks()
+    {
+        var v = VendorMat("Dress");
+        var tex = MakeTexture(VendorRoot, "Pattern");
+
+        // Re-file the same PNG bytes under a .psd extension — Unity's image decoder sniffs content by
+        // signature, not filename, so a PNG payload named ".psd" still imports as a normal Texture2D; only
+        // the leaf's EXTENSION (what the fork Warning keys off) differs from a hand-authored PSD.
+        string psdPath = VendorRoot + "/Pattern.psd";
+        File.WriteAllBytes(psdPath, File.ReadAllBytes(AssetDatabase.GetAssetPath(tex)));
+        AssetDatabase.ImportAsset(psdPath, ImportAssetOptions.ForceSynchronousImport);
+        var psdTex = AssetDatabase.LoadAssetAtPath<Texture2D>(psdPath);
+        Assert.IsNotNull(psdTex, "fixture: a PNG payload saved with a .psd extension must still import as a " +
+            "Texture2D (Unity's image decoder sniffs content, not extension) — if this assert fails, the " +
+            "fixture needs fixing, not the OwnMaterial fork logic");
+
+        v.SetTexture("_MainTex", psdTex);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
+        StringAssert.Contains("=> PASS", s);
+        StringAssert.Contains("warnings=[", s);
+        StringAssert.Contains(".psd", s);
+
+        var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
+        var ownedTex = o.GetTexture("_MainTex");
+        Assert.IsNotNull(ownedTex);
+        StringAssert.EndsWith(".psd", AssetDatabase.GetAssetPath(ownedTex));
+
+        string logPath = ExtractLogPath(s);
+        string json = File.ReadAllText(logPath);
+        StringAssert.Contains("\"disposition\": \"forked\"", json);
+    }
+
+    [Test] public void Requested_unforkable_slots_each_named_offender_disposition_self_legible()
+    {
+        var v = VendorMat("Dress");
+        var rt = new RenderTexture(4, 4, 0);
+        AssetDatabase.CreateAsset(rt, VendorRoot + "/Rt.renderTexture");
+        var subTex = SubAssetTex(VendorRoot + "/Holder.asset", "Embedded");
+        Assert.IsNotNull(subTex, "fixture: sub-asset texture must be embedded under the holder asset");
+
+        // _MainTex left null (empty, requested); _ParallaxMap = built-in; _OcclusionMap = RenderTexture
+        // (non-Texture2D); _EmissionMap = sub-asset (embedded, e.g. inside an FBX). _DetailMask left null
+        // and NOT requested — proves an untouched empty slot isn't conflated with a requested unforkable one.
+        v.SetTexture("_ParallaxMap", Texture2D.whiteTexture);
+        v.SetTexture("_OcclusionMap", rt);
+        v.SetTexture("_EmissionMap", subTex);
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned,
+            new[] { "_MainTex", "_ParallaxMap", "_OcclusionMap", "_EmissionMap" });
+        StringAssert.Contains("=> FAIL", s);
+        Assert.AreEqual(4, AnimatorTestHelpers.Count(s, "slotsUnforkable"));
+
+        string logPath = ExtractLogPath(s);
+        string json = File.ReadAllText(logPath);
+        StringAssert.Contains("\"slot\": \"_MainTex\", \"requested\": true, \"disposition\": \"unforkable\"", json);
+        StringAssert.Contains("\"slot\": \"_ParallaxMap\", \"requested\": true, \"disposition\": \"unforkable\"", json);
+        StringAssert.Contains("\"slot\": \"_OcclusionMap\", \"requested\": true, \"disposition\": \"unforkable\"", json);
+        StringAssert.Contains("\"slot\": \"_EmissionMap\", \"requested\": true, \"disposition\": \"unforkable\"", json);
+        StringAssert.Contains("\"slot\": \"_DetailMask\", \"requested\": false, \"disposition\": \"empty\"", json);
+        Assert.IsNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat"), "FAIL must roll back the created O");
     }
 
     static string ExtractLogPath(string summary)
