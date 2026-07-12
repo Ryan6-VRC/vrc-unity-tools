@@ -45,18 +45,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
 
-            if (ownedRoot == null)
-            {
-                string err = "[ConformRenderers] ownedRoot is null => FAIL";
-                Debug.LogError(err);
-                return err;
-            }
-            if (source == null)
-            {
-                string err = "[ConformRenderers] source is null => FAIL";
-                Debug.LogError(err);
-                return err;
-            }
+            if (ownedRoot == null) return ArgFail(label, whatIf, ownedRoot, source, "ownedRoot is null");
+            if (source == null)    return ArgFail(label, whatIf, ownedRoot, source, "source is null");
 
             var data = new RunData
             {
@@ -453,6 +443,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // ── RunLog output ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>Route an argument-guard failure through the house RunLog grammar (summary + RunLog +
+        /// LogError), like the sibling tools — never a bare trailer-less line. Uses this tool's own
+        /// RunData/WriteRunLog (its RunLog shape is bespoke), with the <c>error=… =&gt; FAIL | log=…</c>
+        /// tail matching the main summary's grammar.</summary>
+        private static string ArgFail(string label, bool whatIf, GameObject ownedRoot, GameObject source, string msg)
+        {
+            var data = new RunData
+            {
+                InstanceName = ownedRoot != null ? ownedRoot.name : null,
+                SourceName   = source != null ? source.name : null,
+                WhatIf       = whatIf,
+                Result       = "FAIL",
+                Error        = msg,
+            };
+            string logPath = WriteRunLog(data, label);
+            string summary = "[ConformRenderers]" + (whatIf ? " (whatIf)" : "") + " " + label +
+                             ": error=" + msg + " => FAIL | log=" + logPath;
+            Debug.LogError(summary);
+            return summary;
+        }
 
         private static string WriteRunLog(RunData data, string label)
         {
