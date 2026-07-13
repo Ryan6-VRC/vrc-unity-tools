@@ -261,34 +261,43 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── Seam defaults (real reflection lands in Tasks 2–3, 7; stubs so the field initializers compile) ─
 
         // Real reflection: union MA GetBonesMapping (base,merge) + VRCFury GetLinks().mergeBones (merge,base,
-        // flipped). Wrap the whole body — any thrown hop OR a null GetLinks becomes ReflectError, never an
-        // escaping exception. Validated end-to-end by the live corpus (Task 8), not by unit tests (the SDK-only
-        // TestEditor has no MA/VRCFury). CollectVrcfPairs also sets ScaleBakeReason on a scaled bake ⇒ REFUSE.
-        private static SeamResolution DefaultResolveSeam(GameObject baseGO, GameObject mergeGO)
+        // flipped). Two layers of guard, so nothing escapes: each collector runs under its own try here (catching
+        // pre-loop/setup throws — the type/method/field resolution), and inside each collector every component
+        // iterates under its own try (catching a per-component throw and continuing the sweep). ClassifyReflect
+        // maps each catch — Missing*/TypeLoad ⇒ ReflectError (API drift), everything else (incl. a null GetLinks,
+        // which throws NullReferenceException) ⇒ UnresolvableReason (won't resolve onto this base). Validated
+        // end-to-end by the live corpus (Task 8), not by unit tests (the SDK-only TestEditor has no MA/VRCFury).
+        // CollectVrcfPairs also sets ScaleBakeReason on a scaled bake ⇒ REFUSE.
+        internal static SeamResolution ResolveMergeMap(GameObject scopeGO, GameObject avatarGO)
         {
             var res = new SeamResolution();
-            try
-            {
-                CollectMaPairs(mergeGO, res);
-                CollectVrcfPairs(mergeGO, baseGO, res);
-            }
-            catch (Exception e)
-            {
-                // Reflection surfaces the resolver's real throw wrapped in TargetInvocationException — unwrap it.
-                var real = (e as System.Reflection.TargetInvocationException)?.InnerException ?? e;
-                if (real is MissingMethodException || real is MissingFieldException ||
-                    real is MissingMemberException || real is TypeLoadException)
-                    // Genuine API drift: the tool is broken against the installed package version ⇒ misuse (error).
-                    res.ReflectError = real.GetType().Name + ": " + real.Message;
-                else
-                    // A seam component exists but its resolver threw resolving against THIS base ⇒ valid-abstain (warning).
-                    res.UnresolvableReason = "seam present but does not resolve onto this base (likely an incompatible or independent rig): " +
-                        real.GetType().Name + ": " + real.Message;
-            }
+            try { CollectMaPairs(scopeGO, res); } catch (Exception e) { ClassifyReflect(e, res); }
+            try { CollectVrcfPairs(scopeGO, avatarGO, res); } catch (Exception e) { ClassifyReflect(e, res); }
             return res;
         }
 
-        private static Type FindType(string fullName) =>
+        // Reflection surfaces a real throw wrapped in TargetInvocationException — unwrap it. Genuine API drift
+        // (the tool broken against the installed package) => ReflectError (misuse/error). A seam that exists but
+        // won't resolve onto this base => UnresolvableReason (valid abstain). First of each kind wins.
+        private static void ClassifyReflect(Exception e, SeamResolution res)
+        {
+            var real = (e as System.Reflection.TargetInvocationException)?.InnerException ?? e;
+            if (real is MissingMethodException || real is MissingFieldException ||
+                real is MissingMemberException || real is TypeLoadException)
+            {
+                if (res.ReflectError == null) res.ReflectError = real.GetType().Name + ": " + real.Message;
+            }
+            else if (res.UnresolvableReason == null)
+            {
+                res.UnresolvableReason = "seam present but does not resolve onto this base (likely an incompatible " +
+                    "or independent rig): " + real.GetType().Name + ": " + real.Message;
+            }
+        }
+
+        private static SeamResolution DefaultResolveSeam(GameObject baseGO, GameObject mergeGO)
+            => ResolveMergeMap(mergeGO, baseGO);
+
+        internal static Type FindType(string fullName) =>
             AppDomain.CurrentDomain.GetAssemblies()
                 .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
                 .FirstOrDefault(t => t.FullName == fullName);
@@ -313,18 +322,20 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (getMapping == null) throw new MissingMethodException("ModularAvatarMergeArmature.GetBonesMapping");
             foreach (var comp in mergeGO.GetComponentsInChildren(maType, true))
             {
-                var mapping = getMapping.Invoke(comp, null) as System.Collections.IEnumerable;
-                if (mapping == null) continue;
-                foreach (var item in mapping)
+                try
                 {
-                    var tt = item.GetType();
-                    var item1 = tt.GetField("Item1"); var item2 = tt.GetField("Item2");
-                    if (item1 == null) throw new MissingFieldException(tt.Name, "Item1");
-                    if (item2 == null) throw new MissingFieldException(tt.Name, "Item2");
-                    var b = item1.GetValue(item) as Transform;
-                    var m = item2.GetValue(item) as Transform;
-                    res.Pairs.Add(new BonePair { Base = b, Merge = m });
+                    var mapping = getMapping.Invoke(comp, null) as System.Collections.IEnumerable;
+                    if (mapping == null) continue;
+                    foreach (var item in mapping)
+                    {
+                        var tt = item.GetType();
+                        var item1 = tt.GetField("Item1"); var item2 = tt.GetField("Item2");
+                        if (item1 == null) throw new MissingFieldException(tt.Name, "Item1");
+                        if (item2 == null) throw new MissingFieldException(tt.Name, "Item2");
+                        res.Pairs.Add(new BonePair { Base = item1.GetValue(item) as Transform, Merge = item2.GetValue(item) as Transform });
+                    }
                 }
+                catch (Exception e) { ClassifyReflect(e, res); }
             }
         }
 
@@ -360,40 +371,44 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             foreach (var comp in mergeGO.GetComponentsInChildren(vrcfType, true))
             {
-                var content = contentField.GetValue(comp);
-                if (content == null || !armLinkType.IsInstanceOfType(content)) continue; // not an ArmatureLink feature
-                var links = getLinks.Invoke(null, new object[] { content, avatarVfGo });
-                if (links == null) throw new NullReferenceException("GetLinks returned null (propBone == null)");
-
-                if (res.ScaleBakeReason == null) // GetScalingFactor(model, links) → (float,float,float); Item3 = factor
+                try
                 {
-                    bool forceOne = (bool)forceField.GetValue(content);
-                    var factorTuple = getScaling.Invoke(null, new object[] { content, links });
-                    float factor = 1f;
-                    if (factorTuple != null)
+                    var content = contentField.GetValue(comp);
+                    if (content == null || !armLinkType.IsInstanceOfType(content)) continue; // not an ArmatureLink feature
+                    var links = getLinks.Invoke(null, new object[] { content, avatarVfGo });
+                    if (links == null) throw new NullReferenceException("GetLinks returned null (propBone == null)");
+
+                    if (res.ScaleBakeReason == null) // GetScalingFactor(model, links) → (float,float,float); Item3 = factor
                     {
-                        var item3 = factorTuple.GetType().GetField("Item3");
-                        if (item3 == null) throw new MissingFieldException(factorTuple.GetType().Name, "Item3");
-                        factor = (float)item3.GetValue(factorTuple);
+                        bool forceOne = (bool)forceField.GetValue(content);
+                        var factorTuple = getScaling.Invoke(null, new object[] { content, links });
+                        float factor = 1f;
+                        if (factorTuple != null)
+                        {
+                            var item3 = factorTuple.GetType().GetField("Item3");
+                            if (item3 == null) throw new MissingFieldException(factorTuple.GetType().Name, "Item3");
+                            factor = (float)item3.GetValue(factorTuple);
+                        }
+                        if (forceOne || Mathf.Abs(1f - factor) > 1e-4f)
+                            res.ScaleBakeReason = "scaled at bake (forceOneWorldScale / non-unit scale) — edit-time coincidence unverifiable, check the baked result";
                     }
-                    if (forceOne || Mathf.Abs(1f - factor) > 1e-4f)
-                        res.ScaleBakeReason = "scaled at bake (forceOneWorldScale / non-unit scale) — edit-time coincidence unverifiable, check the baked result";
-                }
 
-                var mergeBonesField = links.GetType().GetField("mergeBones");
-                if (mergeBonesField == null) throw new MissingFieldException(links.GetType().Name, "mergeBones");
-                var mergeBones = mergeBonesField.GetValue(links) as System.Collections.IEnumerable;
-                if (mergeBones == null) continue;
-                foreach (var pair in mergeBones)
-                {
-                    var pt = pair.GetType();
-                    var item1 = pt.GetField("Item1"); var item2 = pt.GetField("Item2");
-                    if (item1 == null) throw new MissingFieldException(pt.Name, "Item1");
-                    if (item2 == null) throw new MissingFieldException(pt.Name, "Item2");
-                    var mergeVf = item1.GetValue(pair); // prop/merge
-                    var baseVf = item2.GetValue(pair);  // avatar/base
-                    res.Pairs.Add(new BonePair { Base = FromVfGameObject(vfGoType, baseVf), Merge = FromVfGameObject(vfGoType, mergeVf) });
+                    var mergeBonesField = links.GetType().GetField("mergeBones");
+                    if (mergeBonesField == null) throw new MissingFieldException(links.GetType().Name, "mergeBones");
+                    var mergeBones = mergeBonesField.GetValue(links) as System.Collections.IEnumerable;
+                    if (mergeBones == null) continue;
+                    foreach (var pair in mergeBones)
+                    {
+                        var pt = pair.GetType();
+                        var item1 = pt.GetField("Item1"); var item2 = pt.GetField("Item2");
+                        if (item1 == null) throw new MissingFieldException(pt.Name, "Item1");
+                        if (item2 == null) throw new MissingFieldException(pt.Name, "Item2");
+                        var mergeVf = item1.GetValue(pair); // prop/merge
+                        var baseVf = item2.GetValue(pair);  // avatar/base
+                        res.Pairs.Add(new BonePair { Base = FromVfGameObject(vfGoType, baseVf), Merge = FromVfGameObject(vfGoType, mergeVf) });
+                    }
                 }
+                catch (Exception e) { ClassifyReflect(e, res); }
             }
         }
 
