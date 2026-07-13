@@ -197,7 +197,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (ProbeSettle(root, out string pipeline) == Settle.Unsettled)
             {
                 bool kicked = TryFocusKick(out string kick);
-                return Fail(label, "preview not settled (NDMF rebuild in flight; " + pipeline + ") — "
+                // Transient: the verdict is still FAIL (no sheet — re-grab), but an unsettled preview is an
+                // expected retry condition, not an error, so it logs at Warning to keep console-clean gates
+                // clean (G17). Genuine failures below still log at Error.
+                return FailTransient(label, "preview not settled (NDMF rebuild in flight; " + pipeline + ") — "
                     + (kicked
                         ? "focus kick sent (" + kick + "), the rebuild can advance now: re-grab in a separate call"
                         : "focus kick failed (" + kick + "): focus the Unity Editor window, then re-grab"));
@@ -939,11 +942,22 @@ namespace Ryan6Vrc.AgentTools.Editor
             return false;
         }
 
-        // Family arrow; NO `| png=` trailer — the schema never points at a PNG that isn't on disk.
-        private static string Fail(string label, string reason)
+        // Family arrow; NO `| png=` trailer — the schema never points at a PNG that isn't on disk. Genuine
+        // failures (bad input, API drift, degenerate grab) log at Error. internal for the severity-split test.
+        internal static string Fail(string label, string reason)
         {
             string msg = "[RenderAvatar] " + (string.IsNullOrEmpty(label) ? "?" : label) + " => FAIL: " + reason;
             Debug.LogError(msg);
+            return msg;
+        }
+
+        // A transient, retryable FAIL — the preview settle-gate (G17). Same "=> FAIL:" contract string as
+        // Fail (no sheet was produced; re-grab), but logs at Warning: an unsettled preview is an expected
+        // retry condition, not an error, so it doesn't pollute a console-clean gate. internal for the test.
+        internal static string FailTransient(string label, string reason)
+        {
+            string msg = "[RenderAvatar] " + (string.IsNullOrEmpty(label) ? "?" : label) + " => FAIL: " + reason;
+            Debug.LogWarning(msg);
             return msg;
         }
     }

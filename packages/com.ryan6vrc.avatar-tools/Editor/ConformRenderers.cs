@@ -19,8 +19,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// preserved exactly as-is.
     ///
     /// Call <see cref="Run"/> from MCP execute_code or a menu item.
-    /// PASS = all renderers matched, 0 null/default material slots, every SMR's bounds ensured,
-    ///        and the Hips anchor target was resolved.
+    /// PASS = all renderers matched, 0 null/default material slots, every SMR's bounds ensured, and the
+    ///        Hips anchor was resolved OR the target is a mergeable (no humanoid rig / no 'Hips' — the
+    ///        anchor is left as-authored and PASS carries a note, never a FAIL; G25).
     /// </summary>
     [AgentTool]
     public static class ConformRenderers
@@ -274,7 +275,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // and the PASS gate can clear. First match in hierarchy order wins (deterministic,
                     // matching BuildSourceMap's first-wins convention); resolving it records a
                     // non-blocking AnchorNote (with duplicate count) rather than clearing silently. A
-                    // genuinely missing "Hips" still sets AnchorWarning → FAIL.
+                    // genuinely missing "Hips" also records a non-blocking AnchorNote (mergeable → PASS, see
+                    // the else below — G25); only a misconfigured humanoid rig sets AnchorWarning → FAIL (above).
                     var byName = FindDescendantByName(ownedRoot.transform, "hips", out int hipsCandidates);
                     string reason = ourAnimator == null ? "no Animator" : "non-humanoid rig";
                     if (byName != null)
@@ -285,7 +287,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                     else
                     {
-                        data.AnchorWarning = reason + " and no transform named 'Hips' under ownedRoot";
+                        // A mergeable (hair/accessory) legitimately has neither a humanoid rig nor a 'Hips'
+                        // transform — the exact input own-mergeable prescribes ConformRenderers for. Don't FAIL
+                        // on the missing anchor (that trained workers to accept a red verdict — G25): leave every
+                        // probeAnchor as-authored (the hips==null guards below skip anchor repair) and PASS with
+                        // a note. Materials + bounds still apply. An avatar BASE never reaches here — it carries a
+                        // 'Hips' transform, so the name scan above resolves it.
+                        data.AnchorNote = reason + " and no 'Hips' under ownedRoot — mergeable: probeAnchor left as-authored, anchor repair skipped";
                     }
                 }
             }

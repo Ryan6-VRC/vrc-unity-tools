@@ -63,7 +63,17 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (seam.ReflectError != null) return RefuseMisuse("seam resolution failed: " + seam.ReflectError);
             if (seam.UnresolvableReason != null) return RefuseAbstain(seam.UnresolvableReason);
             if (seam.ScaleBakeReason != null) return RefuseAbstain(seam.ScaleBakeReason);
-            if (seam.Pairs.Count == 0) return RefuseAbstain("no scorable seam component on '" + mergeableRoot + "'");
+            if (seam.Pairs.Count == 0)
+            {
+                // Name what it found: a BoneProxy (offset-tolerant anchor, verify the bake) and a genuinely
+                // bare prop (route to own-mergeable to add a seam) both yield zero scorable pairs, but the
+                // skill routes OPPOSITELY on them — one string for both was the G26 conflation.
+                if (HasBoneProxy(mergeGO))
+                    return RefuseAbstain("bone-proxy attachment on '" + mergeableRoot +
+                        "' (offset-tolerant by design) — no scorable seam; verify the baked result");
+                return RefuseAbstain("no seam component on '" + mergeableRoot +
+                    "' — bare prop; route to own-mergeable to add a seam");
+            }
             foreach (var p in seam.Pairs)
             {
                 if (p.Base == null || p.Merge == null) return RefuseAbstain("seam pair has a null bone");
@@ -153,9 +163,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             int m = offenders.Count, k = context.Count;
             string verdict = m == 0 ? "PASS" : "NOT-PASS";
 
+            // maxOffset carries the worst humanoid seam-offset magnitude onto the one-liner so a NOT-PASS
+            // reads sub-mm-noise vs wrong-base at a glance (offenders are sorted worst-first). Descriptive
+            // only — the disposition doctrine (fix-to-PASS vs accept-with-flag) stays A8's, not this tool's.
+            string maxTail = m > 0
+                ? " maxOffset=" + offenders[0].mm.ToString("F1", CultureInfo.InvariantCulture) + "mm"
+                : "";
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CheckSeam] {0}→{1}: weightedHumanoid={2} offenders={3} context={4} dropped={5} => {6}",
-                mergeGO.name, baseGO.name, weightedCount, m, k, dropped, verdict);
+                "[CheckSeam] {0}→{1}: weightedHumanoid={2} offenders={3}{4} context={5} dropped={6} => {7}",
+                mergeGO.name, baseGO.name, weightedCount, m, maxTail, k, dropped, verdict);
 
             var sb = new StringBuilder();
             sb.Append("# CheckSeam: ").Append(mergeGO.name).Append(" → ").Append(baseGO.name).Append('\n');
@@ -276,6 +292,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             AppDomain.CurrentDomain.GetAssemblies()
                 .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
                 .FirstOrDefault(t => t.FullName == fullName);
+
+        // A ModularAvatar BoneProxy is the anchor-style seam neither pair collector resolves (it maps no
+        // humanoid bones), so it lands in the zero-pairs REFUSE — but it is a legitimate offset-tolerant
+        // attachment, not a bare prop. Reflected by name (this asmdef has no MA reference). Null type
+        // (MA absent) or no component ⇒ false ⇒ treated as bare (the honest floor when we can't confirm one).
+        private static bool HasBoneProxy(GameObject mergeGO)
+        {
+            var t = FindType("nadena.dev.modular_avatar.core.ModularAvatarBoneProxy");
+            return t != null && mergeGO.GetComponentInChildren(t, true) != null;
+        }
 
         // MA: ModularAvatarMergeArmature.GetBonesMapping() → List<(Transform base, Transform merge)> (Item1=base).
         // Returns matched descendants only (not the root pair) — that is fine, the descendants carry the offset.

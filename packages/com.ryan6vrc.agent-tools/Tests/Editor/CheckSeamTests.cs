@@ -262,15 +262,35 @@ public class CheckSeamTests
     // The reflection default (DefaultResolveSeam) is proven by the live corpus (Task 8), not here — a
     // SDK-only TestEditor has no MA/VRCFury. These prove the door's union/guard/conflict branches.
 
+    // G26: zero pairs with NO BoneProxy present ⇒ genuinely bare prop ⇒ route to own-mergeable.
     [Test]
-    public void NoSeam_refuses()
+    public void NoSeam_refusesAsBareProp()
     {
-        LogAssert.Expect(LogType.Warning, RefuseRe); // no scorable seam ⇒ valid-abstain ⇒ warning
+        LogAssert.Expect(LogType.Warning, RefuseRe); // no seam ⇒ valid-abstain ⇒ warning
         SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
-        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution(); // empty Pairs
+        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution(); // empty Pairs, no BoneProxy on Merge
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
-        StringAssert.Contains("no scorable seam", r);
+        StringAssert.Contains("no seam component", r);
+        StringAssert.Contains("bare prop", r); // names the route (own-mergeable), opposite the proxy route
+    }
+
+    // G26: zero pairs BUT a ModularAvatar BoneProxy present ⇒ offset-tolerant anchor attachment, NOT bare.
+    // The skill routes oppositely on these two — one string for both was the conflation the finding names.
+    [Test]
+    public void ZeroPairs_withBoneProxy_refusesAsProxy_notBareProp()
+    {
+        LogAssert.Expect(LogType.Warning, RefuseRe); // proxy abstain ⇒ warning
+        SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
+        var bpType = Resolve("nadena.dev.modular_avatar.core.ModularAvatarBoneProxy");
+        Assert.IsNotNull(bpType, "TestEditor must have Modular Avatar installed (setup-test-editor copies it)");
+        mergeGO.AddComponent(bpType); // a BoneProxy maps no humanoid bones ⇒ zero scorable pairs
+        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution();
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("bone-proxy attachment", r);
+        StringAssert.Contains("verify the baked result", r);
+        StringAssert.DoesNotContain("bare prop", r); // must NOT be routed out as bare
     }
 
     [Test]
@@ -540,6 +560,7 @@ public class CheckSeamTests
         StringAssert.Contains("weightedHumanoid=2", r);
         StringAssert.Contains("offenders=0", r);
         StringAssert.Contains("context=0 dropped=0", r);
+        StringAssert.DoesNotContain("maxOffset", r); // G37: PASS carries no offender magnitude
         var body = ReadLog(r);
         StringAssert.Contains("_(all within ε)_", body);
     }
@@ -554,6 +575,7 @@ public class CheckSeamTests
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r);
         StringAssert.Contains("offenders=1", r);
+        StringAssert.Contains("maxOffset=1.7mm", r); // G37: worst-offender magnitude on the one-liner
         var body = ReadLog(r);
         StringAssert.Contains("**seam-offset**", body);
         StringAssert.Contains("bone=`Chest`", body);
