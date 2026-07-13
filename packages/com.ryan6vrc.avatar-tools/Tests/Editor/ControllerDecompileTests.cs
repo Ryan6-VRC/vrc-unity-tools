@@ -651,10 +651,13 @@ public class ControllerDecompileTests
         Assert.AreEqual(2, w.UnresolvedGuids.Count, "both dangling slots are listed");
     }
 
-    // ---- Review #7b: a condition param that can't survive the '<param> <op> <value>' grammar -> refusal ----
+    // ---- a condition param carrying INTERIOR whitespace survives the verbatim-prefix grammar ----
+    // Under the right-anchored condition grammar a spaced param name is FAITHFUL: it decodes cleanly and
+    // survives verbatim. Only whitespace that collides with the single-space separator (a trailing space)
+    // is refused — by the decompile self-check, covered in RoundtripStressTests.
 
     [Test]
-    public void Walk_Condition_Param_With_Whitespace_Refuses()
+    public void Walk_Condition_Param_With_Interior_Whitespace_Is_Faithful()
     {
         var c = new AnimatorController { name = "CondWs_Fx" };
         c.AddParameter("Bad Param", AnimatorControllerParameterType.Bool);
@@ -666,8 +669,10 @@ public class ControllerDecompileTests
         tr.AddCondition(AnimatorConditionMode.If, 0f, "Bad Param");
 
         var w = ControllerDecompile.Walk(c);
-        Assert.IsTrue(w.Refusals.Any(r => r.Contains("Bad Param") && r.Contains("condition")),
-            "a condition param carrying whitespace -> located refusal");
+        Assert.IsEmpty(w.Refusals,
+            "an interior-whitespace condition param is faithful, not refused: " + string.Join(" | ", w.Refusals));
+        var cond = w.Doc.Layers[0].Root.States.First(x => x.Name == "S").Transitions[0].When[0];
+        Assert.AreEqual("Bad Param", cond.Param, "the spaced param name survives verbatim");
         Object.DestroyImmediate(c);
     }
 

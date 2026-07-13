@@ -825,18 +825,31 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static void BindConditions(List<Condition> into, List<object> list)
         {
             foreach (var el in list)
-            {
-                string s = ToStr(el, "condition");
-                string[] parts = s.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length != 3)
-                    throw new SchemaException($"condition '{s}' must be '<param> <op> <value>' (exactly 3 tokens)");
-                into.Add(new Condition
-                {
-                    Param = parts[0],
-                    Op = ParseCondOp(parts[1]),
-                    Value = ParseCondValue(parts[2], s),
-                });
-            }
+                into.Add(ParseCondition(ToStr(el, "condition")));
+        }
+
+        // '<param> <op> <value>' parsed RIGHT-ANCHORED: the text after the last space is the value, the
+        // single token before it is the op, and everything before is the parameter — VERBATIM (interior
+        // spaces, colons, tabs, and op-lookalike suffixes like a param named 'X is true' all survive).
+        // Separators are strict single spaces, never normalized: a doubled space is a typo made loud, and
+        // a param whose own trailing space would collide with the separator is unrepresentable here (the
+        // decompiler refuses such names up front — its self-check renders and re-splits every condition
+        // through this same method, so the two can't disagree).
+        internal static Condition ParseCondition(string s)
+        {
+            if (string.IsNullOrEmpty(s))
+                throw new SchemaException("condition must be '<param> <op> <value>', got an empty entry");
+            int iv = s.LastIndexOf(' ');
+            int io = iv > 0 ? s.LastIndexOf(' ', iv - 1) : -1;
+            if (io < 0)
+                throw new SchemaException($"condition '{s}' must be '<param> <op> <value>' (op and value are the last two space-separated tokens)");
+            string value = s.Substring(iv + 1);
+            string op = s.Substring(io + 1, iv - io - 1);
+            string param = s.Substring(0, io);
+            if (op.Length == 0 || value.Length == 0 || (param.Length > 0 && param[param.Length - 1] == ' '))
+                throw new SchemaException(
+                    $"condition '{s}': param, op, and value are separated by SINGLE spaces (a doubled or trailing space is either a typo or a param name the condition grammar cannot carry)");
+            return new Condition { Param = param, Op = ParseCondOp(op), Value = ParseCondValue(value, s) };
         }
 
         private static CondOp ParseCondOp(string v)

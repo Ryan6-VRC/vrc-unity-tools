@@ -166,4 +166,62 @@ public class CompileControllerTests
         StringAssert.Contains("00000000000000000000000000000000", body, "advisory names the GUID");
         StringAssert.Contains("`S`", body, "advisory names the state");
     }
+
+    // ── OSC-unsafe parameter names advisory ────────────────────────────────────────────────────────
+    private const string OscHeader = "## Compile advisory: OSC-unsafe parameter names";
+
+    // Compile `yaml` (leaf-named source) to a scratch outDir and return the OSC-unsafe-names section of the
+    // emitted RunLog body. That section is rendered last, so header-to-end IS the whole section.
+    private string OscAdvisorySection(string yaml, string leaf)
+    {
+        string src = TestRoot + "/" + leaf + ".yaml";
+        File.WriteAllText(src, yaml);
+        string result = CompileController.Compile(src, TestRoot + "/out_" + leaf, whatIf: false);
+        StringAssert.Contains("=> OK", result);
+
+        const string marker = "| log=";
+        int i = result.IndexOf(marker, System.StringComparison.Ordinal);
+        Assert.Greater(i, -1, "result carries the RunLog path in-band");
+        string body = File.ReadAllText(result.Substring(i + marker.Length).Trim());
+        int h = body.IndexOf(OscHeader, System.StringComparison.Ordinal);
+        Assert.Greater(h, -1, "RunLog body has the OSC-unsafe-names section");
+        return body.Substring(h);
+    }
+
+    [Test]
+    public void Osc_Advisory_Lists_Unsafe_Names_By_Class()
+    {
+        string section = OscAdvisorySection(
+            "schema: 1\ncontroller: Osc_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  Hair ribbon: bool\n  Fan#1: bool\n  Clean: bool\n" +
+            "layers:\n  - name: L\n    states:\n      S: { motion: ~ }\n    default: S\n",
+            "spaced");
+
+        StringAssert.Contains("`Hair ribbon`", section, "the spaced param is named (backtick-quoted so the space shows)");
+        StringAssert.Contains("contains a space", section, "the space character class is stated");
+        StringAssert.Contains("`Fan#1`", section, "the metacharacter param is named");
+        StringAssert.Contains("OSC pattern metacharacter", section, "the metacharacter class is stated");
+        StringAssert.DoesNotContain("`Clean`", section, "an OSC-safe param is not listed");
+    }
+
+    [Test]
+    public void Osc_Advisory_Skips_Scratch_Param()
+    {
+        string section = OscAdvisorySection(
+            "schema: 1\ncontroller: Osc_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  Scratch#tmp: { type: bool, scratch: true }\n" +
+            "layers:\n  - name: L\n    states:\n      S: { motion: ~ }\n    default: S\n",
+            "scratch");
+
+        StringAssert.DoesNotContain("Scratch#tmp", section, "a scratch param is animator-internal — never on the OSC surface, so not advised");
+        StringAssert.Contains("_(none)_", section, "with only a scratch offender the section renders the none-found form");
+    }
+
+    [Test]
+    public void Osc_Advisory_None_Form_When_Clean()
+    {
+        // The canonical debounce doc's params (RawInput/Debounced) are OSC-safe.
+        string section = OscAdvisorySection(AnimatorSchemaYamlTests.DebounceDoc, "osc_clean");
+        StringAssert.Contains("_(none)_", section, "a clean document renders the none-found form like the sibling advisories");
+    }
 }

@@ -361,4 +361,96 @@ note: |
         var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, null));
         StringAssert.Contains("block scalar", ex.Message.ToLowerInvariant());
     }
+
+    // ---- right-anchored condition grammar (verbatim-prefix param) ---------------------------------
+    // op and value are the LAST two space-separated tokens; everything before is the parameter, verbatim.
+    // Separators are strict single spaces. Each case wraps ONE flow-list `when:` element (authored with its
+    // own quoting) into a minimal document and inspects the bound Condition — or the SchemaException.
+
+    private static Condition ParseWhenElement(string element)
+    {
+        string doc =
+            "schema: 1\ncontroller: C\nbasis: avatar-root\nrole: fx\n" +
+            "layers:\n  - name: L\n    states:\n" +
+            "      A:\n        motion: ~\n        transitions:\n          - { to: B, when: [ " + element + " ] }\n" +
+            "      B: { motion: ~ }\n    default: A\n";
+        var d = AnimatorSchemaYaml.Parse(doc, "cond");
+        return d.Layers[0].Root.States[0].Transitions[0].When[0];
+    }
+
+    [Test]
+    public void Condition_SpacedParam_RightSplits()
+    {
+        var c = ParseWhenElement("Hair ribbon is true");
+        Assert.AreEqual("Hair ribbon", c.Param);
+        Assert.AreEqual(CondOp.Is, c.Op);
+        Assert.AreEqual(1f, c.Value);
+    }
+
+    [Test]
+    public void Condition_ColonBearingParam_RightSplits()
+    {
+        var c = ParseWhenElement("a:b is true");
+        Assert.AreEqual("a:b", c.Param);
+        Assert.AreEqual(CondOp.Is, c.Op);
+    }
+
+    [Test]
+    public void Condition_TabBearingParam_RightSplits()
+    {
+        // A tab INSIDE the param name (not a separator) survives verbatim — only single spaces separate tokens.
+        var c = ParseWhenElement("X\tY is true");
+        Assert.AreEqual("X\tY", c.Param);
+        Assert.AreEqual(CondOp.Is, c.Op);
+    }
+
+    [Test]
+    public void Condition_OpLookalikeParam_RightSplits()
+    {
+        // The param name itself ends in "is true"; the right-anchor rule peels only the LAST op + value.
+        var c = ParseWhenElement("X is true is true");
+        Assert.AreEqual("X is true", c.Param);
+        Assert.AreEqual(CondOp.Is, c.Op);
+        Assert.AreEqual(1f, c.Value);
+    }
+
+    [Test]
+    public void Condition_EmptyParam_RightSplits()
+    {
+        // The empty-name param emits quoted (leading space); the right-split recovers "".
+        var c = ParseWhenElement("\" is true\"");
+        Assert.AreEqual("", c.Param);
+        Assert.AreEqual(CondOp.Is, c.Op);
+    }
+
+    [Test]
+    public void Condition_LeadingHashParam_RightSplits()
+    {
+        // A '#'-leading param must be quoted or the comment-stripper eats it; quoted, it round-trips.
+        var c = ParseWhenElement("\"#Fan is true\"");
+        Assert.AreEqual("#Fan", c.Param);
+        Assert.AreEqual(CondOp.Is, c.Op);
+    }
+
+    [Test]
+    public void Condition_DoubleSpaceSeparator_ThrowsSingleSpaceError()
+    {
+        var ex = Assert.Throws<SchemaException>(() => ParseWhenElement("X is  true"));
+        StringAssert.Contains("single space", ex.Message.ToLowerInvariant());
+    }
+
+    [Test]
+    public void Condition_TabSeparated_ThrowsShapeError()
+    {
+        // Tabs are not separators, so a tab-"separated" condition has no space-split op/value — a shape error.
+        var ex = Assert.Throws<SchemaException>(() => ParseWhenElement("A\tis\ttrue"));
+        StringAssert.Contains("op and value are the last two", ex.Message);
+    }
+
+    [Test]
+    public void Condition_BadOpToken_ThrowsInvalidOp()
+    {
+        var ex = Assert.Throws<SchemaException>(() => ParseWhenElement("X frobnicate true"));
+        StringAssert.Contains("invalid condition op", ex.Message);
+    }
 }

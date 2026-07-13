@@ -629,7 +629,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 SetTarget(tr, t, srcSm, loc);
                 tr.Mute = t.mute;
                 tr.Solo = t.solo;
-                tr.Name = MeaningfulName(t.name, "", loc);
+                tr.Name = MeaningfulName(t.name, "");
 
                 tr.When = DecodeConditions(t.conditions, loc);
                 tr.ExitTime = t.hasExitTime ? t.exitTime : (float?)null;
@@ -712,11 +712,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (conds == null) return list;
                 foreach (var c in conds)
                 {
-                    // A condition serializes as the plain 3-token string '<param> <op> <value>' inside a flow
-                    // list — a param carrying whitespace (breaks the token split) or a flow delimiter (breaks
-                    // the list) cannot round-trip. Refuse it (named + located) rather than emit a broken scalar.
-                    if (!string.IsNullOrEmpty(c.parameter) && ParamBreaksConditionGrammar(c.parameter))
-                        _result.Refusals.Add($"transition from {loc}: condition parameter '{c.parameter}' contains whitespace or a flow delimiter (,[]{{}}) — it cannot be expressed in the '<param> <op> <value>' condition grammar");
                     var cond = new Condition { Param = c.parameter };
                     switch (c.mode)
                     {
@@ -732,24 +727,43 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             _result.Refusals.Add($"transition from {loc}: condition on '{c.parameter}' has an unknown mode '{c.mode}' — out of vocabulary");
                             continue;
                     }
+                    // A condition must survive its own serialized form: render it exactly as emit will and
+                    // re-split it with the parser's grammar. A mismatch — e.g. a param with a trailing space,
+                    // which collides with the single-space separator — cannot round-trip, so refuse it here
+                    // rather than emit YAML the recompile rejects. The check IS the enforcement mechanism;
+                    // there is no character list to drift out of sync with the grammar.
+                    string bad = ConditionSelfCheckFailure(cond);
+                    if (bad != null)
+                        _result.Refusals.Add($"transition from {loc}: condition on '{cond.Param}' {bad}");
                     list.Add(cond);
                 }
                 return list;
             }
 
+            private static string ConditionSelfCheckFailure(Condition c)
+            {
+                try
+                {
+                    var back = AnimatorSchemaYaml.ParseCondition(AnimatorSchemaEmit.RawCondString(c));
+                    if (back.Param != c.Param || back.Op != c.Op || back.Value != c.Value)
+                        return "does not survive the '<param> <op> <value>' grammar (its serialized form re-splits differently)";
+                    return null;
+                }
+                catch (SchemaException e)
+                {
+                    return "does not survive the '<param> <op> <value>' grammar: " + e.Message;
+                }
+            }
+
             // ----- motions / blend trees -----
 
             // A human-authored name survives decode ONLY when it differs from the positional default (the
-            // shared ControllerEmit.AutoTreeName/AutoChildName the compiler would have applied) AND can
-            // round-trip the line-based YAML — a name containing a line break is refused, not mangled.
-            private string MeaningfulName(string actual, string autoDefault, string loc)
+            // shared ControllerEmit.AutoTreeName/AutoChildName the compiler would have applied). A name the
+            // line-based YAML cannot carry (a line break) is caught by the serializer's funnel guard
+            // (AnimatorSchemaEmit.ScalarStr), which the door surfaces as a named FAIL — not here.
+            private static string MeaningfulName(string actual, string autoDefault)
             {
                 if (string.IsNullOrEmpty(actual) || actual == autoDefault) return null;
-                if (actual.IndexOf('\n') >= 0 || actual.IndexOf('\r') >= 0)
-                {
-                    _result.Refusals.Add($"{loc}: a name contains a line break, which cannot round-trip the YAML");
-                    return null;
-                }
                 return actual;
             }
 
@@ -787,7 +801,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private BlendTreeSpec DecodeTree(BlendTree bt, string loc, string expectedName)
             {
                 var spec = new BlendTreeSpec { Kind = MapTreeKind(bt.blendType, loc) };
-                spec.Name = MeaningfulName(bt.name, expectedName, loc);
+                spec.Name = MeaningfulName(bt.name, expectedName);
                 bool direct = spec.Kind == TreeKind.Direct;
                 bool twoD = Is2D(bt.blendType);
                 if (!direct)
@@ -1087,15 +1101,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     default: return 4; // an unknown ChangeType — a distinct bucket so it never conflates with Random
                                        // for the interleave check (DecodeDriver refuses it outright regardless)
                 }
-            }
-
-            // True when the param can't survive the '<param> <op> <value>' condition grammar (whitespace or a
-            // flow delimiter); the refusal that consumes this is raised in DecodeConditions.
-            private static bool ParamBreaksConditionGrammar(string param)
-            {
-                foreach (char c in param)
-                    if (char.IsWhiteSpace(c) || ",[]{}".IndexOf(c) >= 0) return true;
-                return false;
             }
 
             private Behaviour DecodeTracking(VRC_AnimatorTrackingControl tc, string loc)

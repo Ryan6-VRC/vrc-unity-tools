@@ -233,23 +233,40 @@ namespace Ryan6Vrc.AvatarTools.Tests
                 b.motion = clipB;
             }, "DISTINCT embedded clips");
 
-        [Test] public void Refusal_ConditionParamWhitespace() =>
-            AssertRefuses("wsparam", rc =>
+        // A condition param whose TRAILING space collides with the single-space separator is unrepresentable
+        // in condition position — the decompile self-check renders + re-splits it and refuses (named + located)
+        // rather than emit YAML its own recompile would reject. Replaces the deleted character-list refusal;
+        // interior-whitespace / flow-delimiter params are now faithful (Arm D).
+        [Test] public void Refusal_ConditionParamTrailingSpace() =>
+            AssertRefuses("trailingspaceparam", rc =>
             {
-                rc.AddParameter("p q", AnimatorControllerParameterType.Bool);
+                rc.AddParameter(new AnimatorControllerParameter { name = "Fan ", type = AnimatorControllerParameterType.Bool });
                 var sm = rc.layers[0].stateMachine;
                 var a = sm.AddState("A"); var b = sm.AddState("B");
-                a.AddTransition(b).AddCondition(AnimatorConditionMode.If, 0, "p q");
-            }, "p q");
+                a.AddTransition(b).AddCondition(AnimatorConditionMode.If, 0, "Fan ");
+            }, "does not survive");
 
-        [Test] public void Refusal_ConditionParamFlowDelimiter() =>
-            AssertRefuses("flowparam", rc =>
+        // Funnel line-break guard (AnimatorSchemaEmit.ScalarStr): a literal newline in ANY emitted string
+        // field tears the line-based YAML, so the serializer throws and the door surfaces a named FAIL. One
+        // choke point, three representative sites — a param name, a state name (block-key path), and a
+        // behaviour string field (playAudio.sourcePath).
+        [Test] public void Funnel_LineBreakInParamName_Fails() =>
+            AssertRefuses("lbparam", rc =>
+                rc.AddParameter(new AnimatorControllerParameter { name = "Bad\nName", type = AnimatorControllerParameterType.Bool }),
+                "line break");
+
+        [Test] public void Funnel_LineBreakInStateName_Fails() =>
+            AssertRefuses("lbstate", rc =>
+                rc.layers[0].stateMachine.AddState("S").name = "Bad\nState",
+                "line break");
+
+        [Test] public void Funnel_LineBreakInBehaviourField_Fails() =>
+            AssertRefuses("lbbhv", rc =>
             {
-                rc.AddParameter("a,b", AnimatorControllerParameterType.Bool);
-                var sm = rc.layers[0].stateMachine;
-                var a = sm.AddState("A"); var b = sm.AddState("B");
-                a.AddTransition(b).AddCondition(AnimatorConditionMode.If, 0, "a,b");
-            }, "a,b");
+                var s = rc.layers[0].stateMachine.AddState("S");
+                var pa = s.AddStateMachineBehaviour<VRC.SDK3.Avatars.Components.VRCAnimatorPlayAudio>();
+                pa.SourcePath = "Bad\nPath";
+            }, "line break");
 
         // ── Arm C: import-tolerance coverage (decode-side normalization, neither clean nor refusal) ──
         [Test]
@@ -285,5 +302,39 @@ namespace Ryan6Vrc.AvatarTools.Tests
             Assert.IsTrue(w.Notes.Exists(n => n.ToLower().Contains("time")),
                 "the timeParameter tolerance is recorded in Notes");
         }
+
+        // ── Arm D: faithful condition params (formerly refused) ──────────────────────────────────────
+        // A condition parameter carrying spaces or a flow delimiter is FAITHFUL now — no rename, no refusal:
+        // it decompiles cleanly and the emitted condition reaches a textual fixpoint (the comma param emits as
+        // ONE quoted scalar). Converted from the deleted whitespace/delimiter refusal tests.
+        private void AssertConditionParamRoundtrips(string tag, string paramName, bool quotedInYaml)
+        {
+            string ctrlName = "CondRT_" + tag + "_Fx";
+            var rc = AnimatorController.CreateAnimatorControllerAtPath(TestRoot + "/" + ctrlName + ".controller");
+            rc.AddParameter(paramName, AnimatorControllerParameterType.Bool);
+            var sm = rc.layers[0].stateMachine;
+            var a = sm.AddState("A"); var b = sm.AddState("B");
+            a.AddTransition(b).AddCondition(AnimatorConditionMode.If, 0, paramName);
+            AssetDatabase.SaveAssets();
+
+            var w = ControllerDecompile.Walk(rc);
+            Assert.IsEmpty(w.Refusals,
+                "a spaced/delimiter condition param is faithful, not refused: " + string.Join(" | ", w.Refusals));
+
+            string yamlA = AnimatorSchemaEmit.Serialize(w.Doc);
+            string cond = paramName + " is true";
+            StringAssert.Contains(quotedInYaml ? "[ \"" + cond + "\" ]" : "[ " + cond + " ]", yamlA,
+                "the condition emits as " + (quotedInYaml ? "one quoted scalar" : "an unquoted scalar"));
+
+            var c1 = FixpointOracle.CompileTo(TestRoot, yamlA, ctrlName, "c1");
+            string yamlB = FixpointOracle.Decode(c1);
+            Assert.AreEqual(yamlA, yamlB, "the faithful condition param reaches a textual fixpoint");
+        }
+
+        [Test] public void Faithful_SpacedConditionParam_Roundtrips() =>
+            AssertConditionParamRoundtrips("spaced", "p q", quotedInYaml: false);
+
+        [Test] public void Faithful_CommaConditionParam_EmitsOneQuotedScalar_Roundtrips() =>
+            AssertConditionParamRoundtrips("comma", "a,b", quotedInYaml: true);
     }
 }
