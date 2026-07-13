@@ -286,6 +286,21 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("candidate co-active set", r);
     }
 
+    // A null (or blank) shape-name element is malformed input, not a MISSING shape: reject it in the FAIL
+    // envelope rather than let GetBlendShapeIndex(null) throw a raw exception out of Report().
+    [Test]
+    public void Report_nullShapeName_fails()
+    {
+        LogAssert.Expect(LogType.Error, FailRe);
+        var m = MakeMesh(20);
+        AddSpan(m, "A", 0, 9, 0.05f);
+        var go = NewSkinnedObject("Body", m);
+        var r = ReportShapeOverlap.Report(Path(go), new[] { "A", null });
+        StringAssert.StartsWith("[ReportShapeOverlap] FAIL:", r);
+        StringAssert.Contains("non-empty", r);
+        Assert.IsFalse(r.Contains("| log="), "malformed input is a bare FAIL, not a written report");
+    }
+
     // Two child renderers both carrying blendshapes ⇒ ambiguous ⇒ FAIL naming them (point at one).
     [Test]
     public void Report_ambiguousMesh_fails()

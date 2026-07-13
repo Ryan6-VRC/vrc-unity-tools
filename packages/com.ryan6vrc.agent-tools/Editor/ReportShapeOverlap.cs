@@ -62,11 +62,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             var go = Resolve(meshObject);
             if (go == null) return Fail("scene object '" + meshObject + "' not found in the active scene");
-            var mesh = ResolveMesh(go, out var why);
+            var mesh = ResolveMesh(go, out var why); // only returns a mesh with blendShapeCount > 0
             if (mesh == null) return Fail(why);
-            if (mesh.blendShapeCount == 0) return Fail("mesh '" + mesh.name + "' has no blendshapes");
             if (shapeNames == null || shapeNames.Length == 0)
                 return Fail("no shape names — pass the candidate co-active set (the shapes you believe are on together)");
+            // A null/blank element would throw in GetBlendShapeIndex; reject it here rather than let a raw
+            // exception escape the FAIL envelope. Promoting blank names to FAIL is the honest signal for a
+            // malformed graph read (an unset shape row) — a benign MISSING would mask it.
+            if (shapeNames.Any(string.IsNullOrWhiteSpace))
+                return Fail("shape names must be non-empty — a blank entry means a malformed candidate set");
 
             var analysis = Analyze(mesh, shapeNames);
             return Emit(go, mesh, analysis);
