@@ -135,6 +135,32 @@ public class ConformRenderersBoundsAnchorTests
         Object.DestroyImmediate(owned);
     }
 
+    // G25: a mergeable (no humanoid rig, no 'Hips' transform) must PASS with an anchor NOTE, not FAIL on a
+    // missing anchor. Source MATCHES the one renderer with a real material so the material step passes —
+    // isolating the anchor's contribution: pre-fix this run FAILed via an AnchorWarning offender.
+    [Test]
+    public void Mergeable_without_Hips_passes_with_anchor_note_not_fail()
+    {
+        var owned = new GameObject("Hair"); // no Animator, no 'Hips' child
+        var smr = Child(owned, "Mesh0").AddComponent<SkinnedMeshRenderer>();
+        smr.sharedMesh = new Mesh();
+        Assert.IsNull(smr.probeAnchor, "precondition: anchor starts null (as-authored)");
+
+        var src = new GameObject("Src");
+        var mat = new Material(Shader.Find("Unlit/Color")); // real material (not null / not Default-Material)
+        Child(src, "Mesh0").AddComponent<MeshRenderer>().sharedMaterials = new[] { mat };
+
+        var summary = ConformRenderers.Run(owned, src); // PASS logs at Log level — no LogAssert needed
+
+        StringAssert.Contains("=> PASS", summary);
+        StringAssert.Contains("probeAnchor left as-authored", summary); // the anchor note, in notes=[…]
+        Assert.IsNull(smr.probeAnchor, "mergeable anchor left as-authored (repair skipped), never repaired");
+
+        Object.DestroyImmediate(mat);
+        Object.DestroyImmediate(src);
+        Object.DestroyImmediate(owned);
+    }
+
     [Test]
     public void Null_arg_fails_through_the_runlog_grammar_not_a_bare_line()
     {
