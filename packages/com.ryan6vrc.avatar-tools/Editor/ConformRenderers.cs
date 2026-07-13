@@ -275,7 +275,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // and the PASS gate can clear. First match in hierarchy order wins (deterministic,
                     // matching BuildSourceMap's first-wins convention); resolving it records a
                     // non-blocking AnchorNote (with duplicate count) rather than clearing silently. A
-                    // genuinely missing "Hips" still sets AnchorWarning → FAIL.
+                    // genuinely missing "Hips" also records a non-blocking AnchorNote (mergeable → PASS, see
+                    // the else below — G25); only a misconfigured humanoid rig sets AnchorWarning → FAIL (above).
                     var byName = FindDescendantByName(ownedRoot.transform, "hips", out int hipsCandidates);
                     string reason = ourAnimator == null ? "no Animator" : "non-humanoid rig";
                     if (byName != null)

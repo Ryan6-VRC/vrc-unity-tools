@@ -473,7 +473,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // (the walk's TryGetGUIDAndLocalFileIdentifier returns the same signed id).
                     var hdr = Regex.Match(line, @"^--- !u!\d+ &(-?\d+)");
                     if (hdr.Success) { curFileId = long.Parse(hdr.Groups[1].Value); continue; }
-                    var mm = Regex.Match(line, @"m_Motion:\s*\{fileID:\s*\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}");
+                    // fileID is signed too — an FBX-embedded clip has a hash-derived localID that is often
+                    // NEGATIVE (referenced type: 3). A dangling {fileID: -1234567, guid:…, type: 3} must match,
+                    // or the broken motion is dropped entirely (silent miss, not just mis-attributed).
+                    var mm = Regex.Match(line, @"m_Motion:\s*\{fileID:\s*-?\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}");
                     if (!mm.Success) continue;
                     var g = mm.Groups[1].Value;
                     if (!string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(g))) continue; // resolves ⇒ not dangling

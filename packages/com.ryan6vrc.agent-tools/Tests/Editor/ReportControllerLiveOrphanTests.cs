@@ -54,6 +54,34 @@ public class ReportControllerLiveOrphanTests
         StringAssert.Contains("states=3", report); // A + B + C (recurses the sub-state-machine)
     }
 
+    // F26 regression: a dangling motion whose INNER fileID is negative (an FBX-embedded clip's hash-derived
+    // localID, referenced type: 3) must still be collected — not dropped by a \d+ that can't match the sign.
+    [Test]
+    public void BrokenMotions_NegativeFileID_isCollected_notDropped()
+    {
+        const string NegGuid = "abcdef01abcdef01abcdef01abcdef01";
+
+        var sm = _ctrl.layers[0].stateMachine;
+        var st = sm.AddState("Live");
+        var clip = new AnimationClip { name = "doomed" };
+        AssetDatabase.AddObjectToAsset(clip, _ctrl);
+        st.motion = clip;
+        EditorUtility.SetDirty(_ctrl); AssetDatabase.SaveAssets();
+
+        string path = AssetDatabase.GetAssetPath(_ctrl);
+        AssetDatabase.TryGetGUIDAndLocalFileIdentifier(clip, out _, out long clipLocalId);
+        string yaml = File.ReadAllText(path);
+        // Negative inner fileID + type: 3 — the FBX-embedded-clip dangling shape.
+        yaml = Regex.Replace(yaml, @"m_Motion: \{fileID: " + clipLocalId + @"\}",
+            "m_Motion: {fileID: -8823450917, guid: " + NegGuid + ", type: 3}");
+        File.WriteAllText(path, yaml);
+        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
+        var reloaded = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
+
+        string report = File.ReadAllText(PathFrom(ReportController.Report(reloaded)));
+        StringAssert.Contains(NegGuid, report); // pre-fix: dropped entirely (\d+ misses the '-')
+    }
+
     // F26: one live state carries a dangling motion (guid A); an orphan AnimatorState block carrying a
     // different dangling motion (guid B) is appended to the YAML but wired into no layer. The split must
     // list A under live-reachable and B under orphan-only — never both under one undifferentiated count.

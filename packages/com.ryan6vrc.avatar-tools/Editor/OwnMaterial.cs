@@ -488,8 +488,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     ti.SaveAndReimport();
                     mipsEnabled++;
                 }
-                if (mipsEnabled > 0)
-                    data.Note("enabled streaming mip maps on " + mipsEnabled + " forked texture(s) (VRChat upload defense; owned copies only)");
+                // The note is deferred to the PASS point below: the save/reload and post-condition gates ahead
+                // can still rollback() (deleting these very textures), so a note here would outlive its subject.
 
                 // Re-assert the pre-fork keyword snapshot (see the note by its capture): every texture-slot
                 // read/write since then may have silently wiped shaderKeywords.
@@ -550,6 +550,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     data.error = "fork did not land (post-condition)";
                     return Finish(data, label);
                 }
+                // Past every rollback gate — the forked textures are here to stay, so the streaming-mipmap
+                // note is honest now (G48).
+                if (mipsEnabled > 0)
+                    data.Note("enabled streaming mip maps on " + mipsEnabled + " forked texture(s) (VRChat upload defense; owned copies only)");
                 data.result = "PASS";
                 return Finish(data, label);
             }
