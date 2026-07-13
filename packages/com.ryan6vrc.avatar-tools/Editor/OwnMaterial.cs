@@ -475,6 +475,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return Finish(data, label);
                 }
 
+                // G48: enable streaming mip maps on every freshly-forked texture — our OWNED copy, never the
+                // Vendor/ source (untouchable). Vendor textures routinely ship it OFF, which penalizes/blocks
+                // VRChat upload; the fork is the one moment we own a copy we may fix. Only meaningful when the
+                // texture actually has mip maps. A reused pre-existing copy (needsCopy=false) is left alone.
+                int mipsEnabled = 0;
+                foreach (var texPath in newlyWrittenTex)
+                {
+                    var ti = AssetImporter.GetAtPath(texPath) as TextureImporter;
+                    if (ti == null || !ti.mipmapEnabled || ti.streamingMipmaps) continue;
+                    ti.streamingMipmaps = true;
+                    ti.SaveAndReimport();
+                    mipsEnabled++;
+                }
+                if (mipsEnabled > 0)
+                    data.Note("enabled streaming mip maps on " + mipsEnabled + " forked texture(s) (VRChat upload defense; owned copies only)");
+
                 // Re-assert the pre-fork keyword snapshot (see the note by its capture): every texture-slot
                 // read/write since then may have silently wiped shaderKeywords.
                 owned.shaderKeywords = keywordsBeforeFork;

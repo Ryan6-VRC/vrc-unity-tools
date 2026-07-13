@@ -543,6 +543,34 @@ public class OwnMaterialTests
         StringAssert.Contains("\"disposition\": \"vendor-ref\"", json);
     }
 
+    // G48: a forked texture's OWNED copy gets streaming mip maps enabled (VRChat upload defense), while the
+    // Vendor/ source is left untouched. Source is set vendor-like (mips ON, streaming OFF) deterministically.
+    [Test] public void Fork_enables_streaming_mipmaps_on_owned_copy_not_vendor()
+    {
+        var v = VendorMat("Dress");
+        var srcTex = MakeTexture(VendorRoot, "Diffuse");
+        string srcPath = AssetDatabase.GetAssetPath(srcTex);
+        var srcTi = (TextureImporter)AssetImporter.GetAtPath(srcPath);
+        srcTi.mipmapEnabled = true;
+        srcTi.streamingMipmaps = false; // vendor-like: the state the finding names as an upload hazard
+        srcTi.SaveAndReimport();
+        v.SetTexture("_MainTex", AssetDatabase.LoadAssetAtPath<Texture2D>(srcPath));
+        EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
+
+        string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
+        StringAssert.Contains("=> PASS", s);
+
+        var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
+        string ownedTexPath = AssetDatabase.GetAssetPath(o.GetTexture("_MainTex"));
+        var ownedTi = (TextureImporter)AssetImporter.GetAtPath(ownedTexPath);
+        Assert.IsTrue(ownedTi.streamingMipmaps, "forked owned texture must have streaming mip maps enabled (G48)");
+
+        var reSrcTi = (TextureImporter)AssetImporter.GetAtPath(srcPath);
+        Assert.IsFalse(reSrcTi.streamingMipmaps, "vendor source must be left untouched (streaming still off)");
+
+        StringAssert.Contains("streaming mip maps", s); // surfaced as a note on the one-liner
+    }
+
     [Test] public void Two_slots_one_source_share_one_copy()
     {
         var v = VendorMat("Dress");
