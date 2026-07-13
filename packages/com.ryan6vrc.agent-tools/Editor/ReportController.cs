@@ -46,14 +46,19 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return err;
             }
 
-            var sb = new StringBuilder();
+            var sb = new StringBuilder();       // header + broken-motion split
+            var bodySb = new StringBuilder();   // parameters + layers (walked before the split so it knows what's live)
             int layerCount = controller.layers.Length;
             int paramCount = controller.parameters.Length;
             int stateCount = 0;
 
-            // Recover the dangling-motion GUID set once from the controller YAML — the only handle a
-            // broken motion leaves behind, and no C# API exposes it.
-            var danglingGuids = RecoverDanglingMotionGuids(controller);
+            // Recover the dangling-motion GUIDs from the controller YAML (the only handle a broken motion
+            // leaves behind — no C# API exposes it), each tagged with the fileID of the block that holds
+            // it, so the header can split live-reachable (a walked state/tree references it → a real
+            // runtime break) from orphan-only (in the asset but not reached by any walked state → leftover
+            // YAML residue). Without the split a residue-heavy controller reads as N broken motions (F26).
+            var danglingGuids = RecoverDanglingMotions(controller, out var danglingByBlock);
+            var visited = new HashSet<long>(); // fileIDs of every walked state + blend tree (the "live" set)
 
             // ---- Header ----
             string assetPath = AssetDatabase.GetAssetPath(controller);
@@ -61,18 +66,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("asset: `").Append(string.IsNullOrEmpty(assetPath) ? "(unsaved)" : assetPath).Append("`  \n");
             sb.Append("layers=").Append(layerCount).Append(" states=(see below) params=").Append(paramCount).Append('\n');
 
-            if (danglingGuids.Count > 0)
-            {
-                sb.Append("\n**Broken motion GUIDs** (dangling — asset missing, GUID is the only surviving handle):\n");
-                foreach (var g in danglingGuids) sb.Append("- `").Append(g).Append("`\n");
-            }
-
-            // ---- Parameters ----
-            sb.Append("\n## Parameters\n\n");
-            if (paramCount == 0) sb.Append("_(none)_\n");
+            // ---- Parameters (into bodySb; the broken-motion split is appended to sb after the walk) ----
+            bodySb.Append("\n## Parameters\n\n");
+            if (paramCount == 0) bodySb.Append("_(none)_\n");
             else
             {
-                sb.Append("| name | type | default |\n|---|---|---|\n");
+                bodySb.Append("| name | type | default |\n|---|---|---|\n");
                 foreach (var p in controller.parameters)
                 {
                     string def;
@@ -83,7 +82,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         case AnimatorControllerParameterType.Float:   def = F(p.defaultFloat); break;
                         default:                                      def = "—"; break; // Trigger: no default
                     }
-                    sb.Append("| `").Append(Cell(p.name)).Append("` | ").Append(p.type).Append(" | ").Append(Cell(def)).Append(" |\n");
+                    bodySb.Append("| `").Append(Cell(p.name)).Append("` | ").Append(p.type).Append(" | ").Append(Cell(def)).Append(" |\n");
                 }
             }
 
@@ -102,26 +101,52 @@ namespace Ryan6Vrc.AgentTools.Editor
                 bool synced = layer.syncedLayerIndex >= 0;
                 var walkSm = synced ? layers[layer.syncedLayerIndex].stateMachine : layer.stateMachine;
 
-                sb.Append("\n## Layer ").Append(li).Append(": ").Append(layer.name).Append('\n');
-                sb.Append("weight=").Append(F(layer.defaultWeight))
+                // states=N makes a 0-state layer explicit — its empty section is otherwise
+                // indistinguishable from a truncated report (F27). Counts the walked SM's own states
+                // (recursing sub-machines); a synced layer reports its source SM's count.
+                bodySb.Append("\n## Layer ").Append(li).Append(": ").Append(layer.name).Append('\n');
+                bodySb.Append("weight=").Append(F(layer.defaultWeight))
                   .Append(" blend=").Append(layer.blendingMode)
                   .Append(" mask=").Append(layer.avatarMask != null ? layer.avatarMask.name : "—")
+                  .Append(" states=").Append(CountStates(walkSm))
                   .Append(" ").Append(WriteDefaultsSummary(walkSm))
                   .Append('\n');
 
                 if (synced)
-                    sb.Append("_synced layer → source layer ").Append(layer.syncedLayerIndex)
+                    bodySb.Append("_synced layer → source layer ").Append(layer.syncedLayerIndex)
                       .Append(" (`").Append(layers[layer.syncedLayerIndex].name).Append("`); motions/behaviours below are this layer's overrides_\n");
 
-                if (walkSm == null) { sb.Append("_(no state machine)_\n"); continue; }
+                if (walkSm == null) { bodySb.Append("_(no state machine)_\n"); continue; }
 
-                WalkStateMachine(walkSm, "", sb, controller, layer, synced, danglingGuids, ref stateCount);
+                WalkStateMachine(walkSm, "", bodySb, controller, layer, synced, danglingGuids, visited, ref stateCount);
             }
+
+            // ---- Broken-motion split (the walk has now recorded every live fileID) ----
+            var liveGuids = new HashSet<string>();
+            foreach (var fid in visited)
+                if (danglingByBlock.TryGetValue(fid, out var gs))
+                    foreach (var g in gs) liveGuids.Add(g);
+            var live = new List<string>();
+            var orphan = new List<string>();
+            foreach (var g in danglingGuids) (liveGuids.Contains(g) ? live : orphan).Add(g);
+
+            if (danglingGuids.Count > 0)
+            {
+                sb.Append("\n**Broken motion GUIDs** (dangling — asset missing, GUID is the only surviving handle):\n");
+                sb.Append("- live-reachable — a walked state/tree references these, so they are real runtime breaks");
+                AppendGuidList(sb, live);
+                sb.Append("- orphan-only — in the asset but not reached by any walked state (likely leftover YAML residue, not a runtime break)");
+                AppendGuidList(sb, orphan);
+            }
+
+            sb.Append(bodySb);
 
             // ---- Summary + artifact ----
             var body = sb.ToString();
+            var brokenTail = danglingGuids.Count > 0
+                ? " brokenMotions=" + live.Count + "live/" + orphan.Count + "orphan" : "";
             var summary = "[ReportController] " + controller.name + ": layers=" + layerCount
-                        + " states=" + stateCount + " params=" + paramCount + " => OK";
+                        + " states=" + stateCount + " params=" + paramCount + brokenTail + " => OK";
             var result = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "controller_" + controller.name, summary, body, ".md");
             Debug.Log(result);
             return result;
@@ -131,7 +156,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static void WalkStateMachine(AnimatorStateMachine sm, string prefix, StringBuilder sb,
             AnimatorController controller, AnimatorControllerLayer layer, bool synced,
-            List<string> danglingGuids, ref int stateCount)
+            List<string> danglingGuids, HashSet<long> visited, ref int stateCount)
         {
             var def = sm.defaultState;
 
@@ -148,6 +173,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 var st = cs.state;
                 if (st == null) continue;
+                // Record this state's fileID — a dangling motion in its YAML block is "live" (reachable
+                // by the walk), as opposed to orphan residue no walked object references (F26).
+                if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(st, out _, out long stFid)) visited.Add(stFid);
                 // A synced layer re-skins the SOURCE layer's states — they are the same AnimatorState
                 // objects already counted for the source layer, so counting them again would inflate the
                 // hint. Count each distinct state once (on its owning, non-synced layer).
@@ -182,7 +210,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 // Expand a blend-tree motion inline (recursing nested trees).
                 if (motion is BlendTree bt)
-                    AppendBlendTree(bt, 0, sb, danglingGuids);
+                    AppendBlendTree(bt, 0, sb, danglingGuids, visited);
 
                 // Typed VRC behaviour decode (override behaviours for a synced layer).
                 AppendBehaviours(synced ? layer.GetOverrideBehaviours(st) : st.behaviours, sb);
@@ -195,7 +223,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var child in sm.stateMachines)
             {
                 if (child.stateMachine == null) continue;
-                WalkStateMachine(child.stateMachine, prefix + child.stateMachine.name + "/", sb, controller, layer, synced, danglingGuids, ref stateCount);
+                WalkStateMachine(child.stateMachine, prefix + child.stateMachine.name + "/", sb, controller, layer, synced, danglingGuids, visited, ref stateCount);
             }
         }
 
@@ -243,8 +271,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             return m != null ? m.GetType().Name : "(empty)";
         }
 
-        private static void AppendBlendTree(BlendTree bt, int indent, StringBuilder sb, List<string> danglingGuids)
+        private static void AppendBlendTree(BlendTree bt, int indent, StringBuilder sb, List<string> danglingGuids, HashSet<long> visited)
         {
+            // The blend tree's own block holds its children's motion refs — record its fileID so a dangling
+            // child motion counts as live-reachable, not orphan residue (F26).
+            if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(bt, out _, out long btFid)) visited.Add(btFid);
             string pad = new string(' ', (indent + 1) * 2);
             // Serialized child array is "m_Childs" (Unity's legacy misspelling), NOT "m_Children".
             var childrenProp = new SerializedObject(bt).FindProperty("m_Childs");
@@ -273,7 +304,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (Math.Abs(ch.timeScale - 1f) > 1e-6f) sb.Append(" timeScale=").Append(F(ch.timeScale));
                 sb.Append('\n');
 
-                if (ch.motion is BlendTree childBt) AppendBlendTree(childBt, indent + 1, sb, danglingGuids);
+                if (ch.motion is BlendTree childBt) AppendBlendTree(childBt, indent + 1, sb, danglingGuids, visited);
             }
         }
 
@@ -419,24 +450,58 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Dangling-motion GUID recovery (parse controller YAML once) -------------------------
 
-        private static List<string> RecoverDanglingMotionGuids(AnimatorController controller)
+        // Returns the deduped dangling-motion GUIDs (asset gone) AND, in <paramref name="byBlock"/>, the
+        // GUIDs each YAML object's block holds — keyed by the object's fileID (the `--- !u!<class> &<id>`
+        // the m_Motion line falls under). Report intersects byBlock with the set of fileIDs the walk
+        // actually visits to split live-reachable from orphan-only (F26). Line-scanned, not a whole-file
+        // regex, because the owning fileID is the current `&<id>` header — lost by a file-wide match.
+        private static List<string> RecoverDanglingMotions(AnimatorController controller, out Dictionary<long, List<string>> byBlock)
         {
             var result = new List<string>();
+            byBlock = new Dictionary<long, List<string>>();
             string path = AssetDatabase.GetAssetPath(controller);
             if (string.IsNullOrEmpty(path)) return result;
             try
             {
                 var text = File.ReadAllText(path);
                 var seen = new HashSet<string>();
-                foreach (Match m in Regex.Matches(text, @"m_Motion:\s*\{fileID:\s*\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}"))
+                long curFileId = 0;
+                foreach (var line in text.Split('\n'))
                 {
-                    var g = m.Groups[1].Value;
-                    if (seen.Add(g) && string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(g)))
-                        result.Add(g);
+                    // Unity sub-asset fileIDs (localIdentifierInFile) can be NEGATIVE — match the sign, or a
+                    // negative-id block's m_Motion is mis-attributed to the previous block and reads as orphan
+                    // (the walk's TryGetGUIDAndLocalFileIdentifier returns the same signed id).
+                    var hdr = Regex.Match(line, @"^--- !u!\d+ &(-?\d+)");
+                    if (hdr.Success) { curFileId = long.Parse(hdr.Groups[1].Value); continue; }
+                    var mm = Regex.Match(line, @"m_Motion:\s*\{fileID:\s*\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}");
+                    if (!mm.Success) continue;
+                    var g = mm.Groups[1].Value;
+                    if (!string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(g))) continue; // resolves ⇒ not dangling
+                    if (seen.Add(g)) result.Add(g);
+                    if (!byBlock.TryGetValue(curFileId, out var lst)) byBlock[curFileId] = lst = new List<string>();
+                    if (!lst.Contains(g)) lst.Add(g);
                 }
             }
             catch { /* binary-serialized or unreadable — no guids recoverable */ }
             return result;
+        }
+
+        // Count of a state machine's own states, recursing sub-state-machines (for the per-layer states=N
+        // header). Mirrors CountWriteDefaults' recursion; null ⇒ 0.
+        private static int CountStates(AnimatorStateMachine sm)
+        {
+            if (sm == null) return 0;
+            int n = sm.states.Length;
+            foreach (var child in sm.stateMachines) n += CountStates(child.stateMachine);
+            return n;
+        }
+
+        // Render one side of the broken-motion split: an inline "none" when empty, else a bulleted GUID list.
+        private static void AppendGuidList(StringBuilder sb, List<string> guids)
+        {
+            if (guids.Count == 0) { sb.Append(": none\n"); return; }
+            sb.Append(":\n");
+            foreach (var g in guids) sb.Append("  - `").Append(g).Append("`\n");
         }
 
         // ----- Helpers ----------------------------------------------------------------------------
