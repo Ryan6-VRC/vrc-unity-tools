@@ -413,4 +413,53 @@ public class AnimatorSchemaEmitTests
             "NeedsQuote must quote exactly the tokens the parser would infer as non-string: "
             + string.Join("; ", disagreements));
     }
+
+    // ---- condition string <-> ScalarStr agreement (the condition arm of the drift guard) -------------
+    // The whole condition string routes through ScalarStr (CondString = ScalarStr(RawCondString)), so the
+    // same NeedsQuote predicate must round-trip a condition whatever the param name carries. For each param,
+    // serialize a doc whose sole transition tests `<param> is true`, then assert the emitted YAML is a
+    // textual fixpoint (idempotent through a parse) and the parsed Condition recovers Param byte-for-byte.
+    [Test]
+    public void CondString_Roundtrips_Param_Across_Battery()
+    {
+        string[] battery =
+        {
+            "Fan",                 // plain
+            "Hair ribbon",         // spaced (stays unquoted)
+            "a,b",                 // flow delimiter -> one quoted scalar
+            "a:b",                 // colon -> quoted
+            "#Fan",                // comment leader -> quoted
+            "He said \"hi\"",      // embedded double quotes -> quoted + escaped
+            "a\\b",                // backslash (stays unquoted; the plain flow reader copies it verbatim)
+            "café",                // non-ASCII
+            "",                    // empty param -> " is true" -> quoted
+        };
+        var mismatches = new List<string>();
+        foreach (var param in battery)
+        {
+            var doc = new AnimDocument { Schema = 1, Basis = BindingBasis.AvatarRoot, ControllerName = "C" };
+            var layer = new Layer { Name = "L" };
+            var a = new State { Name = "A" };
+            a.Transitions.Add(new Transition
+            {
+                To = "B",
+                When = { new Condition { Param = param, Op = CondOp.Is, Value = 1f } },
+            });
+            layer.Root.States.Add(a);
+            layer.Root.States.Add(new State { Name = "B" });
+            layer.Root.DefaultState = "A";
+            doc.Layers.Add(layer);
+
+            string y1 = AnimatorSchemaEmit.Serialize(doc);
+            var back = AnimatorSchemaYaml.Parse(y1, "cond-battery");
+            var backCond = back.Layers[0].Root.States[0].Transitions[0].When[0];
+            if (backCond.Param != param)
+                mismatches.Add($"'{param}': parsed Param back as '{backCond.Param}'");
+            string y2 = AnimatorSchemaEmit.Serialize(back);
+            if (y1 != y2)
+                mismatches.Add($"'{param}': not a textual fixpoint");
+        }
+        CollectionAssert.IsEmpty(mismatches,
+            "every condition param must survive emit->parse verbatim and be a fixpoint: " + string.Join("; ", mismatches));
+    }
 }

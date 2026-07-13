@@ -142,13 +142,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var frameLatency = FrameLatencyAdvisories(doc);
             var driverIsolation = DriverIsolationAdvisories(doc);
             var unresolvedRefs = UnresolvedRefAdvisories(built);
+            var oscUnsafeNames = OscUnsafeNameAdvisories(doc);
 
             int states = doc.Layers.Sum(l => l.Root.CountStates());
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[CompileController] {0}: layers={1} states={2} params={3} => OK{4}",
                 name, doc.Layers.Count, states, doc.Parameters.Count, whatIf ? " (whatIf)" : "");
 
-            string body = BuildBody(doc, finalPath, lint, frameLatency, driverIsolation, unresolvedRefs, whatIf);
+            string body = BuildBody(doc, finalPath, lint, frameLatency, driverIsolation, unresolvedRefs, oscUnsafeNames, whatIf);
 
             // ── 7/8. Finalize: whatIf sweeps the temp; a real compile saves the asset ────────────────
             if (whatIf) { if (tempFolder != null) AssetDatabase.DeleteAsset(tempFolder); }
@@ -338,9 +339,39 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return lines;
         }
 
+        // ── Advisory: OSC-unsafe parameter names ─────────────────────────────────────────────────────
+        // VRChat's OSC interface replaces a space in a parameter name with '_' (a resulting collision with
+        // another param can crash the client), and "# * , ? [ ] { }" are OSC address-pattern metacharacters.
+        // Neither is schema-illegal — an Animator param name is an arbitrary string — and the compiler cannot
+        // know which params are OSC-exposed, so this only advises. Skips scratch params (compiler/animator-
+        // internal by construction — never on the OSC surface). NOT gated on the vrc: meta: a freshly-decompiled
+        // vendor FX carries none, which is exactly the case the advisory exists to catch.
+        private const string OscPatternMetachars = "#*,?[]{}";
+        private static List<string> OscUnsafeNameAdvisories(AnimDocument doc)
+        {
+            var lines = new List<string>();
+            foreach (var p in doc.Parameters)
+            {
+                if (p == null || p.Scratch) continue;
+                string name = p.Name ?? "";
+                bool hasSpace = name.IndexOf(' ') >= 0;
+                string metas = new string(name.Where(c => OscPatternMetachars.IndexOf(c) >= 0).Distinct().ToArray());
+                if (!hasSpace && metas.Length == 0) continue;
+                string cls = hasSpace && metas.Length > 0
+                    ? "contains a space and OSC pattern metacharacter(s) `" + metas + "`"
+                    : hasSpace ? "contains a space"
+                    : "contains OSC pattern metacharacter(s) `" + metas + "`";
+                // Backtick-quote the name so a leading/trailing space is visible and `# * [ ]` etc. don't
+                // render as Markdown.
+                lines.Add("`" + name + "` — " + cls);
+            }
+            return lines;
+        }
+
         // ── RunLog body ──────────────────────────────────────────────────────────────────────────────
         private static string BuildBody(AnimDocument doc, string finalPath, LintResult lint,
-            List<string> frameLatency, List<string> driverIsolation, List<string> unresolvedRefs, bool whatIf)
+            List<string> frameLatency, List<string> driverIsolation, List<string> unresolvedRefs,
+            List<string> oscUnsafeNames, bool whatIf)
         {
             var sb = new StringBuilder();
             sb.Append("# CompileController: ").Append(doc.ControllerName).Append('\n');
@@ -371,6 +402,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("\n## Compile advisory: unresolved motion refs\n\n");
             if (unresolvedRefs.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in unresolvedRefs) sb.Append("- ").Append(l).Append('\n');
+
+            sb.Append("\n## Compile advisory: OSC-unsafe parameter names\n\n");
+            if (oscUnsafeNames.Count == 0) sb.Append("_(none)_\n");
+            else
+            {
+                // The per-line class comes from the offenders; state the "why" once for the section.
+                sb.Append("VRChat's OSC interface replaces a space with `_` (a resulting collision can crash the "
+                    + "client), and `# * , ? [ ] { }` are OSC pattern metacharacters — a hazard only if the param "
+                    + "is OSC-exposed, which the compiler can't know (hence advisory).\n");
+                foreach (var l in oscUnsafeNames) sb.Append("- ").Append(l).Append('\n');
+            }
 
             return sb.ToString();
         }

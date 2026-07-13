@@ -383,15 +383,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return "[ " + string.Join(", ", strs) + " ]";
         }
 
-        // '<param> <op> <value>' — the plain 3-token string the parser splits on whitespace. Param names are
-        // identifiers (no spaces) and op/value are safe tokens, so the whole is emitted unquoted for legibility.
-        private static string CondString(Condition c)
+        // '<param> <op> <value>' — op and value are the LAST two space-separated tokens; everything before
+        // is the param, verbatim (the parser right-anchors, so interior spaces stay unquoted and legible).
+        // The whole string routes through ScalarStr, so a param carrying a flow-delimiter/comment/leader
+        // hazard emits as ONE quoted scalar under the same predicate as every other scalar in the schema.
+        // Exposed raw (unquoted) for the decompiler's self-check, which re-splits it with the parser's own
+        // grammar to refuse a condition that can't survive its serialized form.
+        internal static string RawCondString(Condition c)
         {
             string val = (c.Op == CondOp.Is || c.Op == CondOp.IsNot)
                 ? (c.Value != 0f ? "true" : "false")
                 : Num(c.Value);
             return c.Param + " " + CondOpToken(c.Op) + " " + val;
         }
+
+        private static string CondString(Condition c) => ScalarStr(RawCondString(c));
 
         // ----- behaviours -----
 
@@ -460,7 +466,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static string ScalarStr(string s)
         {
             if (s == null) return "~";
+            CheckNoLineBreak(s);
             return NeedsQuote(s) ? Quote(s) : s;
+        }
+
+        // The line-based reader cannot carry a literal newline in any scalar and Quote does not escape
+        // one, so emitting it would write torn YAML. Every string field funnels through ScalarStr/Quote,
+        // so the guard lives here — one choke point instead of per-decode-site checks that rot as fields
+        // are added. DecompileController catches this into a named FAIL.
+        private static void CheckNoLineBreak(string s)
+        {
+            if (s.IndexOf('\n') < 0 && s.IndexOf('\r') < 0) return;
+            throw new SchemaException("'" + s.Replace("\r", "\\r").Replace("\n", "\\n")
+                + "' contains a line break, which cannot round-trip the line-based YAML");
         }
 
         // Quote when the raw token would NOT read back as the same string: it infers to bool/number/null, is
@@ -490,8 +508,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // Double-quoted form: the reader unescapes \" and \\, so those are the only escapes emitted.
+        // (Direct callers — GUID rendering — get the line-break guard here; ScalarStr guards its own.)
         private static string Quote(string s)
-            => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+        {
+            CheckNoLineBreak(s);
+            return "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+        }
 
         private static string Bool(bool b) => b ? "true" : "false";
 

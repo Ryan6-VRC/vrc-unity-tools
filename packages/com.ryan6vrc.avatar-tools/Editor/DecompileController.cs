@@ -74,7 +74,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             doc.ReservedNotes["unresolved"] = walk.UnresolvedGuids.Select(g => (object)g).ToList();
             doc.ReservedNotes["tolerances"] = walk.Notes.Select(n => (object)n).ToList();
 
-            string yaml = AnimatorSchemaEmit.Serialize(doc);
+            // The serializer's funnel guard throws on a string no scalar can carry (a literal line break in
+            // any name/path/field) — surface it as this door's named FAIL, never a torn .yaml.
+            string yaml;
+            try { yaml = AnimatorSchemaEmit.Serialize(doc); }
+            catch (SchemaException e) { return Fail(failLabel, controllerPath, "serialize: " + e.Message); }
 
             // ── Persist the .yaml (skipped in whatIf; that is the only thing whatIf suppresses) ───────
             if (!whatIf)
