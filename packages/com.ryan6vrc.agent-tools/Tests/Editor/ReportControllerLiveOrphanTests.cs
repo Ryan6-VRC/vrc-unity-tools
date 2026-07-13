@@ -54,6 +54,56 @@ public class ReportControllerLiveOrphanTests
         StringAssert.Contains("states=3", report); // A + B + C (recurses the sub-state-machine)
     }
 
+    // F26 regression: a synced layer's dangling OVERRIDE motion (stored in the controller's main-object
+    // block, not a state block) must land under live-reachable, not be mislabeled orphan residue.
+    [Test]
+    public void BrokenMotions_SyncedLayerOverride_isLiveReachable_notOrphan()
+    {
+        const string OvGuid = "11112222333344445555666677778888";
+
+        _ctrl.layers[0].stateMachine.AddState("Src");
+        _ctrl.AddLayer("Synced");
+        var ls = _ctrl.layers;
+        ls[1].syncedLayerIndex = 0; // synced to the base layer
+        _ctrl.layers = ls;
+        var srcState = _ctrl.layers[0].stateMachine.states[0].state;
+        var ov = new AnimationClip { name = "override" };
+        AssetDatabase.AddObjectToAsset(ov, _ctrl);
+
+        // Write the synced-layer override motion directly (the typed SetOverrideMotion on a re-fetched layer
+        // does not persist): m_AnimatorLayers[1].m_Motions[0] = { m_State: srcState, m_Motion: ov }.
+        var so = new SerializedObject(_ctrl);
+        var motions = so.FindProperty("m_AnimatorLayers").GetArrayElementAtIndex(1).FindPropertyRelative("m_Motions");
+        Assert.IsNotNull(motions, "synced layer must expose m_Motions");
+        motions.arraySize = 1;
+        var e0 = motions.GetArrayElementAtIndex(0);
+        var stateProp = e0.FindPropertyRelative("m_State");
+        var motionProp = e0.FindPropertyRelative("m_Motion");
+        Assert.IsNotNull(stateProp, "override entry must expose m_State");
+        Assert.IsNotNull(motionProp, "override entry must expose m_Motion");
+        stateProp.objectReferenceValue = srcState;
+        motionProp.objectReferenceValue = ov;
+        so.ApplyModifiedPropertiesWithoutUndo();
+        EditorUtility.SetDirty(_ctrl); AssetDatabase.SaveAssets();
+
+        string path = AssetDatabase.GetAssetPath(_ctrl);
+        AssetDatabase.TryGetGUIDAndLocalFileIdentifier(ov, out _, out long ovLocalId);
+        string yaml = File.ReadAllText(path);
+        string ovRef = "m_Motion: {fileID: " + ovLocalId + "}";
+        StringAssert.Contains(ovRef, yaml, "precondition: override motion serialized into the controller's main block");
+        yaml = yaml.Replace(ovRef, "m_Motion: {fileID: 7400000, guid: " + OvGuid + ", type: 2}");
+        File.WriteAllText(path, yaml);
+        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
+        var reloaded = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
+
+        string report = File.ReadAllText(PathFrom(ReportController.Report(reloaded)));
+        int liveHdr = report.IndexOf("live-reachable");
+        int orphanHdr = report.IndexOf("orphan-only");
+        int ovAt = report.IndexOf(OvGuid);
+        Assert.That(ovAt, Is.GreaterThan(liveHdr).And.LessThan(orphanHdr),
+            "synced-layer override break must be live-reachable, not orphan residue");
+    }
+
     // F26 regression: a dangling motion whose INNER fileID is negative (an FBX-embedded clip's hash-derived
     // localID, referenced type: 3) must still be collected — not dropped by a \d+ that can't match the sign.
     [Test]

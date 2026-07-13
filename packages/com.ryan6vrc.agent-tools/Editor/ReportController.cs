@@ -101,6 +101,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 bool synced = layer.syncedLayerIndex >= 0;
                 var walkSm = synced ? layers[layer.syncedLayerIndex].stateMachine : layer.stateMachine;
 
+                // A synced layer's override motions live inline in the controller's OWN main-object block
+                // (m_AnimatorLayers[].m_Motions), not a state block — so record that block's fileID as visited
+                // or a dangling override clip (a real runtime break) is mis-bucketed as orphan residue. Residue
+                // always sits in separate orphaned-state blocks, so this can't mark residue live (F26).
+                if (synced && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(controller, out _, out long ctrlFid))
+                    visited.Add(ctrlFid);
+
                 // states=N makes a 0-state layer explicit — its empty section is otherwise
                 // indistinguishable from a truncated report (F27). Counts the walked SM's own states
                 // (recursing sub-machines); a synced layer reports its source SM's count.
