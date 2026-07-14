@@ -278,20 +278,21 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // Reflection surfaces a real throw wrapped in TargetInvocationException — unwrap it. Genuine API drift
         // (the tool broken against the installed package) => ReflectError (misuse/error). A seam that exists but
-        // won't resolve onto this base => UnresolvableReason (valid abstain). First of each kind wins.
+        // won't resolve onto this base => UnresolvableReason (valid abstain).
         private static void ClassifyReflect(Exception e, SeamResolution res)
         {
+            // First carrier wins across BOTH fields. The pre-refactor single outer try aborted on the first
+            // throw and set exactly one reason; because the per-collector/per-component guards now continue,
+            // a later throw must not upgrade an earlier abstain (UnresolvableReason/warning) to misuse
+            // (ReflectError/error). Preserves Check()'s REFUSE severity and removes iteration-order dependence.
+            if (res.ReflectError != null || res.UnresolvableReason != null) return;
             var real = (e as System.Reflection.TargetInvocationException)?.InnerException ?? e;
             if (real is MissingMethodException || real is MissingFieldException ||
                 real is MissingMemberException || real is TypeLoadException)
-            {
-                if (res.ReflectError == null) res.ReflectError = real.GetType().Name + ": " + real.Message;
-            }
-            else if (res.UnresolvableReason == null)
-            {
+                res.ReflectError = real.GetType().Name + ": " + real.Message;
+            else
                 res.UnresolvableReason = "seam present but does not resolve onto this base (likely an incompatible " +
                     "or independent rig): " + real.GetType().Name + ": " + real.Message;
-            }
         }
 
         private static SeamResolution DefaultResolveSeam(GameObject baseGO, GameObject mergeGO)

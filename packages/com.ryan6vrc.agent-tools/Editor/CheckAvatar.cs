@@ -128,21 +128,30 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // Reflect one dynamics category by typename; absent type ⇒ skip (never throw). Read the driven target via
-        // the SDK's own null-resolving getter (null ⇒ own transform). Every per-component hop guarded — a single
-        // bad component warns loud and is skipped, never aborting the sweep.
+        // the SDK's own null-resolving getter (null return ⇒ own transform). Every per-component hop guarded — a
+        // single bad component warns loud and is skipped, never aborting the sweep.
         private static void AddCategory(GameObject avatarGO, List<(Component, Transform, string, string)> result,
             string category, string typeName, string getterName, bool withShape)
         {
             var type = CheckSeam.FindType(typeName);
             if (type == null) return; // SDK/category absent ⇒ skip
             var getter = type.GetMethod(getterName, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+            if (getter == null)
+            {
+                // Type present but its getter renamed ⇒ API drift. Fail loud and skip the whole category — do
+                // NOT silently fall back to own-transform for every component (that fabricates plausible-but-wrong
+                // targets). The CI canary pins this getter, so this only fires on a live editor whose SDK drifted.
+                Debug.LogWarning("[CheckAvatar] dynamics getter '" + typeName + "." + getterName
+                               + "' did not reflect (API drift) — skipping the " + category + " category.");
+                return;
+            }
             foreach (var comp in avatarGO.GetComponentsInChildren(type, true))
             {
                 if (comp == null) continue;
                 try
                 {
-                    Transform target = getter != null ? getter.Invoke(comp, null) as Transform : null;
-                    if (target == null) target = comp.transform; // null ⇒ own transform (getter convention)
+                    Transform target = getter.Invoke(comp, null) as Transform;
+                    if (target == null) target = comp.transform; // getter returned null ⇒ own transform (legit convention)
                     result.Add((comp, target, category, withShape ? ColliderDetail(comp) : ""));
                 }
                 catch (Exception e)
@@ -518,10 +527,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
                 // groups is a Dictionary (non-deterministic iteration) — sort for a byte-stable RunLog, unlike
                 // the List-ordered maSceneRef/clipBinding blocks. Host order within a group is already stable.
+                // FinalPath is not unique — two distinct final bones can share a hierarchy path (Unity allows
+                // duplicate sibling names) — so tiebreak on the first host's path (List.Sort is unstable) to keep
+                // the order total and the RunLog byte-stable; every group has ≥2 hosts, so Hosts[0] is safe.
                 rep.MergeConflicts.Sort((x, y) =>
                 {
                     int c = string.CompareOrdinal(x.Category, y.Category);
-                    return c != 0 ? c : string.CompareOrdinal(x.FinalPath, y.FinalPath);
+                    if (c != 0) return c;
+                    c = string.CompareOrdinal(x.FinalPath, y.FinalPath);
+                    return c != 0 ? c : string.CompareOrdinal(x.Hosts[0].Path, y.Hosts[0].Path);
                 });
             }
             catch (Exception e)
