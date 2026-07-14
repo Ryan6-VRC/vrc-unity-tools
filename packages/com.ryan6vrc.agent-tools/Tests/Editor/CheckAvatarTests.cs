@@ -666,6 +666,35 @@ public class CheckAvatarTests
         StringAssert.Contains("=> PASS", log);
     }
 
+    // ── Real dynamics reflection: type/getter canary + null-root extraction ───────────────────────────
+
+    [Test] public void Canary_DynamicsTypesAndGettersResolve()
+    {
+        AssertTypeGetter("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone", "GetRootTransform");
+        AssertTypeGetter("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider", "GetRootTransform");
+        AssertTypeGetter("VRC.Dynamics.VRCConstraintBase", "GetEffectiveTargetTransform");
+    }
+
+    private static void AssertTypeGetter(string typeName, string getter)
+    {
+        var t = CheckSeam.FindType(typeName);
+        Assert.IsNotNull(t, "type unresolved (drift): " + typeName);
+        Assert.IsNotNull(t.GetMethod(getter, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null),
+            "getter unresolved (drift): " + typeName + "." + getter);
+    }
+
+    [Test] public void CollectDynamics_RealPhysbone_NullRoot_UsesOwnTransform()
+    {
+        var root = NewAvatar("PB");
+        var pbType = CheckSeam.FindType("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone");
+        Assert.IsNotNull(pbType);
+        var child = NewChild(root, "Bone");
+        child.AddComponent(pbType); // rootTransform defaults null
+        var targets = CheckAvatar.CollectDynamicsTargets(root); // real default
+        Assert.IsTrue(targets.Exists(x => x.category == "physbone" && x.target == child.transform),
+            "physbone with null rootTransform should target its own transform");
+    }
+
     // Avatar-root-relative path of a named child, matching CheckAvatar.PathOf output (Root/Child).
     private static string PathOf(GameObject root, string childName) => root.name + "/" + childName;
 }

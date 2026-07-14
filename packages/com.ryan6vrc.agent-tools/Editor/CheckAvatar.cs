@@ -97,9 +97,54 @@ namespace Ryan6Vrc.AgentTools.Editor
             return (pairs, note);
         }
 
-        // TODO(Task 3): real reflection over the three dynamics categories. Provisional non-throwing empty default.
         private static List<(Component, Transform, string, string)> DefaultCollectDynamicsTargets(GameObject avatarGO)
-            => new List<(Component, Transform, string, string)>();
+        {
+            var result = new List<(Component, Transform, string, string)>();
+            AddCategory(avatarGO, result, "physbone",   "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone",         "GetRootTransform", false);
+            AddCategory(avatarGO, result, "collider",   "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider", "GetRootTransform", true);
+            AddCategory(avatarGO, result, "constraint", "VRC.Dynamics.VRCConstraintBase",                            "GetEffectiveTargetTransform", false);
+            return result;
+        }
+
+        // Reflect one dynamics category by typename; absent type ⇒ skip (never throw). Read the driven target via
+        // the SDK's own null-resolving getter (null ⇒ own transform). Every per-component hop guarded — a single
+        // bad component warns loud and is skipped, never aborting the sweep.
+        private static void AddCategory(GameObject avatarGO, List<(Component, Transform, string, string)> result,
+            string category, string typeName, string getterName, bool withShape)
+        {
+            var type = CheckSeam.FindType(typeName);
+            if (type == null) return; // SDK/category absent ⇒ skip
+            var getter = type.GetMethod(getterName, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+            foreach (var comp in avatarGO.GetComponentsInChildren(type, true))
+            {
+                if (comp == null) continue;
+                try
+                {
+                    Transform target = getter != null ? getter.Invoke(comp, null) as Transform : null;
+                    if (target == null) target = comp.transform; // null ⇒ own transform (getter convention)
+                    result.Add((comp, target, category, withShape ? ColliderDetail(comp) : ""));
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning("[CheckAvatar] dynamics target read failed on " + PathOf(comp.gameObject)
+                                   + " (" + e.GetType().Name + ") — skipping this component.");
+                }
+            }
+        }
+
+        // Best-effort collider shape for agent discretion; every field guarded (never throws).
+        private static string ColliderDetail(Component collider)
+        {
+            try
+            {
+                var t = collider.GetType();
+                object shape = t.GetField("shapeType")?.GetValue(collider);
+                object radius = t.GetField("radius")?.GetValue(collider);
+                object height = t.GetField("height")?.GetValue(collider);
+                return "shape=" + shape + " radius=" + radius + " height=" + height;
+            }
+            catch { return "shape=?"; }
+        }
 
         private struct ConflictHost { public string Path; public string Type; public string Bone; public bool Mergeable; public string Detail; }
         private struct MergeConflict { public string Category; public string FinalPath; public List<ConflictHost> Hosts; }
