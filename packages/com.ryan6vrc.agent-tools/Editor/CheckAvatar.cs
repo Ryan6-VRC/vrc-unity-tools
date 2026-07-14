@@ -12,23 +12,32 @@ using static Ryan6Vrc.AgentTools.Editor.CheckAnimator; // FrameKind / FrameResul
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Scene-scoped INSPECTION gate: classify the two silent path-encoded reference breaks a mergeable
-    /// placement leaves on an instantiated IN-SCENE avatar root after a base rename
-    /// (canonical <c>Body_base</c>→<c>Body_Base</c>):
+    /// Scene-scoped INSPECTION gate: classify the silent reference/identity breaks a mergeable placement
+    /// leaves on an instantiated IN-SCENE avatar root. Two are path-encoded reference breaks a base rename
+    /// (canonical <c>Body_base</c>→<c>Body_Base</c>) leaves behind; the third is a post-merge collision.
     ///   - <b>MA scene refs</b> (the reactive family / BlendshapeSync / Mesh Settings — anything carrying
     ///     the <c>referencePath</c>+<c>targetObject</c> <c>AvatarObjectReference</c> field pair) that no
     ///     longer resolve → the skill retargets them in place.
     ///   - <b>clip/controller bindings</b> (descriptor playable layers + every MA MergeAnimator / VRCFury
     ///     FullController merged animator) that resolve to no scene object → the skill owns the vendor
     ///     <c>.anim</c> and repaths (routed by the per-offender <c>clipAssetPath</c>).
+    ///   - <b>merge-conflict</b> (NOT path-encoded — transform-identity, not a name): two+ dynamics
+    ///     components in one category (physbone/collider/constraint) that resolve to the SAME post-merge
+    ///     transform via the MA/VRCFury merge map, ≥1 of them mergeable-sourced — i.e. a mergeable's bone
+    ///     name-merges onto a base bone that already carries the same kind of component, so both bake onto
+    ///     one transform and fight → the agent de-conflicts. A base↔base duplicate (none mergeable) is not a
+    ///     merge artifact and is dropped.
     ///
-    /// Everything is resolved against the PLACED scene (the load-bearing model, spec D1): a to-be-merged
-    /// bone is physically present pre-bake and resolves now; a base-rename break does not. So this predicts
-    /// nothing about what the build will move, and never depends on the <c>Armature.&lt;Name&gt;</c> convention.
+    /// The first two resolve against the PLACED scene (the load-bearing model, spec D1): a to-be-merged bone
+    /// is physically present pre-bake and resolves now; a base-rename break does not. So this predicts nothing
+    /// about what the build will MOVE, and never depends on the <c>Armature.&lt;Name&gt;</c> convention.
+    /// merge-conflict is the one class that reads the merge map (what the build will MERGE), not a scene path.
     ///
-    /// Verdict is <c>PASS</c> (all resolve) or <c>CLASSIFY</c> (any unresolved) — never <c>FAIL</c> for a
-    /// finding (bad input alone bare-FAILs). No computed near-miss/absent/N-of-M heuristic: the tool names
-    /// offenders and their class; the compose agent applies discretion (broken refs are often intentional).
+    /// Verdict is <c>PASS</c> (clean) or <c>CLASSIFY</c> (any finding) — never <c>FAIL</c> for a finding (bad
+    /// input alone bare-FAILs). No computed near-miss/absent/N-of-M SCORING: every class is a definite
+    /// predicate (a ref resolves or it doesn't; a collision group is ≥2-with-a-mergeable or it isn't). The
+    /// tool names offenders and their class; the compose agent applies discretion (findings are often
+    /// intentional).
     ///
     /// Clip-binding detection REUSES <see cref="CheckAnimator"/>'s frame-detection + binding-walk +
     /// humanoid-curve-skip (called, not re-expressed) with the build-rewrite demotion flipped off. The
@@ -90,6 +99,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static (List<(Transform, Transform)>, string) DefaultResolveMergePairs(GameObject avatarGO)
         {
             var res = CheckSeam.ResolveMergeMap(avatarGO, avatarGO);
+            // ScaleBakeReason is intentionally omitted from the note: scale-at-bake doesn't change WHICH
+            // transform two components collide on (only its baked scale), so those pairs stay valid for
+            // collision detection — only genuine drift (ReflectError) or a non-resolving seam (UnresolvableReason)
+            // means the map is partial and conflicts may be under-reported.
             string note = (res.ReflectError ?? res.UnresolvableReason);
             if (note != null) note = "merge map partial — some seams didn't resolve; conflicts may be under-reported (" + note + ")";
             var pairs = new List<(Transform, Transform)>();
@@ -503,6 +516,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                         Hosts = kv.Value,
                     });
                 }
+                // groups is a Dictionary (non-deterministic iteration) — sort for a byte-stable RunLog, unlike
+                // the List-ordered maSceneRef/clipBinding blocks. Host order within a group is already stable.
+                rep.MergeConflicts.Sort((x, y) =>
+                {
+                    int c = string.CompareOrdinal(x.Category, y.Category);
+                    return c != 0 ? c : string.CompareOrdinal(x.FinalPath, y.FinalPath);
+                });
             }
             catch (Exception e)
             {
