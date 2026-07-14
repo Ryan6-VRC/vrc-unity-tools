@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -29,6 +30,7 @@ public class CheckAvatarTests
     private GameObject _avatar;
     private string _logPath;
     private object _origBoxed, _origResolve, _origAnchor;
+    private object _origMergePairs, _origDynamics;
 
     [SetUp]
     public void SetUp()
@@ -43,6 +45,8 @@ public class CheckAvatarTests
         _origBoxed = GetSeam("GetBoxedValue");
         _origResolve = GetSeam("ResolveGetOverload");
         _origAnchor = GetSeam("FrameAnchorOverride");
+        _origMergePairs = GetSeam("ResolveMergePairs");
+        _origDynamics = GetSeam("CollectDynamicsTargets");
     }
 
     [TearDown]
@@ -78,6 +82,8 @@ public class CheckAvatarTests
         SetSeam("GetBoxedValue", _origBoxed);
         SetSeam("ResolveGetOverload", _origResolve);
         SetSeam("FrameAnchorOverride", _origAnchor);
+        SetSeam("ResolveMergePairs", _origMergePairs);
+        SetSeam("CollectDynamicsTargets", _origDynamics);
     }
 
     private static string Inspect(string root) => CheckAvatar.Inspect(root);
@@ -231,7 +237,7 @@ public class CheckAvatarTests
         AddMaObjectToggle(outfit, "Body_Base", null); // resolves
 
         var r = Inspect("LintClean");
-        StringAssert.Contains("maSceneRef=0 clipBinding=0 => PASS", r, r);
+        StringAssert.Contains("maSceneRef=0 clipBinding=0 mergeConflict=0 => PASS", r, r);
     }
 
     // ── Proof A + Proof B coexist ─────────────────────────────────────────────────────────────────────
@@ -323,7 +329,7 @@ public class CheckAvatarTests
         SetVrcfRewriteBindings(c, ("DeleteMe", "", true)); // delete: the binding vanishes at build
 
         var r = Inspect("LintVrcfDel");
-        StringAssert.Contains("clipBinding=0 => PASS", r, "a delete-ruled binding is not a break: " + r);
+        StringAssert.Contains("clipBinding=0 mergeConflict=0 => PASS", r, "a delete-ruled binding is not a break: " + r);
     }
 
     // ── clipAssetPath routing (R-E) ───────────────────────────────────────────────────────────────────
@@ -493,4 +499,206 @@ public class CheckAvatarTests
         StringAssert.StartsWith("[CheckAvatar] FAIL:", r);
         Assert.IsFalse(r.Contains("| log="), "bad input carries no artifact trailer: " + r);
     }
+
+    // ── Merge-conflict grouping core (fakes-injected: no MA/VRCF/VRC-dynamics types needed) ────────────
+    // Each test injects fake merge→base pairs + fake dynamics targets via the two seams, so it proves the
+    // pure grouping/resolution logic on synthetic transforms. A child GameObject's .transform is a fine
+    // stand-in for a dynamics Component host. TearDown restores both seams.
+
+    private static Func<GameObject, (List<(Transform, Transform)>, string)> Pairs(
+        List<(Transform, Transform)> pairs, string note = null) => _ => (pairs, note);
+
+    private static Func<GameObject, List<(Component, Transform, string, string)>> Targets(
+        params (Component host, Transform target, string category, string detail)[] t)
+        => _ => t.Select(x => (x.host, x.target, x.category, x.detail)).ToList();
+
+    [Test]
+    public void MergeConflict_PhysboneMergedOntoBase_IsClassified()
+    {
+        var root = NewAvatar("MC1");
+        var baseTail = NewChild(root, "BaseTail").transform;
+        var mergeTail = NewChild(root, "MergeTail").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeTail, baseTail) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (mergeTail, mergeTail, "physbone", ""), (baseTail, baseTail, "physbone", ""));
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=1", log);
+        StringAssert.Contains("=> CLASSIFY", log);
+        StringAssert.Contains("[mergeable]", log);
+        StringAssert.Contains("[base]", log);
+    }
+
+    [Test]
+    public void MergeConflict_ColliderDuplicate_CarriesShapeDetail()
+    {
+        var root = NewAvatar("MCcol");
+        var baseCol = NewChild(root, "BaseCol").transform;
+        var mergeCol = NewChild(root, "MergeCol").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeCol, baseCol) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (mergeCol, mergeCol, "collider", "shape=Sphere radius=0.1 height=0"),
+            (baseCol, baseCol, "collider", "")); // colliders group; detail emitted for the mergeable one
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=1", log);
+        StringAssert.Contains("=> CLASSIFY", log);
+        StringAssert.Contains("category=`collider`", log);
+        StringAssert.Contains("radius=0.1", log); // the ", " + h.Detail emit branch
+    }
+
+    [Test]
+    public void MergeConflict_BaseToBaseDuplicate_IsDropped()
+    {
+        var root = NewAvatar("MC2");
+        var a = NewChild(root, "A").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)>());
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (a, a, "physbone", ""), (a, a, "physbone", ""));
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=0", log);
+    }
+
+    [Test]
+    public void MergeConflict_CategoryIsolation_PhysboneAndColliderNotAConflict()
+    {
+        var root = NewAvatar("MC3");
+        var m = NewChild(root, "M").transform;
+        var b = NewChild(root, "B").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (m, b) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (m, m, "physbone", ""), (b, b, "collider", "radius=0.1")); // both resolve to b, different categories
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=0", log); // two groups of one → no conflict
+        StringAssert.Contains("=> PASS", log);
+    }
+
+    [Test]
+    public void MergeConflict_TwoMergeablesOntoOneBase_IsClassified()
+    {
+        var root = NewAvatar("MC4");
+        var m1 = NewChild(root, "M1").transform;
+        var m2 = NewChild(root, "M2").transform;
+        var b = NewChild(root, "B").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (m1, b), (m2, b) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (m1, m1, "physbone", ""), (m2, m2, "physbone", ""));
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=1", log); // {m1,m2} share final b, both mergeable
+        StringAssert.Contains("=> CLASSIFY", log);
+    }
+
+    [Test]
+    public void MergeConflict_TransitiveChain_ResolvesToRootBase()
+    {
+        var root = NewAvatar("MC5");
+        var a = NewChild(root, "A").transform;
+        var b = NewChild(root, "B").transform;
+        var c = NewChild(root, "C").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (a, b), (b, c) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (a, a, "physbone", ""), (c, c, "physbone", "")); // a→b→c and c → same final c
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=1", log);
+        StringAssert.Contains("final=`" + PathOf(root, "C") + "`", log);
+    }
+
+    [Test]
+    public void MergeConflict_CycleGuard_Terminates()
+    {
+        var root = NewAvatar("MC6");
+        var a = NewChild(root, "A").transform;
+        var b = NewChild(root, "B").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (a, b), (b, a) }); // cycle
+        CheckAvatar.CollectDynamicsTargets = Targets((a, a, "physbone", ""));
+        string log = null;
+        Assert.DoesNotThrow(() => log = ReadLog(Inspect(root.name)), "cycle-guarded ResolveFinal must terminate");
+        StringAssert.Contains("mergeConflict=0", log); // single host → no conflict, but run completed
+    }
+
+    [Test]
+    public void MergeConflict_NullSidedPair_SkippedNoThrow()
+    {
+        var root = NewAvatar("MC7");
+        var m = NewChild(root, "M").transform;
+        var b = NewChild(root, "B").transform;
+        var b2 = NewChild(root, "B2").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (null, b), (m, null), (m, b2) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (m, m, "physbone", ""), (b2, b2, "physbone", "")); // m→b2 (the only surviving pair) → shared final
+        string log = null;
+        Assert.DoesNotThrow(() => log = ReadLog(Inspect(root.name)), "null-sided pairs must be skipped, not thrown on");
+        StringAssert.Contains("mergeConflict=1", log); // proves map ended with m→b2
+    }
+
+    [Test]
+    public void MergeConflict_FirstWinsOnDuplicateKey()
+    {
+        var root = NewAvatar("MC8");
+        var m = NewChild(root, "M").transform;
+        var b1 = NewChild(root, "B1").transform;
+        var b2 = NewChild(root, "B2").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (m, b1), (m, b2) }); // dup key m
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (m, m, "physbone", ""), (b1, b1, "physbone", "")); // m resolves to first-won b1
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=1", log); // m→b1 shared with b1's own physbone
+        StringAssert.Contains("final=`" + PathOf(root, "B1") + "`", log);
+    }
+
+    [Test]
+    public void MergeConflict_PartialMapNote_Surfaces()
+    {
+        var root = NewAvatar("MC9");
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)>(), "merge map partial — seam X did not resolve");
+        CheckAvatar.CollectDynamicsTargets = Targets();
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("merge map partial — seam X did not resolve", log);
+        StringAssert.Contains("mergeConflict=0", log);
+    }
+
+    [Test]
+    public void MergeConflict_EmptyEverything_IsPass()
+    {
+        var root = NewAvatar("MC10");
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)>());
+        CheckAvatar.CollectDynamicsTargets = Targets();
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=0", log);
+        StringAssert.Contains("=> PASS", log);
+    }
+
+    // ── Real dynamics reflection: type/getter canary + null-root extraction ───────────────────────────
+
+    [Test] public void Canary_DynamicsTypesAndGettersResolve()
+    {
+        foreach (var c in CheckAvatar.DynamicsCategories)
+            AssertTypeGetter(c.typeName, c.getter);
+        // pin ColliderDetail's field names on the real collider type (a rename must go red, not silently blank the detail)
+        var col = CheckSeam.FindType("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider");
+        Assert.IsNotNull(col, "collider type unresolved (drift)");
+        foreach (var f in new[] { "shapeType", "radius", "height" })
+            Assert.IsNotNull(col.GetField(f), "collider field unresolved (drift): " + f);
+    }
+
+    private static void AssertTypeGetter(string typeName, string getter)
+    {
+        var t = CheckSeam.FindType(typeName);
+        Assert.IsNotNull(t, "type unresolved (drift): " + typeName);
+        Assert.IsNotNull(t.GetMethod(getter, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null),
+            "getter unresolved (drift): " + typeName + "." + getter);
+    }
+
+    [Test] public void CollectDynamics_RealPhysbone_NullRoot_UsesOwnTransform()
+    {
+        var root = NewAvatar("PB");
+        var pbType = CheckSeam.FindType("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone");
+        Assert.IsNotNull(pbType);
+        var child = NewChild(root, "Bone");
+        child.AddComponent(pbType); // rootTransform defaults null
+        var targets = CheckAvatar.CollectDynamicsTargets(root); // real default
+        Assert.IsTrue(targets.Exists(x => x.category == "physbone" && x.target == child.transform),
+            "physbone with null rootTransform should target its own transform");
+    }
+
+    // Avatar-root-relative path of a named child, matching CheckAvatar.PathOf output (Root/Child).
+    private static string PathOf(GameObject root, string childName) => root.name + "/" + childName;
 }

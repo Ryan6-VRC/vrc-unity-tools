@@ -12,23 +12,32 @@ using static Ryan6Vrc.AgentTools.Editor.CheckAnimator; // FrameKind / FrameResul
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Scene-scoped INSPECTION gate: classify the two silent path-encoded reference breaks a mergeable
-    /// placement leaves on an instantiated IN-SCENE avatar root after a base rename
-    /// (canonical <c>Body_base</c>→<c>Body_Base</c>):
+    /// Scene-scoped INSPECTION gate: classify the silent reference/identity breaks a mergeable placement
+    /// leaves on an instantiated IN-SCENE avatar root. Two are path-encoded reference breaks a base rename
+    /// (canonical <c>Body_base</c>→<c>Body_Base</c>) leaves behind; the third is a post-merge collision.
     ///   - <b>MA scene refs</b> (the reactive family / BlendshapeSync / Mesh Settings — anything carrying
     ///     the <c>referencePath</c>+<c>targetObject</c> <c>AvatarObjectReference</c> field pair) that no
     ///     longer resolve → the skill retargets them in place.
     ///   - <b>clip/controller bindings</b> (descriptor playable layers + every MA MergeAnimator / VRCFury
     ///     FullController merged animator) that resolve to no scene object → the skill owns the vendor
     ///     <c>.anim</c> and repaths (routed by the per-offender <c>clipAssetPath</c>).
+    ///   - <b>merge-conflict</b> (NOT path-encoded — transform-identity, not a name): two+ dynamics
+    ///     components in one category (physbone/collider/constraint) that resolve to the SAME post-merge
+    ///     transform via the MA/VRCFury merge map, ≥1 of them mergeable-sourced — i.e. a mergeable's bone
+    ///     name-merges onto a base bone that already carries the same kind of component, so both bake onto
+    ///     one transform and fight → the agent de-conflicts. A base↔base duplicate (none mergeable) is not a
+    ///     merge artifact and is dropped.
     ///
-    /// Everything is resolved against the PLACED scene (the load-bearing model, spec D1): a to-be-merged
-    /// bone is physically present pre-bake and resolves now; a base-rename break does not. So this predicts
-    /// nothing about what the build will move, and never depends on the <c>Armature.&lt;Name&gt;</c> convention.
+    /// The first two resolve against the PLACED scene (the load-bearing model, spec D1): a to-be-merged bone
+    /// is physically present pre-bake and resolves now; a base-rename break does not. So this predicts nothing
+    /// about what the build will MOVE, and never depends on the <c>Armature.&lt;Name&gt;</c> convention.
+    /// merge-conflict is the one class that reads the merge map (what the build will MERGE), not a scene path.
     ///
-    /// Verdict is <c>PASS</c> (all resolve) or <c>CLASSIFY</c> (any unresolved) — never <c>FAIL</c> for a
-    /// finding (bad input alone bare-FAILs). No computed near-miss/absent/N-of-M heuristic: the tool names
-    /// offenders and their class; the compose agent applies discretion (broken refs are often intentional).
+    /// Verdict is <c>PASS</c> (clean) or <c>CLASSIFY</c> (any finding) — never <c>FAIL</c> for a finding (bad
+    /// input alone bare-FAILs). No computed near-miss/absent/N-of-M SCORING: every class is a definite
+    /// predicate (a ref resolves or it doesn't; a collision group is ≥2-with-a-mergeable or it isn't). The
+    /// tool names offenders and their class; the compose agent applies discretion (findings are often
+    /// intentional).
     ///
     /// Clip-binding detection REUSES <see cref="CheckAnimator"/>'s frame-detection + binding-walk +
     /// humanoid-curve-skip (called, not re-expressed) with the build-rewrite demotion flipped off. The
@@ -78,6 +87,97 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Maps a discovered frame's unreflected-anchor (default identity). A test injects an anchor
         /// onto a real MA/VRCF frame to exercise the R-H fail-loud surface for a drift it can't construct live.</summary>
         internal static Func<string, string> FrameAnchorOverride = a => a;
+
+        // ── Merge-conflict seams (default = real; tests swap fakes) ──────────────────────────────────
+        /// <summary>Whole-avatar merge→base pairs (may contain null sides) + a partial-map note (null if clean).</summary>
+        internal static Func<GameObject, (List<(Transform merge, Transform baseT)> pairs, string note)> ResolveMergePairs =
+            DefaultResolveMergePairs;
+        /// <summary>Every dynamics component's (host, driven target, category, display detail). detail="" except colliders.</summary>
+        internal static Func<GameObject, List<(Component host, Transform target, string category, string detail)>> CollectDynamicsTargets =
+            DefaultCollectDynamicsTargets;
+
+        private static (List<(Transform, Transform)>, string) DefaultResolveMergePairs(GameObject avatarGO)
+        {
+            var res = CheckSeam.ResolveMergeMap(avatarGO, avatarGO);
+            // ScaleBakeReason is intentionally omitted from the note: scale-at-bake doesn't change WHICH
+            // transform two components collide on (only its baked scale), so those pairs stay valid for
+            // collision detection — only genuine drift (ReflectError) or a non-resolving seam (UnresolvableReason)
+            // means the map is partial and conflicts may be under-reported.
+            string note = (res.ReflectError ?? res.UnresolvableReason);
+            if (note != null) note = "merge map partial — some seams didn't resolve; conflicts may be under-reported (" + note + ")";
+            var pairs = new List<(Transform, Transform)>();
+            foreach (var p in res.Pairs) pairs.Add((p.Merge, p.Base));
+            return (pairs, note);
+        }
+
+        // (category, typeName, getter, withShape) — single source of truth for the three dynamics categories,
+        // iterated by both the collector and the drift canary so the canary pins the real production strings.
+        internal static readonly (string category, string typeName, string getter, bool withShape)[] DynamicsCategories =
+        {
+            ("physbone",   "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone",         "GetRootTransform",            false),
+            ("collider",   "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider", "GetRootTransform",            true),
+            ("constraint", "VRC.Dynamics.VRCConstraintBase",                            "GetEffectiveTargetTransform", false),
+        };
+
+        private static List<(Component, Transform, string, string)> DefaultCollectDynamicsTargets(GameObject avatarGO)
+        {
+            var result = new List<(Component, Transform, string, string)>();
+            foreach (var c in DynamicsCategories)
+                AddCategory(avatarGO, result, c.category, c.typeName, c.getter, c.withShape);
+            return result;
+        }
+
+        // Reflect one dynamics category by typename; absent type ⇒ skip (never throw). Read the driven target via
+        // the SDK's own null-resolving getter (null return ⇒ own transform). Every per-component hop guarded — a
+        // single bad component warns loud and is skipped, never aborting the sweep.
+        private static void AddCategory(GameObject avatarGO, List<(Component, Transform, string, string)> result,
+            string category, string typeName, string getterName, bool withShape)
+        {
+            var type = CheckSeam.FindType(typeName);
+            if (type == null) return; // SDK/category absent ⇒ skip
+            var getter = type.GetMethod(getterName, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+            if (getter == null)
+            {
+                // Type present but its getter renamed ⇒ API drift. Fail loud and skip the whole category — do
+                // NOT silently fall back to own-transform for every component (that fabricates plausible-but-wrong
+                // targets). The CI canary pins this getter, so this only fires on a live editor whose SDK drifted.
+                Debug.LogWarning("[CheckAvatar] dynamics getter '" + typeName + "." + getterName
+                               + "' did not reflect (API drift) — skipping the " + category + " category.");
+                return;
+            }
+            foreach (var comp in avatarGO.GetComponentsInChildren(type, true))
+            {
+                if (comp == null) continue;
+                try
+                {
+                    Transform target = getter.Invoke(comp, null) as Transform;
+                    if (target == null) target = comp.transform; // getter returned null ⇒ own transform (legit convention)
+                    result.Add((comp, target, category, withShape ? ColliderDetail(comp) : ""));
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning("[CheckAvatar] dynamics target read failed on " + PathOf(comp.gameObject)
+                                   + " (" + e.GetType().Name + ") — skipping this component.");
+                }
+            }
+        }
+
+        // Best-effort collider shape for agent discretion; every field guarded (never throws).
+        private static string ColliderDetail(Component collider)
+        {
+            try
+            {
+                var t = collider.GetType();
+                object shape = t.GetField("shapeType")?.GetValue(collider);
+                object radius = t.GetField("radius")?.GetValue(collider);
+                object height = t.GetField("height")?.GetValue(collider);
+                return "shape=" + shape + " radius=" + radius + " height=" + height;
+            }
+            catch { return "shape=?"; }
+        }
+
+        private struct ConflictHost { public string Path; public string Type; public string Bone; public bool Mergeable; public string Detail; }
+        private struct MergeConflict { public string Category; public string FinalPath; public List<ConflictHost> Hosts; }
 
         // ── Public API ──────────────────────────────────────────────────────────────────────────────
 
@@ -180,6 +280,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     });
                 }
             }
+
+            ScanMergeConflicts(avatarGO, rep);
 
             return Emit(rep);
         }
@@ -378,17 +480,93 @@ namespace Ryan6Vrc.AgentTools.Editor
                && clipAssetPath.StartsWith("Packages/com.vrchat.", StringComparison.OrdinalIgnoreCase)
                && clipAssetPath.IndexOf("/ProxyAnim/", StringComparison.OrdinalIgnoreCase) >= 0;
 
+        // ── Merge-conflict scan (pure grouping core) ─────────────────────────────────────────────────
+        // Merge-conflict scan: two dynamics components (grouped within a category) that resolve to the same
+        // POST-MERGE transform, where ≥1 is mergeable-sourced (its raw target name-merges onto a shared bone).
+        // CLASSIFY-style; never throws (degrades to a loud Note).
+        private static void ScanMergeConflicts(GameObject avatarGO, Report rep)
+        {
+            try
+            {
+                var (pairs, note) = ResolveMergePairs(avatarGO);
+                if (note != null) rep.Notes.Add("fail-loud: " + note);
+
+                var map = new Dictionary<Transform, Transform>();
+                foreach (var (merge, baseT) in pairs)
+                {
+                    if (merge == null || baseT == null) continue;   // Check()-parity null guard (extracted body lacks it)
+                    if (!map.ContainsKey(merge)) map[merge] = baseT; // first-wins (safe for detection)
+                }
+
+                var targets = CollectDynamicsTargets(avatarGO);
+                var groups = new Dictionary<(string cat, Transform final), List<ConflictHost>>();
+                foreach (var (host, target, category, detail) in targets)
+                {
+                    if (target == null) continue;
+                    bool mergeable = map.ContainsKey(target);
+                    var key = (category, ResolveFinal(target, map));
+                    if (!groups.TryGetValue(key, out var list)) groups[key] = list = new List<ConflictHost>();
+                    list.Add(new ConflictHost {
+                        Path = host != null ? PathOf(host.gameObject) : "—",
+                        Type = host != null ? host.GetType().Name : "—",
+                        Bone = target.name,
+                        Mergeable = mergeable, Detail = detail ?? "",
+                    });
+                }
+
+                foreach (var kv in groups)
+                {
+                    if (kv.Value.Count < 2) continue;
+                    bool anyMergeable = false; foreach (var h in kv.Value) if (h.Mergeable) { anyMergeable = true; break; }
+                    if (!anyMergeable) continue;
+                    rep.MergeConflicts.Add(new MergeConflict {
+                        Category = kv.Key.cat,
+                        FinalPath = kv.Key.final != null ? PathOf(kv.Key.final.gameObject) : "—",
+                        Hosts = kv.Value,
+                    });
+                }
+                // groups is a Dictionary (non-deterministic iteration) — sort for a byte-stable RunLog, unlike
+                // the List-ordered maSceneRef/clipBinding blocks. Host order within a group is already stable.
+                // FinalPath is not unique — two distinct final bones can share a hierarchy path (Unity allows
+                // duplicate sibling names) — so tiebreak on the first host's path (List.Sort is unstable) to keep
+                // the order total and the RunLog byte-stable; every group has ≥2 hosts, so Hosts[0] is safe.
+                rep.MergeConflicts.Sort((x, y) =>
+                {
+                    int c = string.CompareOrdinal(x.Category, y.Category);
+                    if (c != 0) return c;
+                    c = string.CompareOrdinal(x.FinalPath, y.FinalPath);
+                    return c != 0 ? c : string.CompareOrdinal(x.Hosts[0].Path, y.Hosts[0].Path);
+                });
+            }
+            catch (Exception e)
+            {
+                string msg = "[CheckAvatar] merge-conflict scan degraded (" + e.GetType().Name + ": " + e.Message + ") — no conflicts reported.";
+                Debug.LogWarning(msg);
+                rep.Notes.Add("fail-loud: " + msg.Substring("[CheckAvatar] ".Length));
+            }
+        }
+
+        // Follow merge→base transitively (accessory→outfit→base); cycle-guarded. Not in map ⇒ own final.
+        private static Transform ResolveFinal(Transform target, Dictionary<Transform, Transform> map)
+        {
+            var seen = new HashSet<Transform>();
+            var cur = target;
+            while (cur != null && seen.Add(cur) && map.TryGetValue(cur, out var next)) cur = next;
+            return cur;
+        }
+
         // ── Output ────────────────────────────────────────────────────────────────────────────────────
 
         private static string Emit(Report rep)
         {
             int maSceneRef = rep.SceneRefs.Count;
             int clipBinding = rep.ClipBindings.Count;
-            string result = (maSceneRef > 0 || clipBinding > 0) ? "CLASSIFY" : "PASS";
+            int mergeConflict = rep.MergeConflicts.Count;
+            string result = (maSceneRef > 0 || clipBinding > 0 || mergeConflict > 0) ? "CLASSIFY" : "PASS";
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CheckAvatar] {0}: maSceneRef={1} clipBinding={2} => {3}",
-                rep.Root.name, maSceneRef, clipBinding, result);
+                "[CheckAvatar] {0}: maSceneRef={1} clipBinding={2} mergeConflict={3} => {4}",
+                rep.Root.name, maSceneRef, clipBinding, mergeConflict, result);
 
             var sb = new StringBuilder();
             sb.Append("# CheckAvatar: ").Append(rep.Root.name).Append('\n');
@@ -398,6 +576,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("\n## Counts\n\n");
             sb.Append("- maSceneRef: ").Append(maSceneRef).Append('\n');
             sb.Append("- clipBinding: ").Append(clipBinding).Append('\n');
+            sb.Append("- mergeConflict: ").Append(mergeConflict).Append('\n');
 
             sb.Append("\n## Offenders\n\n");
             sb.Append("### MA-scene-ref\n\n");
@@ -414,11 +593,27 @@ namespace Ryan6Vrc.AgentTools.Editor
                   .Append("` clipAssetPath=`").Append(string.IsNullOrEmpty(o.ClipAssetPath) ? "(unsaved)" : o.ClipAssetPath)
                   .Append("` [").Append(o.Host).Append("]\n");
 
+            sb.Append("\n### merge-conflict\n\n");
+            if (rep.MergeConflicts.Count == 0) sb.Append("_(none)_\n");
+            else foreach (var mc in rep.MergeConflicts)
+            {
+                sb.Append("- **merge-conflict** category=`").Append(mc.Category)
+                  .Append("` final=`").Append(mc.FinalPath).Append("`\n");
+                foreach (var h in mc.Hosts)
+                    sb.Append("  - ").Append(h.Mergeable ? "[mergeable] " : "[base] ").Append(h.Path)
+                      .Append(" (").Append(h.Type).Append(", bone=`").Append(h.Bone).Append("`")
+                      .Append(string.IsNullOrEmpty(h.Detail) ? "" : ", " + h.Detail).Append(")\n");
+            }
+
             sb.Append("\n## Notes\n\n");
             sb.Append("- ").Append(ExcludedEdgeLine).Append('\n');
             sb.Append("- ").Append(DiscretionLimitsLine).Append('\n');
             foreach (var n in rep.FrameUncertain) sb.Append("- ").Append(n).Append('\n');
             foreach (var n in rep.Notes) sb.Append("- ").Append(n).Append('\n');
+            if (rep.MergeConflicts.Count > 0)
+                sb.Append("- MA prunes exact-duplicate physbones at build (PruneDuplicatePhysBones), so a flagged MA " +
+                    "physbone pair may already be resolved — verify against a build. VRCFury has no such pass; colliders, " +
+                    "constraints, and non-exact/non-zip-merged MA physbone pairs are the residue this check exists for.\n");
 
             var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "avatarlint_" + rep.Root.name, summary, sb.ToString(), ".md");
             if (result == "PASS") Debug.Log(res); else Debug.LogWarning(res);
@@ -513,6 +708,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public GameObject Root;
             public readonly List<Offender> SceneRefs = new List<Offender>();
             public readonly List<Offender> ClipBindings = new List<Offender>();
+            public readonly List<MergeConflict> MergeConflicts = new List<MergeConflict>();
             public readonly List<string> FrameUncertain = new List<string>(); // R-K caveats
             public readonly List<string> Notes = new List<string>();          // R-H fail-loud + degrade notes
         }
