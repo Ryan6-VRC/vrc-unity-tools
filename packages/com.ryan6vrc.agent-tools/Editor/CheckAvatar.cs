@@ -79,6 +79,31 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// onto a real MA/VRCF frame to exercise the R-H fail-loud surface for a drift it can't construct live.</summary>
         internal static Func<string, string> FrameAnchorOverride = a => a;
 
+        // ── Merge-conflict seams (default = real; tests swap fakes) ──────────────────────────────────
+        /// <summary>Whole-avatar merge→base pairs (may contain null sides) + a partial-map note (null if clean).</summary>
+        internal static Func<GameObject, (List<(Transform merge, Transform baseT)> pairs, string note)> ResolveMergePairs =
+            DefaultResolveMergePairs;
+        /// <summary>Every dynamics component's (host, driven target, category, display detail). detail="" except colliders.</summary>
+        internal static Func<GameObject, List<(Component host, Transform target, string category, string detail)>> CollectDynamicsTargets =
+            DefaultCollectDynamicsTargets;
+
+        private static (List<(Transform, Transform)>, string) DefaultResolveMergePairs(GameObject avatarGO)
+        {
+            var res = CheckSeam.ResolveMergeMap(avatarGO, avatarGO);
+            string note = (res.ReflectError ?? res.UnresolvableReason);
+            if (note != null) note = "merge map partial — some seams didn't resolve; conflicts may be under-reported (" + note + ")";
+            var pairs = new List<(Transform, Transform)>();
+            foreach (var p in res.Pairs) pairs.Add((p.Merge, p.Base));
+            return (pairs, note);
+        }
+
+        // TODO(Task 3): real reflection over the three dynamics categories. Provisional non-throwing empty default.
+        private static List<(Component, Transform, string, string)> DefaultCollectDynamicsTargets(GameObject avatarGO)
+            => new List<(Component, Transform, string, string)>();
+
+        private struct ConflictHost { public string Path; public string Type; public string Bone; public bool Mergeable; public string Detail; }
+        private struct MergeConflict { public string Category; public string FinalPath; public List<ConflictHost> Hosts; }
+
         // ── Public API ──────────────────────────────────────────────────────────────────────────────
 
         /// <summary>Classify the MA-scene-ref and clip-binding reference breaks on the in-scene avatar at
@@ -180,6 +205,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     });
                 }
             }
+
+            ScanMergeConflicts(avatarGO, rep);
 
             return Emit(rep);
         }
@@ -378,17 +405,81 @@ namespace Ryan6Vrc.AgentTools.Editor
                && clipAssetPath.StartsWith("Packages/com.vrchat.", StringComparison.OrdinalIgnoreCase)
                && clipAssetPath.IndexOf("/ProxyAnim/", StringComparison.OrdinalIgnoreCase) >= 0;
 
+        // ── Merge-conflict scan (pure grouping core) ─────────────────────────────────────────────────
+        // Merge-conflict scan: two dynamics components (grouped within a category) that resolve to the same
+        // POST-MERGE transform, where ≥1 is mergeable-sourced (its raw target name-merges onto a shared bone).
+        // CLASSIFY-style; never throws (degrades to a loud Note).
+        private static void ScanMergeConflicts(GameObject avatarGO, Report rep)
+        {
+            try
+            {
+                var (pairs, note) = ResolveMergePairs(avatarGO);
+                if (note != null) rep.Notes.Add("fail-loud: " + note);
+
+                var map = new Dictionary<Transform, Transform>();
+                foreach (var (merge, baseT) in pairs)
+                {
+                    if (merge == null || baseT == null) continue;   // Check()-parity null guard (extracted body lacks it)
+                    if (!map.ContainsKey(merge)) map[merge] = baseT; // first-wins (safe for detection)
+                }
+
+                var targets = CollectDynamicsTargets(avatarGO);
+                var groups = new Dictionary<(string cat, Transform final), List<ConflictHost>>();
+                foreach (var (host, target, category, detail) in targets)
+                {
+                    if (target == null) continue;
+                    bool mergeable = map.ContainsKey(target);
+                    var key = (category, ResolveFinal(target, map));
+                    if (!groups.TryGetValue(key, out var list)) groups[key] = list = new List<ConflictHost>();
+                    list.Add(new ConflictHost {
+                        Path = host != null ? PathOf(host.gameObject) : "—",
+                        Type = host != null ? host.GetType().Name : "—",
+                        Bone = target.name,
+                        Mergeable = mergeable, Detail = detail ?? "",
+                    });
+                }
+
+                foreach (var kv in groups)
+                {
+                    if (kv.Value.Count < 2) continue;
+                    bool anyMergeable = false; foreach (var h in kv.Value) if (h.Mergeable) { anyMergeable = true; break; }
+                    if (!anyMergeable) continue;
+                    rep.MergeConflicts.Add(new MergeConflict {
+                        Category = kv.Key.cat,
+                        FinalPath = kv.Key.final != null ? PathOf(kv.Key.final.gameObject) : "—",
+                        Hosts = kv.Value,
+                    });
+                }
+            }
+            catch (Exception e)
+            {
+                string msg = "[CheckAvatar] merge-conflict scan degraded (" + e.GetType().Name + ": " + e.Message + ") — no conflicts reported.";
+                Debug.LogWarning(msg);
+                rep.Notes.Add("fail-loud: " + msg.Substring("[CheckAvatar] ".Length));
+            }
+        }
+
+        // Follow merge→base transitively (accessory→outfit→base); cycle-guarded. Not in map ⇒ own final.
+        private static Transform ResolveFinal(Transform target, Dictionary<Transform, Transform> map)
+        {
+            var seen = new HashSet<Transform>();
+            var cur = target;
+            while (cur != null && seen.Add(cur) && map.TryGetValue(cur, out var next)) cur = next;
+            return cur;
+        }
+
         // ── Output ────────────────────────────────────────────────────────────────────────────────────
 
         private static string Emit(Report rep)
         {
             int maSceneRef = rep.SceneRefs.Count;
             int clipBinding = rep.ClipBindings.Count;
-            string result = (maSceneRef > 0 || clipBinding > 0) ? "CLASSIFY" : "PASS";
+            int mergeConflict = rep.MergeConflicts.Count;
+            string result = (maSceneRef > 0 || clipBinding > 0 || mergeConflict > 0) ? "CLASSIFY" : "PASS";
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CheckAvatar] {0}: maSceneRef={1} clipBinding={2} => {3}",
-                rep.Root.name, maSceneRef, clipBinding, result);
+                "[CheckAvatar] {0}: maSceneRef={1} clipBinding={2} mergeConflict={3} => {4}",
+                rep.Root.name, maSceneRef, clipBinding, mergeConflict, result);
 
             var sb = new StringBuilder();
             sb.Append("# CheckAvatar: ").Append(rep.Root.name).Append('\n');
@@ -398,6 +489,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("\n## Counts\n\n");
             sb.Append("- maSceneRef: ").Append(maSceneRef).Append('\n');
             sb.Append("- clipBinding: ").Append(clipBinding).Append('\n');
+            sb.Append("- mergeConflict: ").Append(mergeConflict).Append('\n');
 
             sb.Append("\n## Offenders\n\n");
             sb.Append("### MA-scene-ref\n\n");
@@ -414,11 +506,27 @@ namespace Ryan6Vrc.AgentTools.Editor
                   .Append("` clipAssetPath=`").Append(string.IsNullOrEmpty(o.ClipAssetPath) ? "(unsaved)" : o.ClipAssetPath)
                   .Append("` [").Append(o.Host).Append("]\n");
 
+            sb.Append("\n### merge-conflict\n\n");
+            if (rep.MergeConflicts.Count == 0) sb.Append("_(none)_\n");
+            else foreach (var mc in rep.MergeConflicts)
+            {
+                sb.Append("- **merge-conflict** category=`").Append(mc.Category)
+                  .Append("` final=`").Append(mc.FinalPath).Append("`\n");
+                foreach (var h in mc.Hosts)
+                    sb.Append("  - ").Append(h.Mergeable ? "[mergeable] " : "[base] ").Append(h.Path)
+                      .Append(" (").Append(h.Type).Append(", bone=`").Append(h.Bone).Append("`")
+                      .Append(string.IsNullOrEmpty(h.Detail) ? "" : ", " + h.Detail).Append(")\n");
+            }
+
             sb.Append("\n## Notes\n\n");
             sb.Append("- ").Append(ExcludedEdgeLine).Append('\n');
             sb.Append("- ").Append(DiscretionLimitsLine).Append('\n');
             foreach (var n in rep.FrameUncertain) sb.Append("- ").Append(n).Append('\n');
             foreach (var n in rep.Notes) sb.Append("- ").Append(n).Append('\n');
+            if (rep.MergeConflicts.Count > 0)
+                sb.Append("- MA prunes exact-duplicate physbones at build (PruneDuplicatePhysBones), so a flagged MA " +
+                    "physbone pair may already be resolved — verify against a build. VRCFury has no such pass; colliders, " +
+                    "constraints, and non-exact/non-zip-merged MA physbone pairs are the residue this check exists for.\n");
 
             var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "avatarlint_" + rep.Root.name, summary, sb.ToString(), ".md");
             if (result == "PASS") Debug.Log(res); else Debug.LogWarning(res);
@@ -513,6 +621,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public GameObject Root;
             public readonly List<Offender> SceneRefs = new List<Offender>();
             public readonly List<Offender> ClipBindings = new List<Offender>();
+            public readonly List<MergeConflict> MergeConflicts = new List<MergeConflict>();
             public readonly List<string> FrameUncertain = new List<string>(); // R-K caveats
             public readonly List<string> Notes = new List<string>();          // R-H fail-loud + degrade notes
         }
