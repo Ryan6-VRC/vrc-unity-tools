@@ -670,9 +670,13 @@ public class CheckAvatarTests
 
     [Test] public void Canary_DynamicsTypesAndGettersResolve()
     {
-        AssertTypeGetter("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone", "GetRootTransform");
-        AssertTypeGetter("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider", "GetRootTransform");
-        AssertTypeGetter("VRC.Dynamics.VRCConstraintBase", "GetEffectiveTargetTransform");
+        foreach (var c in CheckAvatar.DynamicsCategories)
+            AssertTypeGetter(c.typeName, c.getter);
+        // pin ColliderDetail's field names on the real collider type (a rename must go red, not silently blank the detail)
+        var col = CheckSeam.FindType("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider");
+        Assert.IsNotNull(col, "collider type unresolved (drift)");
+        foreach (var f in new[] { "shapeType", "radius", "height" })
+            Assert.IsNotNull(col.GetField(f), "collider field unresolved (drift): " + f);
     }
 
     private static void AssertTypeGetter(string typeName, string getter)

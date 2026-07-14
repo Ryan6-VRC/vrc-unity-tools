@@ -97,12 +97,20 @@ namespace Ryan6Vrc.AgentTools.Editor
             return (pairs, note);
         }
 
+        // (category, typeName, getter, withShape) — single source of truth for the three dynamics categories,
+        // iterated by both the collector and the drift canary so the canary pins the real production strings.
+        internal static readonly (string category, string typeName, string getter, bool withShape)[] DynamicsCategories =
+        {
+            ("physbone",   "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone",         "GetRootTransform",            false),
+            ("collider",   "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider", "GetRootTransform",            true),
+            ("constraint", "VRC.Dynamics.VRCConstraintBase",                            "GetEffectiveTargetTransform", false),
+        };
+
         private static List<(Component, Transform, string, string)> DefaultCollectDynamicsTargets(GameObject avatarGO)
         {
             var result = new List<(Component, Transform, string, string)>();
-            AddCategory(avatarGO, result, "physbone",   "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone",         "GetRootTransform", false);
-            AddCategory(avatarGO, result, "collider",   "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider", "GetRootTransform", true);
-            AddCategory(avatarGO, result, "constraint", "VRC.Dynamics.VRCConstraintBase",                            "GetEffectiveTargetTransform", false);
+            foreach (var c in DynamicsCategories)
+                AddCategory(avatarGO, result, c.category, c.typeName, c.getter, c.withShape);
             return result;
         }
 
