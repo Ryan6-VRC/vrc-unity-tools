@@ -231,9 +231,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // rank). ControllerDecompile.ReconstructBindingTarget round-trips through THIS method as its oracle,
         // so emit and decompile cannot drift; widen the list AND the schema §clips together — never one
         // silently.
+        // Memo: emit and decompile both resolve once per binding, and the probe walks every loaded assembly
+        // per namespace — a large FX pays it hundreds of times. Successes only (a refusal aborts the compile,
+        // so its path is never hot); statics reset on domain reload, so the cache cannot outlive the assembly
+        // set it was built from.
+        private static readonly Dictionary<string, Type> ResolveCache = new Dictionary<string, Type>();
+
         internal static Type ResolveComponentType(string typeName)
         {
             if (typeName == "GameObject") return typeof(GameObject); // animatable but not a Component
+            if (ResolveCache.TryGetValue(typeName, out var cached)) return cached;
 
             var matches = new List<Type>();
             foreach (var ns in BindingNamespaces)
@@ -245,7 +252,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (t != null && typeof(Component).IsAssignableFrom(t)) { matches.Add(t); break; }
                 }
             }
-            if (matches.Count == 1) return matches[0];
+            if (matches.Count == 1) { ResolveCache[typeName] = matches[0]; return matches[0]; }
             if (matches.Count > 1)
                 throw new EmitException($"clip binding component type '{typeName}' is ambiguous across the "
                     + "supported namespaces: " + string.Join(", ", matches.Select(m => m.FullName))

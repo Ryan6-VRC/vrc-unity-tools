@@ -894,11 +894,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return spec;
                 }
 
+                // PPtr (object-reference) curves — a material swap, a sprite flipbook — animate WHICH asset a
+                // slot points at. The schema's set/curves grammar can only produce float curves, so decoding
+                // around them would silently drop the swap on recompile. Refuse (named + located).
+                var pptr = AnimationUtility.GetObjectReferenceCurveBindings(clip);
+                foreach (var b in pptr)
+                    _result.Refusals.Add($"inline clip '{clip.name}': object-reference (PPtr) curve on "
+                        + $"'{b.path}/{(b.type == null ? "<missing script>" : b.type.Name)}.{b.propertyName}' is out of "
+                        + "vocabulary — no schema form animates asset references");
+
                 // A hand-authored clip with ZERO curve bindings has no animatable content — ControllerEmit.BuildClipContent
-                // would reject the resulting empty ClipSpec (no content, no seconds). Refuse loudly here instead.
+                // would reject the resulting empty ClipSpec (no content, no seconds). Refuse loudly here instead
+                // (unless PPtr refusals above already explain the emptiness).
                 if (bindings.Length == 0)
                 {
-                    _result.Refusals.Add($"inline clip '{clip.name}': has no animatable content (zero curve bindings) — malformed");
+                    if (pptr.Length == 0)
+                        _result.Refusals.Add($"inline clip '{clip.name}': has no animatable content (zero curve bindings) — malformed");
                     return spec;
                 }
 

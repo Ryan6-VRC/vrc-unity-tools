@@ -192,4 +192,31 @@ layers:
             "the refused binding must not appear in the document");
         Object.DestroyImmediate(c);
     }
+
+    // ---- decompile: an embedded PPtr (object-reference) curve is a located Refusal ------------
+
+    [Test]
+    public void Walk_pptr_curve_refuses()
+    {
+        // A material swap: the schema's set/curves grammar can only author float curves, so decoding
+        // around a PPtr curve would silently drop the swap on recompile. (Standalone .anim swaps are
+        // unaffected — DecodeMotion keeps a pathed clip as a ref: and never decodes its content.)
+        var c = new AnimatorController { name = "Pptr_Fx" };
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        var clip = new AnimationClip { name = "swap" };
+        var mat = new Material(Shader.Find("Standard"));
+        AnimationUtility.SetObjectReferenceCurve(clip,
+            EditorCurveBinding.PPtrCurve("Body", typeof(SkinnedMeshRenderer), "m_Materials.Array.data[0]"),
+            new[] { new ObjectReferenceKeyframe { time = 0f, value = mat } });
+        st.motion = clip;
+
+        var w = ControllerDecompile.Walk(c); // must NOT throw
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("PPtr") && r.Contains("m_Materials")),
+            "embedded PPtr curve -> located refusal: " + string.Join(" | ", w.Refusals));
+        Assert.IsFalse(w.Refusals.Any(r => r.Contains("zero curve bindings")),
+            "a PPtr-only clip is refused for the real reason, not as 'no animatable content'");
+        Object.DestroyImmediate(mat);
+        Object.DestroyImmediate(c);
+    }
 }
