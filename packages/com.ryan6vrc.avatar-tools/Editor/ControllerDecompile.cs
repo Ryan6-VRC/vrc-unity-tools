@@ -906,8 +906,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var b in bindings)
                 {
                     var curve = AnimationUtility.GetEditorCurve(clip, b);
-                    string target = ReconstructBindingTarget(b);
-                    if (curve == null || curve.length == 0) continue;
+                    string target = ReconstructBindingTarget(b, clip.name);
+                    if (target == null || curve == null || curve.length == 0) continue;
                     // A constant-VALUE curve collapses to a Set — UNLESS its tangents are linear: `set:` carries
                     // no tangent marker, so downgrading a constant linear curve would silently drop `tangents:
                     // linear` and break the compile↔decompile fixpoint (a valid, BindCurve-accepted input like
@@ -966,11 +966,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // Invert ControllerEmit.ResolveBinding: an animator-property binding (path "", type Animator) is a
             // bare parameter name; otherwise "path/Component.property" (empty path drops the leading slash).
-            private static string ReconstructBindingTarget(EditorCurveBinding b)
+            // The emit resolver is the ORACLE: a binding whose type's simple name would not resolve back to
+            // the SAME type could never recompile, so it is refused here (named + located, null return the
+            // caller skips) instead of emitted as doomed yaml. One source of truth, both directions.
+            private string ReconstructBindingTarget(EditorCurveBinding b, string clipName)
             {
                 if (b.type == typeof(Animator) && b.path == "") return b.propertyName;
-                string comp = b.type.Name;
-                string body = comp + "." + b.propertyName;
+                System.Type roundtrip = null;
+                if (b.type != null)
+                    try { roundtrip = ControllerEmit.ResolveComponentType(b.type.Name); }
+                    catch (ControllerEmit.EmitException) { /* refused below, with the binding's location */ }
+                if (roundtrip != b.type)
+                {
+                    _result.Refusals.Add($"inline clip '{clipName}': binding "
+                        + (b.path.Length == 0 ? "" : $"'{b.path}' ")
+                        + $"on component type '{(b.type == null ? "<missing script>" : b.type.FullName)}' is out of "
+                        + "vocabulary — the compiler could not re-emit it (schema §clips namespace allowlist)");
+                    return null;
+                }
+                string body = b.type.Name + "." + b.propertyName;
                 return b.path.Length == 0 ? body : b.path + "/" + body;
             }
 
