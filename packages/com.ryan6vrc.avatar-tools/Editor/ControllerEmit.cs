@@ -240,6 +240,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal static Type ResolveComponentType(string typeName)
         {
             if (typeName == "GameObject") return typeof(GameObject); // animatable but not a Component
+
+            // Bare MonoBehaviour is Unity's missing-script placeholder: a deserialized curve whose script
+            // no longer resolves reads back as typeof(MonoBehaviour) (measured, 2022.3) — never a real
+            // authorable target. Resolving it would round-trip vendor junk silently; refuse by name so the
+            // decompile oracle turns a missing-script binding into a named refusal.
+            if (typeName == "MonoBehaviour")
+                throw new EmitException("clip binding component type 'MonoBehaviour' is not bindable — it is "
+                    + "the placeholder Unity reports for a curve whose script cannot be resolved (missing script); "
+                    + "bind the concrete component type");
+
             if (ResolveCache.TryGetValue(typeName, out var cached)) return cached;
 
             var matches = new List<Type>();

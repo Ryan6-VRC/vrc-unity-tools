@@ -78,9 +78,20 @@ public class ClipBindingTypeTests
     public void Refuses_non_component_type()
     {
         // UnityEngine.Time IS a UnityEngine-namespace type — the Component-assignability check is what
-        // must refuse it (previously it resolved silently into a junk binding).
+        // must refuse it (previously it resolved silently into a junk binding). 'Object' is what a
+        // classID-0 placeholder curve reads back as; same check refuses it.
         var ex = Assert.Throws<ControllerEmit.EmitException>(() => ControllerEmit.ResolveComponentType("Time"));
         StringAssert.Contains("Time", ex.Message);
+        Assert.Throws<ControllerEmit.EmitException>(() => ControllerEmit.ResolveComponentType("Object"));
+    }
+
+    [Test]
+    public void Refuses_bare_monobehaviour()
+    {
+        // A missing-script curve reads back as typeof(MonoBehaviour) (measured, 2022.3): resolving the
+        // bare name would silently round-trip vendor junk, so it is refused by name.
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => ControllerEmit.ResolveComponentType("MonoBehaviour"));
+        StringAssert.Contains("missing script", ex.Message);
     }
 
     [Test]
@@ -219,4 +230,138 @@ layers:
         Object.DestroyImmediate(mat);
         Object.DestroyImmediate(c);
     }
+
+    // ---- decompile: placeholder bindings a vendor clip really carries are Refusals, not junk YAML ----
+
+    [Test]
+    public void Walk_placeholder_bindings_refuse()
+    {
+        // Serialized producers only reachable through import (no public API fabricates them): a classID-0
+        // curve (an OSCmooth-style no-op placeholder) reads back as typeof(UnityEngine.Object), a curve
+        // whose script guid resolves to nothing as typeof(MonoBehaviour). Previously the first would emit
+        // 'X/Object.NOPE' and the second 'X/MonoBehaviour.someField' — recompilable-looking YAML that drops
+        // the (already broken) intent silently. Both must refuse; the valid sibling curve still decodes.
+        AnimatorTestHelpers.EnsureFolder(ClipsOut);
+        string animPath = ClipsOut + "/placeholders.anim";
+        System.IO.File.WriteAllText(animPath, PlaceholderAnimYaml);
+        AssetDatabase.ImportAsset(animPath, ImportAssetOptions.ForceSynchronousImport);
+        var imported = AssetDatabase.LoadAssetAtPath<AnimationClip>(animPath);
+        Assert.IsNotNull(imported, "fixture .anim imported");
+
+        // Instantiate = pathless copy, so DecodeMotion inlines it (a pathed standalone .anim stays a ref:).
+        var copy = Object.Instantiate(imported);
+        copy.name = "placeholders";
+        var c = new AnimatorController { name = "Placeholder_Fx" };
+        c.AddLayer("L");
+        c.layers[0].stateMachine.AddState("S").motion = copy;
+
+        var w = ControllerDecompile.Walk(c); // must NOT throw
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("UnityEngine.Object")),
+            "classID-0 placeholder -> located refusal: " + string.Join(" | ", w.Refusals));
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("UnityEngine.MonoBehaviour")),
+            "missing-script binding -> located refusal: " + string.Join(" | ", w.Refusals));
+        var spec = w.Doc.Clips.First(x => x.Name == "placeholders");
+        var targets = spec.Sets.Keys.Concat(spec.Curves.Select(cs => cs.Binding)).ToList();
+        CollectionAssert.AreEquivalent(new[] { "X/Light.m_Intensity" }, targets,
+            "the valid sibling decodes (as set or curve); no placeholder binding leaks into the document");
+
+        Object.DestroyImmediate(copy);
+        Object.DestroyImmediate(c);
+    }
+
+    // A minimal serialized clip: classID-0 curve ('NOPE'), a classID-114 curve with an unresolvable script
+    // guid, and a valid Light.m_Intensity curve. Constant single-key curves.
+    private const string PlaceholderAnimYaml = @"%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!74 &7400000
+AnimationClip:
+  m_ObjectHideFlags: 0
+  m_Name: placeholders
+  serializedVersion: 6
+  m_Legacy: 0
+  m_Compressed: 0
+  m_UseHighQualityCurve: 1
+  m_RotationCurves: []
+  m_CompressedRotationCurves: []
+  m_EulerCurves: []
+  m_PositionCurves: []
+  m_ScaleCurves: []
+  m_FloatCurves:
+  - curve:
+      serializedVersion: 2
+      m_Curve:
+      - serializedVersion: 3
+        time: 0
+        value: 1
+        inSlope: 0
+        outSlope: 0
+        tangentMode: 136
+        weightedMode: 0
+        inWeight: 0.33333334
+        outWeight: 0.33333334
+      m_PreInfinity: 2
+      m_PostInfinity: 2
+      m_RotationOrder: 4
+    attribute: NOPE
+    path: X
+    classID: 0
+    script: {fileID: 0}
+  - curve:
+      serializedVersion: 2
+      m_Curve:
+      - serializedVersion: 3
+        time: 0
+        value: 2
+        inSlope: 0
+        outSlope: 0
+        tangentMode: 136
+        weightedMode: 0
+        inWeight: 0.33333334
+        outWeight: 0.33333334
+      m_PreInfinity: 2
+      m_PostInfinity: 2
+      m_RotationOrder: 4
+    attribute: someField
+    path: X
+    classID: 114
+    script: {fileID: 11500000, guid: 00000000000000000000000000000dea, type: 3}
+  - curve:
+      serializedVersion: 2
+      m_Curve:
+      - serializedVersion: 3
+        time: 0
+        value: 3
+        inSlope: 0
+        outSlope: 0
+        tangentMode: 136
+        weightedMode: 0
+        inWeight: 0.33333334
+        outWeight: 0.33333334
+      m_PreInfinity: 2
+      m_PostInfinity: 2
+      m_RotationOrder: 4
+    attribute: m_Intensity
+    path: X
+    classID: 108
+    script: {fileID: 0}
+  m_PPtrCurves: []
+  m_SampleRate: 60
+  m_WrapMode: 0
+  m_Bounds:
+    m_Center: {x: 0, y: 0, z: 0}
+    m_Extent: {x: 0, y: 0, z: 0}
+  m_ClipBindingConstant:
+    genericBindings: []
+    pptrCurveMapping: []
+  m_AnimationClipSettings:
+    serializedVersion: 2
+    m_StartTime: 0
+    m_StopTime: 1
+    m_LoopTime: 0
+  m_EditorCurves: []
+  m_EulerEditorCurves: []
+  m_HasGenericRootTransform: 0
+  m_HasMotionFloatCurves: 0
+  m_Events: []
+";
 }

@@ -987,11 +987,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (b.type != null)
                     try { roundtrip = ControllerEmit.ResolveComponentType(b.type.Name); }
                     catch (ControllerEmit.EmitException) { /* refused below, with the binding's location */ }
-                if (roundtrip != b.type)
+                // The null check must come FIRST: with b.type null, `roundtrip != b.type` is null != null —
+                // false — and the refusal would be skipped straight into an NRE below. No producer of a
+                // null-typed binding is known (classID 0 reads back as UnityEngine.Object, a missing script
+                // as MonoBehaviour — both refused via the oracle), so this guard is defensive.
+                if (b.type == null || roundtrip != b.type)
                 {
                     _result.Refusals.Add($"inline clip '{clipName}': binding "
                         + (b.path.Length == 0 ? "" : $"'{b.path}' ")
-                        + $"on component type '{(b.type == null ? "<missing script>" : b.type.FullName)}' is out of "
+                        + $"on component type '{(b.type == null ? "<unresolved type>" : b.type.FullName)}' is out of "
                         + "vocabulary — the compiler could not re-emit it (schema §clips namespace allowlist)");
                     return null;
                 }
