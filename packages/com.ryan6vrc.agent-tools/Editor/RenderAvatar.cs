@@ -44,18 +44,24 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// API drifts, proxies are left visible and the note says so — a visible foreign-geometry leak the
     /// reader can see, never a silent body-drop it can't.
     ///
-    /// <b>Freshness — settle-gated.</b> The preview rebuilds asynchronously, advanced only by editor
-    /// ticks that fire after a synchronous call returns — so a same-call edit+grab would capture the
-    /// pre-edit proxy, and a background-throttled editor stops ticking and wedges the rebuild
+    /// <b>Freshness — settle-gated, horizon-swept.</b> The preview rebuilds asynchronously, advanced only
+    /// by editor ticks that fire after a synchronous call returns — so a same-call edit+grab would capture
+    /// the pre-edit proxy, and a background-throttled editor stops ticking and wedges the rebuild
     /// indefinitely. Rather than return an untrustworthy sheet, an unsettled pipeline on a reactive
     /// target FAILS the grab — after kicking the editor's main window to the OS foreground (a synthetic
     /// Alt tap first releases the Windows foreground lock) so real frames fire between this call and the
-    /// re-grab. Protocol stays <b>edit and grab in separate calls</b>; on the settle FAIL, just re-grab.
-    /// In-call waiting is impossible by construction — no editor tick runs while the synchronous call
-    /// blocks the main thread. Two deliberate edges: previews globally DISABLED is exempt, not a FAIL
-    /// (originals render un-suppressed — the sheet is trustworthy); an editor whose foregrounding Windows
-    /// keeps refusing stays FAILed by design — the message names the operator action (focus the editor),
-    /// and the tool never trades that cliff for a sheet it can't vouch for. Mechanism →
+    /// re-grab. The settle predicate alone has one blind spot: a scripted edit (reflection write +
+    /// SetDirty) publishes only a ChangeScene event, which NDMF's ChangeStream deliberately ignores, and
+    /// the PropertyMonitor fallback that would catch it parks while the editor is unfocused — the pipeline
+    /// then reads settled while its proxies render pre-edit geometry, for seconds to indefinitely. The
+    /// gate closes it by running one PropertyMonitor sweep itself before probing (see
+    /// SweepNdmfChangeHorizon), so a pending edit becomes a real invalidation and FAILs the grab loudly.
+    /// Protocol stays <b>edit and grab in separate calls</b>; on the settle FAIL, just re-grab.
+    /// In-call waiting for the REBUILD remains impossible by construction — no editor tick runs while the
+    /// synchronous call blocks the main thread. Two deliberate edges: previews globally DISABLED is
+    /// exempt, not a FAIL (originals render un-suppressed — the sheet is trustworthy); an editor whose
+    /// foregrounding Windows keeps refusing stays FAILed by design — the message names the operator action
+    /// (focus the editor), and the tool never trades that cliff for a sheet it can't vouch for. Mechanism →
     /// docs/superpowers/surveys/2026-07-07-ndmf-preview-refresh.md.
     ///
     /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
@@ -127,6 +133,39 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static readonly PropertyInfo PiIsInvalidated = SafeGetProperty(ProxyPipelineType, "IsInvalidated",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
+        // ----- NDMF change-horizon sweep (reflection, same drift rules) ---------------------------
+        // The settle predicate reads PIPELINE state, but a scripted edit (reflection write + SetDirty —
+        // the normal execute_code mutation path) publishes only a ChangeScene event, which NDMF's
+        // ChangeStreamMonitor deliberately ignores ("too many spurious sources"); the fallback that is
+        // supposed to catch such unreported changes — PropertyMonitor's poll loop — PARKS while the
+        // editor is unfocused (the norm in agent sessions). Until one of them runs, the pipeline reads
+        // settled while its proxies render pre-edit geometry: the gate's one blind spot, seen live as
+        // => OK on a stale sheet. Before probing, Capture therefore runs one PropertyMonitor sweep
+        // itself (NDMF's own unreported-change detector) and pumps the NDMF sync context so a pending
+        // edit lands as a real invalidation the probe can see. Drift on any handle skips the sweep and
+        // appends a note — the gate still runs exactly as before, its blind spot documented in-band.
+        private const string HorizonDriftNote =
+            " | note=change-horizon sweep unavailable (NDMF internals drifted) — a recent scripted edit may not be visible to the settle gate";
+        private static readonly Type ObjectWatcherType = ResolveNdmfType("nadena.dev.ndmf.cs.ObjectWatcher");
+        private static readonly PropertyInfo PiOwInstance = SafeGetProperty(ObjectWatcherType, "Instance",
+            BindingFlags.Static | BindingFlags.Public);
+        private static readonly FieldInfo FiPropertyMonitor = SafeGetField(ObjectWatcherType, "PropertyMonitor",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly MethodInfo MiCheckAllObjects = SafeGetMethodNoArgs(FiPropertyMonitor?.FieldType,
+            "CheckAllObjects", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly Type SyncContextType = ResolveNdmfType("nadena.dev.ndmf.preview.NDMFSyncContext");
+        private static readonly MethodInfo MiSyncScope = SafeGetMethodNoArgs(SyncContextType, "Scope",
+            BindingFlags.Static | BindingFlags.Public);
+        private static readonly FieldInfo FiInternalContext = SafeGetField(SyncContextType, "InternalContext",
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly MethodInfo MiTurn = SafeGetMethodNoArgs(FiInternalContext?.FieldType, "Turn",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly Type ComputeContextType = ResolveNdmfType("nadena.dev.ndmf.preview.ComputeContext");
+        // FlushInvalidates is overloaded — the Type.EmptyTypes lookup picks the parameterless one
+        // (a bare GetMethod would throw AmbiguousMatchException and null the handle).
+        private static readonly MethodInfo MiFlushInvalidates = SafeGetMethodNoArgs(ComputeContextType,
+            "FlushInvalidates", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
         // ----- NDMF preview-scene proxy attribution (reflection, same drift rules) ---------------
         // Both hooks are PUBLIC NDMF API (NDMFPreviewSceneManager.IsPreviewScene, changelog-tracked
         // NDMFPreview.GetOriginalObjectForProxy) — reflected only because this asmdef has references:[].
@@ -194,6 +233,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             // to the OS foreground so the rebuild's ticks fire between this call and the re-grab
             // (a background-throttled editor wedges the rebuild indefinitely; waiting in-call is
             // impossible — no editor tick runs while this synchronous call blocks the main thread).
+            // The sweep first: a scripted edit NDMF hasn't noticed yet (ChangeScene-only publish +
+            // parked PropertyMonitor — see the change-horizon handles above) leaves the pipeline
+            // reading settled while its proxies are stale; the sweep surfaces it as a real
+            // invalidation so the probe below FAILs honestly instead of grabbing the stale frame.
+            string horizonNote = "";
+            if (!Application.isPlaying && HasReactiveMA(root))
+                horizonNote = SweepNdmfChangeHorizon(root);
             if (ProbeSettle(root, out string pipeline) == Settle.Unsettled)
             {
                 bool kicked = TryFocusKick(out string kick);
@@ -416,10 +462,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 string proxyInfo = (proxiesKept + proxiesHidden) > 0
                     ? " proxies=kept:" + proxiesKept + ",hidden:" + proxiesHidden : "";
                 string summary = string.Format(CultureInfo.InvariantCulture,
-                    "[RenderAvatar] {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7}{8} => OK{9}{10} | png={11}",
+                    "[RenderAvatar] {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7}{8} => OK{9}{10}{11} | png={12}",
                     label, string.Join(",", resolvedAngles), n, tileRes, margin.ToString("0.##", CultureInfo.InvariantCulture),
                     showGizmos ? "on" : "off", hiddenCount, excludedCount, proxyInfo,
-                    proxyNote, note, path);
+                    proxyNote, horizonNote, note, path);
                 Debug.Log(summary);
                 return summary;
             }
@@ -813,6 +859,59 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (type == null) return null;
             try { return type.GetMethod(name, flags); }
             catch { return null; }
+        }
+
+        // For overloaded members: binds the parameterless overload explicitly, where the name-only
+        // lookup above would throw AmbiguousMatchException and null the handle.
+        private static MethodInfo SafeGetMethodNoArgs(Type type, string name, BindingFlags flags)
+        {
+            if (type == null) return null;
+            try { return type.GetMethod(name, flags, null, Type.EmptyTypes, null); }
+            catch { return null; }
+        }
+
+        // True when every change-horizon handle resolved — the drift canary the EditMode suite gates on
+        // (NDMF installed + this false = the sweep silently reopened the gate's blind spot).
+        internal static bool ChangeHorizonHandlesResolved =>
+            PiOwInstance != null && FiPropertyMonitor != null && MiCheckAllObjects != null
+            && MiSyncScope != null && FiInternalContext != null && MiTurn != null && MiFlushInvalidates != null;
+
+        // Runs NDMF's own unreported-change sweep (PropertyMonitor.CheckAllObjects) inside the NDMF sync
+        // context, then pumps that context (Turn + FlushInvalidates) so a pending scripted edit lands as a
+        // pipeline invalidation BEFORE ProbeSettle reads the gate. Bounded and self-terminating: exits the
+        // moment the probe stops reading Settled (poisoned — the gate FAILs right after), or ~50ms after
+        // the sweep completes with nothing found (grace for the invalidation's thread-pool continuation to
+        // land; measured ~20ms live). Only ever called on a reactive edit-mode target. Returns "" or the
+        // drift note; never throws (a throw would fail a grab the old gate would have served).
+        internal static string SweepNdmfChangeHorizon(GameObject root)
+        {
+            if (!ChangeHorizonHandlesResolved) return HorizonDriftNote;
+            try
+            {
+                // Previews globally disabled → originals render un-suppressed; nothing to sweep.
+                if (PiCurrent == null || PiCurrent.GetValue(null, null) == null) return "";
+                var watcher = PiOwInstance.GetValue(null, null);
+                var monitor = watcher != null ? FiPropertyMonitor.GetValue(watcher) : null;
+                var syncCtx = FiInternalContext.GetValue(null);
+                if (monitor == null || syncCtx == null) return HorizonDriftNote;
+
+                System.Threading.Tasks.Task sweep;
+                var scope = MiSyncScope.Invoke(null, null) as IDisposable;
+                try { sweep = MiCheckAllObjects.Invoke(monitor, null) as System.Threading.Tasks.Task; }
+                finally { scope?.Dispose(); }
+
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < 250)
+                {
+                    MiTurn.Invoke(syncCtx, null);           // drain queued posts (incl. the sweep's yields)
+                    MiFlushInvalidates.Invoke(null, null);  // dispatch queued ComputeContext invalidates
+                    if (ProbeSettle(root, out _) != Settle.Settled) break; // invalidation landed — gate FAILs next
+                    if ((sweep == null || sweep.IsCompleted) && sw.ElapsedMilliseconds >= 50) break; // clean
+                    System.Threading.Thread.Sleep(2);
+                }
+                return "";
+            }
+            catch { return HorizonDriftNote; }
         }
 
         private enum Settle { Exempt, Settled, Unsettled, Drift }
