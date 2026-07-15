@@ -1,6 +1,4 @@
-using System;
 using NUnit.Framework;
-using UnityEngine;
 using Ryan6Vrc.AgentTools.Editor;
 
 // The change-horizon sweep closes the settle gate's one blind spot: a scripted edit whose only
@@ -14,13 +12,11 @@ public class RenderAvatarChangeHorizonTests
 {
     private static bool NdmfInstalled()
     {
-        // Package-presence signal independent of the type-resolution path under test: the assembly
-        // by name. A TYPE rename with the assembly still present must land in the Fail branch below.
-        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-        {
-            try { if (asm.GetName().Name == "nadena.dev.ndmf") return true; }
-            catch { /* dynamic assembly — skip */ }
-        }
+        // Package-presence signal independent of the reflection path under test: the package
+        // registry by package ID — survives an assembly rename/split that would blind an
+        // assembly-name check the same way it blinds the handles.
+        foreach (var p in UnityEditor.PackageManager.PackageInfo.GetAllRegisteredPackages())
+            if (p.name == "nadena.dev.ndmf") return true;
         return false;
     }
 
@@ -41,21 +37,15 @@ public class RenderAvatarChangeHorizonTests
     {
         // Headless there is no rendered preview pipeline, so the sweep must degrade to a clean
         // no-op/note — and return within its budget (bounded loop, not a wait-for-settle).
-        var go = new GameObject("HorizonSweepProbe");
-        try
-        {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            string note = RenderAvatar.SweepNdmfChangeHorizon(go);
-            sw.Stop();
-            Assert.IsNotNull(note);
-            if (note.Length > 0)
-                StringAssert.Contains("change-horizon sweep unavailable", note); // only the drift note is legal
-            Assert.Less(sw.ElapsedMilliseconds, 2000,
-                "sweep exceeded its bound — the pump loop must be time-capped, not settle-blocking");
-        }
-        finally
-        {
-            UnityEngine.Object.DestroyImmediate(go);
-        }
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        string note = RenderAvatar.SweepNdmfChangeHorizon();
+        sw.Stop();
+        Assert.IsNotNull(note);
+        if (note.Length > 0)
+            Assert.That(note,
+                Does.Contain("change-horizon sweep unavailable").Or.EqualTo(RenderAvatar.HorizonIncompleteNote),
+                "only the drift note or the incomplete sentinel are legal non-empty returns");
+        Assert.Less(sw.ElapsedMilliseconds, 2000,
+            "sweep exceeded its bound — the pump loop must be time-capped, not settle-blocking");
     }
 }
