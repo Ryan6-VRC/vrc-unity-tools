@@ -213,33 +213,63 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return EditorCurveBinding.FloatCurve(path, ResolveComponentType(typeName), prop);
         }
 
-        private static Type ResolveComponentType(string typeName)
+        // The authored binding vocabulary (docs/animator-schema.md §clips): simple names resolve in exactly
+        // these namespaces. Namespaces, not a type list, so a pinned-SDK addition inside a covered family
+        // needs no code change — while UI / TMP / arbitrary scripts stay out of scope by construction.
+        private static readonly string[] BindingNamespaces =
         {
-            switch (typeName)
+            "UnityEngine",
+            "UnityEngine.Animations",
+            "VRC.SDK3.Dynamics.Constraint.Components",
+            "VRC.SDK3.Dynamics.Contact.Components",
+            "VRC.SDK3.Dynamics.PhysBone.Components",
+        };
+
+        // SCOPE (item V, revisited by C1): the original UnityEngine-only ruling is NARROWED, not overturned —
+        // resolution is still a closed, documented allowlist (of namespaces), refusing everything else
+        // fail-loud, including a non-Component type and a name matching in two namespaces (refuse, never
+        // rank). ControllerDecompile.ReconstructBindingTarget round-trips through THIS method as its oracle,
+        // so emit and decompile cannot drift; widen the list AND the schema §clips together — never one
+        // silently.
+        // Memo: emit and decompile both resolve once per binding, and the probe walks every loaded assembly
+        // per namespace — a large FX pays it hundreds of times. Successes only (a refusal aborts the compile,
+        // so its path is never hot); statics reset on domain reload, so the cache cannot outlive the assembly
+        // set it was built from.
+        private static readonly Dictionary<string, Type> ResolveCache = new Dictionary<string, Type>();
+
+        internal static Type ResolveComponentType(string typeName)
+        {
+            if (typeName == "GameObject") return typeof(GameObject); // animatable but not a Component
+
+            // Bare MonoBehaviour is Unity's missing-script placeholder: a deserialized curve whose script
+            // no longer resolves reads back as typeof(MonoBehaviour) (measured, 2022.3) — never a real
+            // authorable target. Resolving it would round-trip vendor junk silently; refuse by name so the
+            // decompile oracle turns a missing-script binding into a named refusal.
+            if (typeName == "MonoBehaviour")
+                throw new EmitException("clip binding component type 'MonoBehaviour' is not bindable — it is "
+                    + "the placeholder Unity reports for a curve whose script cannot be resolved (missing script); "
+                    + "bind the concrete component type");
+
+            if (ResolveCache.TryGetValue(typeName, out var cached)) return cached;
+
+            var matches = new List<Type>();
+            foreach (var ns in BindingNamespaces)
             {
-                case "GameObject": return typeof(GameObject);
-                case "Transform": return typeof(Transform);
+                string full = ns + "." + typeName;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    var t = asm.GetType(full);
+                    if (t != null && typeof(Component).IsAssignableFrom(t)) { matches.Add(t); break; }
+                }
             }
-            // Most animatable components live in Transform's assembly (UnityEngine.CoreModule).
-            var t = typeof(Transform).Assembly.GetType("UnityEngine." + typeName);
-            if (t != null) return t;
-            // Fallback: a `UnityEngine.<typeName>` type in any other loaded module assembly (e.g.
-            // UnityEngine.AudioSource in AudioModule). This resolves ONLY the UnityEngine namespace.
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                var byNs = asm.GetType("UnityEngine." + typeName);
-                if (byNs != null) return byNs;
-            }
-            // SCOPE (kickoff item V, gap 1 — decided intentional, NOT a resolver bug): inline clip bindings
-            // resolve UnityEngine-namespace component types only. That is the entire authored surface
-            // (Renderer/SkinnedMeshRenderer/MeshRenderer/Light/Transform/GameObject + material & blendShape
-            // sub-properties — docs/animator-schema.md §clips). A UI or VRC-SDK component (e.g.
-            // UnityEngine.UI.Image, whose simple name is not under `UnityEngine.`) is deliberately out of
-            // scope; do not broaden this lookup on speculation. If a real need appears, widen here AND
-            // document it in the schema — never one silently.
-            throw new EmitException($"clip binding component type '{typeName}' could not be resolved to a "
-                + "UnityEngine-namespace component — inline bindings resolve UnityEngine component types only "
-                + "(UI / VRC-SDK components are out of scope); check the type name or bind a supported UnityEngine component");
+            if (matches.Count == 1) { ResolveCache[typeName] = matches[0]; return matches[0]; }
+            if (matches.Count > 1)
+                throw new EmitException($"clip binding component type '{typeName}' is ambiguous across the "
+                    + "supported namespaces: " + string.Join(", ", matches.Select(m => m.FullName))
+                    + " — refused rather than guessed (the binding grammar has no qualified form; this needs a resolver decision)");
+            throw new EmitException($"clip binding component type '{typeName}' does not resolve to an "
+                + "animatable Component in the supported namespaces (" + string.Join(", ", BindingNamespaces)
+                + ") — UI / arbitrary scripts are out of scope; check the name against the schema §clips vocabulary");
         }
 
         // Per-build mutable state kept off the static surface so Build stays a pure entry point.

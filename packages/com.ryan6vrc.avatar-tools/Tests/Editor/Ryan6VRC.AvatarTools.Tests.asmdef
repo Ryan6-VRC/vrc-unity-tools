@@ -18,7 +18,11 @@
         "nunit.framework.dll",
         "VRCSDK3A.dll",
         "VRCSDKBase.dll",
-        "VRCCore-Editor.dll"
+        "VRCCore-Editor.dll",
+        "VRC.Dynamics.dll",
+        "VRC.SDK3.Dynamics.Constraint.dll",
+        "VRC.SDK3.Dynamics.Contact.dll",
+        "VRC.SDK3.Dynamics.PhysBone.dll"
     ],
     "autoReferenced": false,
     "defineConstraints": [
