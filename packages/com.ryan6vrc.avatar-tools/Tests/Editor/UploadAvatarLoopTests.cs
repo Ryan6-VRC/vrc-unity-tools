@@ -116,6 +116,53 @@ public class UploadAvatarLoopTests
         foreach (var g in avatars) UnityEngine.Object.DestroyImmediate(g);
     }
 
+    // The status file is a FIXED path, so a reader cannot tell this batch's record from the previous
+    // batch's without an identity to match. That stale read is the catastrophic one: if the editor is
+    // already wedged when Run is issued, the call times out, the agent falls back to the file, and sees
+    // the last batch's "done-pass" — concluding an upload that never started succeeded, on an operation
+    // that publishes to a live account.
+    [Test]
+    public void StatusRecord_CarriesTheBatchId()
+    {
+        var json = UploadAvatar.BuildStatusJson("abc123", "running", "uploading", 0, 2, "AvatarA", "T");
+        StringAssert.Contains("\"batchId\":\"abc123\"", json,
+            "without an id the record is indistinguishable from a stale one");
+    }
+
+    // The verdict must live in `phase`, not only in the human-readable message: this file is machine-read
+    // from Bash during a wedge, so a bare "done" would make a FAILED batch look finished-and-fine.
+    [Test]
+    public void StatusRecord_PutsTheVerdictInPhase()
+    {
+        StringAssert.Contains("\"phase\":\"done-pass\"",
+            UploadAvatar.BuildStatusJson("b", "done-pass", "ok", -1, 1, null, "T"));
+        StringAssert.Contains("\"phase\":\"done-fail\"",
+            UploadAvatar.BuildStatusJson("b", "done-fail", "nope", -1, 1, null, "T"));
+    }
+
+    // The status file is written to disk and read by an external poller — a leaked blueprint id there is
+    // as public as one in the RunLog, and message carries SDK exception text.
+    [Test]
+    public void StatusRecord_RedactsIdsInTheMessage()
+    {
+        var json = UploadAvatar.BuildStatusJson("b", "done-fail",
+            "failed avtr_00000000-1111-2222-3333-444444444444", -1, 1, null, "T");
+        StringAssert.DoesNotContain("avtr_00000000-1111-2222-3333-444444444444", json);
+    }
+
+    // Avatar names are user data and land in a JSON field — an unescaped quote would produce a record the
+    // Bash-side reader cannot parse, exactly when it is the only channel left.
+    [Test]
+    public void StatusRecord_EscapesAHostileHandle()
+    {
+        var json = UploadAvatar.BuildStatusJson("b", "running", "uploading", 0, 1, "He said \"hi\"\\n", "T");
+        StringAssert.Contains("\\\"hi\\\"", json);
+        Assert.DoesNotThrow(() => UnityEngine.JsonUtility.FromJson<StatusProbe>(json),
+            "the record must stay parseable with a hostile handle");
+    }
+
+    private class StatusProbe { public string batchId; public string phase; public string handle; }
+
     // The callback is optional — omitting it must not change loop semantics (every pre-existing caller).
     [Test]
     public void Loop_ProgressCallbackIsOptional()
