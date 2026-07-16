@@ -82,6 +82,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // when the batch first reaches a terminal state, not on every poll. Reset when a new batch starts.
         static string _terminalSummary;
 
+        /// <summary>The status file: this batch's progress, on disk, readable WITHOUT the MCP bridge.
+        /// <see cref="Status"/> alone was not enough — it is C# the agent invokes over MCP, and a modal
+        /// dialog raised mid-upload (VRCFury's, the SDK's) blocks the editor's main thread, so the poll
+        /// itself can never run. The channel that reports the wedge must not depend on the wedged thread.
+        /// A file does not: the agent reads it from Bash while MCP is dead. Paired with the terminal write
+        /// being self-driven (see <see cref="Watch"/>), a completed batch always lands on disk even if no
+        /// poll ever gets through.
+        ///
+        /// The path is fixed, so every record carries a <c>batchId</c> and <see cref="Run"/> returns it:
+        /// match them. Without that the file is indistinguishable from a STALE one, and the stale read is
+        /// catastrophic in the exact scenario this file exists for — if the editor is already wedged when
+        /// Run is issued, the command never drains, the caller times out, falls back to the file, and reads
+        /// the PREVIOUS batch's "done … => PASS". It would conclude an upload that never started succeeded,
+        /// on an operation that publishes to a live account.</summary>
+        public static string StatusPath => TransplantCore.RunLogDir + "/upload-avatar_status.json";
+
+        // Identity of the current batch, minted in Run and echoed in its return value. Also the batch size,
+        // stashed once: `total` otherwise meant avatars.Length on "started" but rows.Count at the terminal,
+        // which coincide only because AppendNotAttempted backfills the tail.
+        static string _batchId;
+        static int _batchTotal;
+
         // ── The loop (pure, injectable, fully unit-tested) ──────────────────────────────────────
 
         /// <summary>Drive one pass over <paramref name="avatars"/> with an injected per-avatar delegate.
@@ -94,7 +116,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public static async System.Threading.Tasks.Task<UploadReport> RunCore(
             GameObject[] avatars,
             Func<GameObject, System.Threading.Tasks.Task<UploadOutcome>> uploadOne,
-            Action saveAssets)
+            Action saveAssets,
+            Action<int, string> onProgress = null)
         {
             var report = new UploadReport();
             int n = avatars != null ? avatars.Length : 0;
@@ -112,6 +135,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
 
                 string state = ClassifyAvatar(go).state;
+                // Announce BEFORE awaiting: the upload we are about to start is the one that can raise a
+                // modal, and once it does nothing else in this process runs. The status file must already
+                // name it, or the agent reads a wedge with no idea which avatar wedged it.
+                if (onProgress != null) onProgress(i, go.name);
                 var outcome = await uploadOne(go);
 
                 switch (outcome.kind)
@@ -191,12 +218,117 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // the agent polls Status() for progress and the final summary.
             if (_inflight != null && !_inflight.IsCompleted)
                 return Refuse("an upload batch is already in flight — poll UploadAvatar.Status()");
+            // A completed-but-not-yet-finalized batch: Watch hasn't ticked, so overwriting _inflight here
+            // would drop its RunLog entirely — a hole in "the log always lands". Finalize it first
+            // (Status() is idempotent and memoized, so this is a no-op if Watch already ran).
+            if (_inflight != null) Status();
             if (!CauReflect.TryGetBuilder(out var builder, out var whyBuilder))
                 return Refuse(whyBuilder);
             _terminalSummary = null;
-            _inflight = RunCore(avatars, go => RealUploadOne(go, builder), () => AssetDatabase.SaveAssets());
-            return "[upload-avatar] batch started (" + (avatars != null ? avatars.Length : 0) +
-                   " avatar(s)); poll UploadAvatar.Status()";
+            _batchTotal = avatars != null ? avatars.Length : 0;
+            _batchId = Guid.NewGuid().ToString("N");
+
+            // The "started" write is MANDATORY, not best-effort: it is what stamps this batch's id over
+            // the previous batch's record. If it cannot land, the file still shows the LAST batch's
+            // terminal state and a reader would attribute it to this one — so refuse to start, and say so
+            // in the return value, the one channel the caller is guaranteed to see.
+            if (!WriteStatus("started", "batch started (" + _batchTotal + " avatar(s))", -1, null, out var whyStatus))
+            {
+                _batchId = null;
+                return Refuse("cannot write the status file (" + whyStatus + ") — refusing to start: a " +
+                              "stale record would read as this batch's result. Path: " + StatusPath);
+            }
+
+            _inflight = RunCore(avatars, go => RealUploadOne(go, builder), () => AssetDatabase.SaveAssets(),
+                                (i, name) => WriteStatus("running", "uploading", i, name, out _));
+            // Self-driven terminal write: without this the RunLog lands only when the agent polls Status(),
+            // so a batch that finishes while MCP is unreachable leaves nothing on disk at all.
+            EditorApplication.update -= Watch;
+            EditorApplication.update += Watch;
+            return "[upload-avatar] batch started (" + _batchTotal + " avatar(s)) batchId=" + _batchId +
+                   "; poll UploadAvatar.Status(), or read " + StatusPath +
+                   " from disk (survives a wedged editor) — match its batchId to the one above, or you " +
+                   "are reading a previous batch";
+        }
+
+        /// <summary>Finalize the batch the moment it completes, rather than when someone asks. Registered on
+        /// the editor update loop by <see cref="Run"/> and unregistered as soon as it fires.</summary>
+        static void Watch()
+        {
+            if (_inflight == null || !_inflight.IsCompleted) return;
+            EditorApplication.update -= Watch;
+            try { Status(); }                    // idempotent: writes the RunLog + memoizes, exactly once
+            catch (Exception e) { Debug.LogError("[upload-avatar] terminal write failed: " + e.Message); }
+        }
+
+        /// <summary>Write the disk-side status; returns false + why on failure. Only the "started" write
+        /// treats that as fatal (see <see cref="Run"/>) — a later one failing leaves a correctly-identified
+        /// record that is merely behind, and the RunLog and <see cref="Status"/> remain the authority. It
+        /// never throws into the upload: a status write must not fail a batch.
+        ///
+        /// Written via temp + atomic rename. WriteAllText truncates then writes, and the whole point of
+        /// this file is an external poller reading it in a loop — that reader would eventually catch a torn
+        /// or empty file and have to guess whether it meant anything.</summary>
+        /// <summary>The status record itself — pure, so the invariants a Bash-side reader depends on
+        /// (identity present, verdict in <c>phase</c>, ids redacted) are testable without a live batch.</summary>
+        internal static string BuildStatusJson(string batchId, string phase, string message,
+                                               int index, int total, string handle, string utc)
+        {
+            var sb = new StringBuilder();
+            sb.Append("{\"batchId\":").Append(TransplantCore.Q(batchId));
+            sb.Append(",\"phase\":\"").Append(phase).Append("\"");
+            sb.Append(",\"message\":").Append(TransplantCore.Q(UploadAvatarLogic.RedactIds(message)));
+            sb.Append(",\"total\":").Append(total.ToString(CultureInfo.InvariantCulture));
+            if (index >= 0) sb.Append(",\"index\":").Append(index.ToString(CultureInfo.InvariantCulture));
+            if (handle != null) sb.Append(",\"handle\":").Append(TransplantCore.Q(handle));
+            sb.Append(",\"utc\":").Append(TransplantCore.Q(utc)).Append("}");
+            return sb.ToString();
+        }
+
+        static bool WriteStatus(string phase, string message, int index, string handle, out string why)
+        {
+            why = null;
+            try
+            {
+                Directory.CreateDirectory(TransplantCore.RunLogDir);
+                var json = BuildStatusJson(_batchId, phase, message, index, _batchTotal, handle,
+                                           DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+                var tmp = StatusPath + ".tmp";
+                File.WriteAllText(tmp, json);
+                // Replace, not Delete+Move: this runtime's File.Move has no overwrite overload, and
+                // delete-then-move leaves a window in which the poller reads "no file at all".
+                // File.Replace maps to ReplaceFile (atomic on NTFS); it requires an existing target,
+                // so the very first write is a plain Move.
+                if (File.Exists(StatusPath)) File.Replace(tmp, StatusPath, null);
+                else File.Move(tmp, StatusPath);
+                return true;
+            }
+            catch (Exception e)
+            {
+                why = e.Message;
+                Debug.LogWarning("[upload-avatar] status write failed: " + e.Message);
+                return false;
+            }
+        }
+
+        /// <summary>An orphaned "running" record — the domain reloaded (script recompile, play-mode entry)
+        /// mid-batch, which kills <c>_inflight</c> and the <see cref="Watch"/> registration together but
+        /// leaves the file asserting a batch is still in flight, forever. Nothing else would ever correct
+        /// it, and a reader cannot distinguish it from a live batch.</summary>
+        [InitializeOnLoadMethod]
+        static void MarkOrphanedBatchInterrupted()
+        {
+            try
+            {
+                if (!File.Exists(StatusPath)) return;
+                var txt = File.ReadAllText(StatusPath);
+                if (txt.IndexOf("\"phase\":\"running\"", StringComparison.Ordinal) < 0 &&
+                    txt.IndexOf("\"phase\":\"started\"", StringComparison.Ordinal) < 0) return;
+                File.WriteAllText(StatusPath, txt.TrimEnd().TrimEnd('}') +
+                    ",\"interrupted\":\"the editor domain reloaded while this batch was in flight; " +
+                    "its outcome is UNKNOWN — check the RunLog and the avatar's blueprintId before re-running\"}");
+            }
+            catch { /* best-effort: a startup hook must never throw */ }
         }
 
         /// <summary>Poll the in-flight execute batch. The upload is async-driven — Run returns immediately and
@@ -218,11 +350,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                          cls = "real", error = redacted });
                 string faultLog = WriteRunLog(fault, false, "all");
                 _terminalSummary = "[upload-avatar] batch FAULTED: " + redacted + " | log=" + faultLog;
+                WriteStatus("faulted", _terminalSummary, -1, null, out _);
                 return _terminalSummary;
             }
 
             var report = _inflight.Result;
             _terminalSummary = BuildSummary(report, false, WriteRunLog(report, false, "all"));
+            // The verdict goes in `phase`, not only in the human-readable message: this file exists to be
+            // machine-read from Bash during a wedge, and a bare "done" would make a FAILED batch look
+            // finished-and-fine to anything that keys on phase.
+            WriteStatus(report.result == "PASS" ? "done-pass" : "done-fail", _terminalSummary, -1, null, out _);
             return _terminalSummary;
         }
 
