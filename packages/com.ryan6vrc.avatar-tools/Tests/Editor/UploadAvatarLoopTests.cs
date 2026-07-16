@@ -77,6 +77,57 @@ public class UploadAvatarLoopTests
         foreach (var g in avatars) UnityEngine.Object.DestroyImmediate(g);
     }
 
+    // The status file is the agent's ONLY channel when a modal wedges the editor mid-upload: Status() is
+    // C# invoked over MCP, and a modal blocks the main thread the poll would have to run on. Progress must
+    // therefore be announced BEFORE the upload that could wedge, naming the avatar — announcing after would
+    // leave the agent reading a stall with no idea which handle caused it.
+    [Test]
+    public void Loop_AnnouncesEachAvatarBeforeAttemptingIt()
+    {
+        var avatars = new[] { MakeAvatar("A",""), MakeAvatar("B","") };
+        var announced = new System.Collections.Generic.List<string>();
+        var attempted = new System.Collections.Generic.List<string>();
+        var report = UploadAvatar.RunCore(avatars,
+            go => { attempted.Add(go.name);
+                    // At the moment of the attempt, this handle must ALREADY have been announced.
+                    Assert.AreEqual(go.name, announced[announced.Count - 1],
+                        "progress must be announced before the upload that can raise a modal");
+                    return System.Threading.Tasks.Task.FromResult(UploadAvatar.UploadOutcome.Uploaded()); },
+            () => {},
+            (i, name) => announced.Add(name)).GetAwaiter().GetResult();
+        CollectionAssert.AreEqual(new[]{"A","B"}, announced);
+        CollectionAssert.AreEqual(new[]{"A","B"}, attempted);
+        Assert.AreEqual("PASS", report.result);
+        foreach (var g in avatars) UnityEngine.Object.DestroyImmediate(g);
+    }
+
+    // A halt must not announce the avatars it never tried — the status file would otherwise name a handle
+    // the batch never touched as the one in flight.
+    [Test]
+    public void Loop_DoesNotAnnounceNotAttemptedTail()
+    {
+        var avatars = new[] { MakeAvatar("A",""), MakeAvatar("B","") };
+        var announced = new System.Collections.Generic.List<string>();
+        UploadAvatar.RunCore(avatars,
+            _ => System.Threading.Tasks.Task.FromResult(UploadAvatar.UploadOutcome.Failed(httpStatus: 500)),
+            () => {},
+            (i, name) => announced.Add(name)).GetAwaiter().GetResult();
+        CollectionAssert.AreEqual(new[]{"A"}, announced, "B was never attempted, so it must never be announced");
+        foreach (var g in avatars) UnityEngine.Object.DestroyImmediate(g);
+    }
+
+    // The callback is optional — omitting it must not change loop semantics (every pre-existing caller).
+    [Test]
+    public void Loop_ProgressCallbackIsOptional()
+    {
+        var a = MakeAvatar("A","");
+        var report = UploadAvatar.RunCore(new[]{a},
+            _ => System.Threading.Tasks.Task.FromResult(UploadAvatar.UploadOutcome.Uploaded()),
+            () => {}).GetAwaiter().GetResult();
+        Assert.AreEqual("PASS", report.result);
+        UnityEngine.Object.DestroyImmediate(a);
+    }
+
     [Test]
     public void Loop_RateLimitIsNotAutoRetried()
     {

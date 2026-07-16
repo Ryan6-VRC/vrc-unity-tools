@@ -82,6 +82,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // when the batch first reaches a terminal state, not on every poll. Reset when a new batch starts.
         static string _terminalSummary;
 
+        /// <summary>The status file: this batch's progress, on disk, readable WITHOUT the MCP bridge.
+        /// <see cref="Status"/> alone was not enough — it is C# the agent invokes over MCP, and a modal
+        /// dialog raised mid-upload (VRCFury's, the SDK's) blocks the editor's main thread, so the poll
+        /// itself can never run. The channel that reports the wedge must not depend on the wedged thread.
+        /// A file does not: the agent reads it from Bash while MCP is dead. Paired with the terminal write
+        /// being self-driven (see <see cref="Watch"/>), a completed batch always lands on disk even if no
+        /// poll ever gets through.</summary>
+        public static string StatusPath => TransplantCore.RunLogDir + "/upload-avatar_status.json";
+
         // ── The loop (pure, injectable, fully unit-tested) ──────────────────────────────────────
 
         /// <summary>Drive one pass over <paramref name="avatars"/> with an injected per-avatar delegate.
@@ -94,7 +103,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public static async System.Threading.Tasks.Task<UploadReport> RunCore(
             GameObject[] avatars,
             Func<GameObject, System.Threading.Tasks.Task<UploadOutcome>> uploadOne,
-            Action saveAssets)
+            Action saveAssets,
+            Action<int, string> onProgress = null)
         {
             var report = new UploadReport();
             int n = avatars != null ? avatars.Length : 0;
@@ -112,6 +122,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
 
                 string state = ClassifyAvatar(go).state;
+                // Announce BEFORE awaiting: the upload we are about to start is the one that can raise a
+                // modal, and once it does nothing else in this process runs. The status file must already
+                // name it, or the agent reads a wedge with no idea which avatar wedged it.
+                if (onProgress != null) onProgress(i, go.name);
                 var outcome = await uploadOne(go);
 
                 switch (outcome.kind)
@@ -194,9 +208,46 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!CauReflect.TryGetBuilder(out var builder, out var whyBuilder))
                 return Refuse(whyBuilder);
             _terminalSummary = null;
-            _inflight = RunCore(avatars, go => RealUploadOne(go, builder), () => AssetDatabase.SaveAssets());
-            return "[upload-avatar] batch started (" + (avatars != null ? avatars.Length : 0) +
-                   " avatar(s)); poll UploadAvatar.Status()";
+            int total = avatars != null ? avatars.Length : 0;
+            WriteStatus("started", "batch started (" + total + " avatar(s))", -1, total, null);
+            _inflight = RunCore(avatars, go => RealUploadOne(go, builder), () => AssetDatabase.SaveAssets(),
+                                (i, name) => WriteStatus("running", "uploading", i, total, name));
+            // Self-driven terminal write: without this the RunLog lands only when the agent polls Status(),
+            // so a batch that finishes while MCP is unreachable leaves nothing on disk at all.
+            EditorApplication.update -= Watch;
+            EditorApplication.update += Watch;
+            return "[upload-avatar] batch started (" + total +
+                   " avatar(s)); poll UploadAvatar.Status(), or read " + StatusPath +
+                   " from disk (survives a wedged editor)";
+        }
+
+        /// <summary>Finalize the batch the moment it completes, rather than when someone asks. Registered on
+        /// the editor update loop by <see cref="Run"/> and unregistered as soon as it fires.</summary>
+        static void Watch()
+        {
+            if (_inflight == null || !_inflight.IsCompleted) return;
+            EditorApplication.update -= Watch;
+            try { Status(); }                    // idempotent: writes the RunLog + memoizes, exactly once
+            catch (Exception e) { Debug.LogError("[upload-avatar] terminal write failed: " + e.Message); }
+        }
+
+        /// <summary>Write the disk-side status. Best-effort and never throws into the upload: a status write
+        /// that fails must not fail the batch — the RunLog and Status() remain the authority.</summary>
+        static void WriteStatus(string phase, string message, int index, int total, string handle)
+        {
+            try
+            {
+                Directory.CreateDirectory(TransplantCore.RunLogDir);
+                var sb = new StringBuilder();
+                sb.Append("{\"phase\":\"").Append(phase).Append("\"");
+                sb.Append(",\"message\":").Append(TransplantCore.Q(UploadAvatarLogic.RedactIds(message)));
+                sb.Append(",\"total\":").Append(total.ToString(CultureInfo.InvariantCulture));
+                if (index >= 0) sb.Append(",\"index\":").Append(index.ToString(CultureInfo.InvariantCulture));
+                if (handle != null) sb.Append(",\"handle\":").Append(TransplantCore.Q(handle));
+                sb.Append(",\"utc\":\"").Append(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)).Append("\"}");
+                File.WriteAllText(StatusPath, sb.ToString());
+            }
+            catch (Exception e) { Debug.LogWarning("[upload-avatar] status write failed: " + e.Message); }
         }
 
         /// <summary>Poll the in-flight execute batch. The upload is async-driven — Run returns immediately and
@@ -218,11 +269,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                          cls = "real", error = redacted });
                 string faultLog = WriteRunLog(fault, false, "all");
                 _terminalSummary = "[upload-avatar] batch FAULTED: " + redacted + " | log=" + faultLog;
+                WriteStatus("faulted", _terminalSummary, -1, 0, null);
                 return _terminalSummary;
             }
 
             var report = _inflight.Result;
             _terminalSummary = BuildSummary(report, false, WriteRunLog(report, false, "all"));
+            WriteStatus("done", _terminalSummary, -1, report.rows.Count, null);
             return _terminalSummary;
         }
 
