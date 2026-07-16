@@ -924,6 +924,34 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
+    // ---- an exotic (auto/clamped-auto) tangent shape -> a located Refusal, not a silent flatten ----
+
+    [Test]
+    public void ExoticTangentCurve_Refused_NotFlattened()
+    {
+        var c = new AnimatorController { name = "ExoticTangent_Fx" };
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        var clip = new AnimationClip { name = "Exotic", frameRate = 60f };
+        // Monotonic 3-key shape with UNEVEN slopes either side of the middle key: a peak/valley (local
+        // extremum) shape makes ClampedAuto specifically zero the tangent there (it clamps extrema to
+        // avoid overshoot) and would wrongly pass the flat test; a middle key that is NOT an extremum,
+        // with a slope discontinuity, gets a genuine non-zero clamped-auto tangent.
+        var curve = new AnimationCurve(new Keyframe(0f, 0f), new Keyframe(0.1f, 0.9f), new Keyframe(0.5f, 1f));
+        for (int i = 0; i < curve.length; i++)
+        {
+            AnimationUtility.SetKeyLeftTangentMode(curve, i, AnimationUtility.TangentMode.ClampedAuto);
+            AnimationUtility.SetKeyRightTangentMode(curve, i, AnimationUtility.TangentMode.ClampedAuto);
+        }
+        AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve("Prop", typeof(Renderer), "enabled"), curve);
+        st.motion = clip;
+
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("tangent")), "exotic tangents -> named refusal: " + string.Join(" | ", w.Refusals));
+        StringAssert.DoesNotContain("Prop/Renderer.enabled", AnimatorSchemaEmit.Serialize(w.Doc));
+        Object.DestroyImmediate(c);
+    }
+
     private static void EnsureScratch()
     {
         if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");

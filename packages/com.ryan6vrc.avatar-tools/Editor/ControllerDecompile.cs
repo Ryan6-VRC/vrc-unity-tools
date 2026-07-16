@@ -919,11 +919,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var curve = AnimationUtility.GetEditorCurve(clip, b);
                     string target = ReconstructBindingTarget(b, clip.name);
                     if (target == null || curve == null || curve.length == 0) continue;
-                    // A constant-VALUE curve collapses to a Set — UNLESS its tangents are linear: `set:` carries
-                    // no tangent marker, so downgrading a constant linear curve would silently drop `tangents:
-                    // linear` and break the compile↔decompile fixpoint (a valid, BindCurve-accepted input like
-                    // a two-key linear curve holding one value). Keep any linear curve as a Curve.
-                    if (IsConstant(curve) && !IsAllLinear(curve))
+                    // A constant-VALUE curve collapses to a Set — UNLESS its tangents are linear or stepped:
+                    // `set:` carries no tangent marker, so downgrading a constant linear/stepped curve would
+                    // silently drop the marker and break the compile↔decompile fixpoint (a valid,
+                    // BindCurve-accepted input like a two-key linear/stepped curve holding one value). Keep
+                    // any non-flat curve as a Curve. A tangent shape the classifier can't name (auto/clamped-
+                    // auto/free/mixed) is refused loudly rather than silently flattened.
+                    var cls = ClassifyTangents(curve);
+                    if (cls == null)
+                    {
+                        _result.Refusals.Add($"inline clip '{clip.name}': curve '{target}' uses a tangent shape "
+                            + "the schema can't round-trip (not flat/linear/stepped -- auto/clamped-auto are "
+                            + "Unity-recomputed, free carries explicit tangent values the [t,v] form can't "
+                            + "express); author it as a hand-owned .anim");
+                        continue;
+                    }
+                    if (IsConstant(curve) && cls == CurveTangent.Flat)
                     {
                         spec.Sets[target] = curve.keys[0].value;
                         maxConstEnd = Mathf.Max(maxConstEnd, curve.keys[curve.length - 1].time);
@@ -933,7 +944,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         {
                             Binding = target,
                             Keys = curve.keys.Select(k => new Keyframe2(k.time, k.value)).ToList(),
-                            Tangents = IsAllLinear(curve) ? CurveTangent.Linear : CurveTangent.Flat,
+                            Tangents = cls.Value,
                         });
                 }
                 // A Set curve carries no keyframes in the schema, so a Sets clip authored with an explicit
@@ -962,15 +973,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return true;
             }
 
-            // Round-trips ControllerEmit's linear-tangent marker: true only when EVERY key is linear on
-            // both sides (ControllerEmit sets both when `tangents: linear`), so any hand-authored or
-            // imported mixed-tangent curve decodes as Flat rather than falsely claiming linear.
-            private static bool IsAllLinear(AnimationCurve curve)
+            // Recover ControllerEmit's tangent marker. Mode tests BEFORE the value test: a constant-VALUED linear
+            // curve has zero-slope tangents, so a value-first flat test would mislabel it flat and re-break the
+            // fixpoint the collapse guard protects; a Constant curve's tangents read as +/-inf, caught by its mode
+            // branch before it would wrongly fall to refuse. Flat is then the honest value test (all tangents ~= 0)
+            // -- a zero-tangent Auto/ClampedAuto/Free curve interpolates identically to the emitter's default-Free
+            // flat, so folding it to flat is faithful. Non-zero custom/auto tangents, or tangents mixed across
+            // keys/sides, can't round-trip -> null (refused by the caller).
+            private static CurveTangent? ClassifyTangents(AnimationCurve curve)
+            {
+                if (AllKeysMode(curve, AnimationUtility.TangentMode.Linear))   return CurveTangent.Linear;
+                if (AllKeysMode(curve, AnimationUtility.TangentMode.Constant)) return CurveTangent.Stepped;
+                if (AllKeysZeroTangent(curve))                                 return CurveTangent.Flat;
+                return null;
+            }
+
+            private static bool AllKeysMode(AnimationCurve curve, AnimationUtility.TangentMode mode)
             {
                 if (curve.length == 0) return false;
                 for (int i = 0; i < curve.length; i++)
-                    if (AnimationUtility.GetKeyLeftTangentMode(curve, i) != AnimationUtility.TangentMode.Linear
-                     || AnimationUtility.GetKeyRightTangentMode(curve, i) != AnimationUtility.TangentMode.Linear)
+                    if (AnimationUtility.GetKeyLeftTangentMode(curve, i) != mode
+                     || AnimationUtility.GetKeyRightTangentMode(curve, i) != mode)
+                        return false;
+                return true;
+            }
+
+            private static bool AllKeysZeroTangent(AnimationCurve curve)
+            {
+                if (curve.length == 0) return false;
+                for (int i = 0; i < curve.length; i++)
+                    if (!Mathf.Approximately(curve.keys[i].inTangent, 0f) || !Mathf.Approximately(curve.keys[i].outTangent, 0f))
                         return false;
                 return true;
             }

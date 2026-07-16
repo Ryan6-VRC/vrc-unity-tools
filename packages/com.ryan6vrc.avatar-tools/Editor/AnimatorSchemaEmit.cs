@@ -145,14 +145,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // Flat (default) curves keep the bare-list form byte-identical to before linear tangents existed;
-        // only a Linear-tangent curve pays for the map form, matching AnimatorSchemaYaml.BindCurve's reader.
+        // only a Linear/Stepped-tangent curve pays for the map form, matching AnimatorSchemaYaml.BindCurve's reader.
         private static string FlowCurve(CurveSpec cs)
         {
             var keysFlow = FlowCurveKeys(cs.Keys);
-            return cs.Tangents == CurveTangent.Linear
-                ? "{ tangents: linear, keys: " + keysFlow + " }"
-                : keysFlow;
+            return cs.Tangents == CurveTangent.Flat
+                ? keysFlow
+                : "{ tangents: " + TangentToken(cs.Tangents) + ", keys: " + keysFlow + " }";
         }
+
+        private static string TangentToken(CurveTangent t) => t switch
+        {
+            CurveTangent.Linear  => "linear",
+            CurveTangent.Stepped => "stepped",
+            _ => throw new System.InvalidOperationException($"flat curve uses the bare-list form, not the map form (got {t})"),
+        };
 
         // ----- layers / machines / states -----
 
