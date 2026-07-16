@@ -90,6 +90,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const int OverlayPad = 12;     // px cleared below the detected floating-overlay band
         private const int FgThreshold = 35;    // per-pixel sum |channel-bg| above which a pixel is foreground
 
+        private const int ManifestSchema = 1;  // <png>.cam.json schema; bumped on any field rename (diff FAILs on mismatch)
+        private static readonly string ToolVersion = typeof(RenderAvatar).Assembly.GetName().Version.ToString();
+        private static readonly Color32 Magenta = new Color32(255, 0, 255, 255); // occlusion overlay (exact-match, MSAA off)
+
         // Descendants excluded from every grab, merged with the caller's `hide`. The non-destructive
         // build adds a ~10 km "Culling" mesh (visible in play mode) that renders as a huge pale surface
         // and would otherwise become the framed silhouette. Present only in built/play state; a no-op
@@ -200,21 +204,74 @@ namespace Ryan6Vrc.AgentTools.Editor
             bool showGizmos = false,
             int resolution = 1024)
         {
+            var r = CaptureCore(target, angles, hide, margin, showGizmos, resolution, default);
+            if (!r.ok) return r.fail;
+            string png = WriteSheetAndManifest(r);
+            if (png == null) return Fail(r.label, "failed to write the grab PNG/manifest to temp (disk full or locked path?)");
+            string proxyInfo = (r.proxiesKept + r.proxiesHidden) > 0
+                ? " proxies=kept:" + r.proxiesKept + ",hidden:" + r.proxiesHidden : "";
+            // cam=ok signals a diffable camera manifest was written beside the png — CaptureDiff's `against`.
+            string summary = string.Format(CultureInfo.InvariantCulture,
+                "[RenderAvatar] Capture {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7}{8} => OK cam=ok{9}{10}{11} | png={12}",
+                r.label, string.Join(",", r.manifest.angles), r.manifest.views.Length, r.manifest.tileRes,
+                r.manifest.margin.ToString("0.##", CultureInfo.InvariantCulture), showGizmos ? "on" : "off",
+                r.hiddenCount, r.excludedCount, proxyInfo, r.proxyNote, r.horizonNote, r.settleNote, png);
+            Debug.Log(summary);
+            return summary;
+        }
+
+        // ----- Shared capture types + core ------------------------------------------------------
+        // The per-grab camera manifest, written as <png>.cam.json beside every grab: the exact per-angle
+        // framing + window geometry to reproduce THIS grab, so CaptureDiff frames B identically to A.
+        [Serializable] private class CamFrame { public int w, h, camW, camH; public float ppp; }
+        [Serializable] private class CamView { public string angle; public Vector3 pivot; public Quaternion rot; public float orthoSize; public int cropX, cropY, side; }
+        [Serializable] private class CamManifest
+        {
+            public int schema; public string toolVersion; public string label;
+            public string[] angles; public string[] hide; public bool showGizmos;
+            public int cols, rows, tileRes, resolution; public float margin;
+            public CamFrame frame; public CamView[] views;
+        }
+
+        // opts.pinned reuses a prior grab's per-angle framing (diff — skips silhouette auto-frame + resize-guards
+        // against A's window). opts.occlude paints one renderer magenta for the grab (occlusion); opts.solo also
+        // hides every OTHER drawable (the unoccluded-silhouette denominator).
+        private struct CoreOpts { public Renderer occlude; public Material occludeMat; public bool solo; public CamManifest pinned; }
+        private sealed class CoreResult
+        {
+            public bool ok; public string fail;
+            public Color32[] sheet; public int sheetW, sheetH;
+            public CamManifest manifest; public string label;
+            public int hiddenCount, excludedCount, proxiesKept, proxiesHidden;
+            public string proxyNote = "", horizonNote = "", settleNote = "";
+            public bool reactive;                 // target has reactive MA → drawn via NDMF proxies (expected denominator invalid, see CaptureOcclusion)
+            public int[] occCount; public RectInt[] occBbox; // occlusion mode: per-angle magenta count/bbox on the FULL-RES crop (pre-downscale, exact)
+        }
+        private static CoreResult Failed(string msg) => new CoreResult { ok = false, fail = msg };
+        private static CoreResult CoreFail(string label, string reason) => Failed(Fail(label, reason));
+        private static CoreResult CoreFailT(string label, string reason) => Failed(FailTransient(label, reason));
+
+        // The isolate -> freshness -> configure -> per-angle frame/grab -> compose -> restore scaffold that all
+        // three public doors run. Returns the composed sheet + a fully-populated manifest, or a Fail string.
+        private static CoreResult CaptureCore(
+            string target, string[] angles, string[] hide, float margin, bool showGizmos, int resolution, CoreOpts opts)
+        {
             resolution = Mathf.Clamp(resolution, MinResolution, MaxResolution);
             margin = Mathf.Clamp(margin, 0f, 0.8f);
+            bool pin = opts.pinned != null;
 
             // ----- Resolve target ------------------------------------------------------------
             var root = Resolve(target);
             if (root == null)
-                return Fail(target, "target not found — tried hierarchy path, instance id, then name in the active scene");
+                return CoreFail(target, "target not found — tried hierarchy path, instance id, then name in the active scene");
             string label = root.name;
 
             if (PrefabStageUtility.GetPrefabStage(root) != null)
-                return Fail(label, "target is in prefab isolation — grab from the scene");
+                return CoreFail(label, "target is in prefab isolation — grab from the scene");
 
             var sv = SceneView.lastActiveSceneView;
             if (sv == null)
-                return Fail(label, "no SceneView window open — open a Scene View first (can't grab a viewport that doesn't exist)");
+                return CoreFail(label, "no SceneView window open — open a Scene View first (can't grab a viewport that doesn't exist)");
 
             // ----- Resolve + validate angles -------------------------------------------------
             if (angles == null || angles.Length == 0) angles = new[] { "front", "back" };
@@ -223,7 +280,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 string a = (angles[i] ?? "").Trim().ToLowerInvariant();
                 if (Array.IndexOf(Vocabulary, a) < 0)
-                    return Fail(label, "unknown angle '" + angles[i] + "' — valid: " + string.Join(",", Vocabulary));
+                    return CoreFail(label, "unknown angle '" + angles[i] + "' — valid: " + string.Join(",", Vocabulary));
                 resolvedAngles[i] = a;
             }
 
@@ -249,7 +306,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (horizonNote == HorizonIncompleteNote)
                 {
                     bool kickedSweep = TryFocusKick(out string kickSweep);
-                    return FailTransient(label, "change-horizon sweep incomplete (unreported-change scan exceeded its in-call budget; freshness can't be certified) — "
+                    return CoreFailT(label, "change-horizon sweep incomplete (unreported-change scan exceeded its in-call budget; freshness can't be certified) — "
                         + (kickedSweep
                             ? "focus kick sent (" + kickSweep + "): re-grab in a separate call"
                             : "focus kick failed (" + kickSweep + "): focus the Unity Editor window, then re-grab"));
@@ -261,7 +318,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // Transient: the verdict is still FAIL (no sheet — re-grab), but an unsettled preview is an
                 // expected retry condition, not an error, so it logs at Warning to keep console-clean gates
                 // clean (G17). Genuine failures below still log at Error.
-                return FailTransient(label, "preview not settled (NDMF rebuild in flight; " + pipeline + ") — "
+                return CoreFailT(label, "preview not settled (NDMF rebuild in flight; " + pipeline + ") — "
                     + (kicked
                         ? "focus kick sent (" + kick + "), the rebuild can advance now: re-grab in a separate call"
                         : "focus kick failed (" + kick + "): focus the Unity Editor window, then re-grab"));
@@ -284,13 +341,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             // ----- Reflection handles for the GUIView capture path ---------------------------
             var hostField = typeof(EditorWindow).GetField("m_Parent", BindingFlags.Instance | BindingFlags.NonPublic);
             object host = hostField?.GetValue(sv);
-            if (host == null) return Fail(label, "SceneView host GUIView (m_Parent) not resolvable by reflection — Unity API drift");
+            if (host == null) return CoreFail(label, "SceneView host GUIView (m_Parent) not resolvable by reflection — Unity API drift");
             var hostType = host.GetType();
             var miRepaint = hostType.GetMethod("RepaintImmediately", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             var miGrab = hostType.GetMethod("GrabPixels", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             var piPos = hostType.GetProperty("position");
             if (miRepaint == null || miGrab == null || piPos == null)
-                return Fail(label, "GUIView RepaintImmediately/GrabPixels/position not resolvable by reflection — Unity API drift");
+                return CoreFail(label, "GUIView RepaintImmediately/GrabPixels/position not resolvable by reflection — Unity API drift");
             var cap = new Capturer(sv, host, miRepaint, miGrab, piPos);
 
             // ----- Record all prior state (restored in finally) ------------------------------
@@ -310,7 +367,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             bool oWire = PiWire != null && (bool)PiWire.GetValue(null, null);
 
             var rts = new List<RenderTexture>();
-            var scratch = new List<Texture2D>();
+            Renderer occR = opts.occlude; Material[] savedMats = null; // occlusion material swap, restored in finally
+            // Solo-mode hides (occlusion denominator pass) tracked apart from cascadeHides so the finally
+            // restores them SELF-only — cascadeHides restores cascading, which would force-show any operator
+            // eye-hide under a solo-hidden in-subtree renderer.
+            var soloHides = new Dictionary<GameObject, bool>();
+            // Freshness: SMRs whose forceMatrixRecalculationPerRender we flip true for the capture's duration
+            // so a backgrounded editor re-bakes their skinned deform each render (recorded as we set them,
+            // once `drawable` is known; restored in finally). See the freshness note below.
+            var forcedRebake = new Dictionary<SkinnedMeshRenderer, bool>();
 
             try
             {
@@ -362,7 +427,43 @@ namespace Ryan6Vrc.AgentTools.Editor
                     drawable.Add(rend);
                 }
                 if (drawable.Count == 0)
-                    return Fail(label, "no drawable renderers after exclusion (hidden=" + hiddenCount + " excluded=" + excludedCount + ")");
+                    return CoreFail(label, "no drawable renderers after exclusion (hidden=" + hiddenCount + " excluded=" + excludedCount + ")");
+
+                // ----- Occlusion: paint one renderer magenta (restored in finally) ----------------
+                // occlusion swaps opts.occlude's sharedMaterials to the in-memory magenta unlit; every other
+                // renderer draws normally, so an occluder covers the magenta. On a reactive target the swap lands
+                // on the suppressed original and NDMF copies it to the drawn proxy (measured). `solo` additionally
+                // hides every OTHER drawable so this pass renders the renderer's unoccluded silhouette — the
+                // `expected` denominator that disambiguates visible=0 (occluded) from a renderer that never drew.
+                if (occR != null && opts.occludeMat != null)
+                {
+                    savedMats = occR.sharedMaterials;
+                    var swap = new Material[savedMats.Length];
+                    for (int i = 0; i < swap.Length; i++) swap[i] = opts.occludeMat;
+                    occR.sharedMaterials = swap;
+                    if (opts.solo)
+                        foreach (var rend in drawable)
+                            if (rend != occR && !soloHides.ContainsKey(rend.gameObject))
+                            {
+                                soloHides[rend.gameObject] = svm.IsHidden(rend.gameObject, false);
+                                svm.Hide(rend.gameObject, false); // self-only; restored self-only in finally
+                            }
+                }
+
+                // ----- Freshness: force a synchronous skinned re-bake for the capture --------------
+                // A backgrounded editor (isApplicationActive==false, the norm in agent sessions) repaints the
+                // camera on RepaintImmediately but FREEZES SkinnedMeshRenderer deform baking to the editor
+                // tick — so a same-call SetBlendShapeWeight/pose edit renders the pre-edit geometry and the
+                // grab is byte-identical to before (a false "=> OK; immaterial"). forceMatrixRecalculationPerRender
+                // forces the skin bake (blendshapes included, measured) each render; restored in finally. On a
+                // reactive target the drawn pixels are NDMF proxies (originals suppressed), refreshed by the
+                // settle-gated pipeline rebuild — the flag on a suppressed original is a harmless no-op there.
+                foreach (var rend in drawable)
+                    if (rend is SkinnedMeshRenderer smr && !forcedRebake.ContainsKey(smr))
+                    {
+                        forcedRebake[smr] = smr.forceMatrixRecalculationPerRender;
+                        smr.forceMatrixRecalculationPerRender = true;
+                    }
 
                 // Generous first-frame bounds: inflated Renderer.bounds union guarantees the whole
                 // avatar is in-view for the initial over-framed shot. NOT the framing basis (silhouette is).
@@ -385,117 +486,149 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sv.sceneViewState = svState;
 
                 // ----- Per-angle capture -----------------------------------------------------
-                int n = resolvedAngles.Length;
-                int cols = Mathf.CeilToInt(Mathf.Sqrt(n));
-                int rows = Mathf.CeilToInt((float)n / cols);
-                int tileRes = Mathf.Max(MinTileRes, Mathf.Min(resolution, SheetEdgeCap / Mathf.Max(cols, rows)));
+                int n = pin ? opts.pinned.views.Length : resolvedAngles.Length;
+                int cols = pin ? opts.pinned.cols : Mathf.CeilToInt(Mathf.Sqrt(n));
+                int rows = pin ? opts.pinned.rows : Mathf.CeilToInt((float)n / cols);
+                int tileRes = pin ? opts.pinned.tileRes
+                    : Mathf.Max(MinTileRes, Mathf.Min(resolution, SheetEdgeCap / Mathf.Max(cols, rows)));
 
                 var tiles = new List<Color32[]>(n);
-                foreach (var angle in resolvedAngles)
+                var views = new CamView[n];
+                CamFrame frame = null;
+                // Occlusion: count magenta on the FULL-RES crop (before the bilinear Downscale re-blends the hard
+                // magenta edge msaa=off keeps exact — else a 1-2px poke downscales to zero and false-reads occluded).
+                bool countMagenta = occR != null && opts.occludeMat != null;
+                var occCount = countMagenta ? new int[n] : null;
+                var occBbox = countMagenta ? new RectInt[n] : null;
+                for (int ai = 0; ai < n; ai++)
                 {
+                    string angle = pin ? opts.pinned.views[ai].angle : resolvedAngles[ai];
                     Basis(angle, out Vector3 fwd, out Vector3 upv);
                     var rot = Quaternion.LookRotation(fwd, upv);
+                    int cropX, cropY, side; Vector3 pivotF; float sizeF; Frame f;
 
-                    // (a) generous shot -> measure silhouette
-                    sv.drawGizmos = false;
-                    Selection.objects = Array.Empty<UnityEngine.Object>();
-                    sv.LookAt(gcenter, rot, sphereRadius, true, true);
-                    var g = cap.Grab(2, rts);
-                    if (!Measure(g, out RectInt bbox, out int usableTop, out Color32 bg))
-                        return Fail(label, "degenerate silhouette on '" + angle + "' — nothing drew (isolation dropped the body?)");
-
-                    // (c) one exact orthographic correction
-                    var cam = g.cam;
-                    float ortho1 = cam.orthographicSize;
-                    float k = ortho1 / Mathf.Max(1e-6f, sv.size);
-                    float ccx = g.camW / 2f, ccy = g.camH / 2f;
-                    float wpp1 = (2f * ortho1) / g.camH;
-                    Vector3 right = cam.transform.right, up = cam.transform.up;
-
-                    int usableW = g.w - 2 * Inset;
-                    int usableH = usableTop + 1;
-                    int side = Mathf.Min(usableW, usableH);
-                    float fill = Mathf.Max(0.05f, 1f - margin);
-                    float bcx = bbox.x + bbox.width * 0.5f, bcy = bbox.y + bbox.height * 0.5f;
-
-                    float ortho2 = ortho1 * (Mathf.Max(bbox.width, bbox.height) / (fill * side));
-                    float size2 = ortho2 / k;
-                    float wpp2 = (2f * ortho2) / g.camH;
-                    Vector3 avC = gcenter + right * ((bcx - ccx) * wpp1) + up * ((bcy - ccy) * wpp1);
-                    float uCy = usableTop / 2f;
-                    Vector3 pivot2 = avC - up * ((uCy - ccy) * wpp2);
-
-                    // (d) final shot at the corrected frame (gizmos + root selection only here)
-                    if (showGizmos)
+                    if (pin)
                     {
-                        sv.drawGizmos = true;
-                        Selection.activeGameObject = root;
-                        Selection.objects = new UnityEngine.Object[] { root };
+                        // Reuse frame A's exact per-angle view + crop; NO silhouette auto-frame — a diff pair must
+                        // share one camera, else a silhouette-changing edit moves the camera and corrupts the diff.
+                        var pv = opts.pinned.views[ai];
+                        pivotF = pv.pivot; rot = pv.rot; sizeF = pv.orthoSize;
+                        cropX = pv.cropX; cropY = pv.cropY; side = pv.side;
+                        if (showGizmos) { sv.drawGizmos = true; Selection.activeGameObject = root; Selection.objects = new UnityEngine.Object[] { root }; }
+                        sv.LookAt(pivotF, rot, sizeF, true, true);
+                        f = cap.Grab(showGizmos ? 3 : 2, rts);
+                        if (ai == 0)
+                        {
+                            frame = new CamFrame { w = f.w, h = f.h, camW = f.camW, camH = f.camH, ppp = EditorGUIUtility.pixelsPerPoint };
+                            var pf = opts.pinned.frame;
+                            if (pf == null || pf.w != frame.w || pf.h != frame.h || pf.camW != frame.camW
+                                || pf.camH != frame.camH || Mathf.Abs(pf.ppp - frame.ppp) > 1e-3f)
+                                return CoreFail(label, "SceneView resized since frame A (was "
+                                    + (pf == null ? "?" : pf.w + "x" + pf.h) + ", now " + frame.w + "x" + frame.h + ") — re-grab the pair");
+                        }
                     }
-                    sv.LookAt(pivot2, rot, size2, true, true);
-                    var f = cap.Grab(showGizmos ? 3 : 2, rts);
+                    else
+                    {
+                        // (a) generous shot -> measure silhouette
+                        sv.drawGizmos = false;
+                        Selection.objects = Array.Empty<UnityEngine.Object>();
+                        sv.LookAt(gcenter, rot, sphereRadius, true, true);
+                        var g = cap.Grab(2, rts);
+                        if (!Measure(g, out RectInt bbox, out int usableTop, out Color32 bg))
+                            return CoreFail(label, "degenerate silhouette on '" + angle + "' — nothing drew (isolation dropped the body?)");
 
-                    // (e) post-normalize: center-crop the square, bilinear downscale to tileRes
-                    int cropX = Mathf.RoundToInt(ccx - side / 2f);
-                    int cropY = Mathf.RoundToInt(uCy - side / 2f);
-                    cropX = Mathf.Clamp(cropX, 0, Mathf.Max(0, f.w - side));
-                    cropY = Mathf.Clamp(cropY, 0, Mathf.Max(0, usableTop + 1 - side));
+                        // (c) one exact orthographic correction
+                        var cam = g.cam;
+                        float ortho1 = cam.orthographicSize;
+                        float k = ortho1 / Mathf.Max(1e-6f, sv.size);
+                        float ccx = g.camW / 2f, ccy = g.camH / 2f;
+                        float wpp1 = (2f * ortho1) / g.camH;
+                        Vector3 right = cam.transform.right, up = cam.transform.up;
+
+                        int usableW = g.w - 2 * Inset;
+                        int usableH = usableTop + 1;
+                        side = Mathf.Min(usableW, usableH);
+                        float fill = Mathf.Max(0.05f, 1f - margin);
+                        float bcx = bbox.x + bbox.width * 0.5f, bcy = bbox.y + bbox.height * 0.5f;
+
+                        float ortho2 = ortho1 * (Mathf.Max(bbox.width, bbox.height) / (fill * side));
+                        sizeF = ortho2 / k;
+                        float wpp2 = (2f * ortho2) / g.camH;
+                        Vector3 avC = gcenter + right * ((bcx - ccx) * wpp1) + up * ((bcy - ccy) * wpp1);
+                        float uCy = usableTop / 2f;
+                        pivotF = avC - up * ((uCy - ccy) * wpp2);
+
+                        // (d) final shot at the corrected frame (gizmos + root selection only here)
+                        if (showGizmos)
+                        {
+                            sv.drawGizmos = true;
+                            Selection.activeGameObject = root;
+                            Selection.objects = new UnityEngine.Object[] { root };
+                        }
+                        sv.LookAt(pivotF, rot, sizeF, true, true);
+                        f = cap.Grab(showGizmos ? 3 : 2, rts);
+
+                        // (e) center-square crop rect (bilinear downscale below)
+                        cropX = Mathf.RoundToInt(ccx - side / 2f);
+                        cropY = Mathf.RoundToInt(uCy - side / 2f);
+                        cropX = Mathf.Clamp(cropX, 0, Mathf.Max(0, f.w - side));
+                        cropY = Mathf.Clamp(cropY, 0, Mathf.Max(0, usableTop + 1 - side));
+                        if (ai == 0)
+                            frame = new CamFrame { w = f.w, h = f.h, camW = f.camW, camH = f.camH, ppp = EditorGUIUtility.pixelsPerPoint };
+                    }
+
+                    if (countMagenta)
+                    {
+                        var crop = ExtractTile(f.px, f.w, cropX, cropY, side); // clamped above, so in-bounds
+                        occCount[ai] = RenderDiff.CountColor(crop, side, side, Magenta, out RectInt ob);
+                        occBbox[ai] = ob;
+                    }
                     tiles.Add(Downscale(f.px, f.w, cropX, cropY, side, tileRes));
+                    views[ai] = new CamView { angle = angle, pivot = pivotF, rot = rot, orthoSize = sizeF, cropX = cropX, cropY = cropY, side = side };
                 }
 
-                // ----- Contact sheet ---------------------------------------------------------
+                // ----- Contact sheet + manifest ----------------------------------------------
                 var sheet = Compose(tiles, tileRes, cols, rows, out int sheetW, out int sheetH);
-                var tex = new Texture2D(sheetW, sheetH, TextureFormat.RGBA32, false, false);
-                scratch.Add(tex);
-                tex.SetPixels32(sheet);
-                tex.Apply();
-                var png = tex.EncodeToPNG();
-
-                var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-                var path = Application.temporaryCachePath + "/renderavatar_" + RunLogFormat.Sanitize(label) + "_" + stamp + ".png";
-                File.WriteAllBytes(path, png);
-
-                // The temp grab dir is never swept by Unity or Windows, so it accumulates across every
-                // session. Prune our own grabs older than 30 days here — the common write path — so it stays
-                // bounded; the just-written grab is always newer than the cutoff. Best-effort per file (a
-                // locked grab being Read elsewhere just survives to the next run).
-                var cutoff = DateTime.Now.AddDays(-30);
-                foreach (var old in Directory.GetFiles(Application.temporaryCachePath, "renderavatar_*.png"))
+                var manifest = new CamManifest
                 {
-                    try { if (File.GetLastWriteTime(old) < cutoff) File.Delete(old); }
-                    catch { /* locked or already gone — leave it for a later run */ }
-                }
-
-                // Settle note (residual): the pre-grab gate FAILED any grab that STARTED unsettled, so
-                // this firing means the pipeline invalidated DURING the call (this grab's own SVM churn
-                // can). The grabbed frames still rendered the pre-call settled proxies — no tick ran
-                // in-call to swap them — so the sheet stands; the note flags it for a cautious re-grab.
-                string note = SettleNote(reactive);
-
-                // The note sits BEFORE png= so the png= trailer is always terminal — a consumer reading
-                // png= to end-of-line gets a clean path, never one with the note appended.
-                string proxyInfo = (proxiesKept + proxiesHidden) > 0
-                    ? " proxies=kept:" + proxiesKept + ",hidden:" + proxiesHidden : "";
-                string summary = string.Format(CultureInfo.InvariantCulture,
-                    "[RenderAvatar] {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7}{8} => OK{9}{10}{11} | png={12}",
-                    label, string.Join(",", resolvedAngles), n, tileRes, margin.ToString("0.##", CultureInfo.InvariantCulture),
-                    showGizmos ? "on" : "off", hiddenCount, excludedCount, proxyInfo,
-                    proxyNote, horizonNote, note, path);
-                Debug.Log(summary);
-                return summary;
+                    schema = ManifestSchema, toolVersion = ToolVersion, label = label,
+                    angles = resolvedAngles, hide = hide ?? Array.Empty<string>(), showGizmos = showGizmos,
+                    cols = cols, rows = rows, tileRes = tileRes, resolution = resolution, margin = margin,
+                    frame = frame, views = views
+                };
+                return new CoreResult
+                {
+                    ok = true, sheet = sheet, sheetW = sheetW, sheetH = sheetH, manifest = manifest, label = label,
+                    hiddenCount = hiddenCount, excludedCount = excludedCount,
+                    proxiesKept = proxiesKept, proxiesHidden = proxiesHidden,
+                    proxyNote = proxyNote, horizonNote = horizonNote, settleNote = SettleNote(reactive),
+                    reactive = reactive, occCount = occCount, occBbox = occBbox
+                };
             }
             catch (Exception e)
             {
-                return Fail(label, "capture failed: " + e.Message);
+                return CoreFail(label, "capture failed: " + e.Message);
             }
             finally
             {
+                // Restore the freshness re-bake flags first (null-guarded — SMRs can be NDMF-owned), before the
+                // synchronous repaint below, so the frame left on the operator's screen bakes with original flags.
+                foreach (var kv in forcedRebake)
+                    if (kv.Key != null) kv.Key.forceMatrixRecalculationPerRender = kv.Value;
+                // Occlusion: repoint the renderer at its real materials BEFORE the wrapper destroys the magenta
+                // (else the renderer would momentarily reference a destroyed material).
+                if (occR != null && savedMats != null) occR.sharedMaterials = savedMats;
+
                 // Restore visibility COARSELY: every subtree this grab hid (hide-list / DefaultHide /
                 // ancestor siblings, and the other scene roots) returns to its own recorded self-state.
                 // The CONTAINING root is skipped — it was never hidden, and cascading over it would re-show
                 // the target subtree's own operator eye-hides, which the tool never touched.
                 foreach (var kv in cascadeHides)
                     if (kv.Key != null) { if (kv.Value) svm.Hide(kv.Key, true); else svm.Show(kv.Key, true); }
+                // Solo hides restore SELF-only (self-only hidden above) — never cascade over an in-subtree
+                // renderer's operator eye-hides.
+                foreach (var kv in soloHides)
+                    if (kv.Key != null) { if (kv.Value) svm.Hide(kv.Key, false); else svm.Show(kv.Key, false); }
                 foreach (var kv in rootVis)
                     if (kv.Key != null && kv.Key != containingRoot && kv.Key.name != "nadena.dev.ndmf__Activator")
                     { if (kv.Value) svm.Hide(kv.Key, true); else svm.Show(kv.Key, true); }
@@ -509,7 +642,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 PiWire?.SetValue(null, oWire, null);
                 Selection.objects = oSel; Selection.activeGameObject = oActive;
 
-                foreach (var t in scratch) if (t != null) UnityEngine.Object.DestroyImmediate(t);
                 foreach (var rt in rts) if (rt != null) { rt.Release(); UnityEngine.Object.DestroyImmediate(rt); }
                 // Force a synchronous repaint of the RESTORED view so the operator's Scene View shows its
                 // normal state immediately — an async Repaint() alone leaves the last captured frame on
@@ -518,6 +650,219 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sv.Repaint();
                 RenderTexture.active = oRt; // restore LAST — the synchronous repaint above binds its own RT
             }
+        }
+
+        // Encode the composed sheet to a timestamped PNG in temporaryCachePath, write its <png>.cam.json sidecar
+        // (the framing to reproduce this grab for a diff), and prune our grabs + their sidecars as PAIRS past 30
+        // days (the sidecar glob doesn't match "*.png", so it must be deleted explicitly or it orphans).
+        // Returns the PNG path, or NULL on an IO failure (disk full, locked path) — callers turn null into a
+        // loud FAIL, never a raw throw, so this sits outside a door's FAIL boundary safely.
+        private static string WriteSheetAndManifest(CoreResult r)
+        {
+            byte[] png;
+            var tex = new Texture2D(r.sheetW, r.sheetH, TextureFormat.RGBA32, false, false);
+            try { tex.SetPixels32(r.sheet); tex.Apply(); png = tex.EncodeToPNG(); }
+            finally { UnityEngine.Object.DestroyImmediate(tex); } // release the native texture even if encode throws
+
+            var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+            var path = Application.temporaryCachePath + "/renderavatar_" + RunLogFormat.Sanitize(r.label) + "_" + stamp + ".png";
+            try
+            {
+                File.WriteAllBytes(path, png);
+                File.WriteAllText(path + ".cam.json", JsonUtility.ToJson(r.manifest));
+            }
+            catch (Exception e) { Debug.LogWarning("[RenderAvatar] grab write failed: " + e.Message); return null; }
+
+            // Prune our grabs + their sidecars as PAIRS past 30 days, and sweep any orphaned sidecar whose png was
+            // removed out-of-band (the "*.png" glob never visits it). Best-effort; a prune failure never fails a grab.
+            var cutoff = DateTime.Now.AddDays(-30);
+            try
+            {
+                foreach (var old in Directory.GetFiles(Application.temporaryCachePath, "renderavatar_*.png"))
+                    try
+                    {
+                        if (File.GetLastWriteTime(old) < cutoff)
+                        {
+                            File.Delete(old);
+                            if (File.Exists(old + ".cam.json")) File.Delete(old + ".cam.json");
+                        }
+                    }
+                    catch { /* locked or already gone */ }
+                const string ext = ".cam.json";
+                foreach (var sc in Directory.GetFiles(Application.temporaryCachePath, "renderavatar_*.png" + ext))
+                    try { if (!File.Exists(sc.Substring(0, sc.Length - ext.Length))) File.Delete(sc); }
+                    catch { }
+            }
+            catch { /* enumeration failure — the write already succeeded; skip the prune */ }
+            return path;
+        }
+
+        /// <summary>
+        /// Diff a fresh grab of <paramref name="target"/> against a prior grab, reusing that grab's exact per-angle
+        /// camera + framing (from its <c>.cam.json</c> sidecar) so a silhouette-changing edit can't move the camera.
+        /// Reports, per angle: exact byte-equality, changed-pixel count, and the changed bounding box.
+        /// </summary>
+        /// <param name="target">the subtree to grab now (frame B; usually the same target as frame A).</param>
+        /// <param name="against">the prior grab's png path (its <c>png=</c> trailer) — its sidecar supplies the framing.</param>
+        public static string CaptureDiff(string target, string against)
+        {
+            var root = Resolve(target);
+            string label = root != null ? root.name : target;
+            if (string.IsNullOrEmpty(against))
+                return Fail(label, "against is empty — pass a prior grab's png path (its png= trailer)");
+            string camPath = against + ".cam.json";
+            if (!File.Exists(camPath))
+                return Fail(label, "no camera manifest for " + against + " (expected " + Path.GetFileName(camPath)
+                    + " — absent or pruned). Re-grab frame A with Capture, then diff.");
+            CamManifest A;
+            try { A = JsonUtility.FromJson<CamManifest>(File.ReadAllText(camPath)); }
+            catch (Exception e) { return Fail(label, "camera manifest unreadable (" + e.Message + ") — re-grab frame A"); }
+            // JsonUtility zero-fills missing/renamed fields silently, so validate rather than trust the parse.
+            if (A == null || A.schema != ManifestSchema || A.views == null || A.angles == null
+                || A.frame == null || A.views.Length == 0 || A.views.Length != A.angles.Length
+                || A.cols <= 0 || A.rows <= 0 || A.tileRes <= 0
+                || A.frame.w <= 0 || A.frame.h <= 0 || A.frame.camH <= 0)
+                return Fail(label, "camera manifest for " + against + " is drifted/incomplete (schema="
+                    + (A == null ? -1 : A.schema) + ", expected " + ManifestSchema + ") — re-grab frame A");
+            foreach (var v in A.views)
+                if (v == null || !(v.orthoSize > 0f) || v.side <= 0)
+                    return Fail(label, "camera manifest has a degenerate view (orthoSize/side <= 0) — re-grab frame A");
+            if (!File.Exists(against))
+                return Fail(label, "frame A png missing: " + against + " — re-grab frame A");
+
+            var r = CaptureCore(target, A.angles, A.hide, A.margin, A.showGizmos, A.resolution, new CoreOpts { pinned = A });
+            if (!r.ok) return r.fail;
+
+            // Decode frame A BEFORE writing B: WriteSheetAndManifest's 30-day prune can delete a stale `against`,
+            // and this read has no catch — reading first turns a pruned A into the loud FAIL above, not a raw throw.
+            var aTex = new Texture2D(2, 2, TextureFormat.RGBA32, false, false);
+            Color32[] aSheet;
+            try
+            {
+                if (!ImageConversion.LoadImage(aTex, File.ReadAllBytes(against)))
+                    return Fail(label, "frame A png failed to decode: " + against);
+                if (aTex.width != r.sheetW || aTex.height != r.sheetH)
+                    return Fail(label, "frame A sheet size " + aTex.width + "x" + aTex.height + " != B "
+                        + r.sheetW + "x" + r.sheetH + " — re-grab the pair at the same window/resolution");
+                aSheet = aTex.GetPixels32();
+            }
+            finally { UnityEngine.Object.DestroyImmediate(aTex); }
+
+            string pngB = WriteSheetAndManifest(r);
+            if (pngB == null) return Fail(label, "failed to write the diff grab PNG/manifest to temp (disk full or locked path?)");
+
+            int cols = r.manifest.cols, rows = r.manifest.rows, tileRes = r.manifest.tileRes;
+            int identical = 0;
+            var parts = new List<string>();
+            for (int i = 0; i < r.manifest.views.Length; i++)
+            {
+                int c = i % cols, rr = i / cols;
+                int x0 = c * tileRes, y0 = (rows - 1 - rr) * tileRes; // Compose layout (row 0 at top, bottom-origin sheet)
+                var aTile = ExtractTile(aSheet, r.sheetW, x0, y0, tileRes);
+                var bTile = ExtractTile(r.sheet, r.sheetW, x0, y0, tileRes);
+                bool id = RenderDiff.Compare(aTile, bTile, tileRes, tileRes, out int changed, out RectInt bb);
+                if (id) identical++;
+                parts.Add(r.manifest.views[i].angle + ":changed=" + changed + ",bbox="
+                    + (changed == 0 ? "-" : "(" + bb.x + "," + bb.y + "," + bb.width + "," + bb.height + ")"));
+            }
+            string versionNote = A.toolVersion != ToolVersion
+                ? " | note=frame A grabbed by tool v" + A.toolVersion + " (now v" + ToolVersion + "); a pre-fix grab may be stale-baked" : "";
+            // Carry B's freshness/settle notes — an unsettled or horizon-incomplete B undercuts the whole
+            // "empty diff ⇒ immaterial GIVEN freshness" premise, so the caveat must ride the diff summary too.
+            string summary = "[RenderAvatar] CaptureDiff " + label + " against=" + Path.GetFileName(against)
+                + " angles=" + string.Join(",", r.manifest.angles) + " => OK diff=[" + string.Join("; ", parts) + "] identical="
+                + identical + "/" + r.manifest.views.Length + r.proxyNote + r.horizonNote + r.settleNote + versionNote + " | png=" + pngB;
+            Debug.Log(summary);
+            return summary;
+        }
+
+        /// <summary>
+        /// Paint one should-be-hidden renderer magenta and grab; report how many magenta pixels are VISIBLE (poke
+        /// through occluders) per angle, with an unoccluded-silhouette <c>expected</c> denominator. One grab, no pair.
+        /// The swap lands on the ORIGINAL renderer; on a reactive target NDMF copies it to the drawn proxy (measured).
+        /// </summary>
+        /// <param name="target">the subtree to isolate + grab.</param>
+        /// <param name="renderer">descendant path/name of the renderer to occlusion-test.</param>
+        public static string CaptureOcclusion(
+            string target, string renderer, string[] angles = null, string[] hide = null, float margin = 0.15f, int resolution = 1024)
+        {
+            var root = Resolve(target);
+            if (root == null) return Fail(target, "target not found — tried hierarchy path, instance id, then name");
+            string label = root.name;
+            if (string.IsNullOrEmpty(renderer))
+                return Fail(label, "renderer is empty — name the descendant renderer to occlusion-test");
+            var go = ResolveDescendant(root, renderer.Trim());
+            if (go == null) return Fail(label, "occlusion renderer '" + renderer + "' not found under target");
+            var rend = go.GetComponent<Renderer>();
+            if (rend == null) return Fail(label, "'" + renderer + "' resolved but has no Renderer component");
+            if (!rend.enabled || !go.activeInHierarchy)
+                return Fail(label, "occlusion renderer '" + renderer + "' is disabled/inactive — it draws nothing (visible=0 would be meaningless); enable it first");
+            if (rend.sharedMaterials == null || rend.sharedMaterials.Length == 0)
+                return Fail(label, "occlusion renderer '" + renderer + "' has no material slots — nothing to swap");
+            Mesh occMesh = (rend as SkinnedMeshRenderer)?.sharedMesh ?? go.GetComponent<MeshFilter>()?.sharedMesh;
+            if ((rend is SkinnedMeshRenderer || rend is MeshRenderer) && occMesh == null)
+                return Fail(label, "occlusion renderer '" + renderer + "' has no mesh — it draws nothing (visible=0 would be meaningless)");
+            var shader = Shader.Find("Unlit/Color");
+            if (shader == null) return Fail(label, "Unlit/Color shader not found — can't build the occlusion overlay");
+            var mag = new Material(shader) { color = Magenta, hideFlags = HideFlags.DontSave };
+
+            // MSAA off for the occlusion pass: a blended magenta edge falls outside an exact (255,0,255) match and
+            // would undercount thin pokes — the very case occlusion must catch. Snapshot/restore the global setting.
+            int oAA = QualitySettings.antiAliasing;
+            try
+            {
+                QualitySettings.antiAliasing = 0;
+                var r1 = CaptureCore(target, angles, hide, margin, false, resolution, new CoreOpts { occlude = rend, occludeMat = mag, solo = false });
+                if (!r1.ok) return r1.fail;
+                // Unoccluded silhouette (solo) = the `expected` denominator, valid only on a NON-reactive target:
+                // solo hides the drawn ORIGINALS, but a reactive target draws through NDMF proxies solo can't reach,
+                // so its solo silhouette still carries occluders and `expected` would degrade toward `visible`. Skip
+                // the pass on reactive and report expected=n/a rather than a silently-wrong number.
+                CoreResult r2 = null;
+                if (!r1.reactive)
+                {
+                    r2 = CaptureCore(target, r1.manifest.angles, r1.manifest.hide, r1.manifest.margin, false,
+                        r1.manifest.resolution, new CoreOpts { occlude = rend, occludeMat = mag, solo = true, pinned = r1.manifest });
+                    if (!r2.ok) return r2.fail; // never emit => OK with expected=? — fail loud, let the caller re-grab
+                }
+                string pngB = WriteSheetAndManifest(r1);
+                if (pngB == null) return Fail(label, "failed to write the occlusion grab PNG/manifest to temp (disk full or locked path?)");
+
+                // Counts come from the FULL-RES crop (CoreResult.occCount), NOT the bilinear-downscaled sheet — a
+                // thin poke survives the exact magenta match only before Downscale re-blends the edge.
+                var parts = new List<string>();
+                for (int i = 0; i < r1.manifest.views.Length; i++)
+                {
+                    int visible = r1.occCount[i];
+                    var vb = r1.occBbox[i];
+                    string expected = r1.reactive ? "n/a(reactive)"
+                        : (r2 != null && r2.occCount != null && i < r2.occCount.Length ? r2.occCount[i].ToString() : "?");
+                    parts.Add(r1.manifest.views[i].angle + ":visible=" + visible + ",expected=" + expected + ",bbox="
+                        + (visible == 0 ? "-" : "(" + vb.x + "," + vb.y + "," + vb.width + "," + vb.height + ")"));
+                }
+                string summary = "[RenderAvatar] CaptureOcclusion " + label + " renderer=" + renderer
+                    + " angles=" + string.Join(",", r1.manifest.angles) + " => OK occ=[" + string.Join("; ", parts)
+                    + "] msaa=off" + r1.proxyNote + r1.horizonNote + r1.settleNote + " | png=" + pngB;
+                Debug.Log(summary);
+                return summary;
+            }
+            finally
+            {
+                QualitySettings.antiAliasing = oAA;
+                UnityEngine.Object.DestroyImmediate(mag);
+                // AA was 0 during CaptureCore's own restore-repaint, so the on-screen frame is aliased — request a
+                // repaint now that AA is restored (cosmetic, #11).
+                SceneView.lastActiveSceneView?.Repaint();
+            }
+        }
+
+        // Extract a tileRes×tileRes tile at (x0,y0) from a bottom-origin composed sheet into its own buffer.
+        private static Color32[] ExtractTile(Color32[] sheet, int sheetW, int x0, int y0, int tileRes)
+        {
+            var tile = new Color32[tileRes * tileRes];
+            for (int ty = 0; ty < tileRes; ty++)
+                Array.Copy(sheet, (y0 + ty) * sheetW + x0, tile, ty * tileRes, tileRes);
+            return tile;
         }
 
         // ===== Capture ===========================================================================
