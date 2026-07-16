@@ -1001,9 +1001,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private static bool AllKeysZeroTangent(AnimationCurve curve)
             {
                 if (curve.length == 0) return false;
-                for (int i = 0; i < curve.length; i++)
-                    if (!Mathf.Approximately(curve.keys[i].inTangent, 0f) || !Mathf.Approximately(curve.keys[i].outTangent, 0f))
+                var keys = curve.keys;   // curve.keys copies the array on every access — read it once
+                for (int i = 0; i < keys.Length; i++)
+                {
+                    // A WEIGHTED key is not emitter-flat even at zero slope: the weight sets the Bezier
+                    // handle length independent of slope, so it reshapes the segment, and the [t,v] schema
+                    // carries no weight. Folding it to flat would silently drop the weight (the exact
+                    // silent-loss this classifier exists to prevent) — refuse it. Matches the tool's own
+                    // weightedMode-significant contract (CompileClips hashes it; a weighted edit is refused,
+                    // not folded, by CompileClips' Weighted_tangent_edit_is_caught).
+                    if (keys[i].weightedMode != WeightedMode.None) return false;
+                    if (!Mathf.Approximately(keys[i].inTangent, 0f) || !Mathf.Approximately(keys[i].outTangent, 0f))
                         return false;
+                }
                 return true;
             }
 
