@@ -289,6 +289,20 @@ public class CompileClipsTests
         finally { File.Delete(cyPath); }
     }
 
+    [TestCase("auto")]
+    [TestCase("free")]
+    public void Tangents_UnsupportedToken_RefusedAtParse(string token)
+    {
+        // 'auto'/'free' are refused fail-loud at parse (Unity recomputes auto/clamped-auto; free carries
+        // explicit tangent values the [t,v] schema can't express) — confirmed real entry point is
+        // AnimatorSchemaYaml.Parse, throwing SchemaException (mirrors AnimatorSchemaYamlTests.cs).
+        string body = Head + "clips:\n  Bad:\n    curves:\n      Prop/Renderer.enabled:\n" +
+            "        tangents: " + token + "\n        keys: [[0, 0], [1, 1]]\n";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(body, "test"));
+        StringAssert.Contains("stepped", ex.Message);
+        StringAssert.Contains(token, ex.Message);
+    }
+
     [Test]
     public void No_clips_is_refused()
     {
