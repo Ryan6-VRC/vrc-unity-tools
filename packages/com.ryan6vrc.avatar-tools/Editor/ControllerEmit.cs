@@ -173,11 +173,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     keys.Add(new Keyframe(spec.Seconds.Value, last.value)); // hold to the declared length
             }
             var animCurve = new AnimationCurve(keys.ToArray());
-            if (cs.Tangents == CurveTangent.Linear)
+            var mode = cs.Tangents switch
+            {
+                CurveTangent.Linear  => (AnimationUtility.TangentMode?)AnimationUtility.TangentMode.Linear,
+                CurveTangent.Stepped => AnimationUtility.TangentMode.Constant,
+                _                    => null,   // Flat: leave the default keyframe tangents (zero) untouched
+            };
+            if (mode.HasValue)
                 for (int i = 0; i < animCurve.length; i++)
                 {
-                    AnimationUtility.SetKeyLeftTangentMode(animCurve, i, AnimationUtility.TangentMode.Linear);
-                    AnimationUtility.SetKeyRightTangentMode(animCurve, i, AnimationUtility.TangentMode.Linear);
+                    AnimationUtility.SetKeyLeftTangentMode(animCurve, i, mode.Value);
+                    AnimationUtility.SetKeyRightTangentMode(animCurve, i, mode.Value);
                 }
             AnimationUtility.SetEditorCurve(clip, binding, animCurve);
         }

@@ -1054,8 +1054,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case "tangents":
                             var t = ToStr(kv.Value, $"{ctx} tangents");
                             curve.Tangents = t == "linear" ? CurveTangent.Linear
+                                : t == "stepped" ? CurveTangent.Stepped
                                 : t == "flat" ? CurveTangent.Flat
-                                : throw new SchemaException($"curve '{binding}': tangents must be 'linear' or 'flat', got '{t}'");
+                                : throw new SchemaException($"curve '{binding}': tangents must be 'flat', 'linear', or 'stepped', got '{t}' — 'auto'/'free' are unsupported (Unity recomputes auto/clamped-auto; free carries explicit tangent values the [t,v] schema can't express); author such a curve as a hand-owned .anim");
                             break;
                         case "keys": keys = ToList(kv.Value, $"{ctx} keys"); break;
                         default: throw new SchemaException($"curve '{binding}': unknown field '{kv.Key}'");

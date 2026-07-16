@@ -193,6 +193,43 @@ layers:
     }
 
     [Test]
+    public void Curve_Tangents_Stepped_Marker_Sets_Constant_Tangents_Both_Sides()
+    {
+        // `tangents: stepped` mirrors `linear` exactly, but emits Constant (a hard 0->1->0 pulse) on
+        // both sides of every key rather than Linear.
+        const string yaml = @"schema: 1
+controller: T_SteppedTangents
+basis: avatar-root
+clips:
+  c:
+    curves:
+      Prop/Renderer.enabled:
+        tangents: stepped
+        keys: [[0, 0], [0.25, 1], [0.5, 0]]
+layers:
+  - name: L
+    states:
+      S:
+        motion: { clip: c }
+    default: S
+";
+        var doc = AnimatorSchemaYaml.Parse(yaml, "mem://stepped-tangents");
+        ControllerEmit.Build(doc, out var r);
+
+        var clip = r.Clips["c"];
+        var binding = AnimationUtility.GetCurveBindings(clip).First(b => b.path == "Prop");
+        var curve = AnimationUtility.GetEditorCurve(clip, binding);
+        Assert.AreEqual(3, curve.length);
+        for (int i = 0; i < curve.length; i++)
+        {
+            Assert.AreEqual(AnimationUtility.TangentMode.Constant, AnimationUtility.GetKeyLeftTangentMode(curve, i),
+                $"key {i} left tangent is Constant");
+            Assert.AreEqual(AnimationUtility.TangentMode.Constant, AnimationUtility.GetKeyRightTangentMode(curve, i),
+                $"key {i} right tangent is Constant");
+        }
+    }
+
+    [Test]
     public void Seconds_Shorter_Than_Last_Key_Fails()
     {
         var doc = new AnimDocument { Schema = 1, ControllerName = "T_Short" };

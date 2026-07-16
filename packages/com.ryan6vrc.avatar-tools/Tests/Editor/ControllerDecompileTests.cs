@@ -924,6 +924,59 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
+    // ---- an exotic (auto/clamped-auto) tangent shape -> a located Refusal, not a silent flatten ----
+
+    [Test]
+    public void ExoticTangentCurve_Refused_NotFlattened()
+    {
+        var c = new AnimatorController { name = "ExoticTangent_Fx" };
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        var clip = new AnimationClip { name = "Exotic", frameRate = 60f };
+        // Monotonic 3-key shape with UNEVEN slopes either side of the middle key: a peak/valley (local
+        // extremum) shape makes ClampedAuto specifically zero the tangent there (it clamps extrema to
+        // avoid overshoot) and would wrongly pass the flat test; a middle key that is NOT an extremum,
+        // with a slope discontinuity, gets a genuine non-zero clamped-auto tangent.
+        var curve = new AnimationCurve(new Keyframe(0f, 0f), new Keyframe(0.1f, 0.9f), new Keyframe(0.5f, 1f));
+        for (int i = 0; i < curve.length; i++)
+        {
+            AnimationUtility.SetKeyLeftTangentMode(curve, i, AnimationUtility.TangentMode.ClampedAuto);
+            AnimationUtility.SetKeyRightTangentMode(curve, i, AnimationUtility.TangentMode.ClampedAuto);
+        }
+        AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve("Prop", typeof(Renderer), "enabled"), curve);
+        st.motion = clip;
+
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("tangent")), "exotic tangents -> named refusal: " + string.Join(" | ", w.Refusals));
+        StringAssert.DoesNotContain("Prop/Renderer.enabled", AnimatorSchemaEmit.Serialize(w.Doc));
+        Object.DestroyImmediate(c);
+    }
+
+    // ---- a WEIGHTED zero-slope curve -> a located Refusal, not folded to flat (weights reshape the
+    //      segment and the [t,v] schema can't express them; matches the tool's weightedMode-significant
+    //      contract elsewhere — CompileClips hashes weightedMode / refuses a weighted edit) ------------
+
+    [Test]
+    public void WeightedZeroTangentCurve_Refused_NotFoldedToFlat()
+    {
+        var c = new AnimatorController { name = "WeightedZero_Fx" };
+        c.AddLayer("L");
+        var st = c.layers[0].stateMachine.AddState("S");
+        var clip = new AnimationClip { name = "WeightedZero", frameRate = 60f };
+        // Both keys have zero slopes (so the value-only flat test would pass) BUT carry weighted handles
+        // with non-default weights — a weighted flat tangent still eases differently, so this must refuse.
+        var k0 = new Keyframe(0f, 0f) { inTangent = 0f, outTangent = 0f, weightedMode = WeightedMode.Both, inWeight = 0.05f, outWeight = 0.05f };
+        var k1 = new Keyframe(0.5f, 1f) { inTangent = 0f, outTangent = 0f, weightedMode = WeightedMode.Both, inWeight = 0.05f, outWeight = 0.05f };
+        var curve = new AnimationCurve(k0, k1);
+        AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve("Prop", typeof(Renderer), "enabled"), curve);
+        st.motion = clip;
+
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("tangent")), "weighted zero-slope tangents -> named refusal: " + string.Join(" | ", w.Refusals));
+        StringAssert.DoesNotContain("Prop/Renderer.enabled", AnimatorSchemaEmit.Serialize(w.Doc));
+        Object.DestroyImmediate(c);
+    }
+
     private static void EnsureScratch()
     {
         if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");

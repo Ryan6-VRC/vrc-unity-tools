@@ -262,4 +262,52 @@ layers:
         var c2 = FixpointOracle.CompileTo(TestRoot, yamlB, "ConstLinear_Fx", "c2");
         Assert.AreEqual(yamlB, FixpointOracle.Decode(c2), "tight fixpoint on the constant linear curve");
     }
+
+    [Test]
+    public void Roundtrip_SteppedPulse_StaysMapForm()
+    {
+        const string yaml = @"schema: 1
+controller: SteppedPulse_Fx
+basis: avatar-root
+clips:
+  c:
+    curves:
+      Prop/Renderer.enabled: { tangents: stepped, keys: [ [0, 0], [0.25, 1], [0.5, 0] ] }
+layers:
+  - name: L
+    states:
+      S:
+        motion: { clip: c }
+    default: S
+";
+        var c1 = FixpointOracle.CompileTo(TestRoot, yaml, "SteppedPulse_Fx", "c1");
+        string yamlB = FixpointOracle.Decode(c1);
+        StringAssert.Contains("tangents: stepped", yamlB);
+        var c2 = FixpointOracle.CompileTo(TestRoot, yamlB, "SteppedPulse_Fx", "c2");
+        Assert.AreEqual(yamlB, FixpointOracle.Decode(c2), "tight fixpoint on the stepped curve");
+    }
+
+    [Test]
+    public void Roundtrip_ConstantValueSteppedCurve_StaysMapForm_NotSet()
+    {
+        const string yaml = @"schema: 1
+controller: ConstStepped_Fx
+basis: avatar-root
+clips:
+  c:
+    curves:
+      Prop/Renderer.enabled: { tangents: stepped, keys: [ [0, 1], [0.5, 1] ] }
+layers:
+  - name: L
+    states:
+      S:
+        motion: { clip: c }
+    default: S
+";
+        var c1 = FixpointOracle.CompileTo(TestRoot, yaml, "ConstStepped_Fx", "c1");
+        string yamlB = FixpointOracle.Decode(c1);
+        StringAssert.Contains("tangents: stepped", yamlB);
+        StringAssert.DoesNotContain("set:", yamlB, "constant-value stepped must NOT collapse to set: (drops the marker)");
+        Assert.AreEqual(yamlB, FixpointOracle.Decode(FixpointOracle.CompileTo(TestRoot, yamlB, "ConstStepped_Fx", "c2")));
+    }
 }
