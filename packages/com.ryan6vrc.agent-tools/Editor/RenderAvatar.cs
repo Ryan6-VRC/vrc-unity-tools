@@ -297,8 +297,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             string horizonNote = "";
             // Scanned from the target's SCENE ROOT, not the target subtree: MA reactives routinely sit on a
             // sibling (ShapeChanger on an outfit piece driving the body mesh), and a leaf-mesh target would
-            // otherwise skip the gate entirely and grab stale with no diagnostic (G56, run-4). Over-arming a
-            // plain sibling under a reactive root costs one settle probe — the safe direction.
+            // otherwise skip the gate entirely and grab stale with no diagnostic (G56, run-4). Over-arming
+            // is the safe direction and is accepted as broad: transform.root can escape the avatar into a
+            // shared container, arming on an unrelated sibling avatar's reactive — cost is a settle probe
+            // (or an honest transient FAIL while that neighbor rebuilds), never wrong pixels.
             bool reactive = !Application.isPlaying && HasReactiveMA(root.transform.root.gameObject);
             if (reactive)
             {
@@ -1253,9 +1255,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             PiOwInstance != null && FiPropertyMonitor != null && MiCheckAllObjects != null
             && MiSyncScope != null && FiInternalContext != null && MiTurn != null && MiFlushInvalidates != null;
 
-        // Same canary contract for the proxy-attribution handles (kept-proxy identification → the proxy
+        // Same canary contract for the proxy-attribution handle (kept-proxy identification → the proxy
         // skin-rebake force flag): NDMF installed + this false = the flag silently stops landing.
-        internal static bool ProxyHandlesResolved => MiGetOriginalForProxy != null && MiIsPreviewScene != null;
+        // Deliberately ONLY GetOriginalObjectForProxy — IsPreviewScene has a working name fallback
+        // (IsNdmfPreviewScene), so its drift alone must not red-fail a gate that still lands the flag.
+        internal static bool ProxyHandlesResolved => MiGetOriginalForProxy != null;
 
         // Sentinel: the sweep ran out of in-call budget before CheckAllObjects finished, with the probe
         // still reading settled — freshness is UNCERTIFIED and Capture must FAIL transiently, never OK.
