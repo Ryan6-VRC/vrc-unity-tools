@@ -99,5 +99,20 @@ namespace Ryan6Vrc.AgentTools.Editor
             int i = p.LastIndexOf('/');
             return i >= 0 ? p.Substring(i + 1) : p;
         }
+
+        /// <summary>Resolve a string asset handle — an asset path OR a GUID — to the loaded asset, or
+        /// null if it names none. The path/GUID counterpart of the report/check doors' typed-object entry
+        /// points: a door that takes an <c>AnimatorController</c>/<c>AnimationClip</c> asset exposes a
+        /// string overload that resolves through here, so an agent holding only a path/GUID need not
+        /// pre-<see cref="AssetDatabase.LoadAssetAtPath"/> at the call site. A known GUID resolves via
+        /// <see cref="AssetDatabase.GUIDToAssetPath"/>; anything else is treated as a path. One
+        /// implementation, so the two conventions cannot drift per door.</summary>
+        public static T LoadByPathOrGuid<T>(string handle) where T : UnityEngine.Object
+        {
+            if (string.IsNullOrEmpty(handle)) return null;
+            var guidPath = AssetDatabase.GUIDToAssetPath(handle);
+            var path = string.IsNullOrEmpty(guidPath) ? handle : guidPath;
+            return AssetDatabase.LoadAssetAtPath<T>(path);
+        }
     }
 }
