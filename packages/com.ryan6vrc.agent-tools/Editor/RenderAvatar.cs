@@ -295,7 +295,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             // reading settled while its proxies are stale; the sweep surfaces it as a real
             // invalidation so the probe below FAILs honestly instead of grabbing the stale frame.
             string horizonNote = "";
-            bool reactive = !Application.isPlaying && HasReactiveMA(root); // one hierarchy scan, threaded through
+            // Scanned from the target's SCENE ROOT, not the target subtree: MA reactives routinely sit on a
+            // sibling (ShapeChanger on an outfit piece driving the body mesh), and a leaf-mesh target would
+            // otherwise skip the gate entirely and grab stale with no diagnostic (G56, run-4). Over-arming a
+            // plain sibling under a reactive root costs one settle probe — the safe direction.
+            bool reactive = !Application.isPlaying && HasReactiveMA(root.transform.root.gameObject);
             if (reactive)
             {
                 horizonNote = SweepNdmfChangeHorizon();
@@ -408,7 +412,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // NDMF preview-scene proxies: exempt from the blanket root-hide above (RecordRootVisibility
                 // skips the preview scene), attributed per-proxy here — the target's own proxies must stay
                 // visible or the preview hook deletes every reactive-targeted renderer from the grab.
-                string proxyNote = IsolateNdmfProxies(root, hideTargets, cascadeHides, svm,
+                var keptProxies = new List<Renderer>();
+                string proxyNote = IsolateNdmfProxies(root, hideTargets, cascadeHides, svm, keptProxies,
                     out int proxiesKept, out int proxiesHidden);
 
                 // ----- Collect drawable renderers + count hidden -----------------------------
@@ -450,15 +455,22 @@ namespace Ryan6Vrc.AgentTools.Editor
                             }
                 }
 
-                // ----- Freshness: force a synchronous skinned re-bake for the capture --------------
-                // A backgrounded editor (isApplicationActive==false, the norm in agent sessions) repaints the
-                // camera on RepaintImmediately but FREEZES SkinnedMeshRenderer deform baking to the editor
-                // tick — so a same-call SetBlendShapeWeight/pose edit renders the pre-edit geometry and the
-                // grab is byte-identical to before (a false "=> OK; immaterial"). forceMatrixRecalculationPerRender
-                // forces the skin bake (blendshapes included, measured) each render; restored in finally. On a
-                // reactive target the drawn pixels are NDMF proxies (originals suppressed), refreshed by the
-                // settle-gated pipeline rebuild — the flag on a suppressed original is a harmless no-op there.
+                // ----- Freshness: force a synchronous skin re-bake for the capture --------------------------
+                // Two freshness layers, and the settle gate only governs one. The NDMF pipeline keeps proxy
+                // CONTENT current (weights, reactive state — the #42 sweep); proxy SKIN BAKING is a plain-SMR
+                // concern the pipeline never touches. A backgrounded editor freezes skin baking to the (parked)
+                // editor tick, so proxies render pre-edit geometry while their weights read current — measured
+                // 2026-07-16 (proxy weight synced=100, deform frozen, three settled `=> OK` captures
+                // byte-identical around a BakeMesh-verified move). On a reactive target the drawn renderers ARE
+                // the proxies (originals suppressed), so the force flag must land on the kept proxies, not just
+                // `drawable`. Restored in finally via the same dict.
                 foreach (var rend in drawable)
+                    if (rend is SkinnedMeshRenderer smr && !forcedRebake.ContainsKey(smr))
+                    {
+                        forcedRebake[smr] = smr.forceMatrixRecalculationPerRender;
+                        smr.forceMatrixRecalculationPerRender = true;
+                    }
+                foreach (var rend in keptProxies)
                     if (rend is SkinnedMeshRenderer smr && !forcedRebake.ContainsKey(smr))
                     {
                         forcedRebake[smr] = smr.forceMatrixRecalculationPerRender;
@@ -1074,7 +1086,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // beats a silent body-drop.
         private static string IsolateNdmfProxies(
             GameObject root, List<GameObject> hideTargets, Dictionary<GameObject, bool> cascadeHides,
-            SceneVisibilityManager svm, out int kept, out int hidden)
+            SceneVisibilityManager svm, List<Renderer> keptProxies, out int kept, out int hidden)
         {
             kept = 0; hidden = 0;
             var proxies = new List<GameObject>();
@@ -1105,7 +1117,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                     && original.activeInHierarchy
                     && !IsUnderAny(original.transform, hideTargets)
                     && !svm.IsHidden(original, false);
-                if (drawable) { kept++; continue; }
+                if (drawable)
+                {
+                    kept++;
+                    keptProxies.AddRange(proxy.GetComponents<Renderer>());
+                    continue;
+                }
                 hidden++;
                 if (!cascadeHides.ContainsKey(proxy))
                 {
@@ -1236,6 +1253,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             PiOwInstance != null && FiPropertyMonitor != null && MiCheckAllObjects != null
             && MiSyncScope != null && FiInternalContext != null && MiTurn != null && MiFlushInvalidates != null;
 
+        // Same canary contract for the proxy-attribution handles (kept-proxy identification → the proxy
+        // skin-rebake force flag): NDMF installed + this false = the flag silently stops landing.
+        internal static bool ProxyHandlesResolved => MiGetOriginalForProxy != null && MiIsPreviewScene != null;
+
         // Sentinel: the sweep ran out of in-call budget before CheckAllObjects finished, with the probe
         // still reading settled — freshness is UNCERTIFIED and Capture must FAIL transiently, never OK.
         internal const string HorizonIncompleteNote = "__horizon-sweep-incomplete__";
@@ -1358,8 +1379,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
         [DllImport("user32.dll")] private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
+        // Escape hatch: a measurement session that must hold the editor backgrounded (freshness
+        // probing, focus-state matrices) sets this pref true; the FAIL message then degrades to the
+        // manual instruction. Default off — shipped kick behavior unchanged.
+        internal const string DisableFocusKickPref = "Ryan6VRC.AgentTools.RenderAvatar.DisableFocusKick";
+
         private static bool TryFocusKick(out string detail)
         {
+            if (EditorPrefs.GetBool(DisableFocusKickPref, false))
+            { detail = "kick disabled by pref (" + DisableFocusKickPref + ")"; return false; }
             if (Application.platform != RuntimePlatform.WindowsEditor)
             { detail = "non-Windows editor, no kick path"; return false; }
             try
@@ -1401,7 +1429,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             "MeshDeleter", "MeshCutter", "RemoveVertexColor", "ScaleAdjuster",
         };
 
-        private static bool HasReactiveMA(GameObject root)
+        internal static bool HasReactiveMA(GameObject root)
         {
             foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(true))
             {
