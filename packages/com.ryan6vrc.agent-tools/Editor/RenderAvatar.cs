@@ -328,13 +328,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             //  NoAvatarRoot→ a plain prop / scratch clone → not reactive → Settle.Exempt (MA proxies only
             //               exist under an avatar root, so there is nothing to certify);
             //  Drift       → the resolver handle is missing or its return type changed. Under installed NDMF
-            //               (PreviewSessionType present) this must FAIL LOUD, not fall through to a silent
-            //               exempt — a drifted resolver would render every avatar ungated (OK-stale), and the
-            //               return-type mode also defeats a bare-null canary. Symmetric with the
-            //               attribution-drift FAIL. Absent NDMF (no preview surface) → nothing to certify.
+            //               (NdmfInstalled — the package-registration check, NOT a reflected sentinel that
+            //               could drift in the same release) this must FAIL LOUD, not fall through to a
+            //               silent exempt — a drifted resolver would render every avatar ungated (OK-stale),
+            //               and the return-type mode also defeats a bare-null canary. Symmetric with the
+            //               attribution-drift FAIL. Absent NDMF → no proxies to certify → exempt.
             string armedBy = null;
             var scopeState = ResolveArmScope(root, out GameObject armScope);
-            if (scopeState == ArmScope.Drift && PreviewSessionType != null)
+            if (scopeState == ArmScope.Drift && NdmfInstalled)
                 return CoreFail(label, ArmScopeResolverDriftFailReason);
             bool reactive = !Application.isPlaying && scopeState == ArmScope.Found && HasReactiveMA(armScope, out armedBy);
             if (reactive)
@@ -1428,6 +1429,22 @@ namespace Ryan6Vrc.AgentTools.Editor
                         return true;
                     }
             }
+            return false;
+        }
+
+        // "Is NDMF installed?" — the authoritative package-registration check (the same signal the EditMode
+        // canary uses), NOT a reflected NDMF type. Gates whether a resolver Drift FAILs loud: a reflected
+        // sentinel could itself drift in the same NDMF release that renamed the resolver, silently reopening
+        // the OK-stale hole (council review round 2). Computed once — install state is fixed within a domain.
+        private static readonly bool NdmfInstalled = ComputeNdmfInstalled();
+        private static bool ComputeNdmfInstalled()
+        {
+            try
+            {
+                foreach (var p in UnityEditor.PackageManager.PackageInfo.GetAllRegisteredPackages())
+                    if (p.name == "nadena.dev.ndmf") return true;
+            }
+            catch { /* package manager not ready at this moment — treat as absent; next domain recomputes */ }
             return false;
         }
 
