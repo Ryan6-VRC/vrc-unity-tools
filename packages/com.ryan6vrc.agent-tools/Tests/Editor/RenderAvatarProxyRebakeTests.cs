@@ -52,7 +52,7 @@ public class RenderAvatarProxyRebakeTests
 }
 
 // Namespace deliberately contains "modular_avatar" and the type name contains marker "ShapeChanger"
-// so HasReactiveMA's name-based matcher fires without an MA dependency (this asmdef references: []).
+// so HasReactiveMA's name-based matcher fires without referencing a real MA reactive type.
 namespace modular_avatar_fixture
 {
     public class FakeShapeChanger : MonoBehaviour { }
