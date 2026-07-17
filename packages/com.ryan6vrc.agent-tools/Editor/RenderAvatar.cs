@@ -175,6 +175,18 @@ namespace Ryan6Vrc.AgentTools.Editor
         // A drift leaves the handles null → proxies stay visible + an in-band note (see class doc).
         private const string ProxyDriftNote =
             " | note=NDMF proxy attribution drifted — preview proxies left visible (possible foreign-geometry leak)";
+        // ProxyDriftNote never reaches a summary anymore: CaptureCore converts it to this error-level FAIL
+        // (a sheet with unattributed proxies can't be vouched for). internal for the headless drift test.
+        internal const string ProxyDriftFailReason =
+            "NDMF proxy attribution drifted — preview proxies are present but attribution is unavailable, so the "
+            + "grab would render unattributed preview proxies as unflagged geometry (possible foreign-geometry "
+            + "leak); re-pin GetOriginalObjectForProxy before trusting a sheet";
+        // Reactive-armed target + live settled preview session + zero proxies attributed to the target =
+        // the drawn frame silently lost the reactive-targeted renderers. internal for the headless drift test.
+        internal const string ProxyPresenceFailReason =
+            "reactive target with a live settled NDMF preview session but zero proxies attributed to it — either "
+            + "preview-scene discovery drifted (a renamed preview scene blanket-hides its proxies) or attribution "
+            + "returned null for every proxy; the sheet would silently drop reactive-targeted geometry";
         private static readonly Type PreviewSceneManagerType =
             ResolveNdmfType("nadena.dev.ndmf.preview.NDMFPreviewSceneManager");
         private static readonly MethodInfo MiIsPreviewScene = SafeGetMethod(PreviewSceneManagerType, "IsPreviewScene",
@@ -291,13 +303,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             // reading settled while its proxies are stale; the sweep surfaces it as a real
             // invalidation so the probe below FAILs honestly instead of grabbing the stale frame.
             string horizonNote = "";
-            // Scanned from the target's SCENE ROOT, not the target subtree: MA reactives routinely sit on a
-            // sibling (ShapeChanger on an outfit piece driving the body mesh), and a leaf-mesh target would
-            // otherwise skip the gate entirely and grab stale with no diagnostic (G56, run-4). Over-arming
-            // is the safe direction and is accepted as broad: transform.root can escape the avatar into a
-            // shared container, arming on an unrelated sibling avatar's reactive — cost is a settle probe
-            // (or an honest transient FAIL while that neighbor rebuilds), never wrong pixels.
-            bool reactive = !Application.isPlaying && HasReactiveMA(root.transform.root.gameObject);
+            // Scanned from the nearest VRCAvatarDescriptor ANCESTOR of the target (fallback: scene root),
+            // not the target subtree: MA reactives routinely sit on a sibling (ShapeChanger on an outfit
+            // piece driving the body mesh), and a leaf-mesh target would otherwise skip the gate entirely
+            // and grab stale with no diagnostic. G56 stays closed — sibling reactives under the SAME
+            // avatar still arm — while descriptor-scoping ends the old transform.root escape: neighbor
+            // avatars under a shared container no longer arm a plain target.
+            string armedBy = null;
+            bool reactive = !Application.isPlaying && HasReactiveMA(FindArmScopeRoot(root), out armedBy);
             if (reactive)
             {
                 horizonNote = SweepNdmfChangeHorizon();
@@ -311,10 +324,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                     return CoreFailT(label, "change-horizon sweep incomplete (unreported-change scan exceeded its in-call budget; freshness can't be certified) — "
                         + (kickedSweep
                             ? "focus kick sent (" + kickSweep + "): re-grab in a separate call"
-                            : "focus kick failed (" + kickSweep + "): focus the Unity Editor window, then re-grab"));
+                            : "focus kick failed (" + kickSweep + "): focus the Unity Editor window, then re-grab")
+                        + " | armed-by=" + armedBy);
                 }
             }
-            if (ProbeSettle(reactive, out string pipeline) == Settle.Unsettled)
+            // The result (not just the Unsettled compare) stays in scope: the proxy-presence assert below
+            // reuses it — no editor tick runs inside this synchronous call, so it can't go stale.
+            var settle = ProbeSettle(reactive, out string pipeline);
+            if (settle == Settle.Unsettled)
             {
                 bool kicked = TryFocusKick(out string kick);
                 // Transient: the verdict is still FAIL (no sheet — re-grab), but an unsettled preview is an
@@ -323,7 +340,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return CoreFailT(label, "preview not settled (NDMF rebuild in flight; " + pipeline + ") — "
                     + (kicked
                         ? "focus kick sent (" + kick + "), the rebuild can advance now: re-grab in a separate call"
-                        : "focus kick failed (" + kick + "): focus the Unity Editor window, then re-grab"));
+                        : "focus kick failed (" + kick + "): focus the Unity Editor window, then re-grab")
+                    + " | armed-by=" + armedBy);
             }
 
             // ----- Resolve hide list (descendants of target) + default hides -----------------
@@ -408,6 +426,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var keptProxies = new List<Renderer>();
                 string proxyNote = IsolateNdmfProxies(root, hideTargets, cascadeHides, svm, keptProxies,
                     out int proxiesKept, out int proxiesHidden);
+                // Attribution drift with proxies PRESENT is a FAIL, not a note-and-continue: the grab
+                // would render unattributed preview proxies as unflagged geometry. Error-level (not
+                // transient) — a re-grab can't fix drifted reflection handles.
+                if (IsProxyAttributionDrift(proxyNote))
+                    return CoreFail(label, ProxyDriftFailReason);
+                // Proxy-presence assert: a reactive-armed target with a live SETTLED preview session must
+                // surface at least one attributed proxy — zero means the reactive-targeted renderers were
+                // lost silently (Unsettled already FAILed above; Exempt = no live session; Drift can't
+                // certify a session exists, so neither arms this check).
+                if (IsProxyPresenceViolation(reactive, settle, proxiesKept))
+                    return CoreFail(label, ProxyPresenceFailReason);
 
                 // ----- Collect drawable renderers + count hidden -----------------------------
                 var all = root.GetComponentsInChildren<Renderer>(true);
@@ -1181,7 +1210,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             catch { return HorizonDriftNote; }
         }
 
-        private enum Settle { Exempt, Settled, Unsettled, Drift }
+        internal enum Settle { Exempt, Settled, Unsettled, Drift }
+
+        // The (c)/(d) review-gate decisions, extracted pure so the headless suite can pin them —
+        // batchmode has no preview scene or session, so the full CaptureCore paths are live-gate-only
+        // (see Tests/Editor/RenderAvatarFreshnessGate.md).
+        internal static bool IsProxyAttributionDrift(string proxyNote) => proxyNote == ProxyDriftNote;
+        internal static bool IsProxyPresenceViolation(bool reactive, Settle settle, int proxiesKept)
+            => reactive && settle == Settle.Settled && proxiesKept == 0;
 
         // The one settle probe (read-only), shared by the pre-grab gate, the sweep's pump loop, and the
         // residual note. `reactiveEditMode` is the caller's ONE precomputed !isPlaying && HasReactiveMA
@@ -1304,17 +1340,50 @@ namespace Ryan6Vrc.AgentTools.Editor
             "MeshDeleter", "MeshCutter", "RemoveVertexColor", "ScaleAdjuster",
         };
 
-        internal static bool HasReactiveMA(GameObject root)
+        // `armedBy` = hierarchy path of the FIRST matched reactive component's GameObject (null when none) —
+        // threaded into the settle-FAIL messages so a re-grab loop can name what armed the gate.
+        internal static bool HasReactiveMA(GameObject root, out string armedBy)
         {
+            armedBy = null;
             foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(true))
             {
                 if (mb == null) continue;
                 var ty = mb.GetType();
                 if ((ty.Namespace ?? "").IndexOf("modular_avatar", StringComparison.OrdinalIgnoreCase) < 0) continue;
                 foreach (var mk in ReactiveMarkers)
-                    if (ty.Name.IndexOf(mk, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+                    if (ty.Name.IndexOf(mk, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        armedBy = HierarchyPath(mb.transform);
+                        return true;
+                    }
             }
             return false;
+        }
+
+        // Gate-arm scope: the nearest ancestor (target included) carrying a VRCAvatarDescriptor — the
+        // avatar boundary the reactive scan should cover. Matched by type name via reflection over
+        // GetComponents, namespace-gated to VRC* (same defensive style as HasReactiveMA — this asmdef has
+        // references:[], so no typeof against the SDK). No descriptor ancestor → transform.root fallback
+        // (non-avatar objects keep the old scene-root behavior).
+        internal static GameObject FindArmScopeRoot(GameObject root)
+        {
+            for (Transform cur = root.transform; cur != null; cur = cur.parent)
+                foreach (var c in cur.GetComponents<Component>())
+                {
+                    if (c == null) continue;
+                    var ty = c.GetType();
+                    if (ty.Name == "VRCAvatarDescriptor"
+                        && (ty.Namespace ?? "").StartsWith("VRC", StringComparison.Ordinal))
+                        return cur.gameObject;
+                }
+            return root.transform.root.gameObject;
+        }
+
+        private static string HierarchyPath(Transform t)
+        {
+            string path = t.name;
+            for (var cur = t.parent; cur != null; cur = cur.parent) path = cur.name + "/" + path;
+            return path;
         }
 
         // Family arrow; NO `| png=` trailer — the schema never points at a PNG that isn't on disk. Genuine
