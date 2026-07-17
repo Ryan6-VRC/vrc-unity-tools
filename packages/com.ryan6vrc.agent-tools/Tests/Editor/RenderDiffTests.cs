@@ -3,9 +3,9 @@ using NUnit.Framework;
 using UnityEngine;
 using Ryan6Vrc.AgentTools.Editor;
 
-// Pixel-buffer diff/count helpers verified on hand-built small buffers so expected values are obvious.
-// The load-bearing guarantee under test is EXACT rgb compare (no silent tolerance): a 1-LSB delta counts,
-// and a near-color does NOT match a target — the band-mask trap this design deliberately avoids.
+// Pixel-buffer diff helper verified on hand-built small buffers so expected values are obvious.
+// The load-bearing guarantee under test is EXACT rgb compare (no silent tolerance): a 1-LSB delta counts —
+// the band-mask trap this design deliberately avoids.
 public class RenderDiffTests
 {
     // Solid fill of a w*h buffer, alpha 255.
@@ -92,60 +92,5 @@ public class RenderDiffTests
 
         Assert.Throws<ArgumentException>(() =>
             RenderDiff.Compare(a, b, w, h, out int _, out RectInt _));
-    }
-
-    [Test]
-    public void CountColor_AllMagenta_CountsWholeBuffer()
-    {
-        int w = 4, h = 4;
-        var px = Fill(w, h, Magenta);
-
-        int count = RenderDiff.CountColor(px, w, h, Magenta, out RectInt bbox);
-
-        Assert.AreEqual(w * h, count);
-        Assert.AreEqual(new RectInt(0, 0, w, h), bbox);
-    }
-
-    [Test]
-    public void CountColor_NoMagenta_Zero_BboxZero()
-    {
-        int w = 4, h = 4;
-        var px = Fill(w, h, Black);
-
-        int count = RenderDiff.CountColor(px, w, h, Magenta, out RectInt bbox);
-
-        Assert.AreEqual(0, count);
-        Assert.AreEqual(new RectInt(0, 0, 0, 0), bbox);
-    }
-
-    [Test]
-    public void CountColor_MagentaBlockOnBackground_CountAndBbox()
-    {
-        int w = 8, h = 8;
-        var px = Fill(w, h, Black);
-        // Block x in [1,2], y in [4,6] => 2 wide, 3 tall = 6 pixels.
-        int x0 = 1, y0 = 4, bw = 2, bh = 3;
-        for (int y = y0; y < y0 + bh; y++)
-            for (int x = x0; x < x0 + bw; x++)
-                px[y * w + x] = Magenta;
-
-        int count = RenderDiff.CountColor(px, w, h, Magenta, out RectInt bbox);
-
-        Assert.AreEqual(bw * bh, count);
-        Assert.AreEqual(new RectInt(x0, y0, bw, bh), bbox);
-    }
-
-    [Test]
-    public void CountColor_SkinPinkVsMagentaTarget_NotCounted()
-    {
-        int w = 4, h = 4;
-        var px = Fill(w, h, Black);
-        // A near-color pixel — must NOT match an exact magenta target.
-        px[3] = new Color32(235, 180, 170, 255);
-
-        int count = RenderDiff.CountColor(px, w, h, Magenta, out RectInt bbox);
-
-        Assert.AreEqual(0, count);
-        Assert.AreEqual(new RectInt(0, 0, 0, 0), bbox);
     }
 }
