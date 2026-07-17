@@ -31,8 +31,25 @@ namespace Ryan6Vrc.AgentTools.Editor
     [AgentTool]
     public static class ReportController
     {
-        // ----- Agent entry point (path-addressed load is one line at the call site:
-        //   ReportController.Report(AssetDatabase.LoadAssetAtPath<AnimatorController>(path)) ) -------
+        // ----- Agent entry points ------------------------------------------------------------------
+        // Take the AnimatorController asset object, OR its asset path/GUID (the overload below) — pass
+        // whichever handle you already hold. Scene-scoped doors (CheckAvatar) take a scene-handle string
+        // instead; that path/GUID-vs-scene split is the family convention, documented in unity-tools.md.
+
+        /// <summary>Path/GUID overload: resolve <paramref name="controllerPathOrGuid"/> (an asset path or a
+        /// GUID) to the <see cref="AnimatorController"/> and digest it. A handle that names no controller
+        /// is a bare-FAIL echoing the handle, no trailer (nothing was written).</summary>
+        public static string Report(string controllerPathOrGuid)
+        {
+            var controller = RunLogFormat.LoadByPathOrGuid<AnimatorController>(controllerPathOrGuid);
+            if (controller == null)
+            {
+                var err = "[ReportController] FAIL: no AnimatorController at '" + controllerPathOrGuid + "' — expects an asset path or GUID";
+                Debug.LogError(err);
+                return err;
+            }
+            return Report(controller);
+        }
 
         /// <summary>Digest <paramref name="controller"/> to markdown under Snapshots/. Returns a one-line
         /// summary ending with the artifact path in-band (<c>… =&gt; OK | log=&lt;path&gt;</c>); a null

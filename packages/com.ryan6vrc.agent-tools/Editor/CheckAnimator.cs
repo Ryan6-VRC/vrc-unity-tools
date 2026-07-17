@@ -37,6 +37,19 @@ namespace Ryan6Vrc.AgentTools.Editor
     {
         // ----- Public API ---------------------------------------------------------------------------
 
+        /// <summary>Path/GUID overload: resolve <paramref name="controllerPathOrGuid"/> (an asset path or a
+        /// GUID) to the <see cref="AnimatorController"/> and lint it, forwarding the basis args. A handle
+        /// that names no controller is the same bare <c>[CheckAnimator] FAIL: …</c> (echoing the handle) as
+        /// a null controller.</summary>
+        public static string Lint(string controllerPathOrGuid, string basis = "auto",
+                                  string mergeSite = null, string avatarRoot = null, string mountRoot = null)
+        {
+            var controller = RunLogFormat.LoadByPathOrGuid<AnimatorController>(controllerPathOrGuid);
+            if (controller == null)
+                return Refuse("no AnimatorController at '" + controllerPathOrGuid + "' — expects an asset path or GUID");
+            return Lint(controller, basis, mergeSite, avatarRoot, mountRoot);
+        }
+
         /// <summary>Lint <paramref name="controller"/> against the v1 rule set. <paramref name="basis"/>
         /// is <c>auto</c> (detect the binding-basis root from a merge component at <paramref name="mergeSite"/>)
         /// or <c>explicit</c> (caller names <paramref name="avatarRoot"/> / <paramref name="mountRoot"/> as
