@@ -44,24 +44,28 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// API drifts, proxies are left visible and the note says so — a visible foreign-geometry leak the
     /// reader can see, never a silent body-drop it can't.
     ///
-    /// <b>Freshness — settle-gated, horizon-swept.</b> The preview rebuilds asynchronously, advanced only
-    /// by editor ticks that fire after a synchronous call returns — so a same-call edit+grab would capture
-    /// the pre-edit proxy, and a background-throttled editor stops ticking and wedges the rebuild
-    /// indefinitely. Rather than return an untrustworthy sheet, an unsettled pipeline on a reactive
-    /// target FAILS the grab — after kicking the editor's main window to the OS foreground (a synthetic
-    /// Alt tap first releases the Windows foreground lock) so real frames fire between this call and the
-    /// re-grab. The settle predicate alone has one blind spot: a scripted edit (reflection write +
-    /// SetDirty) publishes only a ChangeScene event, which NDMF's ChangeStream deliberately ignores, and
-    /// the PropertyMonitor fallback that would catch it parks while the editor is unfocused — the pipeline
-    /// then reads settled while its proxies render pre-edit geometry, for seconds to indefinitely. The
-    /// gate closes it by running one PropertyMonitor sweep itself before probing (see
-    /// SweepNdmfChangeHorizon), so a pending edit becomes a real invalidation and FAILs the grab loudly.
-    /// Protocol stays <b>edit and grab in separate calls</b>; on the settle FAIL, just re-grab.
-    /// In-call waiting for the REBUILD remains impossible by construction — no editor tick runs while the
-    /// synchronous call blocks the main thread. Two deliberate edges: previews globally DISABLED is
-    /// exempt, not a FAIL (originals render un-suppressed — the sheet is trustworthy); an editor whose
-    /// foregrounding Windows keeps refusing stays FAILed by design — the message names the operator action
-    /// (focus the editor), and the tool never trades that cliff for a sheet it can't vouch for. Mechanism →
+    /// <b>Freshness — settle-gated, horizon-swept.</b> One-sentence contract: <b>target any subtree; the
+    /// freshness gate arms at its avatar root</b> (NDMF's own outermost-root resolver — a leaf-mesh target
+    /// still reaches its whole avatar, a non-avatar prop arms nothing); <b>OK means rendered-current</b>
+    /// (<c>gate=armed</c>) <b>or nothing-to-certify</b> (<c>gate=exempt</c> — no avatar root, where MA
+    /// proxies can't exist, or previews globally disabled so originals render un-suppressed); <b>FAIL says
+    /// what to do next</b> — re-grab an unsettled preview, focus a backgrounded editor, or re-pin a drifted
+    /// NDMF handle. Mechanism: the preview rebuilds asynchronously, advanced only by editor ticks that fire
+    /// after a synchronous call returns — so a same-call edit+grab would capture the pre-edit proxy, and a
+    /// background-throttled editor stops ticking and wedges the rebuild indefinitely. Rather than return an
+    /// untrustworthy sheet, an unsettled pipeline on an armed target FAILS the grab — after kicking the
+    /// editor's main window to the OS foreground (a synthetic Alt tap first releases the Windows foreground
+    /// lock) so real frames fire between this call and the re-grab. The settle predicate alone has one blind
+    /// spot: a scripted edit (reflection write + SetDirty) publishes only a ChangeScene event, which NDMF's
+    /// ChangeStream deliberately ignores, and the PropertyMonitor fallback that would catch it parks while
+    /// the editor is unfocused — the pipeline then reads settled while its MA proxies render pre-edit
+    /// geometry, for seconds to indefinitely. The gate closes it by running one PropertyMonitor sweep itself
+    /// before probing (see SweepNdmfChangeHorizon), so a pending edit becomes a real invalidation and FAILs
+    /// the grab loudly. Protocol stays <b>edit and grab in separate calls</b>; on the settle FAIL, just
+    /// re-grab. In-call waiting for the REBUILD remains impossible by construction — no editor tick runs
+    /// while the synchronous call blocks the main thread. An editor whose foregrounding Windows keeps
+    /// refusing stays FAILed by design — the message names the operator action (focus the editor), and the
+    /// tool never trades that cliff for a sheet it can't vouch for. Mechanism →
     /// docs/superpowers/surveys/2026-07-07-ndmf-preview-refresh.md.
     ///
     /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
@@ -181,13 +185,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             "NDMF proxy attribution drifted — preview proxies are present but attribution is unavailable, so the "
             + "grab would render unattributed preview proxies as unflagged geometry (possible foreign-geometry "
             + "leak); re-pin GetOriginalObjectForProxy before trusting a sheet";
-        // Active reactive present + live settled preview session, yet the preview scene yields no
-        // attributable proxies = the drawn frame silently lost reactive-targeted renderers. internal
-        // for the headless drift test.
-        internal const string ProxyPresenceFailReason =
-            "active reactive components with a live settled NDMF preview session, but no attributable proxies — "
-            + "either preview-scene discovery drifted (a renamed preview scene hides every proxy) or attribution "
-            + "returned null for every discovered proxy; the sheet would silently drop reactive-targeted geometry";
+        // Proxies discovered + session settled + none attribute = the attribution API silently returned null
+        // for every proxy; the grab would hide all reactive-targeted geometry and draw a bodiless sheet.
+        // internal for the headless truth-table test.
+        internal const string ProxyAllNullFailReason =
+            "NDMF preview proxies are present and the session is settled, but attribution returned null for "
+            + "every one — the grab would hide all reactive-targeted proxies and draw a bodiless sheet; "
+            + "re-pin GetOriginalObjectForProxy before trusting a sheet";
         private static readonly Type PreviewSceneManagerType =
             ResolveNdmfType("nadena.dev.ndmf.preview.NDMFPreviewSceneManager");
         private static readonly MethodInfo MiIsPreviewScene = SafeGetMethod(PreviewSceneManagerType, "IsPreviewScene",
@@ -195,6 +199,14 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static readonly Type NdmfPreviewType = ResolveNdmfType("nadena.dev.ndmf.preview.NDMFPreview");
         private static readonly MethodInfo MiGetOriginalForProxy = SafeGetMethod(NdmfPreviewType, "GetOriginalObjectForProxy",
             BindingFlags.Static | BindingFlags.Public);
+
+        // ----- NDMF avatar-root resolver (reflection, same drift rules) ---------------------------
+        // RuntimeUtil.FindAvatarInParents(Transform) → the OUTERMOST avatar root at/above the target,
+        // using NDMF's own AllRootTypes (VRCAvatarDescriptor is registered by VRChatPlatform via
+        // PlatformRegistry's InitializeOnLoad). Reflected only because this asmdef has references:[].
+        private static readonly Type RuntimeUtilType = ResolveNdmfType("nadena.dev.ndmf.runtime.RuntimeUtil");
+        private static readonly MethodInfo MiFindAvatarInParents = SafeGetMethod(RuntimeUtilType,
+            "FindAvatarInParents", BindingFlags.Static | BindingFlags.Public);
 
         /// <summary>
         /// Render the GameObject subtree at <paramref name="target"/> in isolation from
@@ -224,10 +236,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 ? " proxies=kept:" + r.proxiesKept + ",hidden:" + r.proxiesHidden : "";
             // cam=ok signals a diffable camera manifest was written beside the png — CaptureDiff's `against`.
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[RenderAvatar] Capture {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7}{8} => OK cam=ok{9}{10}{11} | png={12}",
+                "[RenderAvatar] Capture {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7}{8} => OK gate={9} cam=ok{10}{11}{12} | png={13}",
                 r.label, string.Join(",", r.manifest.angles), r.manifest.views.Length, r.manifest.tileRes,
                 r.manifest.margin.ToString("0.##", CultureInfo.InvariantCulture), showGizmos ? "on" : "off",
-                r.hiddenCount, r.excludedCount, proxyInfo, r.proxyNote, r.horizonNote, r.settleNote, png);
+                r.hiddenCount, r.excludedCount, proxyInfo, r.gate, r.proxyNote, r.horizonNote, r.settleNote, png);
             Debug.Log(summary);
             return summary;
         }
@@ -254,7 +266,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public Color32[] sheet; public int sheetW, sheetH;
             public CamManifest manifest; public string label;
             public int hiddenCount, excludedCount, proxiesKept, proxiesHidden;
-            public string proxyNote = "", horizonNote = "", settleNote = "";
+            public string proxyNote = "", horizonNote = "", settleNote = "", gate = "";
         }
         private static CoreResult Failed(string msg) => new CoreResult { ok = false, fail = msg };
         private static CoreResult CoreFail(string label, string reason) => Failed(Fail(label, reason));
@@ -304,16 +316,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             // reading settled while its proxies are stale; the sweep surfaces it as a real
             // invalidation so the probe below FAILs honestly instead of grabbing the stale frame.
             string horizonNote = "";
-            // Scanned from the nearest VRCAvatarDescriptor ANCESTOR of the target (fallback: scene root),
-            // not the target subtree: MA reactives routinely sit on a sibling (ShapeChanger on an outfit
-            // piece driving the body mesh), and a leaf-mesh target would otherwise skip the gate entirely
-            // and grab stale with no diagnostic. G56 stays closed — sibling reactives under the SAME
-            // avatar still arm — while descriptor-scoping ends the old transform.root escape: neighbor
-            // avatars under a shared container no longer arm a plain target.
-            string armedBy = null; bool anyActiveReactive = false;
-            bool reactive = !Application.isPlaying
-                && HasReactiveMA(FindArmScopeRoot(root), out armedBy, out anyActiveReactive);
-            bool proxiesExpected = reactive && anyActiveReactive; // G57: only active reactives get proxied
+            // Arm scope = the OUTERMOST avatar root at/above the target (NDMF's own resolver). A target with
+            // no avatar root (plain prop, scratch clone) resolves to null → not reactive → Settle.Exempt
+            // (MA proxies only exist under an avatar root, so there is nothing to certify). Null also covers
+            // resolver drift; the canary red-fails that under installed NDMF.
+            string armedBy = null;
+            var armScope = FindArmScopeRoot(root);
+            bool reactive = !Application.isPlaying && armScope != null && HasReactiveMA(armScope, out armedBy);
             if (reactive)
             {
                 horizonNote = SweepNdmfChangeHorizon();
@@ -331,8 +340,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                         + " | armed-by=" + armedBy);
                 }
             }
-            // The result (not just the Unsettled compare) stays in scope: the proxy-presence assert below
-            // reuses it — no editor tick runs inside this synchronous call, so it can't go stale.
+            // The result (not just the Unsettled compare) stays in scope: the narrowed attribution guard
+            // below reuses it — no editor tick runs inside this synchronous call, so it can't go stale.
             var settle = ProbeSettle(reactive, out string pipeline);
             if (settle == Settle.Unsettled)
             {
@@ -434,16 +443,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // transient) — a re-grab can't fix drifted reflection handles.
                 if (IsProxyAttributionDrift(proxyNote))
                     return CoreFail(label, ProxyDriftFailReason);
-                // Proxy-presence assert: with an ACTIVE reactive (G57: only activeInHierarchy reactives
-                // get proxied) and a live SETTLED session, the preview scene must yield attributable
-                // proxies — discovery finding NONE means the preview-scene handle/name drifted; discovery
-                // finding proxies that ALL attribute to null means the attribution API drifted per-proxy.
-                // Either way the sheet would silently drop reactive-targeted geometry. Deliberately NOT
-                // keyed on proxiesKept: a plain leaf target (a hat) under a reactive avatar legitimately
-                // keeps zero of its neighbor's proxies. (Unsettled already FAILed above; Exempt = no live
-                // session; Drift can't certify a session exists — neither arms this check.)
-                if (IsProxyPresenceViolation(proxiesExpected, settle, proxiesDiscovered, proxiesAttributed))
-                    return CoreFail(label, ProxyPresenceFailReason);
+                // Attribution-integrity guard: proxies WERE discovered and the session is SETTLED, yet EVERY
+                // one attributes to null — the attribution API silently broke for all of them, so the grab
+                // would hide every reactive-targeted proxy (IsolateNdmfProxies hides a null-attributed proxy)
+                // and draw a bodiless sheet. Not a heuristic and false-FAIL-free: a healthy proxy always
+                // attributes to its original, so all-null-while-settled is a genuine drift. Distinct from the
+                // handle-drift FAIL above (that fires on a null handle / throw / non-GameObject return, never
+                // on a clean null-for-all). NOT keyed on discovered==0 (an at-rest avatar legitimately has
+                // zero proxies — the deleted presence assert's false-FAIL) nor on kept-count.
+                if (IsAttributionAllNull(settle, proxiesDiscovered, proxiesAttributed))
+                    return CoreFail(label, ProxyAllNullFailReason);
 
                 // ----- Collect drawable renderers + count hidden -----------------------------
                 var all = root.GetComponentsInChildren<Renderer>(true);
@@ -610,7 +619,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                     ok = true, sheet = sheet, sheetW = sheetW, sheetH = sheetH, manifest = manifest, label = label,
                     hiddenCount = hiddenCount, excludedCount = excludedCount,
                     proxiesKept = proxiesKept, proxiesHidden = proxiesHidden,
-                    proxyNote = proxyNote, horizonNote = horizonNote, settleNote = SettleNote(reactive)
+                    proxyNote = proxyNote, horizonNote = horizonNote, settleNote = SettleNote(reactive),
+                    gate = !reactive ? "exempt"
+                        : settle == Settle.Settled ? "armed"
+                        : settle == Settle.Exempt ? "exempt"   // reactive but previews globally disabled
+                        : "drift",                             // reactive, reflection drifted (settleNote carries detail)
                 };
             }
             catch (Exception e)
@@ -771,7 +784,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Carry B's freshness/settle notes — an unsettled or horizon-incomplete B undercuts the whole
             // "empty diff ⇒ immaterial GIVEN freshness" premise, so the caveat must ride the diff summary too.
             string summary = "[RenderAvatar] CaptureDiff " + label + " against=" + Path.GetFileName(against)
-                + " angles=" + string.Join(",", r.manifest.angles) + " => OK diff=[" + string.Join("; ", parts) + "] identical="
+                + " angles=" + string.Join(",", r.manifest.angles) + " => OK gate=" + r.gate + " diff=[" + string.Join("; ", parts) + "] identical="
                 + identical + "/" + r.manifest.views.Length + r.proxyNote + r.horizonNote + r.settleNote + versionNote + " | png=" + pngB;
             Debug.Log(summary);
             return summary;
@@ -1171,6 +1184,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         // (IsNdmfPreviewScene), so its drift alone must not red-fail a gate that still lands the flag.
         internal static bool ProxyHandlesResolved => MiGetOriginalForProxy != null;
 
+        // Same canary contract for the avatar-root resolver handle (FindArmScopeRoot → gate arming):
+        // NDMF installed + this false = FindArmScopeRoot returns null for EVERY target → every reactive
+        // avatar wrongly Settle.Exempt → silent OK-stale. No name fallback exists, so the EditMode canary
+        // must red-fail (Assert.IsTrue when NDMF is installed), never Ignore-when-unresolved.
+        internal static bool AvatarRootResolverHandleResolved => MiFindAvatarInParents != null;
+
         // Sentinel: the sweep ran out of in-call budget before CheckAllObjects finished, with the probe
         // still reading settled — freshness is UNCERTIFIED and Capture must FAIL transiently, never OK.
         internal const string HorizonIncompleteNote = "__horizon-sweep-incomplete__";
@@ -1222,14 +1241,16 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         internal enum Settle { Exempt, Settled, Unsettled, Drift }
 
-        // The (c)/(d) review-gate decisions, extracted pure so the headless suite can pin them —
-        // batchmode has no preview scene or session, so the full CaptureCore paths are live-gate-only
-        // (see Tests/Editor/RenderAvatarFreshnessGate.md). Presence is keyed on discovery/attribution
-        // totals, NOT on kept-count: kept==0 is legitimate for a plain leaf target under a reactive
-        // avatar (its neighbor's proxies are foreign and hidden, not lost).
+        // The review-gate decisions, extracted pure so the headless suite can pin them — batchmode has no
+        // preview scene or session, so the full CaptureCore paths are live-gate-only (see
+        // Tests/Editor/RenderAvatarFreshnessGate.md). The attribution guard is keyed on discovery/attribution
+        // totals, NOT on kept-count: kept==0 is legitimate for a plain leaf target under a reactive avatar
+        // (its neighbor's proxies are foreign and hidden, not lost). discovered==0 is likewise NOT a fault —
+        // an at-rest avatar has zero proxies; only discovered>0 with every one attributing null while settled
+        // is the silent body-drop.
         internal static bool IsProxyAttributionDrift(string proxyNote) => proxyNote == ProxyDriftNote;
-        internal static bool IsProxyPresenceViolation(bool proxiesExpected, Settle settle, int discovered, int attributedNonNull)
-            => proxiesExpected && settle == Settle.Settled && (discovered == 0 || attributedNonNull == 0);
+        internal static bool IsAttributionAllNull(Settle settle, int discovered, int attributedNonNull)
+            => settle == Settle.Settled && discovered > 0 && attributedNonNull == 0;
 
         // The one settle probe (read-only), shared by the pre-grab gate, the sweep's pump loop, and the
         // residual note. `reactiveEditMode` is the caller's ONE precomputed !isPlaying && HasReactiveMA
@@ -1352,17 +1373,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             "MeshDeleter", "MeshCutter", "RemoveVertexColor", "ScaleAdjuster",
         };
 
-        // `armedBy` = hierarchy path of the FIRST matched reactive component's GameObject (null when none) —
-        // threaded into the settle-FAIL messages so a re-grab loop can name what armed the gate.
-        // `anyActive` = at least one match sits on an activeInHierarchy GameObject. The gate arms on ANY
-        // match (inactive included — conservative, costs a probe), but proxies are only EXPECTED when an
-        // active one exists: NDMF's edit-time preview keys on activeInHierarchy, never component .enabled
-        // (G57) — an all-inactive-reactives avatar legitimately has zero proxies, and the presence assert
-        // must not FAIL it.
-        internal static bool HasReactiveMA(GameObject root, out string armedBy, out bool anyActive)
+        // `armedBy` = hierarchy path of the FIRST matched reactive component's GameObject (null when none),
+        // threaded into the settle-FAIL messages so a re-grab loop can name what armed the gate. The gate
+        // arms on ANY match (inactive included — MA analyzes inactive reactives, so an at-rest inactive one
+        // can still drive a proxy; conservative, costs a probe).
+        internal static bool HasReactiveMA(GameObject root, out string armedBy)
         {
-            armedBy = null; anyActive = false;
-            bool found = false;
+            armedBy = null;
             foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(true))
             {
                 if (mb == null) continue;
@@ -1371,31 +1388,29 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var mk in ReactiveMarkers)
                     if (ty.Name.IndexOf(mk, StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        if (!found) { armedBy = HierarchyPath(mb.transform); found = true; }
-                        if (mb.gameObject.activeInHierarchy) { anyActive = true; return true; }
-                        break; // this component matched; keep scanning for an active one
+                        armedBy = HierarchyPath(mb.transform);
+                        return true;
                     }
             }
-            return found;
+            return false;
         }
 
-        // Gate-arm scope: the nearest ancestor (target included) carrying a VRCAvatarDescriptor — the
-        // avatar boundary the reactive scan should cover. Matched by type name via reflection over
-        // GetComponents, namespace-gated to VRC* (same defensive style as HasReactiveMA — this asmdef has
-        // references:[], so no typeof against the SDK). No descriptor ancestor → transform.root fallback
-        // (non-avatar objects keep the old scene-root behavior).
+        // Gate-arm scope: the OUTERMOST avatar root at/above the target, resolved by reflecting NDMF's own
+        // RuntimeUtil.FindAvatarInParents — the semantics NDMF's preview uses to decide what to proxy. A
+        // nested descriptor can't scope the gate too narrowly (the old nearest-match bug) and a leaf-mesh
+        // target still resolves up to its whole avatar. Returns null when the target has no avatar root (a
+        // plain prop → Settle.Exempt) OR when the reflected handle drifted (→ Exempt too; the
+        // AvatarRootResolverHandleResolved canary red-fails on installed-NDMF drift, so this can't rot
+        // silently). Never throws (references:[] rules out typeof).
         internal static GameObject FindArmScopeRoot(GameObject root)
         {
-            for (Transform cur = root.transform; cur != null; cur = cur.parent)
-                foreach (var c in cur.GetComponents<Component>())
-                {
-                    if (c == null) continue;
-                    var ty = c.GetType();
-                    if (ty.Name == "VRCAvatarDescriptor"
-                        && (ty.Namespace ?? "").StartsWith("VRC", StringComparison.Ordinal))
-                        return cur.gameObject;
-                }
-            return root.transform.root.gameObject;
+            if (MiFindAvatarInParents == null) return null;
+            try
+            {
+                var t = MiFindAvatarInParents.Invoke(null, new object[] { root.transform }) as Transform;
+                return t != null ? t.gameObject : null;
+            }
+            catch { return null; }
         }
 
         private static string HierarchyPath(Transform t)
