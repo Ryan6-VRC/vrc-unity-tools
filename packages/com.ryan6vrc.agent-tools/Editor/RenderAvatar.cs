@@ -192,6 +192,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             "NDMF preview proxies are present and the session is settled, but attribution returned null for "
             + "every one — the grab would hide all reactive-targeted proxies and draw a bodiless sheet; "
             + "re-pin GetOriginalObjectForProxy before trusting a sheet";
+        // NDMF installed but its avatar-root resolver drifted (handle missing OR return type changed): every
+        // target would classify as no-avatar-root → render ungated → silent OK-stale, and the return-type
+        // mode also slips past a bare-null canary. FAIL loud, symmetric with the proxy-attribution drift FAIL.
+        internal const string ArmScopeResolverDriftFailReason =
+            "NDMF is installed but its avatar-root resolver (RuntimeUtil.FindAvatarInParents) drifted — the "
+            + "handle is missing or its return type changed, so every target would resolve to no-avatar-root "
+            + "and render ungated (a silent OK-stale). Re-pin the resolver handle before trusting a sheet";
         private static readonly Type PreviewSceneManagerType =
             ResolveNdmfType("nadena.dev.ndmf.preview.NDMFPreviewSceneManager");
         private static readonly MethodInfo MiIsPreviewScene = SafeGetMethod(PreviewSceneManagerType, "IsPreviewScene",
@@ -316,16 +323,30 @@ namespace Ryan6Vrc.AgentTools.Editor
             // reading settled while its proxies are stale; the sweep surfaces it as a real
             // invalidation so the probe below FAILs honestly instead of grabbing the stale frame.
             string horizonNote = "";
-            // Arm scope = the OUTERMOST avatar root at/above the target (NDMF's own resolver). A target with
-            // no avatar root (plain prop, scratch clone) resolves to null → not reactive → Settle.Exempt
-            // (MA proxies only exist under an avatar root, so there is nothing to certify). Null also covers
-            // resolver drift; the canary red-fails that under installed NDMF.
+            // Arm scope = the OUTERMOST avatar root at/above the target (NDMF's own resolver), tri-state:
+            //  Found       → arm the gate on that avatar root;
+            //  NoAvatarRoot→ a plain prop / scratch clone → not reactive → Settle.Exempt (MA proxies only
+            //               exist under an avatar root, so there is nothing to certify);
+            //  Drift       → the resolver handle is missing or its return type changed. Under installed NDMF
+            //               (PreviewSessionType present) this must FAIL LOUD, not fall through to a silent
+            //               exempt — a drifted resolver would render every avatar ungated (OK-stale), and the
+            //               return-type mode also defeats a bare-null canary. Symmetric with the
+            //               attribution-drift FAIL. Absent NDMF (no preview surface) → nothing to certify.
             string armedBy = null;
-            var armScope = FindArmScopeRoot(root);
-            bool reactive = !Application.isPlaying && armScope != null && HasReactiveMA(armScope, out armedBy);
+            var scopeState = ResolveArmScope(root, out GameObject armScope);
+            if (scopeState == ArmScope.Drift && PreviewSessionType != null)
+                return CoreFail(label, ArmScopeResolverDriftFailReason);
+            bool reactive = !Application.isPlaying && scopeState == ArmScope.Found && HasReactiveMA(armScope, out armedBy);
             if (reactive)
             {
                 horizonNote = SweepNdmfChangeHorizon();
+                // Sweep handles drifted → the scripted-edit blind-spot scan never ran, so a settled probe
+                // below would stamp gate=armed on an uncertified frame. Drift guards FAIL-not-skip: fail loud
+                // (persistent — re-pinning the handles is the fix, not a re-grab).
+                if (horizonNote == HorizonDriftNote)
+                    return CoreFail(label, "change-horizon sweep unavailable (NDMF internals drifted; the "
+                        + "scripted-edit blind-spot scan never ran, so freshness can't be certified) — re-pin "
+                        + "the sweep handles | armed-by=" + armedBy);
                 // A sweep that ran out of budget with the probe still reading settled certifies NOTHING —
                 // an unswept pending edit would be the exact stale-OK this gate exists to prevent. Same
                 // transient-FAIL contract as unsettled: the sweep's task keeps advancing on editor ticks
@@ -355,6 +376,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                         : "focus kick failed (" + kick + "): focus the Unity Editor window, then re-grab")
                     + " | armed-by=" + armedBy);
             }
+            // Settle probe itself drifted (NDMF internals reflection failed / threw): settled-state is
+            // unknowable, so an OK here would stamp gate=armed on a frame we can't certify. FAIL loud
+            // (persistent — re-pin the handles). This leaves only Settled / Exempt reaching the OK path, so
+            // the gate token is exactly armed|exempt (never "drift").
+            if (settle == Settle.Drift)
+                return CoreFail(label, "settle-state unknown (NDMF preview internals drifted; " + pipeline
+                    + ") — freshness can't be certified; re-pin the settle handles | armed-by=" + armedBy);
 
             // ----- Resolve hide list (descendants of target) + default hides -----------------
             var hideTargets = new List<GameObject>();
@@ -620,10 +648,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     hiddenCount = hiddenCount, excludedCount = excludedCount,
                     proxiesKept = proxiesKept, proxiesHidden = proxiesHidden,
                     proxyNote = proxyNote, horizonNote = horizonNote, settleNote = SettleNote(reactive),
-                    gate = !reactive ? "exempt"
-                        : settle == Settle.Settled ? "armed"
-                        : settle == Settle.Exempt ? "exempt"   // reactive but previews globally disabled
-                        : "drift",                             // reactive, reflection drifted (settleNote carries detail)
+                    gate = GateToken(reactive, settle),
                 };
             }
             catch (Exception e)
@@ -1184,11 +1209,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         // (IsNdmfPreviewScene), so its drift alone must not red-fail a gate that still lands the flag.
         internal static bool ProxyHandlesResolved => MiGetOriginalForProxy != null;
 
-        // Same canary contract for the avatar-root resolver handle (FindArmScopeRoot → gate arming):
-        // NDMF installed + this false = FindArmScopeRoot returns null for EVERY target → every reactive
+        // Same canary contract for the avatar-root resolver handle (ResolveArmScope → gate arming): NDMF
+        // installed + this false = the resolver classifies EVERY target as no-avatar-root → every reactive
         // avatar wrongly Settle.Exempt → silent OK-stale. No name fallback exists, so the EditMode canary
-        // must red-fail (Assert.IsTrue when NDMF is installed), never Ignore-when-unresolved.
-        internal static bool AvatarRootResolverHandleResolved => MiFindAvatarInParents != null;
+        // must red-fail (Assert.IsTrue when NDMF is installed), never Ignore-when-unresolved. The ReturnType
+        // check is load-bearing: GetMethod resolves by name+flags alone, so a return-type-only drift
+        // (Transform → GameObject) would keep a bare != null GREEN while `raw is Transform` silently fails at
+        // runtime — the "canary green while production blind" trap. handleUsable folds both checks.
+        internal static bool AvatarRootResolverHandleResolved =>
+            MiFindAvatarInParents != null && MiFindAvatarInParents.ReturnType == typeof(Transform);
 
         // Sentinel: the sweep ran out of in-call budget before CheckAllObjects finished, with the probe
         // still reading settled — freshness is UNCERTIFIED and Capture must FAIL transiently, never OK.
@@ -1251,6 +1280,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal static bool IsProxyAttributionDrift(string proxyNote) => proxyNote == ProxyDriftNote;
         internal static bool IsAttributionAllNull(Settle settle, int discovered, int attributedNonNull)
             => settle == Settle.Settled && discovered > 0 && attributedNonNull == 0;
+
+        // The OK-path gate token — armed ONLY when a reactive avatar probed settled; every other OK path
+        // (non-reactive target, previews globally disabled) is exempt. Unsettled / Drift / horizon-drift all
+        // FAIL before the OK return, so this never yields "drift": the summary token is exactly armed|exempt,
+        // matching the docs. Extracted pure so the headless test can pin that invariant.
+        internal static string GateToken(bool reactive, Settle settle)
+            => reactive && settle == Settle.Settled ? "armed" : "exempt";
 
         // The one settle probe (read-only), shared by the pre-grab gate, the sweep's pump loop, and the
         // residual note. `reactiveEditMode` is the caller's ONE precomputed !isPlaying && HasReactiveMA
@@ -1395,22 +1431,38 @@ namespace Ryan6Vrc.AgentTools.Editor
             return false;
         }
 
-        // Gate-arm scope: the OUTERMOST avatar root at/above the target, resolved by reflecting NDMF's own
+        internal enum ArmScope { NoAvatarRoot, Found, Drift }
+
+        // Pure tri-state classifier, shared by the live resolver and the headless truth-table test.
+        // handleUsable folds BOTH the null-handle and return-type checks (a return-type drift makes the
+        // handle unusable even though GetMethod still found it). A non-null, non-Transform invoke result is
+        // a second-line catch for the same drift. Distinguishing NoAvatarRoot (a real null return — a plain
+        // prop) from Drift is the whole point: the former is a legitimate Settle.Exempt, the latter must
+        // FAIL loud so a silent OK-stale can't slip through (see the call site).
+        internal static ArmScope ClassifyArmScope(bool handleUsable, object rawResult)
+            => !handleUsable ? ArmScope.Drift
+             : rawResult == null ? ArmScope.NoAvatarRoot
+             : rawResult is Transform ? ArmScope.Found
+             : ArmScope.Drift;
+
+        // Gate-arm scope resolution: the OUTERMOST avatar root at/above the target, via reflected NDMF
         // RuntimeUtil.FindAvatarInParents — the semantics NDMF's preview uses to decide what to proxy. A
         // nested descriptor can't scope the gate too narrowly (the old nearest-match bug) and a leaf-mesh
-        // target still resolves up to its whole avatar. Returns null when the target has no avatar root (a
-        // plain prop → Settle.Exempt) OR when the reflected handle drifted (→ Exempt too; the
-        // AvatarRootResolverHandleResolved canary red-fails on installed-NDMF drift, so this can't rot
-        // silently). Never throws (references:[] rules out typeof).
-        internal static GameObject FindArmScopeRoot(GameObject root)
+        // target still resolves up to its whole avatar. Never throws (references:[] rules out typeof); a
+        // throw is classified Drift, not swallowed to a false NoAvatarRoot.
+        internal static ArmScope ResolveArmScope(GameObject root, out GameObject scope)
         {
-            if (MiFindAvatarInParents == null) return null;
-            try
+            scope = null;
+            bool handleUsable = AvatarRootResolverHandleResolved; // null-handle OR return-type drift → unusable
+            object raw = null;
+            if (handleUsable)
             {
-                var t = MiFindAvatarInParents.Invoke(null, new object[] { root.transform }) as Transform;
-                return t != null ? t.gameObject : null;
+                try { raw = MiFindAvatarInParents.Invoke(null, new object[] { root.transform }); }
+                catch { return ArmScope.Drift; }
             }
-            catch { return null; }
+            var state = ClassifyArmScope(handleUsable, raw);
+            if (state == ArmScope.Found) scope = ((Transform)raw).gameObject;
+            return state;
         }
 
         private static string HierarchyPath(Transform t)

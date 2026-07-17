@@ -4,7 +4,7 @@ using Ryan6Vrc.AgentTools.Editor;
 
 // The freshness gate hangs on reflected NDMF handles that can silently rot: the proxy-attribution
 // handle (proxy -> original, feeds the skin-rebake force-flag) and the avatar-root resolver handle
-// (FindArmScopeRoot -> gate arming). These tests are their drift canaries. Package present + handle
+// (ResolveArmScope -> gate arming). These tests are their drift canaries. Package present + handle
 // unresolved must FAIL, never skip (versionDefines/reflection-canary rule: a skip is exactly when
 // production goes blind).
 public class RenderAvatarProxyRebakeTests
@@ -31,9 +31,9 @@ public class RenderAvatarProxyRebakeTests
 
     // G56 scope rule: a reactive component on a SIBLING of the capture target must still arm the
     // gate — the call site scans HasReactiveMA from the target's arm-scope root (the outermost avatar
-    // root, resolved by FindArmScopeRoot). This pins the helper's scan semantics the call site depends
+    // root, resolved by ResolveArmScope). This pins the helper's scan semantics the call site depends
     // on: a subtree scan misses the sibling, a root scan catches it — and armedBy names the match by
-    // hierarchy path. (FindArmScopeRoot's own resolution is delegated to NDMF and canaried separately —
+    // hierarchy path. (ResolveArmScope's own resolution is delegated to NDMF and canaried separately —
     // a fake descriptor can't drive the real-type resolver, so here we stand in transform.root.)
     [Test]
     public void HasReactiveMA_AncestorScope_CatchesSiblingReactives_AndNamesThem()
@@ -80,20 +80,61 @@ public class RenderAvatarProxyRebakeTests
         StringAssert.Contains("null for every one", RenderAvatar.ProxyAllNullFailReason);
     }
 
-    // Handle canary for the avatar-root resolver (FindArmScopeRoot → gate arming). NDMF installed + the
-    // handle unresolved must red-FAIL, never Ignore: there is no name fallback, so drift → null for every
-    // target → every reactive avatar routes to Settle.Exempt and backgrounded captures return OK-stale
-    // silently. Resolver SEMANTICS delegate to NDMF's own (tested) walk-up — we canary the handle, not
-    // re-test the walk (a fake VRCAvatarDescriptor can't drive the real-type resolver).
+    // Handle canary for the avatar-root resolver (ResolveArmScope → gate arming). NDMF installed + the
+    // handle unusable must red-FAIL, never Ignore: there is no name fallback, so drift → no-avatar-root for
+    // every target → every reactive avatar routes to Settle.Exempt and backgrounded captures return
+    // OK-stale silently. The canary now folds a RETURN-TYPE check (see AvatarRootResolverHandleResolved):
+    // a bare != null would stay green through a Transform→GameObject return drift that fails at runtime.
+    // Resolver SEMANTICS delegate to NDMF's own (tested) walk-up — we canary the handle, not the walk.
     [Test]
     public void AvatarRootResolverHandle_ResolvesAgainstInstalledNdmf()
     {
         if (!NdmfInstalled())
             Assert.Ignore("nadena.dev.ndmf not installed in this venue — canary has nothing to check");
         Assert.IsTrue(RenderAvatar.AvatarRootResolverHandleResolved,
-            "NDMF is installed but RuntimeUtil.FindAvatarInParents didn't resolve — FindArmScopeRoot returns " +
-            "null for every target, so every reactive avatar routes to Settle.Exempt and backgrounded " +
-            "captures can return OK-stale silently; re-pin the resolver handle.");
+            "NDMF is installed but RuntimeUtil.FindAvatarInParents didn't resolve to a Transform-returning " +
+            "handle — ResolveArmScope classifies every target no-avatar-root, so every reactive avatar routes " +
+            "to Settle.Exempt and backgrounded captures can return OK-stale silently; re-pin the resolver handle.");
+    }
+
+    // Finding 1 (council review): the resolver must be tri-state so Drift ≠ NoAvatarRoot. NoAvatarRoot is a
+    // legitimate Settle.Exempt; Drift (handle unusable OR a non-Transform invoke result — the return-type
+    // drift that slips a bare-null canary) must route to a loud FAIL at the call site, never a silent exempt.
+    [Test]
+    public void ClassifyArmScope_TriState_DistinguishesDriftFromNoAvatarRoot()
+    {
+        var go = new GameObject("V4_ArmScopeFixture");
+        try
+        {
+            var t = go.transform;
+            Assert.AreEqual(RenderAvatar.ArmScope.Drift, RenderAvatar.ClassifyArmScope(false, null),
+                "unusable handle (null or return-type drift) → Drift, whatever the result");
+            Assert.AreEqual(RenderAvatar.ArmScope.Drift, RenderAvatar.ClassifyArmScope(false, t),
+                "unusable handle → Drift even with a Transform-shaped result");
+            Assert.AreEqual(RenderAvatar.ArmScope.NoAvatarRoot, RenderAvatar.ClassifyArmScope(true, null),
+                "usable handle + null return = a real plain prop → NoAvatarRoot (legit exempt, NOT drift)");
+            Assert.AreEqual(RenderAvatar.ArmScope.Found, RenderAvatar.ClassifyArmScope(true, t),
+                "usable handle + Transform return → Found");
+            Assert.AreEqual(RenderAvatar.ArmScope.Drift, RenderAvatar.ClassifyArmScope(true, go),
+                "usable handle + non-null NON-Transform (return-type drift slipping through) → Drift");
+            StringAssert.Contains("resolver", RenderAvatar.ArmScopeResolverDriftFailReason);
+        }
+        finally { Object.DestroyImmediate(go); }
+    }
+
+    // Finding 2 (council review): every reflection-drift/unsettled state FAILs before the OK return, so the
+    // summary gate token is exactly armed|exempt — never a "drift" value the docs don't enumerate.
+    [Test]
+    public void GateToken_IsOnlyArmedOrExempt()
+    {
+        Assert.AreEqual("armed", RenderAvatar.GateToken(true, RenderAvatar.Settle.Settled));
+        Assert.AreEqual("exempt", RenderAvatar.GateToken(true, RenderAvatar.Settle.Exempt),
+            "reactive but previews globally disabled → exempt");
+        Assert.AreEqual("exempt", RenderAvatar.GateToken(false, RenderAvatar.Settle.Settled),
+            "non-reactive target → exempt");
+        Assert.AreEqual("exempt", RenderAvatar.GateToken(true, RenderAvatar.Settle.Unsettled),
+            "never 'armed' on a non-settled state (these FAIL upstream anyway)");
+        Assert.AreEqual("exempt", RenderAvatar.GateToken(true, RenderAvatar.Settle.Drift));
     }
 }
 
