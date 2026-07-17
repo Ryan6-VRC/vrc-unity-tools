@@ -40,10 +40,18 @@ Parameters: `<AVATAR>` MA-composed scene root; `<BODY>` an SMR under it with liv
    - content-sync: proxy **BakeMesh geometry** in the driven region (ShapeChanger applies baked
      geometry — proxy blendshape weights are the wrong instrument for reactive drives; scripted
      source edits do sync weights).
-5. **Verdict**: changed ≥ 10×FLOOR with BakeMesh > 10mm → FRESH. changed ≤ 2×FLOOR with
+5. **Flag-less control render** (the "fix-reverted ⇒ stale" leg — without it an un-armed editor
+   yields the same FRESH verdict and the run certifies nothing about the fix): render the live
+   scene with an ad-hoc scratch `Camera.Render()` into a RenderTexture — that path sets NO
+   `forceMatrixRecalculationPerRender` flags, so on an ARMED editor it draws the frozen proxy
+   deform (measured 2026-07-16: an ad-hoc camera "draws the same frozen proxy") while step 4's
+   `Capture` must read fresh. Armed certification = control-stale + Capture-fresh on the
+   identical state. Control-fresh means the editor is NOT armed — say so; the run then
+   certifies detector behavior only, not fix efficacy.
+6. **Verdict**: changed ≥ 10×FLOOR with BakeMesh > 10mm → FRESH. changed ≤ 2×FLOOR with
    BakeMesh > 10mm → STALE (the bug; on a fixed build this must be impossible — investigate
    before touching the verdict). Between → report, don't force.
-6. **Restore**: weight 0; never save the scene.
+7. **Restore**: weight 0; destroy the scratch camera/RT; never save the scene.
 
 Traps (each silently fakes a verdict): any GameObject hide/show between baseline and measure
 forces an NDMF rebuild (fresh-looking); edit+capture in one call is a different contract row;

@@ -181,12 +181,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             "NDMF proxy attribution drifted — preview proxies are present but attribution is unavailable, so the "
             + "grab would render unattributed preview proxies as unflagged geometry (possible foreign-geometry "
             + "leak); re-pin GetOriginalObjectForProxy before trusting a sheet";
-        // Reactive-armed target + live settled preview session + zero proxies attributed to the target =
-        // the drawn frame silently lost the reactive-targeted renderers. internal for the headless drift test.
+        // Active reactive present + live settled preview session, yet the preview scene yields no
+        // attributable proxies = the drawn frame silently lost reactive-targeted renderers. internal
+        // for the headless drift test.
         internal const string ProxyPresenceFailReason =
-            "reactive target with a live settled NDMF preview session but zero proxies attributed to it — either "
-            + "preview-scene discovery drifted (a renamed preview scene blanket-hides its proxies) or attribution "
-            + "returned null for every proxy; the sheet would silently drop reactive-targeted geometry";
+            "active reactive components with a live settled NDMF preview session, but no attributable proxies — "
+            + "either preview-scene discovery drifted (a renamed preview scene hides every proxy) or attribution "
+            + "returned null for every discovered proxy; the sheet would silently drop reactive-targeted geometry";
         private static readonly Type PreviewSceneManagerType =
             ResolveNdmfType("nadena.dev.ndmf.preview.NDMFPreviewSceneManager");
         private static readonly MethodInfo MiIsPreviewScene = SafeGetMethod(PreviewSceneManagerType, "IsPreviewScene",
@@ -309,8 +310,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             // and grab stale with no diagnostic. G56 stays closed — sibling reactives under the SAME
             // avatar still arm — while descriptor-scoping ends the old transform.root escape: neighbor
             // avatars under a shared container no longer arm a plain target.
-            string armedBy = null;
-            bool reactive = !Application.isPlaying && HasReactiveMA(FindArmScopeRoot(root), out armedBy);
+            string armedBy = null; bool anyActiveReactive = false;
+            bool reactive = !Application.isPlaying
+                && HasReactiveMA(FindArmScopeRoot(root), out armedBy, out anyActiveReactive);
+            bool proxiesExpected = reactive && anyActiveReactive; // G57: only active reactives get proxied
             if (reactive)
             {
                 horizonNote = SweepNdmfChangeHorizon();
@@ -425,17 +428,21 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // visible or the preview hook deletes every reactive-targeted renderer from the grab.
                 var keptProxies = new List<Renderer>();
                 string proxyNote = IsolateNdmfProxies(root, hideTargets, cascadeHides, svm, keptProxies,
-                    out int proxiesKept, out int proxiesHidden);
+                    out int proxiesKept, out int proxiesHidden, out int proxiesDiscovered, out int proxiesAttributed);
                 // Attribution drift with proxies PRESENT is a FAIL, not a note-and-continue: the grab
                 // would render unattributed preview proxies as unflagged geometry. Error-level (not
                 // transient) — a re-grab can't fix drifted reflection handles.
                 if (IsProxyAttributionDrift(proxyNote))
                     return CoreFail(label, ProxyDriftFailReason);
-                // Proxy-presence assert: a reactive-armed target with a live SETTLED preview session must
-                // surface at least one attributed proxy — zero means the reactive-targeted renderers were
-                // lost silently (Unsettled already FAILed above; Exempt = no live session; Drift can't
-                // certify a session exists, so neither arms this check).
-                if (IsProxyPresenceViolation(reactive, settle, proxiesKept))
+                // Proxy-presence assert: with an ACTIVE reactive (G57: only activeInHierarchy reactives
+                // get proxied) and a live SETTLED session, the preview scene must yield attributable
+                // proxies — discovery finding NONE means the preview-scene handle/name drifted; discovery
+                // finding proxies that ALL attribute to null means the attribution API drifted per-proxy.
+                // Either way the sheet would silently drop reactive-targeted geometry. Deliberately NOT
+                // keyed on proxiesKept: a plain leaf target (a hat) under a reactive avatar legitimately
+                // keeps zero of its neighbor's proxies. (Unsettled already FAILed above; Exempt = no live
+                // session; Drift can't certify a session exists — neither arms this check.)
+                if (IsProxyPresenceViolation(proxiesExpected, settle, proxiesDiscovered, proxiesAttributed))
                     return CoreFail(label, ProxyPresenceFailReason);
 
                 // ----- Collect drawable renderers + count hidden -----------------------------
@@ -988,9 +995,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         // beats a silent body-drop.
         private static string IsolateNdmfProxies(
             GameObject root, List<GameObject> hideTargets, Dictionary<GameObject, bool> cascadeHides,
-            SceneVisibilityManager svm, List<Renderer> keptProxies, out int kept, out int hidden)
+            SceneVisibilityManager svm, List<Renderer> keptProxies,
+            out int kept, out int hidden, out int discovered, out int attributedNonNull)
         {
-            kept = 0; hidden = 0;
+            kept = 0; hidden = 0; discovered = 0; attributedNonNull = 0;
             var proxies = new List<GameObject>();
             var seen = new HashSet<GameObject>();
             for (int i = 0; i < EditorSceneManager.sceneCount; i++)
@@ -1001,6 +1009,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     foreach (var r in sceneRoot.GetComponentsInChildren<Renderer>(true))
                         if (seen.Add(r.gameObject)) proxies.Add(r.gameObject);
             }
+            discovered = proxies.Count;
             if (proxies.Count == 0) return "";
             if (MiGetOriginalForProxy == null) return ProxyDriftNote;
 
@@ -1014,6 +1023,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     original = result as GameObject;
                 }
                 catch { return ProxyDriftNote; } // partial hides already applied stay recorded in cascadeHides → restored
+                if (original != null) attributedNonNull++;
                 bool drawable = original != null
                     && (original.transform == root.transform || original.transform.IsChildOf(root.transform))
                     && original.activeInHierarchy
@@ -1214,10 +1224,12 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // The (c)/(d) review-gate decisions, extracted pure so the headless suite can pin them —
         // batchmode has no preview scene or session, so the full CaptureCore paths are live-gate-only
-        // (see Tests/Editor/RenderAvatarFreshnessGate.md).
+        // (see Tests/Editor/RenderAvatarFreshnessGate.md). Presence is keyed on discovery/attribution
+        // totals, NOT on kept-count: kept==0 is legitimate for a plain leaf target under a reactive
+        // avatar (its neighbor's proxies are foreign and hidden, not lost).
         internal static bool IsProxyAttributionDrift(string proxyNote) => proxyNote == ProxyDriftNote;
-        internal static bool IsProxyPresenceViolation(bool reactive, Settle settle, int proxiesKept)
-            => reactive && settle == Settle.Settled && proxiesKept == 0;
+        internal static bool IsProxyPresenceViolation(bool proxiesExpected, Settle settle, int discovered, int attributedNonNull)
+            => proxiesExpected && settle == Settle.Settled && (discovered == 0 || attributedNonNull == 0);
 
         // The one settle probe (read-only), shared by the pre-grab gate, the sweep's pump loop, and the
         // residual note. `reactiveEditMode` is the caller's ONE precomputed !isPlaying && HasReactiveMA
@@ -1342,9 +1354,15 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // `armedBy` = hierarchy path of the FIRST matched reactive component's GameObject (null when none) —
         // threaded into the settle-FAIL messages so a re-grab loop can name what armed the gate.
-        internal static bool HasReactiveMA(GameObject root, out string armedBy)
+        // `anyActive` = at least one match sits on an activeInHierarchy GameObject. The gate arms on ANY
+        // match (inactive included — conservative, costs a probe), but proxies are only EXPECTED when an
+        // active one exists: NDMF's edit-time preview keys on activeInHierarchy, never component .enabled
+        // (G57) — an all-inactive-reactives avatar legitimately has zero proxies, and the presence assert
+        // must not FAIL it.
+        internal static bool HasReactiveMA(GameObject root, out string armedBy, out bool anyActive)
         {
-            armedBy = null;
+            armedBy = null; anyActive = false;
+            bool found = false;
             foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(true))
             {
                 if (mb == null) continue;
@@ -1353,11 +1371,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var mk in ReactiveMarkers)
                     if (ty.Name.IndexOf(mk, StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        armedBy = HierarchyPath(mb.transform);
-                        return true;
+                        if (!found) { armedBy = HierarchyPath(mb.transform); found = true; }
+                        if (mb.gameObject.activeInHierarchy) { anyActive = true; return true; }
+                        break; // this component matched; keep scanning for an active one
                     }
             }
-            return false;
+            return found;
         }
 
         // Gate-arm scope: the nearest ancestor (target included) carrying a VRCAvatarDescriptor — the
