@@ -40,36 +40,5 @@ namespace Ryan6Vrc.AgentTools.Editor
                 : new RectInt(minX, minY, maxX - minX + 1, maxY - minY + 1);
             return changed == 0;
         }
-
-        // Count pixels EXACTLY equal to target on R,G,B (alpha ignored). bbox bounds the matches
-        // (0,0,0,0 when none). Returns the count.
-        internal static int CountColor(Color32[] px, int w, int h, Color32 target, out RectInt bbox)
-        {
-            if (px == null || px.Length != w * h)
-                throw new ArgumentException(
-                    $"RenderDiff.CountColor: buffer must be non-null and length w*h ({w}*{h}={w * h}); " +
-                    $"got px={(px == null ? "null" : px.Length.ToString())}");
-
-            int count = 0;
-            int minX = int.MaxValue, minY = int.MaxValue, maxX = int.MinValue, maxY = int.MinValue;
-            for (int i = 0; i < px.Length; i++)
-            {
-                Color32 p = px[i];
-                if (p.r == target.r && p.g == target.g && p.b == target.b)
-                {
-                    count++;
-                    int x = i % w, y = i / w;
-                    if (x < minX) minX = x;
-                    if (y < minY) minY = y;
-                    if (x > maxX) maxX = x;
-                    if (y > maxY) maxY = y;
-                }
-            }
-
-            bbox = count == 0
-                ? new RectInt(0, 0, 0, 0)
-                : new RectInt(minX, minY, maxX - minX + 1, maxY - minY + 1);
-            return count;
-        }
     }
 }

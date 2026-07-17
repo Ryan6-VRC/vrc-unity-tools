@@ -92,7 +92,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private const int ManifestSchema = 1;  // <png>.cam.json schema; bumped on any field rename (diff FAILs on mismatch)
         private static readonly string ToolVersion = typeof(RenderAvatar).Assembly.GetName().Version.ToString();
-        private static readonly Color32 Magenta = new Color32(255, 0, 255, 255); // occlusion overlay (exact-match, MSAA off)
 
         // Descendants excluded from every grab, merged with the caller's `hide`. The non-destructive
         // build adds a ~10 km "Culling" mesh (visible in play mode) that renders as a huge pale surface
@@ -234,9 +233,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // opts.pinned reuses a prior grab's per-angle framing (diff — skips silhouette auto-frame + resize-guards
-        // against A's window). opts.occlude paints one renderer magenta for the grab (occlusion); opts.solo also
-        // hides every OTHER drawable (the unoccluded-silhouette denominator).
-        private struct CoreOpts { public Renderer occlude; public Material occludeMat; public bool solo; public CamManifest pinned; }
+        // against A's window).
+        private struct CoreOpts { public CamManifest pinned; }
         private sealed class CoreResult
         {
             public bool ok; public string fail;
@@ -244,15 +242,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             public CamManifest manifest; public string label;
             public int hiddenCount, excludedCount, proxiesKept, proxiesHidden;
             public string proxyNote = "", horizonNote = "", settleNote = "";
-            public bool reactive;                 // target has reactive MA → drawn via NDMF proxies (expected denominator invalid, see CaptureOcclusion)
-            public int[] occCount; public RectInt[] occBbox; // occlusion mode: per-angle magenta count/bbox on the FULL-RES crop (pre-downscale, exact)
         }
         private static CoreResult Failed(string msg) => new CoreResult { ok = false, fail = msg };
         private static CoreResult CoreFail(string label, string reason) => Failed(Fail(label, reason));
         private static CoreResult CoreFailT(string label, string reason) => Failed(FailTransient(label, reason));
 
-        // The isolate -> freshness -> configure -> per-angle frame/grab -> compose -> restore scaffold that all
-        // three public doors run. Returns the composed sheet + a fully-populated manifest, or a Fail string.
+        // The isolate -> freshness -> configure -> per-angle frame/grab -> compose -> restore scaffold that both
+        // public doors run. Returns the composed sheet + a fully-populated manifest, or a Fail string.
         private static CoreResult CaptureCore(
             string target, string[] angles, string[] hide, float margin, bool showGizmos, int resolution, CoreOpts opts)
         {
@@ -373,11 +369,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             bool oWire = PiWire != null && (bool)PiWire.GetValue(null, null);
 
             var rts = new List<RenderTexture>();
-            Renderer occR = opts.occlude; Material[] savedMats = null; // occlusion material swap, restored in finally
-            // Solo-mode hides (occlusion denominator pass) tracked apart from cascadeHides so the finally
-            // restores them SELF-only — cascadeHides restores cascading, which would force-show any operator
-            // eye-hide under a solo-hidden in-subtree renderer.
-            var soloHides = new Dictionary<GameObject, bool>();
             // Freshness: SMRs whose forceMatrixRecalculationPerRender we flip true for the capture's duration
             // so a backgrounded editor re-bakes their skinned deform each render (recorded as we set them,
             // once `drawable` is known; restored in finally). See the freshness note below.
@@ -436,27 +427,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (drawable.Count == 0)
                     return CoreFail(label, "no drawable renderers after exclusion (hidden=" + hiddenCount + " excluded=" + excludedCount + ")");
 
-                // ----- Occlusion: paint one renderer magenta (restored in finally) ----------------
-                // occlusion swaps opts.occlude's sharedMaterials to the in-memory magenta unlit; every other
-                // renderer draws normally, so an occluder covers the magenta. On a reactive target the swap lands
-                // on the suppressed original and NDMF copies it to the drawn proxy (measured). `solo` additionally
-                // hides every OTHER drawable so this pass renders the renderer's unoccluded silhouette — the
-                // `expected` denominator that disambiguates visible=0 (occluded) from a renderer that never drew.
-                if (occR != null && opts.occludeMat != null)
-                {
-                    savedMats = occR.sharedMaterials;
-                    var swap = new Material[savedMats.Length];
-                    for (int i = 0; i < swap.Length; i++) swap[i] = opts.occludeMat;
-                    occR.sharedMaterials = swap;
-                    if (opts.solo)
-                        foreach (var rend in drawable)
-                            if (rend != occR && !soloHides.ContainsKey(rend.gameObject))
-                            {
-                                soloHides[rend.gameObject] = svm.IsHidden(rend.gameObject, false);
-                                svm.Hide(rend.gameObject, false); // self-only; restored self-only in finally
-                            }
-                }
-
                 // ----- Freshness: force a synchronous skin re-bake for the capture --------------------------
                 // Two freshness layers, and the settle gate only governs one. The NDMF pipeline keeps proxy
                 // CONTENT current (weights, reactive state — the #42 sweep); proxy SKIN BAKING is a plain-SMR
@@ -509,11 +479,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var tiles = new List<Color32[]>(n);
                 var views = new CamView[n];
                 CamFrame frame = null;
-                // Occlusion: count magenta on the FULL-RES crop (before the bilinear Downscale re-blends the hard
-                // magenta edge msaa=off keeps exact — else a 1-2px poke downscales to zero and false-reads occluded).
-                bool countMagenta = occR != null && opts.occludeMat != null;
-                var occCount = countMagenta ? new int[n] : null;
-                var occBbox = countMagenta ? new RectInt[n] : null;
                 for (int ai = 0; ai < n; ai++)
                 {
                     string angle = pin ? opts.pinned.views[ai].angle : resolvedAngles[ai];
@@ -591,12 +556,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                             frame = new CamFrame { w = f.w, h = f.h, camW = f.camW, camH = f.camH, ppp = EditorGUIUtility.pixelsPerPoint };
                     }
 
-                    if (countMagenta)
-                    {
-                        var crop = ExtractTile(f.px, f.w, cropX, cropY, side); // clamped above, so in-bounds
-                        occCount[ai] = RenderDiff.CountColor(crop, side, side, Magenta, out RectInt ob);
-                        occBbox[ai] = ob;
-                    }
                     tiles.Add(Downscale(f.px, f.w, cropX, cropY, side, tileRes));
                     views[ai] = new CamView { angle = angle, pivot = pivotF, rot = rot, orthoSize = sizeF, cropX = cropX, cropY = cropY, side = side };
                 }
@@ -615,8 +574,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     ok = true, sheet = sheet, sheetW = sheetW, sheetH = sheetH, manifest = manifest, label = label,
                     hiddenCount = hiddenCount, excludedCount = excludedCount,
                     proxiesKept = proxiesKept, proxiesHidden = proxiesHidden,
-                    proxyNote = proxyNote, horizonNote = horizonNote, settleNote = SettleNote(reactive),
-                    reactive = reactive, occCount = occCount, occBbox = occBbox
+                    proxyNote = proxyNote, horizonNote = horizonNote, settleNote = SettleNote(reactive)
                 };
             }
             catch (Exception e)
@@ -629,9 +587,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // synchronous repaint below, so the frame left on the operator's screen bakes with original flags.
                 foreach (var kv in forcedRebake)
                     if (kv.Key != null) kv.Key.forceMatrixRecalculationPerRender = kv.Value;
-                // Occlusion: repoint the renderer at its real materials BEFORE the wrapper destroys the magenta
-                // (else the renderer would momentarily reference a destroyed material).
-                if (occR != null && savedMats != null) occR.sharedMaterials = savedMats;
 
                 // Restore visibility COARSELY: every subtree this grab hid (hide-list / DefaultHide /
                 // ancestor siblings, and the other scene roots) returns to its own recorded self-state.
@@ -639,10 +594,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // the target subtree's own operator eye-hides, which the tool never touched.
                 foreach (var kv in cascadeHides)
                     if (kv.Key != null) { if (kv.Value) svm.Hide(kv.Key, true); else svm.Show(kv.Key, true); }
-                // Solo hides restore SELF-only (self-only hidden above) — never cascade over an in-subtree
-                // renderer's operator eye-hides.
-                foreach (var kv in soloHides)
-                    if (kv.Key != null) { if (kv.Value) svm.Hide(kv.Key, false); else svm.Show(kv.Key, false); }
                 foreach (var kv in rootVis)
                     if (kv.Key != null && kv.Key != containingRoot && kv.Key.name != "nadena.dev.ndmf__Activator")
                     { if (kv.Value) svm.Hide(kv.Key, true); else svm.Show(kv.Key, true); }
@@ -788,86 +739,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 + identical + "/" + r.manifest.views.Length + r.proxyNote + r.horizonNote + r.settleNote + versionNote + " | png=" + pngB;
             Debug.Log(summary);
             return summary;
-        }
-
-        /// <summary>
-        /// Paint one should-be-hidden renderer magenta and grab; report how many magenta pixels are VISIBLE (poke
-        /// through occluders) per angle, with an unoccluded-silhouette <c>expected</c> denominator. One grab, no pair.
-        /// The swap lands on the ORIGINAL renderer; on a reactive target NDMF copies it to the drawn proxy (measured).
-        /// </summary>
-        /// <param name="target">the subtree to isolate + grab.</param>
-        /// <param name="renderer">descendant path/name of the renderer to occlusion-test.</param>
-        public static string CaptureOcclusion(
-            string target, string renderer, string[] angles = null, string[] hide = null, float margin = 0.15f, int resolution = 1024)
-        {
-            var root = Resolve(target);
-            if (root == null) return Fail(target, "target not found — tried hierarchy path, instance id, then name");
-            string label = root.name;
-            if (string.IsNullOrEmpty(renderer))
-                return Fail(label, "renderer is empty — name the descendant renderer to occlusion-test");
-            var go = ResolveDescendant(root, renderer.Trim());
-            if (go == null) return Fail(label, "occlusion renderer '" + renderer + "' not found under target");
-            var rend = go.GetComponent<Renderer>();
-            if (rend == null) return Fail(label, "'" + renderer + "' resolved but has no Renderer component");
-            if (!rend.enabled || !go.activeInHierarchy)
-                return Fail(label, "occlusion renderer '" + renderer + "' is disabled/inactive — it draws nothing (visible=0 would be meaningless); enable it first");
-            if (rend.sharedMaterials == null || rend.sharedMaterials.Length == 0)
-                return Fail(label, "occlusion renderer '" + renderer + "' has no material slots — nothing to swap");
-            Mesh occMesh = (rend as SkinnedMeshRenderer)?.sharedMesh ?? go.GetComponent<MeshFilter>()?.sharedMesh;
-            if ((rend is SkinnedMeshRenderer || rend is MeshRenderer) && occMesh == null)
-                return Fail(label, "occlusion renderer '" + renderer + "' has no mesh — it draws nothing (visible=0 would be meaningless)");
-            var shader = Shader.Find("Unlit/Color");
-            if (shader == null) return Fail(label, "Unlit/Color shader not found — can't build the occlusion overlay");
-            var mag = new Material(shader) { color = Magenta, hideFlags = HideFlags.DontSave };
-
-            // MSAA off for the occlusion pass: a blended magenta edge falls outside an exact (255,0,255) match and
-            // would undercount thin pokes — the very case occlusion must catch. Snapshot/restore the global setting.
-            int oAA = QualitySettings.antiAliasing;
-            try
-            {
-                QualitySettings.antiAliasing = 0;
-                var r1 = CaptureCore(target, angles, hide, margin, false, resolution, new CoreOpts { occlude = rend, occludeMat = mag, solo = false });
-                if (!r1.ok) return r1.fail;
-                // Unoccluded silhouette (solo) = the `expected` denominator, valid only on a NON-reactive target:
-                // solo hides the drawn ORIGINALS, but a reactive target draws through NDMF proxies solo can't reach,
-                // so its solo silhouette still carries occluders and `expected` would degrade toward `visible`. Skip
-                // the pass on reactive and report expected=n/a rather than a silently-wrong number.
-                CoreResult r2 = null;
-                if (!r1.reactive)
-                {
-                    r2 = CaptureCore(target, r1.manifest.angles, r1.manifest.hide, r1.manifest.margin, false,
-                        r1.manifest.resolution, new CoreOpts { occlude = rend, occludeMat = mag, solo = true, pinned = r1.manifest });
-                    if (!r2.ok) return r2.fail; // never emit => OK with expected=? — fail loud, let the caller re-grab
-                }
-                string pngB = WriteSheetAndManifest(r1);
-                if (pngB == null) return Fail(label, "failed to write the occlusion grab PNG/manifest to temp (disk full or locked path?)");
-
-                // Counts come from the FULL-RES crop (CoreResult.occCount), NOT the bilinear-downscaled sheet — a
-                // thin poke survives the exact magenta match only before Downscale re-blends the edge.
-                var parts = new List<string>();
-                for (int i = 0; i < r1.manifest.views.Length; i++)
-                {
-                    int visible = r1.occCount[i];
-                    var vb = r1.occBbox[i];
-                    string expected = r1.reactive ? "n/a(reactive)"
-                        : (r2 != null && r2.occCount != null && i < r2.occCount.Length ? r2.occCount[i].ToString() : "?");
-                    parts.Add(r1.manifest.views[i].angle + ":visible=" + visible + ",expected=" + expected + ",bbox="
-                        + (visible == 0 ? "-" : "(" + vb.x + "," + vb.y + "," + vb.width + "," + vb.height + ")"));
-                }
-                string summary = "[RenderAvatar] CaptureOcclusion " + label + " renderer=" + renderer
-                    + " angles=" + string.Join(",", r1.manifest.angles) + " => OK occ=[" + string.Join("; ", parts)
-                    + "] msaa=off" + r1.proxyNote + r1.horizonNote + r1.settleNote + " | png=" + pngB;
-                Debug.Log(summary);
-                return summary;
-            }
-            finally
-            {
-                QualitySettings.antiAliasing = oAA;
-                UnityEngine.Object.DestroyImmediate(mag);
-                // AA was 0 during CaptureCore's own restore-repaint, so the on-screen frame is aliased — request a
-                // repaint now that AA is restored (cosmetic, #11).
-                SceneView.lastActiveSceneView?.Repaint();
-            }
         }
 
         // Extract a tileRes×tileRes tile at (x0,y0) from a bottom-origin composed sheet into its own buffer.
