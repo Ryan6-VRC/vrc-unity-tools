@@ -188,17 +188,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // is deliberately NOT called before cam.Render() below — EndSampling leaves the pose applied,
                 // it does not revert it. Reverting happens once, defensively, in the outer teardown `finally`
                 // (below) after capture, so a throw mid-sampling still can't leak animation-mode state.
+                // Head displacement a pose introduces by resetting the body position (a humanoid clip carries
+                // root/hips translation that moves the head and undoes NDMF's +2 Z clone shift). Zero on the
+                // floor path, so that branch stays byte-for-byte unchanged; Step 6 adds it to follow the head.
+                Vector3 poseHeadDelta = Vector3.zero;
                 if (poseClip != null)
                 {
                     var animator = baked.GetComponent<UnityEngine.Animator>();
                     if (animator == null)
                         throw new InvalidOperationException(
                             "baked clone has no Animator — cannot sample pose '" + poseName + "'");
+                    var headBone = animator.GetBoneTransform(HumanBodyBones.Head);
+                    Vector3 restHead = headBone != null ? headBone.position : baked.transform.position;
                     animator.Rebind();
                     AnimationMode.StartAnimationMode();
                     AnimationMode.BeginSampling();
                     try { AnimationMode.SampleAnimationClip(baked, poseClip, poseClip.length); }
                     finally { AnimationMode.EndSampling(); }
+                    Vector3 posedHead = headBone != null ? headBone.position : baked.transform.position;
+                    poseHeadDelta = posedHead - restHead;
                 }
 
                 // ---- Step 6: camera + off-screen sRGB capture (§Capture, source-verified) ----
@@ -220,6 +228,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // FOV: DO NOT SET — leave Unity's default 60°; PositionPortraitCamera is calibrated to it.
                 descriptorBaked.PositionPortraitCamera(cam.transform);
                 cam.transform.position -= cam.transform.forward * dolly;   // framing dolly (bust = 0)
+                cam.transform.position += poseHeadDelta; // follow the head when a pose reset the body position (floor => zero)
 
                 const int W = 1200, H = 900;
                 rt = new RenderTexture(W, H, 24, UnityEngine.Experimental.Rendering.GraphicsFormat.R8G8B8A8_SRGB)
