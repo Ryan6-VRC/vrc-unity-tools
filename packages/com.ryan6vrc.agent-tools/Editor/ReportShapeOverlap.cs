@@ -131,43 +131,73 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Reflectively read MA ModularAvatarShapeChanger rows under `outfitRoot` and ingest the ShapeName of every
         // row whose write-target resolves to `bodyGO` (the resolved body SMR's GameObject). ChangeType is captured
         // (Delete=0, Set=1); a Delete row is ingested like any other declared shape, not dropped. This asmdef has
-        // no MA assembly reference, so everything is by-name reflection (mirrors CheckSeam.FindType). MA absent or
-        // any member drift ⇒ yields nothing and never throws — reaction ingestion is best-effort context.
+        // no MA assembly reference, so everything is by-name reflection (mirrors CheckSeam.FindType).
+        //
+        // Failure doctrine (this tool exists to catch the invisible weight-0 ShapeChangers, so a silent truncation
+        // is the worst outcome): MA absent ⇒ silent no-op (the honest floor). MA PRESENT but a renamed member ⇒
+        // a loud one-line drift warning + no reactions (the "reflection canary goes silently green" trap — never
+        // let an MA update quietly strip the co-active set). A single throwing component/row ⇒ warn and CONTINUE
+        // the sweep (per-component + per-row guards), so one stale/deleted ref can't drop the rest — including the
+        // very weight-0 ShapeChangers this tool exists to surface.
         private static void IngestShapeChangers(GameObject outfitRoot, GameObject bodyGO, Ingested result, Action<string> add)
         {
-            try
-            {
-                var scType = FindType("nadena.dev.modular_avatar.core.ModularAvatarShapeChanger");
-                if (scType == null) return; // MA not installed ⇒ no reactions
-                var shapesProp = scType.GetProperty("Shapes", BindingFlags.Public | BindingFlags.Instance);
-                if (shapesProp == null) return;
+            var scType = FindType("nadena.dev.modular_avatar.core.ModularAvatarShapeChanger");
+            if (scType == null) return; // MA not installed ⇒ no reactions (silent — the legitimate absent path)
 
-                foreach (var comp in outfitRoot.GetComponentsInChildren(scType, true))
+            // Member handles resolved once. Any null here means MA is installed but its API drifted from ours —
+            // surface it loudly rather than return a silently-empty reaction set the agent would trust.
+            var shapesProp = scType.GetProperty("Shapes", BindingFlags.Public | BindingFlags.Instance);
+            var csType = FindType("nadena.dev.modular_avatar.core.ChangedShape");
+            var objField = csType?.GetField("Object");
+            var nameField = csType?.GetField("ShapeName");
+            var ctField = csType?.GetField("ChangeType");
+            var aorType = FindType("nadena.dev.modular_avatar.core.AvatarObjectReference");
+            var getMethod = aorType?.GetMethod("Get", new[] { typeof(Component) }); // Get(Component container)
+            if (shapesProp == null || objField == null || nameField == null || ctField == null || getMethod == null)
+            {
+                Debug.LogWarning("[ReportShapeOverlap] MA ShapeChanger reflection drift — a member (Shapes / " +
+                    "ChangedShape.Object|ShapeName|ChangeType / AvatarObjectReference.Get) did not resolve; reactions " +
+                    "NOT ingested. The co-active set may be missing weight-0 ShapeChanger shapes.");
+                return;
+            }
+
+            foreach (var comp in outfitRoot.GetComponentsInChildren(scType, true))
+            {
+                if (comp == null) continue;
+                try
                 {
-                    if (comp == null) continue;
                     var shapes = shapesProp.GetValue(comp) as System.Collections.IEnumerable;
                     if (shapes == null) continue;
                     foreach (var row in shapes)
                     {
-                        if (row == null) continue;
-                        var rt = row.GetType();
-                        var objRef = rt.GetField("Object")?.GetValue(row);
-                        var shapeName = rt.GetField("ShapeName")?.GetValue(row) as string;
-                        var ctField = rt.GetField("ChangeType");
-                        if (objRef == null || string.IsNullOrEmpty(shapeName) || ctField == null) continue;
-                        int changeType = Convert.ToInt32(ctField.GetValue(row), CultureInfo.InvariantCulture);
+                        try
+                        {
+                            if (row == null) continue;
+                            var objRef = objField.GetValue(row);
+                            var shapeName = nameField.GetValue(row) as string;
+                            if (objRef == null || string.IsNullOrEmpty(shapeName)) continue;
+                            int changeType = Convert.ToInt32(ctField.GetValue(row), CultureInfo.InvariantCulture);
 
-                        // AvatarObjectReference.Get(Component) resolves the write target relative to the component.
-                        var getMethod = objRef.GetType().GetMethod("Get", new[] { typeof(Component) });
-                        var target = getMethod?.Invoke(objRef, new object[] { comp }) as GameObject;
-                        if (target != bodyGO) continue; // only rows that write the resolved body mesh
+                            // AvatarObjectReference.Get can throw (TargetInvocationException) on a stale/deleted ref.
+                            var target = getMethod.Invoke(objRef, new object[] { comp }) as GameObject;
+                            if (target != bodyGO) continue; // only rows that write the resolved body mesh
 
-                        add(shapeName);
-                        result.ReactionTypes[shapeName] = changeType; // captured for the Task-2 resolution table
+                            add(shapeName);
+                            result.ReactionTypes[shapeName] = changeType; // captured for the Task-2 resolution table
+                        }
+                        catch (Exception e)
+                        {
+                            Debug.LogWarning("[ReportShapeOverlap] skipped a ShapeChanger row on '" +
+                                PathOf(comp.gameObject) + "' (" + e.GetType().Name + "): " + e.Message);
+                        }
                     }
                 }
+                catch (Exception e)
+                {
+                    Debug.LogWarning("[ReportShapeOverlap] skipped a ShapeChanger component on '" +
+                        PathOf(comp.gameObject) + "' (" + e.GetType().Name + "): " + e.Message);
+                }
             }
-            catch { /* MA member drift / a row that won't resolve ⇒ ingest nothing, never throw */ }
         }
 
         internal static Type FindType(string fullName) =>

@@ -454,4 +454,81 @@ public class ReportShapeOverlapTests
         CollectionAssert.Contains(ing.Names, "WornShape");
         CollectionAssert.DoesNotContain(ing.Names, "Idle");
     }
+
+    // Per-row targets (an unset Object leaves referencePath empty ⇒ resolves to null at Get time).
+    private ModularAvatarShapeChanger AddShapeChangerRows(GameObject avatar, string name,
+        params (string shape, ShapeChangeType type, GameObject target)[] rows)
+    {
+        var outfit = new GameObject(name);
+        outfit.transform.SetParent(avatar.transform, false);
+        var sc = outfit.AddComponent<ModularAvatarShapeChanger>();
+        var list = new List<ChangedShape>();
+        foreach (var (shape, type, target) in rows)
+        {
+            var objRef = new AvatarObjectReference();
+            if (target != null) objRef.Set(target); // else leave unset ⇒ Get resolves to null
+            list.Add(new ChangedShape { Object = objRef, ShapeName = shape, ChangeType = type, Value = 100f });
+        }
+        sc.Shapes = list;
+        return sc;
+    }
+
+    // A row whose Object resolves to null is skipped without throwing, and a valid SIBLING row on the SAME
+    // component is still ingested — the per-row guard must not let one bad ref truncate the sweep.
+    [Test]
+    public void BuildAnalyzeSet_nullTargetRow_skippedSiblingIngested()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Valid", 0, 9, 0.05f);
+        AddSpan(m, "Nulled", 10, 14, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChangerRows(avatar, "Outfit",
+            ("Nulled", ShapeChangeType.Set, null),   // unset Object ⇒ resolves to null ⇒ skipped
+            ("Valid",  ShapeChangeType.Set, body));  // sibling on the SAME component ⇒ still ingested
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+
+        var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new string[0], avatar);
+        CollectionAssert.Contains(ing.Names, "Valid");
+        CollectionAssert.DoesNotContain(ing.Names, "Nulled");
+    }
+
+    // A shape that is BOTH caller-passed AND reaction-targeted appears once in the union, and the reaction
+    // ChangeType is still recorded (dedup must not drop the Task-2 type capture).
+    [Test]
+    public void BuildAnalyzeSet_passedAndReaction_dedupedTypeRecorded()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Dual", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChanger(avatar, "Outfit", body, ("Dual", ShapeChangeType.Set));
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+
+        var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new[] { "Dual" }, avatar);
+        Assert.AreEqual(1, ing.Names.Count(n => n == "Dual"), "passed ∪ reaction dedupes to one entry");
+        Assert.AreEqual(1, ing.ReactionTypes["Dual"], "reaction ChangeType still recorded on the deduped shape");
+    }
+
+    // Multiple ShapeChanger components, one carrying multiple rows — every reaction-targeted shape is ingested
+    // and each row's ChangeType is captured.
+    [Test]
+    public void BuildAnalyzeSet_multipleShapeChangers_allIngested()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "A", 0, 4, 0.05f);
+        AddSpan(m, "B", 5, 9, 0.05f);
+        AddSpan(m, "C", 10, 14, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChanger(avatar, "Outfit1", body, ("A", ShapeChangeType.Set), ("B", ShapeChangeType.Delete)); // multi-row
+        AddShapeChanger(avatar, "Outfit2", body, ("C", ShapeChangeType.Set));                                // 2nd component
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+
+        var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new string[0], avatar);
+        CollectionAssert.IsSubsetOf(new[] { "A", "B", "C" }, ing.Names);
+        Assert.AreEqual(1, ing.ReactionTypes["A"]); // Set
+        Assert.AreEqual(0, ing.ReactionTypes["B"]); // Delete
+        Assert.AreEqual(1, ing.ReactionTypes["C"]); // Set
+    }
 }
