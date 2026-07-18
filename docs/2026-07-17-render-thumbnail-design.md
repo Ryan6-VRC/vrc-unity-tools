@@ -73,6 +73,15 @@ doesn't — that single fact decides the correct capture surface for each.
   silently-generic clip won't retarget, defeating "one clip everywhere"); and after
   `MoveGameObjectToScene` call **`animator.Rebind()`** before sampling (stale bind → no-op). All of
   `Start`/`Stop` and `Begin`/`End` are **global editor state** — nest their guards (below).
+- **Posed-head framing correction (measured, load-bearing).** Sampling resets the avatar's body
+  position — the whole skeleton relocates (the clone's root shifts to the animator origin, ≈0.8m down
+  and undoing NDMF's `+2` Z). `PositionPortraitCamera` runs *after* sampling so it already absorbs the
+  **root** move, but it aims at the static `ViewPosition`, not the dropped head. The residual is only the
+  head's **root-local** displacement: capture Head-bone + root world positions before `Rebind` and after
+  `EndSampling`, and translate the camera by `(posedHead−posedRoot)−(restHead−restRoot)` *after*
+  `PositionPortraitCamera` + the `framing` dolly. Floor path: the delta is `Vector3.zero` (no change). The
+  delta is a world-space `Transform.position` difference, so it is correct under any root orientation
+  provided the clip carries no root-rotation curve (the bundled clips carry none).
 - **Capture:** dedicated disabled `Camera` (`HideFlags.DontSave`), `camera.scene = previewScene`,
   render into `new RenderTexture(1200, 900, 24, GraphicsFormat.R8G8B8A8_SRGB){ antiAliasing =
   Max(1, QualitySettings.antiAliasing) }`, `allowHDR = false` → `Texture2D(RGBA32).ReadPixels` →
@@ -230,10 +239,10 @@ Rendering mutates, so most behavior is proven live, not in NUnit
 
 ## Open risks / notes
 
-- **Pose vs. bust framing / hips height.** `PositionPortraitCamera` reads static `ViewPosition`, not the
-  posed head; and a single humanoid keyframe carries body-position/root T, so it can shift hips *height*
-  as well as head angle. Upper-body poses + `framing` keep both minor for v1; revisit if a pose visibly
-  misframes.
+- **Pose framing — resolved.** The body-position reset that dropped the posed head below the frame is
+  fixed by the posed-head framing correction (§Verified mechanism → Pose). Residual, still open: a
+  user-supplied clip that carries a real **root-rotation** curve would break the world-space delta's
+  orientation assumption — out of scope for the bundled upper-body clips, revisit if such a clip is used.
 - **Gradient backdrop.** If the runtime-generated gradient is fiddly, ship the solid-color fallback first;
   render correctness doesn't depend on it.
 - **Lighting constants** are taste defaults (named, obvious, top-of-file); expect the operator to tune
