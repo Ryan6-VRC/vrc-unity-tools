@@ -55,12 +55,18 @@ Same shape for an unparseable `bg` or an unknown pose name (error enumerates the
 ## 3. Teardown on a post-bake exception
 
 The teardown runs inside a `finally`, so C# guarantees it fires when an exception propagates after the
-bake. This is confirmed indirectly by §1: a normal posed run exercises every teardown line (AnimationMode
-started then `InAnimationMode()==False` after; the unique `ZZZ_GeneratedAssets/<name>__rt_<guid>(Clone)`
-subfolder created then deleted; no orphan root). A dedicated forced-throw harness would require a test
-hook that does not belong in production code; the `finally` guarantee plus the §1 normal-path teardown
-proof cover the exception path. If a hard forced-throw check is wanted later, inject it via a temporary
-build of the tool, not a shipped seam.
+bake. §1 evidences the observable half on a normal run: AnimationMode started then
+`InAnimationMode()==False` after, selection restored, no orphan root.
+
+**What §1 cannot evidence is the SDK pairing.** `OnPostprocessAvatar` produces no signal a snippet can
+read — that is why it lives in an inner `finally` that no earlier teardown step can skip by throwing,
+rather than relying on a normal-path observation. The reachable check is the interrupted bake: a render
+wedged on a VRCFury modal dialog (§1's note) and then dismissed still ends with `animMode=False` and no
+`*__rt_*` root, which exercises teardown along an abnormal path. Run the root/animMode assertions from
+§1 after any such interruption.
+
+A dedicated forced-throw harness would need a test hook that does not belong in production code; if one
+is wanted later, inject it via a temporary build of the tool, not a shipped seam.
 
 ## 4. Expression composited onto the pose
 

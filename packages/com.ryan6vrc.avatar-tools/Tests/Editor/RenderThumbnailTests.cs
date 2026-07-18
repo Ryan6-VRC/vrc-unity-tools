@@ -5,9 +5,9 @@ using Ryan6Vrc.AvatarTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Tests
 {
-    // Pure helpers ONLY (FramingDistance / TryParseBg / PoseCatalog / ResolvePose / IsExpressionClip /
-    // ResolveExpression). Render — including the whatIf preflight, the target resolver it drives, and
-    // the baked-clone binding assertion — mutates/reads live scene objects and is verified live
+    // Pure helpers ONLY (FramingDistance / TryParseBg / PoseCatalog / NormalizeToken / ResolvePose).
+    // Everything expression-side resolves against a BAKED avatar, so it is a scene object and is
+    // verified live
     // (execute_code) by the coordinator, never in NUnit; see
     // docs/2026-07-17-render-thumbnail-design.md §Verification. No test here may create a GameObject,
     // add a VRC_AvatarDescriptor, or call RenderThumbnail.Render — that class of EditMode test
@@ -125,90 +125,21 @@ namespace Ryan6Vrc.AvatarTools.Tests
             StringAssert.Contains("path/GUID", err);
         }
 
-        // ===== Expression: path/GUID only, validated as the mirror image of pose =====
 
-        [Test]
-        public void Expression_Null_IsNone()
-        {
-            // No expression is a first-class outcome, not a degraded one: an avatar with no facial
-            // clips renders body-pose-only. Null short-circuits before the avatar is ever consulted.
-            bool ok = RenderThumbnail.ResolveExpressionOn(null, null, out AnimationClip clip, out string err);
 
-            Assert.IsTrue(ok);
-            Assert.IsNull(clip);
-            Assert.IsNull(err);
-        }
 
-        [Test]
-        public void Expression_MissingAsset_Fails()
-        {
-            bool ok = RenderThumbnail.ResolveExpressionOn(null,
-                "Packages/com.ryan6vrc.avatar-tools/Editor/nope.anim", out AnimationClip clip, out string err);
 
-            Assert.IsFalse(ok);
-            Assert.IsNull(clip);
-            StringAssert.Contains("no AnimationClip", err);
-        }
-
-        [Test]
-        public void Expression_PoseClipRejected_NamingTheOtherArg()
-        {
-            // The load-bearing swap guard: a humanoid muscle clip passed as `expression` would sample
-            // over the pose instead of compositing with it. Assert on the DIAGNOSTIC, not on the word
-            // "pose" — the asset path alone contains "pose", so that assertion survived the guard being
-            // removed entirely.
-            var pose = RenderThumbnail.PoseCatalog().First();
-
-            bool ok = RenderThumbnail.ResolveExpressionOn(null, pose.Path, out AnimationClip clip, out string err);
-
-            Assert.IsFalse(ok);
-            Assert.IsNull(clip);
-            StringAssert.Contains("isHumanMotion", err);
-        }
-
-        [Test]
-        public void Expression_UnknownOnAvatarlessCall_ReportsNoCandidates()
-        {
-            // A bare token with no avatar to consult: the error must say the corpus is empty rather than
-            // implying the name was wrong.
-            bool ok = RenderThumbnail.ResolveExpressionOn(null, "smile", out AnimationClip clip, out string err);
-
-            Assert.IsFalse(ok);
-            Assert.IsNull(clip);
-            StringAssert.Contains("no facial expressions", err);
-        }
 
         [Test]
         public void PoseCatalog_TokensAreUnique()
         {
             // A collision would make the winner depend on FindAssets order through an unstable sort.
-            // PoseCatalog throws on one; this asserts the shipped set is clean (and that it can be read).
+            // ResolvePose surfaces a collision as an err; this asserts the shipped set is clean.
             var tokens = RenderThumbnail.PoseCatalog().Select(e => e.Token).ToList();
 
             CollectionAssert.AllItemsAreUnique(tokens);
         }
 
-        [Test]
-        public void IsExpressionClip_AcceptsBlendShapeCurves()
-        {
-            var clip = new AnimationClip();
-            clip.SetCurve("Body", typeof(SkinnedMeshRenderer), "blendShape.eye_smile_1",
-                AnimationCurve.Constant(0f, 0f, 100f));
 
-            Assert.IsTrue(RenderThumbnail.IsExpressionClip(clip, out string err), err);
-        }
-
-        [Test]
-        public void IsExpressionClip_RejectsTransformOnlyClip()
-        {
-            // A clip that moves bones but touches no blendshape is not a facial expression — most
-            // likely a toggle or a gesture clip handed to the wrong arg.
-            var clip = new AnimationClip();
-            clip.SetCurve("Armature/Hips", typeof(Transform), "m_LocalPosition.x",
-                AnimationCurve.Constant(0f, 0f, 1f));
-
-            Assert.IsFalse(RenderThumbnail.IsExpressionClip(clip, out string err));
-            StringAssert.Contains("blendShape", err);
-        }
     }
 }

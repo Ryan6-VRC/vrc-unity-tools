@@ -2,8 +2,7 @@
     "name": "Ryan6VRC.AvatarTools.Editor",
     "rootNamespace": "Ryan6Vrc.AvatarTools.Editor",
     "references": [
-        "Ryan6VRC.AgentTools.Editor",
-        "nadena.dev.ndmf"
+        "Ryan6VRC.AgentTools.Editor"
     ],
     "includePlatforms": [
         "Editor"

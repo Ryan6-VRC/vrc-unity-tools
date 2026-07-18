@@ -49,17 +49,15 @@ doesn't — that single fact decides the correct capture surface for each.
 
 ## Verified mechanism (callables + source-verified traps)
 
-- **Bake:** `nadena.dev.ndmf` → `AvatarProcessor.ManualProcessAvatar(GameObject)` (`AvatarProcessor.cs:105`,
-  `[PublicAPI]`). Clones the passed object internally, returns the fully-baked clone (all phases → MA +
-  VRCFury + skeleton merge), original untouched. **Traps:** (1) it instantiates that clone **into the
-  live scene**, unhidden, shifted `+2` Z, and returns it only on success — an exception mid-bake strands
-  a reference-less orphan and dirties the live scene; (2) it writes generated assets to a **persistent**
-  folder named after the clone: `Assets/ZZZ_GeneratedAssets/<name>(Clone)/`, and **if that folder
-  already exists it is deleted wholesale** inside the bake (`AssetSaver.cs:39`; folder name from
-  `BuildContext.cs:158`). Both traps are handled by the **unique private clone** below. Do **not** use the
-  in-place `ProcessAvatar(GameObject)` overloads (mutate the root), and do **not** call
-  `AvatarProcessor.CleanTemporaryAssets()` post-bake (its temp-dir override is already disposed, so it
-  targets the wrong folder).
+- **Bake:** `VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPreprocessAvatar(GameObject)`
+  — the SDK preprocess chain (see `nondestructive.md` §The bake door for why NDMF's
+  `ManualProcessAvatar` is the wrong door). It mutates the object **in place** and returns `false` when
+  a hook blocks the build. **Traps:** (1) we must clone first — the argument is consumed, so a
+  uniquely-named private clone is made and the original never touched; (2) hooks can open **modal
+  dialogs** (VRCFury prompts per build on a broken Write Defaults mix), which wedges an MCP-driven
+  render — a timed-out bake means read the dialog, not retry; (3) the paired
+  `OnPostprocessAvatar()` **must** run, since that is what fires each hook's own cleanup — teardown
+  calls it from an inner `finally` so no earlier teardown step can skip it by throwing.
 - **Framing:** `VRC.SDKBase.VRC_AvatarDescriptor.PositionPortraitCamera(Transform)` (compiled in
   `VRCSDKBase.dll`; call sites SDK `RuntimeBlueprintCreation.cs:47`, CAU `Uploader.cs:615`). Sets the
   camera **transform only**, calibrated to the **default 60° FOV** — so **do not override FOV** (neither
@@ -102,7 +100,7 @@ doesn't — that single fact decides the correct capture surface for each.
 public static string Render(
     string target,            // avatar root: scene path or name (resolve like RenderAvatar's target)
     string pose = null,       // null => floor (unposed); a bundled pose token; or a clip asset path/GUID
-    string expression = null, // null => no expression; else a facial clip asset path/GUID (no vocabulary)
+    string expression = null, // null => none; else a gesture slot, clip name, or clip asset path/GUID
     string framing = "bust",  // bust | half | full — dolly distance over PositionPortraitCamera
     string bg = null,         // null => default backdrop; "#RRGGBB" => solid color (fail named on unparseable)
     bool   whatIf = false)    // preflight: resolve target/descriptor/pose/expression, report, bake NOTHING
@@ -118,10 +116,49 @@ error enumerates the glob, so what the tool advertises cannot drift from what sh
 ### The bake door
 
 `VRCBuildPipelineCallbacks.OnPreprocessAvatar`, per `nondestructive.md` §The bake door — the rule and
-its evidence live there, not here. Two consequences this tool absorbs: the call mutates its argument
-**in place** (so the clone *is* the baked avatar, with no second object to destroy) and returns `false`
-when a hook blocks the build, which is surfaced as a FAIL because such an avatar would not upload
-either.
+its evidence live there, not here. Three consequences this tool absorbs. The call mutates its argument
+**in place**, so the clone *is* the baked avatar with no second object to destroy. It returns `false`
+when a hook blocks the build, surfaced as a FAIL because such an avatar would not upload either. And
+its paired `OnPostprocessAvatar` **must** be called — it fires each hook's own cleanup, so teardown
+runs it from an inner `finally` that no earlier teardown step can skip by throwing.
+
+### `expression` — a second clip, applied not sampled
+
+The tool holds **no opinion about what an expression is**. It resolves the name the caller chose and
+applies it; choosing is the caller's job, and a heuristic here would be the tool doing the LLM's.
+
+`expression` is a state name on the baked FX controller, or a clip asset path/GUID. State-name
+resolution is the mechanism that matters: the bake renames and merges blendshapes, so a clip taken
+from a pre-bake asset can bind names the baked avatar no longer has, while a **state name survives**.
+Resolution therefore runs on the baked clone — which is also why `whatIf` cannot preflight it and
+simply echoes the token.
+
+Matching is `NormalizeToken` over every FX layer's state names, first match wins. No layer window (the
+bake reorders layers — Modular Avatar's `MergeBlendTreePass` uses `LayerPriority(int.MinValue)`, a sort
+key, so it prepends) and no filtering of what "counts" (a caller asking for `Open` will not
+accidentally match a `Shirt` toggle; the name they chose is the filter).
+
+Applying writes `blendShape.*` curves straight onto the renderers rather than sampling a second clip,
+because a second `SampleAnimationClip` re-runs the Animator's humanoid solver and partially undoes the
+pose — measured, left upper arm `(301.6,303.5,76.7)` → `(321.6,344.4,33.2)`. Pose and expression bind
+disjoint properties, not disjoint systems. A clip that moves nothing on the baked avatar is a named
+FAIL: it binds shapes this avatar lacks, or only meshes that are not drawn.
+
+### The pose vocabulary is a folder glob
+
+There is no hard-wired name array. `Editor/Poses/RTPose_<Name>.anim` IS the vocabulary: a token matches
+by normalizing both sides (lowercase, strip non-alphanumerics), so `hand-on-hip`, `hand_on_hip` and
+`HandOnHip` are one token. **Adding a pose is dropping a file** — no code edit — and the unknown-pose
+error enumerates the glob, so what the tool advertises cannot drift from what ships.
+
+### The bake door
+
+`VRCBuildPipelineCallbacks.OnPreprocessAvatar`, per `nondestructive.md` §The bake door — the rule and
+its evidence live there, not here. Three consequences this tool absorbs. The call mutates its argument
+**in place**, so the clone *is* the baked avatar with no second object to destroy. It returns `false`
+when a hook blocks the build, surfaced as a FAIL because such an avatar would not upload either. And
+its paired `OnPostprocessAvatar` **must** be called — it fires each hook's own cleanup, so teardown
+runs it from an inner `finally` that no earlier teardown step can skip by throwing.
 
 ### `expression` — a second clip, applied not sampled
 
@@ -129,23 +166,22 @@ Selected by **gesture slot** (`Open`, `Peace`, …), clip name, or asset path/GU
 portable name twice over: state names are stable across vendors where clip names are not, and the slot
 survives the bake where a clip's identity does not.
 
-Resolution is therefore two-phase — a pre-bake check so a bad selector fails before paying for a bake,
-then the authoritative re-resolve against the **baked** clone's FX controller, whose clips the bake
-itself rewrote and whose bindings therefore match the baked meshes by construction. The path form is
-an escape hatch; skipping post-bake sourcing costs, on one measured avatar and expression:
+Resolution is **deferred, not two-phase**. Only an asset selector (path/GUID) can be adjudicated
+pre-bake; a slot or clip name is checked *after* the bake, against the baked clone's FX controller —
+whose clips the bake itself rewrote, so their bindings match the baked meshes by construction. Gating a
+slot pre-bake would refuse composed avatars outright, because MA and VRCFury **install** gesture layers
+during preprocess: before it, the FX slot is often `isDefault` or a stock hands layer of
+`proxy_hands_*` muscle clips. `whatIf` reports a deferred selector as `(resolved at bake)`.
 
-```
-slot (post-bake sourcing) : shapes=42/42
-pre-bake asset path       : shapes=42/86    <- 44 curves bind names the bake removed
-```
+For the same reason the catalog scans **every** layer of the baked controller rather than the
+conventional 1–2 window: MA's `MergeBlendTreePass` adds its layer with `LayerPriority(int.MinValue)`,
+and `LayerPriority` is a sort key — it *prepends*, shifting the vendor's gesture layers out of that
+window. A full scan is safe because membership is gated by `IsExpressionClip` and deduped per
+(slot, clip identity), not by position.
 
 An unknown expression enumerates what the avatar offers (`Fist=F_blink, Open=F_smile_1, …`), so
-discovery needs no separate tool.
-
-`shapes=<applied>/<total>` counts every blendShape binding and only credits one that reaches a **drawn**
-renderer — a disabled or inactive one is a miss, since optimizers and MA routinely ship blush and
-star-eye meshes inactive. `ignored=<n>` reports non-blendShape curves, which this tool does not apply
-at all. Both exist so a half-right face is visible in the verdict rather than inferred from the PNG.
+discovery needs no separate tool. A clip that moves nothing on the baked avatar is a named FAIL — the
+signal that the clip and the avatar do not match.
 
 Deliberately **no bundled vocabulary**: expressions are avatar-specific, so a bare name fails with a
 pointer at the discovery route (`ReportController` on the FX controller — candidates sit on layers 1–2 —
@@ -171,13 +207,12 @@ a named FAIL rather than a portrait with a blank face and a verdict still claimi
 
 - **Verdict grammar** (matches the family — `[Tool] Verb <label> … => OK | key=val`; RunLog is
   intentionally **not** used — a render tool's artifact is the PNG, as with RenderAvatar):
-  - render: `[RenderThumbnail] Render <label> baked pose=<name|floor> expression=<path|none> [shapes=53/67] framing=bust silhouette=41% => OK | png=<temp>/renderthumbnail_<label>_<stamp>.png`
-  - preflight: `[RenderThumbnail] Render <label> whatIf pose=clasped expression=none descriptor=OK => WOULD-RENDER (no bake)` (pose/expression tokens = the arguments as passed, or `floor`/`none`)
+  - render: `[RenderThumbnail] Render <label> baked pose=<name|floor> expression=<name|none> [(<clip>)] framing=bust silhouette=41% => OK | png=<temp>/renderthumbnail_<label>_<stamp>.png`
+  - preflight: `[RenderThumbnail] Render <label> whatIf pose=clasped expression=Open (at bake) descriptor=OK => WOULD-RENDER (no bake)` (tokens = the arguments as passed, or `floor`/`none`)
   - the `png=` token is load-bearing (the deferred upload step consumes it) — keep it verbatim.
 - **Fail loud, named** (CLAUDE.md rule 7): missing `VRC_AvatarDescriptor`, unresolvable `pose`
   (error **enumerates the glob**: `unknown pose 'x' — bundled: Clasped, HandOnHip; or pass a clip asset
-  path/GUID`), an `expression` that is a muscle clip / carries no blendShape curves / lands zero shapes
-  on the baked avatar, unparseable `bg`, a non-`isHumanMotion` pose clip, a bake exception, or a
+  path/GUID`), an `expression` unknown to the baked controller or moving nothing on the baked avatar, unparseable `bg`, a non-`isHumanMotion` pose clip, a bake exception, or a
   near-empty silhouette (`silhouette≈0%` = "nothing drew"). `silhouette=NN%` is **reported**, not
   gated on a tuned middle threshold (per `dont-tune-tools-against-one-clean-asset`) — only ~0 fails; a
   low-but-nonzero value is surfaced for the operator to judge, replacing an unbacked "MA+VRCFury

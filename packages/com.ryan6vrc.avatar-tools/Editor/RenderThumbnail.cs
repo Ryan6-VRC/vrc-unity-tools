@@ -113,12 +113,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (!ResolvePose(pose, out AnimationClip _, out string poseErr))
                     return Fail(label, poseErr);
-                if (!PreflightExpression(expression, out string exprErr, out bool exprDeferred))
-                    return Fail(label, exprErr);
 
                 string poseToken = string.IsNullOrEmpty(pose) ? "floor" : pose;
-                string exprToken = string.IsNullOrEmpty(expression) ? "none" : expression;
-                if (exprDeferred) exprToken += " (resolved at bake)";
+                // Not preflighted: an expression resolves against the BAKED controller, which whatIf by
+                // definition does not have. Echoed so the caller can see what will be attempted.
+                string exprToken = string.IsNullOrEmpty(expression) ? "none" : expression + " (at bake)";
                 string ok = string.Format(CultureInfo.InvariantCulture,
                     "[RenderThumbnail] Render {0} whatIf pose={1} expression={2} descriptor=OK => WOULD-RENDER (no bake)",
                     label, poseToken, exprToken);
@@ -129,8 +128,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ---- Preflight resolution (fail fast, before any mutation) ----
             if (!ResolvePose(pose, out AnimationClip poseClip, out string renderPoseErr))
                 return Fail(label, renderPoseErr);
-            if (!PreflightExpression(expression, out string renderExprErr, out bool _))
-                return Fail(label, renderExprErr);
             bool wantExpression = !string.IsNullOrEmpty(expression);
             // poseName is the ORIGINAL pose argument (for verdict display), not the resolved asset path —
             // matches the whatIf branch's poseToken convention above. Same for expressionName.
@@ -279,24 +276,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // and PARTIALLY UNDOES the pose — the left upper arm moved (301.6,303.5,76.7) ->
                 // (321.6,344.4,33.2). Pose and expression bind disjoint properties, not disjoint systems.
                 // Writing weights straight onto the renderers leaves the pose byte-identical.
-                int shapesApplied = 0, shapesTotal = 0, shapesIgnored = 0;
                 string resolvedExpression = null;
                 if (wantExpression)
                 {
-                    // AUTHORITATIVE resolution: on the baked clone, whose FX controller holds the clips the
-                    // bake actually rewrote. A slot selector therefore lands on the post-bake clip, whose
-                    // bindings match the post-bake meshes by construction.
-                    if (!ResolveExpressionOn(baked, expression, out AnimationClip bakedExpr, out string bakedErr))
-                        throw new InvalidOperationException("after bake: " + bakedErr);
+                    var bakedExpr = FindExpressionClip(baked, expression, out string bakedErr);
+                    if (bakedExpr == null) throw new InvalidOperationException(bakedErr);
 
                     resolvedExpression = bakedExpr.name;
-                    shapesApplied = ApplyExpression(baked, bakedExpr, out shapesTotal, out shapesIgnored);
-                    if (shapesApplied == 0)
+                    if (ApplyExpression(baked, bakedExpr) == 0)
                         throw new InvalidOperationException(
-                            "expression '" + expressionName + "' (resolved to clip '" + resolvedExpression
-                            + "') moved no blendshape on the BAKED avatar — 0 of " + shapesTotal
-                            + " blendShape curves landed on a live renderer. The bake renamed, merged, or "
-                            + "dropped the face mesh, or the clip belongs to a different body.");
+                            "expression '" + expressionName + "' (clip '" + resolvedExpression
+                            + "') moved no blendshape on the baked avatar — it binds shapes this avatar "
+                            + "does not have, or only meshes that are not drawn");
                 }
 
                 // ---- Step 6: camera + off-screen sRGB capture (§Capture, source-verified) ----
@@ -366,19 +357,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 float fraction = pixels.Length > 0 ? (float)drawn / pixels.Length : 0f;
                 int pct = Mathf.RoundToInt(fraction * 100f);
 
-                // Everything about the expression that a reader needs to judge the portrait: which clip the
-                // selector actually resolved to post-bake, how many curves landed on a DRAWN renderer, and
-                // how many non-blendShape curves this tool does not apply at all.
-                string shapesToken = "";
-                if (wantExpression)
-                {
-                    shapesToken = "(" + resolvedExpression + ") shapes="
-                        + shapesApplied.ToString(CultureInfo.InvariantCulture)
-                        + "/" + shapesTotal.ToString(CultureInfo.InvariantCulture);
-                    if (shapesIgnored > 0)
-                        shapesToken += " ignored=" + shapesIgnored.ToString(CultureInfo.InvariantCulture);
-                    shapesToken = " " + shapesToken;
-                }
+                // Which clip the selector actually resolved to post-bake — the one thing the reader
+                // cannot infer from the arguments.
+                string shapesToken = wantExpression ? " (" + resolvedExpression + ")" : "";
                 prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName
                     + " expression=" + expressionName + shapesToken + " framing="
                     + framingToken + " silhouette=" + pct.ToString(CultureInfo.InvariantCulture) + "%";
@@ -402,8 +383,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             finally
             {
-                // ---- Step 7: teardown — runs on EVERY exit (success or throw). Every item guarded so a throw
-                // partway through setup still tears down cleanly. Order matters. ----
+                // ---- Step 7: teardown — runs on EVERY exit (success or throw). Order matters.
+                // The body is itself wrapped so the SDK postprocess pairing below can never be skipped:
+                // the steps here are guarded against null, not against throwing (the reflected
+                // ClearSceneDirtiness can raise TargetInvocationException; DestroyImmediate can raise on
+                // an already-destroyed object), and losing the pairing would leak exactly what it exists
+                // to clean while replacing the real pipeline exception with a teardown one. ----
+                try
+                {
                 if (rt != null) UnityEngine.Object.DestroyImmediate(rt);
                 if (tex != null) UnityEngine.Object.DestroyImmediate(tex);
 
@@ -439,17 +426,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         residualNote += " note=scene-dirty-uncleared: EditorSceneManager.ClearSceneDirtiness internals drifted";
                 }
 
-                // The SDK's preprocess/postprocess pair is a contract: OnPreprocessAvatar was called, so
-                // OnPostprocessAvatar must be too. It fires every hook's OWN cleanup (NDMF's temporary-asset
-                // sweep among them) rather than this tool guessing folder names it does not control.
-                // Generated assets that outlive it are not chased — every project accumulates some.
-                if (bakePreprocessed)
+                }
+                finally
                 {
-                    try { VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPostprocessAvatar(); }
-                    catch (Exception cleanupEx)
+                    // The SDK's preprocess/postprocess pair is a contract: OnPreprocessAvatar was called,
+                    // so OnPostprocessAvatar must be too. It fires every hook's OWN cleanup (NDMF's
+                    // temporary-asset sweep among them) rather than this tool guessing folder names it
+                    // does not control. Assets that outlive it are not chased — projects accumulate some.
+                    if (bakePreprocessed)
                     {
-                        // Surfaced, not swallowed — but never fatal: the PNG is already written.
-                        residualNote += " note=postprocess-cleanup-threw: " + cleanupEx.GetType().Name;
+                        try { VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPostprocessAvatar(); }
+                        catch (Exception cleanupEx)
+                        {
+                            // Surfaced, not swallowed — but never fatal: the PNG is already written.
+                            residualNote += " note=postprocess-cleanup-threw: " + cleanupEx.GetType().Name;
+                        }
                     }
                 }
             }
@@ -479,59 +470,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Write the clip's <c>blendShape.*</c> curves straight onto the baked clone's renderers.
-        /// Returns how many landed; <paramref name="total"/> receives how many were tried and
-        /// <paramref name="ignored"/> how many non-blendShape curves were passed over (an expression IS
-        /// its blendshape curves, so nothing else is applied — but a caller must be able to see that a
-        /// clip carrying toggles or material swaps renders only partly).
-        /// <para>Applying rather than sampling is what keeps the pose intact (see the call site). The
-        /// counts are what keep the verdict honest: a clip authored for a different body, or a bake that
-        /// renamed the face mesh, lands fewer than it tried.</para>
+        /// Write the clip's <c>blendShape.*</c> curves straight onto the baked clone's renderers and
+        /// return how many landed on a DRAWN one. Only blendShape curves are applied — an expression is
+        /// its blendshape curves. Applying rather than sampling is what keeps the pose intact (see the
+        /// call site); a zero return is the caller's signal that the clip and the baked avatar do not
+        /// match.
         /// </summary>
-        private static int ApplyExpression(GameObject baked, AnimationClip clip, out int total, out int ignored)
+        private static int ApplyExpression(GameObject baked, AnimationClip clip)
         {
             int applied = 0;
-            total = 0;
-            ignored = 0;
-            // Skip causes are counted separately so a zero/partial landing NAMES its reason instead of
-            // leaving the reader a four-way guess.
-            int pathMiss = 0, noMesh = 0, shapeMiss = 0, notDrawn = 0, emptyCurve = 0;
-
-            // Material and sprite swaps are objectReference curves, a SEPARATE list from the float curves
-            // below — counting only the float list would report ignored=0 for a clip that visibly swaps a
-            // material, which is precisely the "renders only partly" case ignored= exists to reveal.
-            ignored += AnimationUtility.GetObjectReferenceCurveBindings(clip).Length;
 
             foreach (var binding in AnimationUtility.GetCurveBindings(clip))
             {
                 if (binding.propertyName == null
-                    || !binding.propertyName.StartsWith("blendShape.", StringComparison.Ordinal))
-                {
-                    // Counted, not silently dropped: a clip carrying transform/material/toggle curves is
-                    // only PARTLY rendered by this tool, and the caller has to be able to see that.
-                    ignored++;
-                    continue;
-                }
-                total++;
+                    || !binding.propertyName.StartsWith("blendShape.", StringComparison.Ordinal)) continue;
 
                 Transform t = string.IsNullOrEmpty(binding.path)
                     ? baked.transform
                     : baked.transform.Find(binding.path);
-                if (t == null) { pathMiss++; continue; }
+                var smr = t != null ? t.GetComponent<SkinnedMeshRenderer>() : null;
+                if (smr == null || smr.sharedMesh == null) continue;
 
-                var smr = t.GetComponent<SkinnedMeshRenderer>();
-                if (smr == null || smr.sharedMesh == null) { noMesh++; continue; }
-
-                // A weight written to a disabled or inactive renderer changes nothing visible. Counting it
-                // as "landed" is exactly the lie shapes=N/N must not tell — optimizers and MA routinely
-                // leave blush/star-eye meshes inactive by default.
-                if (!smr.enabled || !smr.gameObject.activeInHierarchy) { notDrawn++; continue; }
+                // A weight written to a disabled or inactive renderer changes nothing visible, so it does
+                // not count as landed — optimizers and MA routinely leave blush/star-eye meshes inactive.
+                if (!smr.enabled || !smr.gameObject.activeInHierarchy) continue;
 
                 int index = smr.sharedMesh.GetBlendShapeIndex(binding.propertyName.Substring("blendShape.".Length));
-                if (index < 0) { shapeMiss++; continue; }
+                if (index < 0) continue;
 
                 var curve = AnimationUtility.GetEditorCurve(clip, binding);
-                if (curve == null || curve.length == 0) { emptyCurve++; continue; }
+                if (curve == null || curve.length == 0) continue;
 
                 // Evaluate at clip.length, matching the pose's sample-at-clip.length convention. Curves
                 // default to ClampForever, so for the single-key clips expressions almost always are this
@@ -539,11 +507,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 smr.SetBlendShapeWeight(index, curve.Evaluate(clip.length));
                 applied++;
             }
-
-            if (applied == 0 && total > 0)
-                Debug.LogWarning("[RenderThumbnail] expression clip '" + clip.name + "' landed nothing — "
-                    + "pathMiss=" + pathMiss + " noMesh=" + noMesh + " notDrawn=" + notDrawn
-                    + " shapeMiss=" + shapeMiss + " emptyCurve=" + emptyCurve);
             return applied;
         }
 
@@ -646,21 +609,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string trimmed = pose.Trim();
             var catalog = PoseCatalog();
 
-            // Two files normalizing to one token (RTPose_Hand_On_Hip vs RTPose_HandOnHip) would make the
-            // winner depend on FindAssets order through an unstable sort while the error advertised both
-            // as reachable. The glob's whole point is that poses land without anyone reviewing this file,
-            // which is exactly when such a collision ships unnoticed. Surfaced as a FAIL verdict rather
-            // than an exception: every consumer parses the one-line grammar, and a throw here would also
-            // poison calls that pass no pose at all.
-            for (int i = 1; i < catalog.Count; i++)
-                if (catalog[i].Token == catalog[i - 1].Token)
-                {
-                    err = "two bundled poses normalize to the same token '" + catalog[i].Token + "': "
-                        + catalog[i - 1].Path + " and " + catalog[i].Path
-                        + " — rename one (tokens ignore case and punctuation)";
-                    return false;
-                }
-
             // A bundled token never contains '/', so the vocabulary lookup can safely precede the
             // path/GUID branch.
             if (trimmed.IndexOf('/') < 0)
@@ -727,213 +675,62 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Pre-bake gate for <c>expression</c>, deliberately narrow: it rejects only what a pre-bake read
-        /// can actually adjudicate — an asset selector (path/GUID) that will not load or is not an
-        /// expression clip. A bare slot or clip name is <b>deferred</b> (<paramref name="deferred"/> true),
-        /// never rejected.
-        /// <para>Gesture layers are frequently <i>installed during preprocess</i>: on a VRCFury/MA avatar
-        /// the descriptor's FX slot is often <c>isDefault</c> (no controller at all) or the stock hands
-        /// layer whose states hold <c>proxy_hands_*</c> muscle clips. Enumerating pre-bake there yields
-        /// nothing, so gating on it would hard-fail exactly the composed avatars this tool exists for —
-        /// and would empty the discovery route besides. The authoritative resolve happens on the baked
-        /// clone.</para>
+        /// Find the clip for <paramref name="expression"/> on the BAKED avatar: a clip asset path or
+        /// 32-hex GUID loads directly; anything else is matched (via <see cref="NormalizeToken"/>)
+        /// against the state names of the baked FX controller's layers. Null with a null
+        /// <paramref name="err"/> means no expression was asked for.
+        /// <para>Resolving on the baked avatar rather than the source asset is the whole mechanism: the
+        /// bake renames and merges blendshapes, so a pre-bake clip can bind names the baked avatar no
+        /// longer has, while a state name survives. This makes no judgement about what "is" an
+        /// expression — it resolves the name the caller chose. Choosing is the caller's job.</para>
         /// </summary>
-        internal static bool PreflightExpression(string expression, out string err, out bool deferred)
+        internal static AnimationClip FindExpressionClip(GameObject baked, string expression, out string err)
         {
             err = null;
-            deferred = false;
-            if (string.IsNullOrEmpty(expression)) return true;
-
-            if (!IsAssetSelector(expression.Trim()))
-            {
-                deferred = true;   // a slot/clip name is only knowable post-bake
-                return true;
-            }
-            return ResolveExpressionOn(null, expression, out AnimationClip _, out err);
-        }
-
-        /// <summary>True when the selector names an asset (contains '/' or is a 32-hex GUID) rather than a
-        /// gesture slot or clip name.</summary>
-        private static bool IsAssetSelector(string s)
-        {
-            return s.IndexOf('/') >= 0 || IsGuid(s);
-        }
-
-        /// <summary>One selectable expression: the gesture <c>Slot</c> it sits on (the portable name —
-        /// state names like <c>Peace</c>/<c>Open</c> are stable across vendors where clip names are not),
-        /// the <c>ClipName</c>, and the <c>Clip</c> itself.</summary>
-        internal struct ExpressionEntry
-        {
-            public string Slot;
-            public string ClipName;
-            public AnimationClip Clip;
-        }
-
-        /// <summary>
-        /// The avatar's selectable expressions, from its FX controller's gesture layers (1–2 by the
-        /// VRChat convention — worlds depend on gesture expressions living there, so authors and
-        /// optimizers hold to it). <see cref="IsExpressionClip"/> gates membership, which drops the
-        /// 0-binding <c>Dummy</c>/<c>Empty</c> idles.
-        /// <para><b>Call this on the BAKED avatar.</b> The bake renames and merges, so a clip from the
-        /// pre-bake asset can bind shapes the baked avatar no longer has. The slot survives the bake;
-        /// the clip's identity does not.</para>
-        /// </summary>
-        internal static List<ExpressionEntry> ExpressionCatalog(GameObject avatarRoot)
-        {
-            var entries = new List<ExpressionEntry>();
-            if (avatarRoot == null) return entries;
-
-            var descriptor = avatarRoot.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
-            if (descriptor == null || descriptor.baseAnimationLayers == null) return entries;
-
-            UnityEditor.Animations.AnimatorController fx = null;
-            foreach (var layer in descriptor.baseAnimationLayers)
-                if (layer.type == VRC.SDK3.Avatars.Components.VRCAvatarDescriptor.AnimLayerType.FX)
-                    fx = layer.animatorController as UnityEditor.Animations.AnimatorController;
-            if (fx == null) return entries;
-
-            // Deduped on (slot, clip) — NOT on the clip alone. Layers 1 and 2 mirror each other, which is
-            // what needs collapsing, but vendors also map several slots to ONE clip (Victory and Peace both
-            // playing the same smile). Keying on the clip would register whichever slot came first and make
-            // the other a hard miss on a name the operator can read in the Animator.
-            var seen = new HashSet<string>();
-            for (int i = 1; i <= 2 && i < fx.layers.Length; i++)
-                CollectExpressionStates(fx.layers[i].stateMachine, seen, entries);
-            return entries;
-        }
-
-        /// <summary>Walk a gesture layer's states and sub-state-machines, registering the first expression
-        /// clip each state offers. A state's motion may be a BlendTree (analog-gesture layers), whose
-        /// children are searched rather than skipped.</summary>
-        private static void CollectExpressionStates(
-            UnityEditor.Animations.AnimatorStateMachine sm, HashSet<string> seen, List<ExpressionEntry> entries)
-        {
-            if (sm == null) return;
-
-            foreach (var cs in sm.states)
-            {
-                var clip = FirstExpressionClip(cs.state.motion);
-                if (clip == null) continue;
-                if (!seen.Add(cs.state.name + " " + clip.name)) continue;
-                entries.Add(new ExpressionEntry { Slot = cs.state.name, ClipName = clip.name, Clip = clip });
-            }
-            foreach (var child in sm.stateMachines)
-                CollectExpressionStates(child.stateMachine, seen, entries);
-        }
-
-        /// <summary>The first clip in a motion (itself, or depth-first through a BlendTree) that reads as a
-        /// facial expression. Null when the motion offers none.</summary>
-        private static AnimationClip FirstExpressionClip(Motion motion)
-        {
-            if (motion is AnimationClip clip)
-                return IsExpressionClip(clip, out string _) ? clip : null;
-
-            if (motion is UnityEditor.Animations.BlendTree tree)
-                foreach (var child in tree.children)
-                {
-                    var hit = FirstExpressionClip(child.motion);
-                    if (hit != null) return hit;
-                }
-            return null;
-        }
-
-        /// <summary>
-        /// Resolve <paramref name="expression"/> against <paramref name="avatarRoot"/>: null/empty =&gt; no
-        /// expression (<paramref name="clip"/> null, no error — the supported outcome for an avatar with no
-        /// facial clips, not a degraded one); a gesture slot or clip name (matched via
-        /// <see cref="NormalizeToken"/> against <see cref="ExpressionCatalog"/>); or an asset path/GUID as
-        /// an escape hatch. There is no BUNDLED vocabulary — expressions are avatar-specific — but the
-        /// avatar supplies its own, which the unknown-expression error enumerates.
-        /// </summary>
-        internal static bool ResolveExpressionOn(
-            GameObject avatarRoot, string expression, out AnimationClip clip, out string err)
-        {
-            clip = null;
-            err = null;
-            if (string.IsNullOrEmpty(expression)) return true; // no expression
+            if (string.IsNullOrEmpty(expression)) return null;
 
             string trimmed = expression.Trim();
 
-            // Escape hatch: an explicit asset. Honoured as given — but a pre-bake asset may bind shape
-            // names the baked avatar no longer has, which the verdict's shapes=applied/total then shows.
-            string assetPath = null;
-            if (trimmed.IndexOf('/') >= 0) assetPath = trimmed;
-            else if (IsGuid(trimmed))
+            if (trimmed.IndexOf('/') >= 0 || IsGuid(trimmed))
             {
-                assetPath = AssetDatabase.GUIDToAssetPath(trimmed);
-                if (string.IsNullOrEmpty(assetPath))
-                {
-                    err = "GUID '" + trimmed + "' did not resolve to any asset";
-                    return false;
-                }
+                string path = IsGuid(trimmed) ? AssetDatabase.GUIDToAssetPath(trimmed) : trimmed;
+                var asset = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
+                if (asset == null) err = "no AnimationClip at '" + trimmed + "'";
+                return asset;
             }
 
-            if (assetPath != null)
-            {
-                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(assetPath);
-                if (clip == null)
-                {
-                    err = "no AnimationClip found at '" + assetPath + "'";
-                    return false;
-                }
-                if (!IsExpressionClip(clip, out string why))
-                {
-                    err = "clip '" + assetPath + "' " + why;
-                    clip = null;
-                    return false;
-                }
-                return true;
-            }
-
-            var catalog = ExpressionCatalog(avatarRoot);
             string key = NormalizeToken(trimmed);
-            foreach (var entry in catalog)
-                if (NormalizeToken(entry.Slot) == key || NormalizeToken(entry.ClipName) == key)
+            foreach (var layer in FxLayers(baked))
+            {
+                if (layer.stateMachine == null) continue;
+                foreach (var cs in layer.stateMachine.states)
                 {
-                    clip = entry.Clip;
-                    return true;
+                    if (NormalizeToken(cs.state.name) != key) continue;
+                    var clip = cs.state.motion as AnimationClip;
+                    if (clip != null) return clip;
                 }
-
-            if (catalog.Count == 0)
-            {
-                err = "expression '" + expression + "' — this avatar exposes no facial expressions on its "
-                    + "FX gesture layers (nothing on layers 1-2 binds blendShape curves). Render without "
-                    + "an expression, or pass a clip asset path/GUID explicitly";
-                return false;
             }
-            var offered = new List<string>();
-            foreach (var entry in catalog) offered.Add(entry.Slot + "=" + entry.ClipName);
-            err = "unknown expression '" + expression + "' — this avatar offers: "
-                + string.Join(", ", offered.ToArray()) + "; or pass a clip asset path/GUID";
-            return false;
+            err = "no state named '" + expression + "' on the baked FX controller — read the controller "
+                + "with ReportController to see what it offers, or pass a clip asset path/GUID";
+            return null;
         }
 
-        /// <summary>
-        /// A facial expression clip is the mirror image of a pose clip: NOT <c>isHumanMotion</c> (muscle
-        /// curves would sample over the pose rather than composite with it) and carrying at least one
-        /// <c>blendShape.*</c> binding. Measured on real vendor FX: expression clips are 100%
-        /// blendShape curves on the face mesh, while gesture/pose clips are 100% muscle — the two bind
-        /// disjoint sets and cannot fight, which is what makes compositing them safe.
-        /// </summary>
-        internal static bool IsExpressionClip(AnimationClip clip, out string err)
+        /// <summary>The baked avatar's FX layers, or empty when it has no FX controller.</summary>
+        private static UnityEditor.Animations.AnimatorControllerLayer[] FxLayers(GameObject baked)
         {
-            err = null;
-            if (clip == null) { err = "is null"; return false; }
+            var descriptor = baked != null
+                ? baked.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>()
+                : null;
+            if (descriptor == null || descriptor.baseAnimationLayers == null)
+                return new UnityEditor.Animations.AnimatorControllerLayer[0];
 
-            if (clip.isHumanMotion)
-            {
-                err = "is a humanoid muscle clip (isHumanMotion=true) — that is a body pose, pass it as `pose`";
-                return false;
-            }
-
-            foreach (var binding in AnimationUtility.GetCurveBindings(clip))
-                if (binding.propertyName != null
-                    && binding.propertyName.StartsWith("blendShape.", StringComparison.Ordinal))
-                    return true;
-
-            err = "has no blendShape.* curves — not a facial expression";
-            return false;
+            foreach (var layer in descriptor.baseAnimationLayers)
+                if (layer.type == VRC.SDK3.Avatars.Components.VRCAvatarDescriptor.AnimLayerType.FX
+                    && layer.animatorController is UnityEditor.Animations.AnimatorController fx)
+                    return fx.layers;
+            return new UnityEditor.Animations.AnimatorControllerLayer[0];
         }
+
 
         private static bool IsGuid(string s)
         {
