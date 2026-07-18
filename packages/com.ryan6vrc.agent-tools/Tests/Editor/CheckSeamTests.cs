@@ -547,7 +547,7 @@ public class CheckSeamTests
     // ── Task 5: the ε coincidence gate — PASS / NOT-PASS + offenders ────────────────────────────────────
     // Fixtures put base bones and merge bones both at their root origin (localPosition 0) ⇒ coincident ⇒
     // delta 0; move a merge bone's localPosition to inject a known world offset. SpanMm=350 (BuildSeam) ⇒
-    // ε = max(0.5, 0.002·350) = 0.7mm.
+    // ε = max(0.5, 0.003·350) = 1.05mm.
 
     [Test]
     public void Gate_coincident_pass()
@@ -561,8 +561,10 @@ public class CheckSeamTests
         StringAssert.Contains("offenders=0", r);
         StringAssert.Contains("context=0 dropped=0", r);
         StringAssert.DoesNotContain("maxOffset", r); // G37: PASS carries no offender magnitude
+        StringAssert.Contains("maxWithinEps=", r);   // PASS surfaces the sub-ε band on the one-liner
         var body = ReadLog(r);
         StringAssert.Contains("_(all within ε)_", body);
+        StringAssert.Contains("maxWithinEps=", body); // and in the RunLog body
     }
 
     [Test]
@@ -570,7 +572,7 @@ public class CheckSeamTests
     {
         BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Chest", "Spine" },
             weights: new[] { ("Chest", 1.0f), ("Spine", 1.0f) });
-        // ε = 0.7mm; offset Chest by ε+1mm = 1.7mm (0.0017 world units) ⇒ one offender.
+        // ε = 1.05mm; offset Chest by 1.7mm (0.0017 world units) — still > ε ⇒ one offender.
         FindBone(mergeGO, "Chest").localPosition = new Vector3(0.0017f, 0f, 0f);
         var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r);
@@ -584,9 +586,8 @@ public class CheckSeamTests
     [Test]
     public void Gate_boundary()
     {
-        // ε = 0.7mm. One fixture, one bone (a second fixture would collide on the "Base"/"Merge" hierarchy
-        // path and Resolve would return the first): at ε−0.1mm (0.6mm) → PASS; nudged to ε+0.1mm (0.8mm) →
-        // NOT-PASS.
+        // ε = 1.05mm. One fixture, one bone (a second fixture would collide on the "Base"/"Merge" hierarchy
+        // path and Resolve would return the first): at 0.6mm (< ε) → PASS; nudged to 1.2mm (> ε) → NOT-PASS.
         BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Chest", "Spine" },
             weights: new[] { ("Chest", 1.0f), ("Spine", 1.0f) });
         var chest = FindBone(mergeGO, "Chest");
@@ -594,10 +595,14 @@ public class CheckSeamTests
         chest.localPosition = new Vector3(0.0006f, 0f, 0f); // 0.6mm < ε
         var r1 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> PASS", r1);
+        // Lock the real sub-ε magnitude + even-count median formatting: offsets {Chest 0.6, Spine 0.0} ⇒
+        // max 0.60, median (0.0+0.6)/2 = 0.30. Guards against an empty-list/stuck-0/wrong-set/broken-Median
+        // bug that a coincident all-0.00 PASS would leave green.
+        StringAssert.Contains("maxWithinEps=0.60mm (median 0.30mm)", r1);
         ReadLog(r1); // sets _logPath; delete now so both boundary logs are cleaned (TearDown handles r2)
         if (!string.IsNullOrEmpty(_logPath)) AssetDatabase.DeleteAsset(_logPath);
 
-        chest.localPosition = new Vector3(0.0008f, 0f, 0f); // 0.8mm > ε
+        chest.localPosition = new Vector3(0.0012f, 0f, 0f); // 1.2mm > ε
         var r2 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r2);
         ReadLog(r2);
