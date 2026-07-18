@@ -595,6 +595,10 @@ public class CheckSeamTests
         chest.localPosition = new Vector3(0.0006f, 0f, 0f); // 0.6mm < ε
         var r1 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> PASS", r1);
+        // Lock the real sub-ε magnitude + even-count median formatting: offsets {Chest 0.6, Spine 0.0} ⇒
+        // max 0.60, median (0.0+0.6)/2 = 0.30. Guards against an empty-list/stuck-0/wrong-set/broken-Median
+        // bug that a coincident all-0.00 PASS would leave green.
+        StringAssert.Contains("maxWithinEps=0.60mm (median 0.30mm)", r1);
         ReadLog(r1); // sets _logPath; delete now so both boundary logs are cleaned (TearDown handles r2)
         if (!string.IsNullOrEmpty(_logPath)) AssetDatabase.DeleteAsset(_logPath);
 
