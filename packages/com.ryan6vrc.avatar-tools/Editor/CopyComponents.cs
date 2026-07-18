@@ -115,7 +115,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public readonly List<string> tableDriftOffenders = new List<string>();
 
         /// <summary>
-        /// A1 ambiguous-rename reasons hit while PREDICTING host counterparts under a <c>renameMap</c>. A
+        /// A1 ambiguous-rename reasons hit while PREDICTING host counterparts under a <c>vendorToOwned</c>. A
         /// planner <c>Counterpart</c> reads an A1-null as "mint/scaffold", so without surfacing it a whatIf
         /// preview would PASS while execute's <c>EnsureHost</c> A1 guard FAILs (preview ≠ execute). A non-empty
         /// list is a hard precondition FAIL in BOTH modes, before any mutation. Deduped.
@@ -204,7 +204,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// </summary>
         public static CopyPlan BuildPlan(GameObject ownedRoot, GameObject vendorSource,
                                          string[] typeNames, string[] force = null,
-                                         IDictionary<string, string> renameMap = null)
+                                         IDictionary<string, string> vendorToOwned = null)
         {
             var plan = new CopyPlan();
             if (ownedRoot == null || vendorSource == null) return plan;
@@ -278,13 +278,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // Deep tier in dependency order: colliders/contacts (no deps) → physbones (dep: colliders) →
             // constraints (dep: Sources). A physbone's hard-dep colliders are pulled here if not seeded.
-            foreach (var c in seedColliders)   PlanDeepComponent(c, false, plan, vendorRoot, ourRoot, vendorBones, forceSet, willCopyComponent, predictedDestPath, plannedSlots, planned, renameMap);
-            foreach (var c in seedContacts)    PlanDeepComponent(c, false, plan, vendorRoot, ourRoot, vendorBones, forceSet, willCopyComponent, predictedDestPath, plannedSlots, planned, renameMap);
-            foreach (var c in seedPhysBones)   PlanDeepComponent(c, false, plan, vendorRoot, ourRoot, vendorBones, forceSet, willCopyComponent, predictedDestPath, plannedSlots, planned, renameMap);
-            foreach (var c in seedConstraints) PlanDeepComponent(c, false, plan, vendorRoot, ourRoot, vendorBones, forceSet, willCopyComponent, predictedDestPath, plannedSlots, planned, renameMap);
+            foreach (var c in seedColliders)   PlanDeepComponent(c, false, plan, vendorRoot, ourRoot, vendorBones, forceSet, willCopyComponent, predictedDestPath, plannedSlots, planned, vendorToOwned);
+            foreach (var c in seedContacts)    PlanDeepComponent(c, false, plan, vendorRoot, ourRoot, vendorBones, forceSet, willCopyComponent, predictedDestPath, plannedSlots, planned, vendorToOwned);
+            foreach (var c in seedPhysBones)   PlanDeepComponent(c, false, plan, vendorRoot, ourRoot, vendorBones, forceSet, willCopyComponent, predictedDestPath, plannedSlots, planned, vendorToOwned);
+            foreach (var c in seedConstraints) PlanDeepComponent(c, false, plan, vendorRoot, ourRoot, vendorBones, forceSet, willCopyComponent, predictedDestPath, plannedSlots, planned, vendorToOwned);
 
             // Conservative tier last, so a conservative ref to a deep component would resolve via the map.
-            foreach (var c in seedConservative) PlanConservativeComponent(c, plan, vendorRoot, ourRoot, plannedSlots, planned, renameMap);
+            foreach (var c in seedConservative) PlanConservativeComponent(c, plan, vendorRoot, ourRoot, plannedSlots, planned, vendorToOwned);
 
             return plan;
         }
@@ -311,7 +311,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                       Dictionary<Transform, string> predictedDestPath,
                                       Dictionary<(Transform host, Type type), int> plannedSlots,
                                       HashSet<Component> planned,
-                                      IDictionary<string, string> renameMap)
+                                      IDictionary<string, string> vendorToOwned)
         {
             if (vc == null || planned.Contains(vc)) return;
             planned.Add(vc);
@@ -331,14 +331,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Transform when it exists (InPlace), else the unique vendor host Transform (recreate/scaffold,
             // whose dest doesn't exist yet → M is 0). m is the initial dest count of this type.
             Transform vendorHost = vc.transform;
-            Transform dstHost = CounterpartRec(vendorRoot, ourRoot, vendorHost, renameMap, plan);
+            Transform dstHost = CounterpartRec(vendorRoot, ourRoot, vendorHost, vendorToOwned, plan);
 
             Transform parityHost;
             int m;
             bool isBone = vendorBones.Contains(vendorHost);
             step.isBone = isBone;   // deep-tier classification, surfaced in the flagged-missing note
             Transform leafParentDst = (vendorHost.parent != null)
-                ? CounterpartRec(vendorRoot, ourRoot, vendorHost.parent, renameMap, plan) : null;
+                ? CounterpartRec(vendorRoot, ourRoot, vendorHost.parent, vendorToOwned, plan) : null;
             if (dstHost != null)
             {
                 step.action = CopyAction.InPlace;
@@ -407,15 +407,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (field.IndexOf("[]", StringComparison.Ordinal) >= 0)
                     PlanTokenHardDep(vc, field, plan, vendorRoot, ourRoot, vendorBones, forceSet,
-                                     willCopyComponent, predictedDestPath, plannedSlots, planned, step, renameMap);
+                                     willCopyComponent, predictedDestPath, plannedSlots, planned, step, vendorToOwned);
                 else
                     PlanArrayHardDep(vc, field, plan, vendorRoot, ourRoot, vendorBones, forceSet,
-                                     willCopyComponent, predictedDestPath, plannedSlots, planned, step, renameMap);
+                                     willCopyComponent, predictedDestPath, plannedSlots, planned, step, vendorToOwned);
             }
 
             // Soft deps: a referent that is absent under our hierarchy is silently dropped (no flag).
             foreach (var field in d.softDepFieldPaths)
-                PredictSoftDeps(vc, field, vendorRoot, ourRoot, plan, step, renameMap);
+                PredictSoftDeps(vc, field, vendorRoot, ourRoot, plan, step, vendorToOwned);
 
             // Promote to HardDepNull action if any hard-dep entry was predicted null on a copied component.
             foreach (var rp in step.refs)
@@ -437,7 +437,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                      Dictionary<Transform, string> predictedDestPath,
                                      Dictionary<(Transform host, Type type), int> plannedSlots,
                                      HashSet<Component> planned, CopyStep step,
-                                     IDictionary<string, string> renameMap)
+                                     IDictionary<string, string> vendorToOwned)
         {
             var so = new SerializedObject(vc);
             var prop = FindProperty(so, field);
@@ -450,7 +450,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (el.propertyType != SerializedPropertyType.ObjectReference) continue;
                 var refComp = el.objectReferenceValue as Component;
                 FollowHardDepRef(refComp, field, plan, vendorRoot, ourRoot, vendorBones, forceSet,
-                                 willCopyComponent, predictedDestPath, plannedSlots, planned, step, renameMap);
+                                 willCopyComponent, predictedDestPath, plannedSlots, planned, step, vendorToOwned);
             }
         }
 
@@ -467,7 +467,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                      Dictionary<Transform, string> predictedDestPath,
                                      Dictionary<(Transform host, Type type), int> plannedSlots,
                                      HashSet<Component> planned, CopyStep step,
-                                     IDictionary<string, string> renameMap)
+                                     IDictionary<string, string> vendorToOwned)
         {
             int br = token.IndexOf("[]", StringComparison.Ordinal);
             string arrayField = token.Substring(0, br);
@@ -490,7 +490,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 // The source transform's counterpart must exist (or be scheduled to exist). For a constraint
                 // source that's a transform (not a copied component), "will be present" = counterpart exists.
-                var dt = CounterpartRec(vendorRoot, ourRoot, t, renameMap, plan);
+                var dt = CounterpartRec(vendorRoot, ourRoot, t, vendorToOwned, plan);
                 if (dt == null && !WillTransformExist(t, predictedDestPath))
                 {
                     step.refs.Add(new RefPrediction
@@ -514,7 +514,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                      Dictionary<Transform, string> predictedDestPath,
                                      Dictionary<(Transform host, Type type), int> plannedSlots,
                                      HashSet<Component> planned, CopyStep step,
-                                     IDictionary<string, string> renameMap)
+                                     IDictionary<string, string> vendorToOwned)
         {
             if (refComp == null) return;
             Transform rt = refComp.transform;
@@ -524,12 +524,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Pull the referent into the plan if it's deep-tier and not already planned (the dedup lever).
             if (VrcComponentTable.Lookup(refComp) != null && !planned.Contains(refComp))
                 PlanDeepComponent(refComp, true, plan, vendorRoot, ourRoot, vendorBones, forceSet,
-                                  willCopyComponent, predictedDestPath, plannedSlots, planned, renameMap);
+                                  willCopyComponent, predictedDestPath, plannedSlots, planned, vendorToOwned);
 
             // Now predict the entry: copied → resolves through the session map; not copied → null + flag.
             bool willCopy = willCopyComponent.TryGetValue(refComp, out var wc) && wc;
             bool willBePresent = willCopy ||
-                                 CounterpartRec(vendorRoot, ourRoot, rt, renameMap, plan) != null;
+                                 CounterpartRec(vendorRoot, ourRoot, rt, vendorToOwned, plan) != null;
             if (!willBePresent)
             {
                 step.refs.Add(new RefPrediction
@@ -543,7 +543,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>Predict soft-dep entries (e.g. <c>ignoreTransforms</c>): absent referent → silently dropped, no flag.</summary>
         static void PredictSoftDeps(Component vc, string field, Transform vendorRoot, Transform ourRoot, CopyPlan plan, CopyStep step,
-                                    IDictionary<string, string> renameMap)
+                                    IDictionary<string, string> vendorToOwned)
         {
             var so = new SerializedObject(vc);
             var prop = FindProperty(so, field);
@@ -558,7 +558,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (o == null) continue;
                 Transform t = AsTransform(o);
                 if (t == null || !t.IsChildOf(vendorRoot)) continue;   // external → left untouched
-                if (CounterpartRec(vendorRoot, ourRoot, t, renameMap, plan) == null)
+                if (CounterpartRec(vendorRoot, ourRoot, t, vendorToOwned, plan) == null)
                 {
                     step.refs.Add(new RefPrediction
                     {
@@ -581,7 +581,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                               Transform vendorRoot, Transform ourRoot,
                                               Dictionary<(Transform host, Type type), int> plannedSlots,
                                               HashSet<Component> planned,
-                                              IDictionary<string, string> renameMap)
+                                              IDictionary<string, string> vendorToOwned)
         {
             if (vc == null || planned.Contains(vc)) return;
             planned.Add(vc);
@@ -594,7 +594,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 isDeepTier      = false,
             };
 
-            Transform dstHost = CounterpartRec(vendorRoot, ourRoot, vc.transform, renameMap, plan);
+            Transform dstHost = CounterpartRec(vendorRoot, ourRoot, vc.transform, vendorToOwned, plan);
             if (dstHost == null)
             {
                 step.action = CopyAction.FlaggedMissing;
@@ -712,14 +712,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>
         /// Rename-aware <see cref="RemapReferencesByPath.Counterpart"/> that RECORDS an A1 ambiguous-rename
         /// failReason into <paramref name="plan"/> (deduped). Every planner host-resolution decision routes
-        /// through here so a pathological renameMap surfaces as a door-level FAIL in BOTH whatIf and execute,
+        /// through here so a pathological vendorToOwned surfaces as a door-level FAIL in BOTH whatIf and execute,
         /// rather than a whatIf-only PASS (preview ≠ execute). A plain missing path (failReason == null)
         /// records nothing — it stays a normal mint/flag decision.
         /// </summary>
         static Transform CounterpartRec(Transform vendorRoot, Transform ourRoot, Transform srcTarget,
-                                        IDictionary<string, string> renameMap, CopyPlan plan)
+                                        IDictionary<string, string> vendorToOwned, CopyPlan plan)
         {
-            var dt = RemapReferencesByPath.Counterpart(vendorRoot, ourRoot, srcTarget, renameMap, out var fr);
+            var dt = RemapReferencesByPath.Counterpart(vendorRoot, ourRoot, srcTarget, vendorToOwned, out var fr);
             if (fr != null && !plan.renameAmbiguities.Contains(fr)) plan.renameAmbiguities.Add(fr);
             return dt;
         }
@@ -779,17 +779,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
         ///   - FAIL only on: a vendor-source leak, an AddComponent/scaffold failure, an unresolved
         ///     hard ref that leaked, or an unresolved type name.
         /// </summary>
-        /// <param name="renameMap">Optional <c>vendorName ⇒ ownedName</c> correspondence (source-name key →
+        /// <param name="vendorToOwned">Optional <c>vendorName ⇒ ownedName</c> correspondence (source-name key →
         /// destination-name value) for destination-side child lookups — the armature-root name mismatch case
         /// (owned <c>Armature.1</c> vs vendor <c>Armature</c>). Because every host/ref path resolves from the
         /// reach root, one entry (<c>"Armature" ⇒ "Armature.1"</c>) covers hosts AND relocated-component
         /// anchor refs uniformly. Validated once here (drop empties, reject non-injective → FAIL), then
         /// threaded to host prediction / scaffold / ref-remap. Empty/absent/null ⇒ byte-identical to today.
         /// Direction/case rationale is canonical at <see cref="IndexedPath.Substitute"/> /
-        /// <see cref="IndexedPath.ValidateRenameMap"/>.</param>
+        /// <see cref="IndexedPath.ValidateRenameMap"/>.
+        ///
+        /// <para><b>Direction.</b> Key names the hierarchy this tool WALKS (the vendor source), value the one it
+        /// RESOLVES INTO (ours) — the kit-wide invariant at <see cref="IndexedPath.Substitute"/>. Note that
+        /// <c>ConformRenderers</c> takes the OPPOSITE direction (<c>ownedToSource</c>) under that same rule,
+        /// because it walks our renderers and resolves into the source. Holding one map in mind for both tools
+        /// gets one of them backwards: they are not interchangeable, and this one must additionally be injective
+        /// (rejected loud above) where its is free to be many-to-one.</para></param>
         public static string Run(GameObject ownedRoot, GameObject vendorSource,
                                  string[] typeNames, string[] force = null,
-                                 IDictionary<string, string> renameMap = null, bool whatIf = false)
+                                 IDictionary<string, string> vendorToOwned = null, bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
             var log = new RunLog("copy-components")
@@ -808,12 +815,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // Validate the rename map ONCE before any mutation: a non-injective map cannot address a unique
             // dst sibling → FAIL loud, naming the colliding keys (A2). Empty-after-cleaning ⇒ null ⇒ no-op.
-            var cleanRename = IndexedPath.ValidateRenameMap(renameMap, out var collidingKeys);
+            var cleanRename = IndexedPath.ValidateRenameMap(vendorToOwned, out var collidingKeys);
             if (collidingKeys != null)
             {
                 log.result = "FAIL";
-                log.error  = "non-injective renameMap (keys collide onto one dest name)";
-                log.Offender("renameMap non-injective: keys [" + string.Join(", ", collidingKeys) +
+                log.error  = "non-injective vendorToOwned (keys collide onto one dest name)";
+                log.Offender("vendorToOwned non-injective: keys [" + string.Join(", ", collidingKeys) +
                              "] map onto the same value — cannot address a unique dst sibling");
                 return TransplantCore.Finish(log, label);
             }
@@ -821,7 +828,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // no decision reads them — real resolution goes through the rename-aware Counterpart/EnsureHost). A
             // note keeps a vendor-named 'Armature/…' label from being misread when a rename is active.
             if (cleanRename != null)
-                log.Note("renameMap active (" + cleanRename.Count +
+                log.Note("vendorToOwned active (" + cleanRename.Count +
                          " entr(y/ies)) — predicted dest-path labels stay vendor-named; minted GOs use the mapped name");
 
             // ── Build the plan (pure; both whatIf and execute consume this exact object) ─────────────
@@ -872,13 +879,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // A1 ambiguous-rename hard precondition — FAIL both modes before any mutation, so a pathological
-            // renameMap the planner would otherwise read as "mint" (whatIf PASS) matches execute's EnsureHost
+            // vendorToOwned the planner would otherwise read as "mint" (whatIf PASS) matches execute's EnsureHost
             // A1 FAIL. Named, deterministic; nothing is mutated.
             if (plan.renameAmbiguities.Count > 0)
             {
                 log.result = "FAIL";
-                log.error  = "ambiguous renameMap — a mapped name cannot address a unique dest counterpart";
-                foreach (var a in plan.renameAmbiguities) log.Offender("renameMap ambiguity: " + a);
+                log.error  = "ambiguous vendorToOwned — a mapped name cannot address a unique dest counterpart";
+                foreach (var a in plan.renameAmbiguities) log.Offender("vendorToOwned ambiguity: " + a);
                 return TransplantCore.Finish(log, label);
             }
 
@@ -924,7 +931,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     if (step.action != CopyAction.PresentSkip || step.vendorComponent == null) continue;
                     // Present-skip implies host + component already exist — EnsureHost reuses, never mints.
-                    // renameMap is load-bearing HERE: omitting it re-resolves the present-skip host under the
+                    // vendorToOwned is load-bearing HERE: omitting it re-resolves the present-skip host under the
                     // vendor name, silently minting a parallel 'Armature' and mis-mapping present-skip slots.
                     Transform host = ScaffoldBuilder.EnsureHost(vendorRoot, ourRoot, step.vendorComponent.transform,
                                                                 out string psFail, session, "CopyComponents", cleanRename);
@@ -1119,7 +1126,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// against the component's table descriptor (inert soft-dep drop vs. may-block hard-dep null).
         /// </summary>
         static List<string> RemapBySession(Component comp, SessionMap session, Transform vendorRoot, Transform ourRoot,
-                                            IDictionary<string, string> renameMap, RunLog log)
+                                            IDictionary<string, string> vendorToOwned, RunLog log)
         {
             var so = new SerializedObject(comp);
             so.Update();
@@ -1149,7 +1156,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // an un-copied but path-present transform under the dest, e.g. a physbone rootTransform that
             // wasn't itself a copied component). Refs outside reach are left untouched.
             so.Update();
-            var rr = RemapReferencesByPath.Remap(so, vendorRoot, ourRoot, renameMap);
+            var rr = RemapReferencesByPath.Remap(so, vendorRoot, ourRoot, vendorToOwned);
             so.ApplyModifiedPropertiesWithoutUndo();
             EditorUtility.SetDirty(comp);
             if (rr.renameWarnings != null)

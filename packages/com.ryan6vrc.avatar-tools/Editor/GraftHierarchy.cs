@@ -42,7 +42,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>subtree GOs whose dest host could not be anchored within reach (EnsureHost would return null) — FAIL loud, named.</summary>
         public readonly List<string> unanchorable = new List<string>();
 
-        /// <summary>A1 ambiguous-rename reasons hit while predicting host counterparts under a renameMap. A
+        /// <summary>A1 ambiguous-rename reasons hit while predicting host counterparts under a vendorToOwned. A
         /// planner Counterpart reads an A1-null as "mint", so surfacing it here lets Run FAIL BOTH modes before
         /// mutation, matching execute's EnsureHost A1 guard (preview == execute). Deduped.</summary>
         public readonly List<string> renameAmbiguities = new List<string>();
@@ -84,14 +84,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
     [AgentTool]
     public static class GraftHierarchy
     {
-        /// <param name="renameMap">Optional <c>vendorName ⇒ ownedName</c> correspondence (source-name key →
+        /// <param name="vendorToOwned">Optional <c>vendorName ⇒ ownedName</c> correspondence (source-name key →
         /// destination-name value) for the destination-side child lookups — the armature-root name mismatch
         /// case (owned <c>Armature.1</c> vs vendor <c>Armature</c>). Validated once here (drop empties, reject
         /// non-injective → FAIL), then threaded to host resolution / scaffold / ref-remap. Empty/absent/null
         /// ⇒ byte-identical to today. Direction/case rationale is canonical at
-        /// <see cref="IndexedPath.Substitute"/> / <see cref="IndexedPath.ValidateRenameMap"/>.</param>
+        /// <see cref="IndexedPath.Substitute"/> / <see cref="IndexedPath.ValidateRenameMap"/>.
+        ///
+        /// <para><b>Direction.</b> Key names the hierarchy this tool WALKS (the vendor source), value the one it
+        /// RESOLVES INTO (ours) — the kit-wide invariant at <see cref="IndexedPath.Substitute"/>. Note that
+        /// <c>ConformRenderers</c> takes the OPPOSITE direction (<c>ownedToSource</c>) under that same rule,
+        /// because it walks our renderers and resolves into the source. Holding one map in mind for both tools
+        /// gets one of them backwards: they are not interchangeable, and this one must additionally be injective
+        /// (rejected loud above) where its is free to be many-to-one.</para></param>
         public static string Run(GameObject ownedRoot, GameObject vendorSource,
-                                 string[] subtreeRoots, IDictionary<string, string> renameMap = null,
+                                 string[] subtreeRoots, IDictionary<string, string> vendorToOwned = null,
                                  bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
@@ -117,16 +124,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // Validate the rename map ONCE before any mutation: a non-injective map cannot address a unique
             // dst sibling → FAIL loud, naming the colliding keys (A2). Empty-after-cleaning ⇒ null ⇒ no-op.
-            var cleanRename = IndexedPath.ValidateRenameMap(renameMap, out var collidingKeys);
+            var cleanRename = IndexedPath.ValidateRenameMap(vendorToOwned, out var collidingKeys);
             if (collidingKeys != null)
             {
                 log.result = "FAIL";
-                log.error  = "non-injective renameMap (keys collide onto one dest name)";
-                log.Offender("renameMap non-injective: keys [" + string.Join(", ", collidingKeys) +
+                log.error  = "non-injective vendorToOwned (keys collide onto one dest name)";
+                log.Offender("vendorToOwned non-injective: keys [" + string.Join(", ", collidingKeys) +
                              "] map onto the same value — cannot address a unique dst sibling");
                 return TransplantCore.Finish(log, label);
             }
-            if (cleanRename != null) log.Note("renameMap active (" + cleanRename.Count + " entr(y/ies))");
+            if (cleanRename != null) log.Note("vendorToOwned active (" + cleanRename.Count + " entr(y/ies))");
 
             Transform vendorRoot = vendorSource.transform;
             Transform ourRoot     = ownedRoot.transform;
@@ -154,8 +161,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (plan.renameAmbiguities.Count > 0)
             {
                 log.result = "FAIL";
-                log.error  = "ambiguous renameMap — a mapped name cannot address a unique dest counterpart";
-                foreach (var a in plan.renameAmbiguities) log.Offender("renameMap ambiguity: " + a);
+                log.error  = "ambiguous vendorToOwned — a mapped name cannot address a unique dest counterpart";
+                foreach (var a in plan.renameAmbiguities) log.Offender("vendorToOwned ambiguity: " + a);
                 return TransplantCore.Finish(log, label);
             }
 
@@ -286,7 +293,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// it; <see cref="Run"/> is the public surface.
         /// </summary>
         internal static GraftPlan BuildPlan(GameObject ownedRoot, GameObject vendorSource, string[] subtreeRoots,
-                                            IDictionary<string, string> renameMap = null)
+                                            IDictionary<string, string> vendorToOwned = null)
         {
             var plan = new GraftPlan();
             if (ownedRoot == null || vendorSource == null || subtreeRoots == null) return plan;
@@ -307,7 +314,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var rootPath = raw?.Trim();
                 if (string.IsNullOrEmpty(rootPath)) { plan.unresolvedRoots.Add(raw ?? "(null)"); continue; }
 
-                // ResolveUnderRoot does NOT take renameMap: subtreeRoots are author-given VENDOR-side paths
+                // ResolveUnderRoot does NOT take vendorToOwned: subtreeRoots are author-given VENDOR-side paths
                 // resolved against the vendor hierarchy, so a vendorName⇒ownedName substitution would never
                 // fire. Rename applies only to DESTINATION-child lookups (Counterpart / EnsureHost below).
                 Transform subRoot = ResolveUnderRoot(vendorRoot, rootPath);
@@ -333,7 +340,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         plan.unanchorable.Add(step.vendorPath);
                         continue;
                     }
-                    Transform dstHost = RemapReferencesByPath.Counterpart(vendorRoot, ourRoot, vgo, renameMap, out var cpFail);
+                    Transform dstHost = RemapReferencesByPath.Counterpart(vendorRoot, ourRoot, vgo, vendorToOwned, out var cpFail);
                     if (cpFail != null && !plan.renameAmbiguities.Contains(cpFail)) plan.renameAmbiguities.Add(cpFail);
                     step.hostWillMint = dstHost == null;
 
@@ -372,7 +379,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// </summary>
         static (int nulled, int external, List<string> renameWarnings) RemapBySession(
             Component comp, SessionMap session, Transform vendorRoot, Transform ourRoot,
-            IDictionary<string, string> renameMap)
+            IDictionary<string, string> vendorToOwned)
         {
             var so = new SerializedObject(comp);
             so.Update();
@@ -410,7 +417,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Pass B — generic path-remap for whatever the session map didn't cover (under-reach scene
             // objects at a path-present transform). Refs outside reach are left untouched.
             so.Update();
-            var rr = RemapReferencesByPath.Remap(so, vendorRoot, ourRoot, renameMap);
+            var rr = RemapReferencesByPath.Remap(so, vendorRoot, ourRoot, vendorToOwned);
             so.ApplyModifiedPropertiesWithoutUndo();
             EditorUtility.SetDirty(comp);
             return (rr.nulled, external, rr.renameWarnings ?? new List<string>());

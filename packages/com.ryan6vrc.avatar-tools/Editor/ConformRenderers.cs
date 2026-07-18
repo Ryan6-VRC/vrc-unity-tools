@@ -36,10 +36,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// </summary>
         /// <param name="ownedRoot">Our owned avatar root in the scene (has an Animator with a humanoid avatar).</param>
         /// <param name="source">The vendor's dressed source to copy materials FROM (scene GO or prefab).</param>
-        /// <param name="renameMap">Optional {ourName → sourceName} overrides for renderers we renamed during
-        /// normalization (e.g. our "Body" ← vendor "Face"). Matched case-insensitively. Null/omitted ⇒ match by
-        /// own name. Unmatched renderers (after overrides) still FAIL, so a missed rename surfaces loudly.</param>
-        public static string Run(GameObject ownedRoot, GameObject source, IDictionary<string, string> renameMap = null, bool whatIf = false)
+        /// <param name="ownedToSource">Optional <c>{ourName ⇒ sourceName}</c> overrides for renderers we renamed
+        /// during normalization (e.g. our "Body" ← vendor "Face"). Matched case-insensitively. Null/omitted ⇒
+        /// match by own name. Unmatched renderers (after overrides) still FAIL, so a missed rename surfaces loudly.
+        ///
+        /// <para><b>Direction — it runs opposite to the transplant kit's map, deliberately.</b> The kit-wide
+        /// invariant (canonical at <see cref="IndexedPath.Substitute"/>) is that a rename map's KEY names the
+        /// hierarchy the tool WALKS and its VALUE the hierarchy it RESOLVES INTO. This tool walks OUR renderers
+        /// and looks each one up in the source, so the key is ours — whereas <c>CopyComponents</c> /
+        /// <c>GraftHierarchy</c> walk the vendor hierarchy and resolve into ours, giving them
+        /// <c>vendorToOwned</c>. Same rule, opposite traversal. Consequently this map may be MANY-TO-ONE (two
+        /// owned meshes can both take one source renderer's materials) while theirs must be injective;
+        /// inverting this one would make that case inexpressible, so do not "reconcile" the two.</para></param>
+        public static string Run(GameObject ownedRoot, GameObject source, IDictionary<string, string> ownedToSource = null, bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
 
@@ -72,7 +81,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 // 2. Assign materials to our instance's renderers by name (with optional
                 //    {ourName → sourceName} overrides for meshes we renamed during normalization)
-                var renameLower = NormalizeRenameMap(renameMap);
+                var renameLower = NormalizeRenameMap(ownedToSource);
                 AssignMaterials(ownedRoot, sourceMap, duplicateNames, renameLower, data, whatIf);
 
                 // 3. Normalize bounds + probe-anchor on every SMR under ownedRoot (never-shrink bounds; repair-if-invalid anchor)
@@ -237,11 +246,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Lowercases an optional {ourName → sourceName} override map for case-insensitive matching.
         /// Returns null when no usable entries were supplied.
         /// </summary>
-        private static Dictionary<string, string> NormalizeRenameMap(IDictionary<string, string> renameMap)
+        private static Dictionary<string, string> NormalizeRenameMap(IDictionary<string, string> ownedToSource)
         {
-            if (renameMap == null || renameMap.Count == 0) return null;
+            if (ownedToSource == null || ownedToSource.Count == 0) return null;
             var d = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var kv in renameMap)
+            foreach (var kv in ownedToSource)
                 if (!string.IsNullOrEmpty(kv.Key) && !string.IsNullOrEmpty(kv.Value))
                     d[kv.Key.ToLowerInvariant()] = kv.Value.ToLowerInvariant();
             return d.Count > 0 ? d : null;

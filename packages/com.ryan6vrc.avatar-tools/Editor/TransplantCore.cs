@@ -333,8 +333,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// </summary>
         public static Transform EnsureHost(Transform vendorRoot, Transform ourRoot, Transform vendorHost,
                                            SessionMap session = null, string undoName = "Transplant",
-                                           IDictionary<string, string> renameMap = null)
-            => EnsureHost(vendorRoot, ourRoot, vendorHost, out _, session, undoName, renameMap);
+                                           IDictionary<string, string> vendorToOwned = null)
+            => EnsureHost(vendorRoot, ourRoot, vendorHost, out _, session, undoName, vendorToOwned);
 
         /// <summary>
         /// As <see cref="EnsureHost(Transform,Transform,Transform,SessionMap,string)"/>, but on a null
@@ -352,7 +352,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public static Transform EnsureHost(Transform vendorRoot, Transform ourRoot, Transform vendorHost,
                                            out string failReason,
                                            SessionMap session = null, string undoName = "Transplant",
-                                           IDictionary<string, string> renameMap = null)
+                                           IDictionary<string, string> vendorToOwned = null)
         {
             failReason = null;
             if (vendorRoot == null || ourRoot == null || vendorHost == null)
@@ -375,17 +375,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Transform curDst = ourRoot;
             foreach (var seg in chain)
             {
-                // Destination lookup/mint uses the MAPPED name (renameMap: vendorName ⇒ ownedName); the
+                // Destination lookup/mint uses the MAPPED name (vendorToOwned: vendorName ⇒ ownedName); the
                 // occurrence index is counted on the SOURCE side in the SAME resolving-to-mapped space as the
                 // dest lookup (symmetric with the A1 guard), so a mapped-key child and a literal-mapped sibling
                 // never collapse onto one dest occurrence. Null/non-funneling map ⇒ mapped == seg.name and this
                 // reduces to same-name indexing — byte-identical to today.
-                string mapped = IndexedPath.Substitute(seg.name, renameMap);
-                int idx = IndexedPath.SiblingIndexAmongResolvingTo(seg, mapped, renameMap);
+                string mapped = IndexedPath.Substitute(seg.name, vendorToOwned);
+                int idx = IndexedPath.SiblingIndexAmongResolvingTo(seg, mapped, vendorToOwned);
 
                 // A1 count-equality guard (shared with FindByIndexedPath): a mapped value already present on
                 // the dst (or a non-injective slip) could silently bind the WRONG sibling → fail loud instead.
-                if (!IndexedPath.GuardRename(seg.parent, curDst, mapped, renameMap, out failReason)) return null;
+                if (!IndexedPath.GuardRename(seg.parent, curDst, mapped, vendorToOwned, out failReason)) return null;
 
                 var existing = IndexedPath.NthChildWithName(curDst, mapped, idx);
                 if (existing != null)

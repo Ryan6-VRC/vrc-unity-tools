@@ -152,7 +152,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             => FindByIndexedPath(srcRoot, dstRoot, srcTarget, null, out _);
 
         /// <summary>
-        /// As <see cref="FindByIndexedPath(Transform,Transform,Transform)"/>, but a <paramref name="renameMap"/>
+        /// As <see cref="FindByIndexedPath(Transform,Transform,Transform)"/>, but a <paramref name="vendorToOwned"/>
         /// (<c>vendorName ⇒ ownedName</c>, source-name key → destination-name value) substitutes the segment
         /// NAME at each destination-side <see cref="NthChildWithName"/> lookup. The occurrence index is still
         /// counted on the SOURCE side, but in the resolving-to-<c>mapped</c> space
@@ -171,7 +171,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// path) and this returns null. A null or non-funneling map never trips it.
         /// </summary>
         public static Transform FindByIndexedPath(Transform srcRoot, Transform dstRoot, Transform srcTarget,
-                                                  IDictionary<string, string> renameMap, out string failReason)
+                                                  IDictionary<string, string> vendorToOwned, out string failReason)
         {
             failReason = null;
             var chain = new List<Transform>();
@@ -184,9 +184,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // SOURCE side in the SAME (resolving-to-mapped) space as the dest lookup, so a mapped-key child
                 // and a literal-mapped sibling never collapse onto one dest occurrence. Null/non-funneling map
                 // ⇒ mapped == seg.name and this reduces to same-name indexing — byte-identical to today.
-                string mapped = Substitute(seg.name, renameMap);
-                int idx = SiblingIndexAmongResolvingTo(seg, mapped, renameMap);
-                if (!GuardRename(seg.parent, cur, mapped, renameMap, out failReason)) return null;
+                string mapped = Substitute(seg.name, vendorToOwned);
+                int idx = SiblingIndexAmongResolvingTo(seg, mapped, vendorToOwned);
+                if (!GuardRename(seg.parent, cur, mapped, vendorToOwned, out failReason)) return null;
                 cur = NthChildWithName(cur, mapped, idx);
                 if (cur == null) return null;
             }
@@ -200,6 +200,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// matches a SOURCE segment name against DEST children, so the key is the source (vendor) name.
         /// Matching is Ordinal/case-sensitive (GameObject-name lookup via <see cref="NthChildWithName"/> is);
         /// never lowercase.
+        ///
+        /// <para><b>The kit-wide rename-map invariant.</b> A rename map's KEY names the hierarchy the tool
+        /// WALKS; its VALUE names the hierarchy the tool RESOLVES INTO. You cannot index a dictionary by its
+        /// values, so the direction is fixed by which side the tool iterates — it is not a style choice, and a
+        /// tool cannot flip its map without inverting its own traversal.</para>
+        ///
+        /// <para>This is why the kit's two map directions are both correct rather than one being backwards.
+        /// The transplant tools (<see cref="RemapReferencesByPath"/>, <c>CopyComponents</c>,
+        /// <c>GraftHierarchy</c>) push vendor→owned: they walk the vendor hierarchy and resolve into ours, so
+        /// their map is <c>vendorToOwned</c> and MUST be injective — two keys on one value cannot address a
+        /// unique dst sibling, which <see cref="ValidateRenameMap"/> rejects. <c>ConformRenderers</c> pulls the
+        /// other way: it walks OUR renderers and resolves into the source, so its map is <c>ownedToSource</c>
+        /// and many-to-one is legitimate (two owned meshes may both take one source renderer's materials).
+        /// Inverting it would make that case inexpressible.</para>
         /// </summary>
         internal static string Substitute(string name, IDictionary<string, string> map)
             => map != null && name != null && map.TryGetValue(name, out var v) ? v : name;
@@ -214,16 +228,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// same no-op as an absent map). This is NOT <c>ConformRenderers.NormalizeRenameMap</c> — that one
         /// lowercases (case-insensitive material match); GameObject-name matching must stay Ordinal.
         /// </summary>
-        internal static IDictionary<string, string> ValidateRenameMap(IDictionary<string, string> renameMap,
+        internal static IDictionary<string, string> ValidateRenameMap(IDictionary<string, string> vendorToOwned,
                                                                     out List<string> collidingKeys)
         {
             collidingKeys = null;
-            if (renameMap == null || renameMap.Count == 0) return null;
+            if (vendorToOwned == null || vendorToOwned.Count == 0) return null;
 
             var cleaned = new Dictionary<string, string>(StringComparer.Ordinal);
             var valueToKey = new Dictionary<string, string>(StringComparer.Ordinal);   // value → its first key
             var reportedValues = new HashSet<string>(StringComparer.Ordinal);          // firstKey already named
-            foreach (var kv in renameMap)
+            foreach (var kv in vendorToOwned)
             {
                 if (string.IsNullOrEmpty(kv.Key) || string.IsNullOrEmpty(kv.Value)) continue;
                 if (string.Equals(kv.Key, kv.Value, StringComparison.Ordinal)) continue; // identity ⇒ no-op, drop
