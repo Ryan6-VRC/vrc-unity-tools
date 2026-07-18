@@ -19,7 +19,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public List<string> nulledPaths;
             /// <summary>
             /// Named ambiguous-rename reasons (A1 count-equality guard) hit while resolving refs under a
-            /// <c>renameMap</c>: the ref still NULLS (counted in <see cref="nulled"/>/<see cref="nulledPaths"/>
+            /// <c>vendorToOwned</c>: the ref still NULLS (counted in <see cref="nulled"/>/<see cref="nulledPaths"/>
             /// as a plain missing path), but the reason rides here so the caller can name it rather than let
             /// it hide as an ordinary null. Empty on the null-map path (the guard never fires). Callers that
             /// don't thread a map ignore it.
@@ -37,12 +37,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// in <see cref="Result.remapped"/>. The caller owns <see cref="SerializedObject.Update"/>
         /// beforehand and <c>ApplyModifiedProperties*()</c> afterward.
         ///
-        /// <paramref name="renameMap"/> (<c>vendorName ⇒ ownedName</c>, injective, Ordinal — see
+        /// <paramref name="vendorToOwned"/> (<c>vendorName ⇒ ownedName</c>, injective, Ordinal — see
         /// <see cref="IndexedPath.ValidateRenameMap"/>) substitutes the destination-side segment name at the
         /// armature-root (and any other renamed) level. Empty/absent/null ⇒ byte-identical to today.
         /// </summary>
         public static Result Remap(SerializedObject so, Transform srcRoot, Transform dstRoot,
-                                   IDictionary<string, string> renameMap = null)
+                                   IDictionary<string, string> vendorToOwned = null)
         {
             var res = new Result { nulledPaths = new List<string>(), renameWarnings = new List<string>() };
             var it = so.GetIterator();
@@ -53,7 +53,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (o == null) continue;
                 Transform t = o is Component c ? c.transform : (o is GameObject g ? g.transform : null);
                 if (t == null || !t.IsChildOf(srcRoot)) continue;       // only refs under srcRoot
-                var dt = IndexedPath.FindByIndexedPath(srcRoot, dstRoot, t, renameMap, out var failReason);
+                var dt = IndexedPath.FindByIndexedPath(srcRoot, dstRoot, t, vendorToOwned, out var failReason);
                 if (dt == null)
                 {
                     if (failReason != null) res.renameWarnings.Add(it.propertyPath + ": " + failReason);
@@ -91,19 +91,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>
         /// As <see cref="Counterpart(Transform,Transform,Transform)"/>, threading a
-        /// <paramref name="renameMap"/> (<c>vendorName ⇒ ownedName</c>) into the indexed-path walk so a host
+        /// <paramref name="vendorToOwned"/> (<c>vendorName ⇒ ownedName</c>) into the indexed-path walk so a host
         /// under a renamed armature root resolves. On the A1 ambiguous-rename guard, returns null and sets
         /// <paramref name="failReason"/> (a named signal distinct from a plain missing path). Empty/absent/null
         /// map ⇒ byte-identical to the null-map overload.
         /// </summary>
         public static Transform Counterpart(Transform srcRoot, Transform dstRoot, Transform srcTarget,
-                                            IDictionary<string, string> renameMap, out string failReason)
+                                            IDictionary<string, string> vendorToOwned, out string failReason)
         {
             failReason = null;
             if (srcTarget == null) return null;
             if (srcTarget == srcRoot) return dstRoot;
             if (!srcTarget.IsChildOf(srcRoot)) return null;
-            return IndexedPath.FindByIndexedPath(srcRoot, dstRoot, srcTarget, renameMap, out failReason);
+            return IndexedPath.FindByIndexedPath(srcRoot, dstRoot, srcTarget, vendorToOwned, out failReason);
         }
     }
 }

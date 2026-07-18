@@ -36,10 +36,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// </summary>
         /// <param name="ownedRoot">Our owned avatar root in the scene (has an Animator with a humanoid avatar).</param>
         /// <param name="source">The vendor's dressed source to copy materials FROM (scene GO or prefab).</param>
-        /// <param name="renameMap">Optional {ourName → sourceName} overrides for renderers we renamed during
-        /// normalization (e.g. our "Body" ← vendor "Face"). Matched case-insensitively. Null/omitted ⇒ match by
-        /// own name. Unmatched renderers (after overrides) still FAIL, so a missed rename surfaces loudly.</param>
-        public static string Run(GameObject ownedRoot, GameObject source, IDictionary<string, string> renameMap = null, bool whatIf = false)
+        /// <param name="ownedToSource">Optional <c>{ourName ⇒ sourceName}</c> overrides for renderers we renamed
+        /// during normalization (e.g. our "Body" ← vendor "Face"). Matched case-insensitively. Null/omitted ⇒
+        /// match by own name. Unmatched renderers (after overrides) still FAIL, so a missed rename surfaces loudly.
+        ///
+        /// <para><b>Keyed on OUR name — opposite to the transplant kit's <c>vendorToOwned</c>, deliberately.</b>
+        /// This tool walks our renderers and resolves into the source, so under the kit-wide invariant
+        /// (<see cref="IndexedPath.Substitute"/>) the key is ours. Two consequences a caller reusing "one map"
+        /// will hit: this one may be MANY-TO-ONE where theirs must be injective, and it matches
+        /// case-insensitively where theirs is Ordinal.</para></param>
+        public static string Run(GameObject ownedRoot, GameObject source, IDictionary<string, string> ownedToSource = null, bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
 
@@ -72,7 +78,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 // 2. Assign materials to our instance's renderers by name (with optional
                 //    {ourName → sourceName} overrides for meshes we renamed during normalization)
-                var renameLower = NormalizeRenameMap(renameMap);
+                var renameLower = NormalizeRenameMap(ownedToSource);
                 AssignMaterials(ownedRoot, sourceMap, duplicateNames, renameLower, data, whatIf);
 
                 // 3. Normalize bounds + probe-anchor on every SMR under ownedRoot (never-shrink bounds; repair-if-invalid anchor)
@@ -236,12 +242,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>
         /// Lowercases an optional {ourName → sourceName} override map for case-insensitive matching.
         /// Returns null when no usable entries were supplied.
+        ///
+        /// <para>Keys differing only in case fold together, last-write-wins, silently. Deliberately not
+        /// symmetric with <see cref="IndexedPath.ValidateRenameMap"/>'s loud rejection: there a collision
+        /// cannot address a unique dst sibling, here it only means two spellings of one renderer name.</para>
         /// </summary>
-        private static Dictionary<string, string> NormalizeRenameMap(IDictionary<string, string> renameMap)
+        private static Dictionary<string, string> NormalizeRenameMap(IDictionary<string, string> ownedToSource)
         {
-            if (renameMap == null || renameMap.Count == 0) return null;
+            if (ownedToSource == null || ownedToSource.Count == 0) return null;
             var d = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var kv in renameMap)
+            foreach (var kv in ownedToSource)
                 if (!string.IsNullOrEmpty(kv.Key) && !string.IsNullOrEmpty(kv.Value))
                     d[kv.Key.ToLowerInvariant()] = kv.Value.ToLowerInvariant();
             return d.Count > 0 ? d : null;
