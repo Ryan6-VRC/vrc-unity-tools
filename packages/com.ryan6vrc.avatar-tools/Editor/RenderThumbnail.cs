@@ -188,9 +188,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // is deliberately NOT called before cam.Render() below — EndSampling leaves the pose applied,
                 // it does not revert it. Reverting happens once, defensively, in the outer teardown `finally`
                 // (below) after capture, so a throw mid-sampling still can't leak animation-mode state.
-                // Head displacement a pose introduces by resetting the body position (a humanoid clip carries
-                // root/hips translation that moves the head and undoes NDMF's +2 Z clone shift). Zero on the
-                // floor path, so that branch stays byte-for-byte unchanged; Step 6 adds it to follow the head.
+                // How much the pose moves the head RELATIVE TO THE ROOT — the part PositionPortraitCamera does
+                // NOT handle. Sampling also moves the avatar root to origin (undoing NDMF's +2 Z shift), but the
+                // SDK's framing runs AFTER sampling so it already accounts for the root move; a world-space head
+                // delta would double-count it and fling the camera past the avatar. Root-local isolates the
+                // head's own drop. Zero on the floor path, so that branch stays byte-for-byte unchanged; Step 6
+                // adds it to follow the head.
                 Vector3 poseHeadDelta = Vector3.zero;
                 if (poseClip != null)
                 {
@@ -200,13 +203,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             "baked clone has no Animator — cannot sample pose '" + poseName + "'");
                     var headBone = animator.GetBoneTransform(HumanBodyBones.Head);
                     Vector3 restHead = headBone != null ? headBone.position : baked.transform.position;
+                    Vector3 restRoot = baked.transform.position;
                     animator.Rebind();
                     AnimationMode.StartAnimationMode();
                     AnimationMode.BeginSampling();
                     try { AnimationMode.SampleAnimationClip(baked, poseClip, poseClip.length); }
                     finally { AnimationMode.EndSampling(); }
                     Vector3 posedHead = headBone != null ? headBone.position : baked.transform.position;
-                    poseHeadDelta = posedHead - restHead;
+                    Vector3 posedRoot = baked.transform.position;
+                    poseHeadDelta = (posedHead - posedRoot) - (restHead - restRoot);
                 }
 
                 // ---- Step 6: camera + off-screen sRGB capture (§Capture, source-verified) ----
