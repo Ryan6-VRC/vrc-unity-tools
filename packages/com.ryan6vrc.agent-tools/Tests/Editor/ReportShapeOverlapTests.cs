@@ -742,4 +742,35 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("worn=2", r);     // both are worn
         StringAssert.Contains("mismatch=1", r); // only the undeclared one is a mismatch
     }
+
+    // Fix (finding #2): a NONZERO weight below "0.###" resolution (a float-noise residual) is classified worn
+    // yet must not render as "0" — the row would silently contradict its own mismatch= count. The current-weight
+    // cell shows the real magnitude instead. (Regression: Num's "0.###" printed 0.0004 as "0".)
+    [Test]
+    public void Report_tinyResidualWeight_wornButNotRenderedZero()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Residual", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+        smr.SetBlendShapeWeight(m.GetBlendShapeIndex("Residual"), 0.0004f); // worn (strictly != 0), sub-0.###
+
+        var r = ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar));
+        StringAssert.Contains("worn=1", r);
+        StringAssert.Contains("mismatch=1", r);
+        var row = ResolutionRow(ReadLog(r), "Residual");
+        StringAssert.Contains("**MISMATCH**", row);
+        StringAssert.Contains("0.0004", row); // real magnitude visible, not collapsed to "0"
+    }
+
+    // Fix (finding #1): the MA-present probe underpins loud-vs-silent on an unresolved ShapeChanger type. If the
+    // hardcoded runtime-assembly name were wrong the probe would read "absent" even with MA installed, silently
+    // defeating the drift warning. In this test asmdef MA is referenced ⇒ the probe MUST read installed.
+    [Test]
+    public void ModularAvatarInstalled_trueWhenReferenced()
+    {
+        Assert.IsTrue(ReportShapeOverlap.ModularAvatarInstalled(),
+            "MA is referenced by the test asmdef; the presence probe's assembly name must match");
+    }
 }

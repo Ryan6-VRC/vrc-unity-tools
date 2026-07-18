@@ -147,15 +147,27 @@ namespace Ryan6Vrc.AgentTools.Editor
         // no MA assembly reference, so everything is by-name reflection (mirrors CheckSeam.FindType).
         //
         // Failure doctrine (this tool exists to catch the invisible weight-0 ShapeChangers, so a silent truncation
-        // is the worst outcome): MA absent ⇒ silent no-op (the honest floor). MA PRESENT but a renamed member ⇒
-        // a loud one-line drift warning + no reactions (the "reflection canary goes silently green" trap — never
-        // let an MA update quietly strip the co-active set). A single throwing component/row ⇒ warn and CONTINUE
-        // the sweep (per-component + per-row guards), so one stale/deleted ref can't drop the rest — including the
-        // very weight-0 ShapeChangers this tool exists to surface.
+        // is the worst outcome): MA absent ⇒ silent no-op (the honest floor). MA PRESENT but a renamed member —
+        // OR a renamed/moved ModularAvatarShapeChanger TYPE itself — ⇒ a loud one-line drift warning + no
+        // reactions (the "reflection canary goes silently green" trap — never let an MA update quietly strip the
+        // co-active set). A single throwing component/row ⇒ warn and CONTINUE the sweep (per-component + per-row
+        // guards), so one stale/deleted ref can't drop the rest — including the very weight-0 ShapeChangers this
+        // tool exists to surface.
         private static void IngestShapeChangers(GameObject outfitRoot, GameObject bodyGO, Ingested result, Action<string> add)
         {
             var scType = FindType("nadena.dev.modular_avatar.core.ModularAvatarShapeChanger");
-            if (scType == null) return; // MA not installed ⇒ no reactions (silent — the legitimate absent path)
+            if (scType == null)
+            {
+                // A null type is ambiguous: MA genuinely absent (silent — the legitimate floor) vs MA installed
+                // but the type renamed/moved (or its assembly failed to load types). Probe MA presence by the
+                // runtime assembly — far more stable than any one type's FullName — so the drifted case is loud,
+                // not a silent `=> OK` with every reaction dropped (the worst outcome for this tool).
+                if (ModularAvatarInstalled())
+                    Debug.LogWarning("[ReportShapeOverlap] MA is installed but ModularAvatarShapeChanger did not resolve " +
+                        "(type renamed/moved, or its assembly failed to load types); reactions NOT ingested. The co-active " +
+                        "set may be missing weight-0 ShapeChanger shapes.");
+                return;
+            }
 
             // Member handles resolved once. Any null here means MA is installed but its API drifted from ours —
             // surface it loudly rather than return a silently-empty reaction set the agent would trust.
@@ -228,8 +240,24 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         internal static Type FindType(string fullName) =>
             AppDomain.CurrentDomain.GetAssemblies()
-                .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
+                .SelectMany(SafeGetTypes)
                 .FirstOrDefault(t => t.FullName == fullName);
+
+        // ReflectionTypeLoadException carries the types that DID load in .Types (with null holes), so one
+        // unloadable type in MA's assembly can't hide ModularAvatarShapeChanger behind a whole-assembly drop.
+        private static IEnumerable<Type> SafeGetTypes(Assembly a)
+        {
+            try { return a.GetTypes(); }
+            catch (ReflectionTypeLoadException e) { return e.Types.Where(t => t != null); }
+            catch { return Array.Empty<Type>(); }
+        }
+
+        // MA-present probe independent of any single type resolving: the runtime assembly name is far more
+        // stable than a type's FullName, so `scType == null` WITH this true means the type drifted (loud),
+        // vs MA genuinely absent (silent). Assembly rename would defeat it, but that is a far larger break.
+        internal static bool ModularAvatarInstalled() =>
+            AppDomain.CurrentDomain.GetAssemblies()
+                .Any(a => a.GetName().Name == "nadena.dev.modular-avatar.core");
 
         // ── Pure core ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -408,7 +436,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static string Mm(float meters) => (meters * 1000f).ToString("F3", CultureInfo.InvariantCulture);
 
         // Compact weight/value formatter: integral weights render clean (100, 0, 42), fractional keep up to 3 dp.
-        private static string Num(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
+        // A NONZERO weight must never render as "0": worn/mismatch classification is strictly `!= 0`, so a tiny
+        // residual (float noise from imperfect zeroing) is counted worn yet "0.###" would print it "0" — a row
+        // contradicting its own mismatch= count. Fall back to a round-tripping form so the magnitude stays visible.
+        private static string Num(float v)
+        {
+            if (v == 0f) return "0";
+            string s = v.ToString("0.###", CultureInfo.InvariantCulture);
+            return s == "0" || s == "-0" ? v.ToString("G4", CultureInfo.InvariantCulture) : s;
+        }
 
         // Resolve the SkinnedMeshRenderer carrying blendshapes from the named scene object (its mesh is .sharedMesh;
         // weight reads come off the SMR itself). Prefer the SMR on the object; else a unique blendshape-bearing SMR
