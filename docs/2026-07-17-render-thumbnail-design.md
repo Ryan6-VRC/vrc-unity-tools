@@ -58,10 +58,10 @@ doesn't — that single fact decides the correct capture surface for each.
   render — a timed-out bake means read the dialog, not retry; (3) the paired
   `OnPostprocessAvatar()` **must** run, since that is what fires each hook's own cleanup — teardown
   calls it from an inner `finally` so no earlier teardown step can skip it by throwing.
-- **Framing:** `VRC.SDKBase.VRC_AvatarDescriptor.PositionPortraitCamera(Transform)` (compiled in
-  `VRCSDKBase.dll`; call sites SDK `RuntimeBlueprintCreation.cs:47`, CAU `Uploader.cs:615`). Sets the
-  camera **transform only**, calibrated to the **default 60° FOV** — so **do not override FOV** (neither
-  the SDK nor CAU does); set only clip planes (`near=0.01`, `far=100`) and `cullingMask=0xFFFFFFDF`, as
+- **Framing:** `VRC.SDKBase.VRC_AvatarDescriptor.PositionPortraitCamera(Transform)` sets the
+  camera **transform only**, calibrated to the **default 60° FOV** — verified by calling it on a scratch
+  descriptor and reading the camera back (FOV untouched); CAU (`Uploader.cs:615`) likewise never sets FOV.
+  So **do not override FOV**; set only clip planes (`near=0.01`, `far=100`) and `cullingMask=0xFFFFFFDF`, as
   CAU does. `framing` (dolly) moves the camera back along local-forward — **never** via FOV.
 - **Pose:** `AnimationMode.StartAnimationMode()` → `BeginSampling()` →
   `SampleAnimationClip(bakedClone, clip, t)` → `EndSampling()` — then the pose is **held**;
