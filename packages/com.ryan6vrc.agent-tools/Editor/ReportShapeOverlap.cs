@@ -448,25 +448,30 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static string Mm(float meters) => (meters * 1000f).ToString("F3", CultureInfo.InvariantCulture);
 
         // Encode a dynamic name (a blendshape name off the mesh) for a single Markdown table cell. A
-        // pathological name can carry CR/LF, a pipe, or a backtick — which would break the row, break the
-        // column, or close the code span, injecting structure (a fake heading, extra cells) into the RunLog
-        // an agent reads and trusts. Neutralize exactly those: CR/LF/tab → visible escapes so the name stays
-        // on one physical row; other control chars → space; '|' and '`' → backslash-escaped. Structural
-        // safety does not rest on the backtick escape (a stray backtick can't leave a cell once newlines and
-        // pipes are neutralized) — it only keeps the code span legible.
+        // pathological name can carry CR/LF, a pipe, a backslash, or a backtick — which would break the row,
+        // break the column, or close the code span, injecting structure (a fake heading, extra cells) into the
+        // RunLog an agent reads and trusts. Neutralize them: CR/LF/tab → visible escapes so the name stays on
+        // one physical row; other control chars (and the U+2028/U+2029 line separators char.IsControl misses,
+        // category Zl/Zp) → space; '\', '|', '`' → backslash-escaped. Backslash MUST be escaped too: a raw '\'
+        // immediately before a pipe would consume the pipe's own '\' escape (GFM even/odd-backslash rule),
+        // leaving the pipe bare. Structural safety does not rest on the backtick escape (a stray backtick can't
+        // leave a cell once newlines, pipes, and backslashes are neutralized) — it only keeps the span legible.
         internal static string Cell(string s)
         {
-            if (string.IsNullOrEmpty(s)) return s ?? "";
+            if (string.IsNullOrEmpty(s)) return "";
             var sb = new StringBuilder(s.Length);
             foreach (char c in s)
                 switch (c)
                 {
+                    case '\\': sb.Append("\\\\"); break;
                     case '\r': sb.Append("\\r"); break;
                     case '\n': sb.Append("\\n"); break;
                     case '\t': sb.Append("\\t"); break;
                     case '|':  sb.Append("\\|"); break;
                     case '`':  sb.Append("\\`"); break;
-                    default:   sb.Append(char.IsControl(c) ? ' ' : c); break;
+                    // other control chars, plus the U+2028/U+2029 line separators char.IsControl misses
+                    // (category Zl/Zp), collapse to a space so nothing survives that reads as a line break.
+                    default:   sb.Append(char.IsControl(c) || c == '\u2028' || c == '\u2029' ? ' ' : c); break;
                 }
             return sb.ToString();
         }

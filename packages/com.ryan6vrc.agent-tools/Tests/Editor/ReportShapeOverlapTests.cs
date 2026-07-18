@@ -789,6 +789,15 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("\\n", encoded);       // rendered as a visible escape instead
         StringAssert.Contains("\\|", encoded);       // pipe escaped → cannot inject a column
         StringAssert.Contains("\\`", encoded);       // backtick escaped
+
+        // Regression: a backslash immediately before a pipe must not defeat the pipe escape. Without escaping
+        // the backslash, "a\|b" → "a\\|b", where GFM reads "\\" as an escaped backslash and the pipe is left
+        // BARE (a column break). The pipe must stay escaped: an ODD run of backslashes must precede it.
+        string bp = ReportShapeOverlap.Cell("a\\|b");
+        int pipe = bp.IndexOf('|');
+        int run = 0;
+        for (int i = pipe - 1; i >= 0 && bp[i] == '\\'; i--) run++;
+        Assert.IsTrue(run % 2 == 1, "pipe must be escaped (odd backslash run precedes it), was '" + bp + "'");
     }
 
     // Finding #1 (integration): the encoder is actually wired into the render path — a shape name with a pipe
@@ -825,19 +834,22 @@ public class ReportShapeOverlapTests
         Assert.IsFalse(row.Contains("Set="), "an unknown change type must not render as Set");
     }
 
-    // Finding #4: the overlap column (now precomputed once per shape instead of re-scanning a.Pairs per shape)
-    // still reports each shape's max containment — a fully-swallowed pair surfaces 1.00 on both rows.
+    // Finding #4: the overlap column is precomputed once per shape (instead of re-scanning a.Pairs per shape)
+    // and must report each shape's MAX containment across all its pairs. Small sits in two pairs — 1.00 with
+    // Big, 0.50 with Mid — so its cell must be the max 1.00; a clobbering or min aggregation would leave 0.50.
     [Test]
-    public void Report_resolutionOverlapColumn_reportsContainment()
+    public void Report_resolutionOverlapColumn_reportsMaxContainment()
     {
         var avatar = NewAvatarRoot("Avatar");
         var m = MakeMesh(20);
         AddSpan(m, "Big", 0, 14, 0.05f);  // 15 verts
-        AddSpan(m, "Small", 0, 9, 0.05f); // 10 verts, fully inside Big ⇒ |A∩B|/min = 10/10 = 1.00
+        AddSpan(m, "Small", 0, 9, 0.05f); // 10 verts, fully inside Big ⇒ containment(Big,Small)=10/10=1.00
+        AddSpan(m, "Mid", 5, 14, 0.05f);  // 10 verts, overlaps Small on 5..9 ⇒ containment(Small,Mid)=5/10=0.50
         var body = NewChildBody(avatar, "Body", m);
 
-        var md = ReadLog(ReportShapeOverlap.Report(Path(body), new[] { "Big", "Small" }, Path(avatar)));
-        StringAssert.Contains("1.00", ResolutionRow(md, "Small")); // swallowed shape ⇒ containment 1.00
-        StringAssert.Contains("1.00", ResolutionRow(md, "Big"));   // the same pair rides the larger shape's row
+        var small = ResolutionRow(
+            ReadLog(ReportShapeOverlap.Report(Path(body), new[] { "Big", "Small", "Mid" }, Path(avatar))), "Small");
+        StringAssert.Contains("1.00", small);     // the MAX of Small's two containments
+        StringAssert.DoesNotContain("0.50", small); // not the lesser pair — proves max-selection, not clobber/min
     }
 }
