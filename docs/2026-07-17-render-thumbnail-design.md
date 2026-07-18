@@ -108,10 +108,16 @@ public static string Render(
 
 ### The pose vocabulary is a folder glob
 
-There is no hard-wired name array. `Editor/Poses/RTPose_<Name>.anim` IS the vocabulary: a token matches
-by normalizing both sides (lowercase, strip non-alphanumerics), so `hand-on-hip`, `hand_on_hip` and
-`HandOnHip` are one token. **Adding a pose is dropping a file** — no code edit — and the unknown-pose
-error enumerates the glob, so what the tool advertises cannot drift from what ships.
+There is no hard-wired name array. `Editor/Poses/RTPose_<Name>.anim` IS the vocabulary, matched the same
+way `expression` matches FX state names — `NormalizeToken` on both sides, first match wins — so
+`hand-on-hip`, `hand_on_hip` and `HandOnHip` are one name. **Adding a pose is dropping a file**, and the
+unknown-pose error enumerates the folder, so what the tool advertises cannot drift from what ships.
+
+One guard stays that the expression side does not need: a clip must be `isHumanMotion`. A generic clip
+would not retarget across rigs, and `SampleAnimationClip` is a *silent* no-op for it on a humanoid — the
+verdict would claim `pose=<name>` over an unposed avatar, and nothing downstream would catch it. There
+is no runtime check for two files normalizing to the same name; a unit test guards that at build time,
+which is where it belongs when poses land by dropping files.
 
 ### The bake door
 

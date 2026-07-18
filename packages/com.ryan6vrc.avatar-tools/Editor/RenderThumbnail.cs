@@ -69,7 +69,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// and returns without baking or touching the project.
         /// </summary>
         /// <param name="target">avatar root: scene hierarchy path, instance id, or name (first match).</param>
-        /// <param name="pose">null =&gt; floor (unposed); a bundled token (see <see cref="PoseCatalog"/>);
+        /// <param name="pose">null =&gt; floor (unposed); a bundled name (see <see cref="BundledPoses"/>);
         /// or a clip asset path/GUID.</param>
         /// <param name="expression">null =&gt; no expression (a fully supported outcome); else a state name
         /// on the baked FX controller (a gesture slot such as <c>Open</c>/<c>Peace</c>), or a clip asset
@@ -535,25 +535,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return ColorUtility.TryParseHtmlString(s, out c);
         }
 
-        /// <summary>One bundled pose: <c>Token</c> is the normalized match key, <c>Label</c> the readable
-        /// name as it appears on disk (what the unknown-pose error advertises — any casing/punctuation of
-        /// it normalizes back to Token), and <c>Path</c> the asset it loads.</summary>
-        internal struct PoseEntry
-        {
-            public string Token;
-            public string Label;
-            public string Path;
-        }
-
         /// <summary>
-        /// The bundled pose vocabulary, globbed from <see cref="PosesFolder"/>: every
-        /// <c>RTPose_&lt;Name&gt;.anim</c> becomes the token <c>normalize(&lt;Name&gt;)</c>. Sorted for a
-        /// stable error message. Content-driven by design — adding a pose is dropping a file.
+        /// The bundled poses: readable name (the file name minus <c>RTPose_</c>) to asset path, sorted so
+        /// the unknown-pose error is stable. The folder IS the vocabulary — adding a pose is dropping a
+        /// file, and the error is derived from disk, so what the tool advertises cannot drift from what
+        /// ships.
         /// </summary>
-        internal static List<PoseEntry> PoseCatalog()
+        internal static SortedDictionary<string, string> BundledPoses()
         {
-            var entries = new List<PoseEntry>();
-            if (!AssetDatabase.IsValidFolder(PosesFolder)) return entries;
+            var found = new SortedDictionary<string, string>(StringComparer.Ordinal);
+            if (!AssetDatabase.IsValidFolder(PosesFolder)) return found;
 
             foreach (var guid in AssetDatabase.FindAssets("t:AnimationClip", new[] { PosesFolder }))
             {
@@ -563,27 +554,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (System.IO.Path.GetDirectoryName(path).Replace('\\', '/') != PosesFolder) continue;
                 string file = System.IO.Path.GetFileNameWithoutExtension(path);
                 if (!file.StartsWith("RTPose_", StringComparison.OrdinalIgnoreCase)) continue;
-                entries.Add(new PoseEntry
-                {
-                    Token = NormalizeToken(file),
-                    Label = file.Substring("RTPose_".Length),
-                    Path = path,
-                });
+                found[file.Substring("RTPose_".Length)] = path;
             }
-            entries.Sort((a, b) => string.CompareOrdinal(a.Token, b.Token));
-
-            return entries;
+            return found;
         }
 
         /// <summary>
-        /// Fold a pose name to its match key: drop a leading <c>RTPose_</c>, lowercase, and strip every
-        /// non-alphanumeric character. This is what makes <c>hand-on-hip</c>, <c>hand_on_hip</c> and
-        /// <c>HandOnHip</c> the same token, replacing the old hand-maintained name→PascalCase switch.
+        /// Fold a name to its match key: lowercase, drop every non-alphanumeric character. This is what
+        /// makes <c>hand-on-hip</c>, <c>hand_on_hip</c> and <c>HandOnHip</c> one token, for both pose
+        /// names and FX state names.
         /// </summary>
         internal static string NormalizeToken(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
-            if (s.StartsWith("RTPose_", StringComparison.OrdinalIgnoreCase)) s = s.Substring("RTPose_".Length);
 
             var sb = new System.Text.StringBuilder(s.Length);
             foreach (char ch in s)
@@ -593,11 +576,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>
         /// Resolve <paramref name="pose"/> to a clip: null/empty =&gt; floor (<paramref name="clip"/> null,
-        /// no error); a bundled token (see <see cref="PoseCatalog"/>, matched via
-        /// <see cref="NormalizeToken"/>) =&gt; that package clip; else a value containing '/' or a 32-hex
-        /// GUID =&gt; loaded as an asset path/GUID; else a named FAIL enumerating the globbed vocabulary.
-        /// Any loaded clip that is not <c>isHumanMotion</c> (a generic/transform clip) fails loud here,
-        /// before any bake — such a clip would not retarget across rigs.
+        /// no error); a clip asset path or 32-hex GUID loads directly; anything else is matched (via
+        /// <see cref="NormalizeToken"/>) against <see cref="BundledPoses"/>, first match wins.
+        /// <para>The one guard that has to stay: a clip that is not <c>isHumanMotion</c> would not retarget
+        /// across rigs, and <c>SampleAnimationClip</c> is a SILENT no-op for it on a humanoid — so without
+        /// this the verdict would claim <c>pose=&lt;name&gt;</c> over an unposed avatar. Unlike the
+        /// expression side, nothing downstream catches it.</para>
         /// </summary>
         internal static bool ResolvePose(string pose, out AnimationClip clip, out string err)
         {
@@ -606,71 +590,49 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (string.IsNullOrEmpty(pose)) return true; // floor
 
             string trimmed = pose.Trim();
-            var catalog = PoseCatalog();
+            string source;
 
-            // A bundled token never contains '/', so the vocabulary lookup can safely precede the
-            // path/GUID branch.
-            if (trimmed.IndexOf('/') < 0)
+            if (trimmed.IndexOf('/') >= 0 || IsGuid(trimmed))
             {
-                string key = NormalizeToken(trimmed);
-                foreach (var entry in catalog)
-                {
-                    if (entry.Token != key) continue;
-
-                    clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(entry.Path);
-                    if (clip == null)
-                    {
-                        err = "bundled pose '" + entry.Token + "' did not load from " + entry.Path;
-                        return false;
-                    }
-                    if (!clip.isHumanMotion)
-                    {
-                        err = "clip '" + entry.Path + "' is not a humanoid muscle clip (isHumanMotion=false)";
-                        clip = null;
-                        return false;
-                    }
-                    return true;
-                }
-            }
-
-            string assetPath = null;
-            if (trimmed.IndexOf('/') >= 0)
-            {
-                assetPath = trimmed;
-            }
-            else if (IsGuid(trimmed))
-            {
-                assetPath = AssetDatabase.GUIDToAssetPath(trimmed);
-                if (string.IsNullOrEmpty(assetPath))
-                {
-                    err = "GUID '" + trimmed + "' did not resolve to any asset";
-                    return false;
-                }
-            }
-
-            if (assetPath != null)
-            {
-                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(assetPath);
+                source = IsGuid(trimmed) ? AssetDatabase.GUIDToAssetPath(trimmed) : trimmed;
+                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(source);
                 if (clip == null)
                 {
-                    err = "no AnimationClip found at '" + assetPath + "'";
+                    err = "no AnimationClip at '" + trimmed + "'";
                     return false;
                 }
-                if (!clip.isHumanMotion)
+            }
+            else
+            {
+                var bundled = BundledPoses();
+                string key = NormalizeToken(trimmed);
+                source = null;
+                foreach (var entry in bundled)
+                    if (NormalizeToken(entry.Key) == key) { source = entry.Value; break; }
+
+                if (source == null)
                 {
-                    err = "clip '" + assetPath + "' is not a humanoid muscle clip (isHumanMotion=false)";
-                    clip = null;
+                    var names = new List<string>(bundled.Keys);
+                    err = "unknown pose '" + pose + "' — bundled: "
+                        + (names.Count > 0 ? string.Join(", ", names.ToArray()) : "(none in " + PosesFolder + ")")
+                        + "; or pass a clip asset path/GUID";
                     return false;
                 }
-                return true;
+                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(source);
+                if (clip == null)
+                {
+                    err = "bundled pose '" + pose + "' did not load from " + source;
+                    return false;
+                }
             }
 
-            var tokens = new List<string>();
-            foreach (var entry in catalog) tokens.Add(entry.Label);
-            err = "unknown pose '" + pose + "' — bundled: "
-                + (tokens.Count > 0 ? string.Join(", ", tokens.ToArray()) : "(none under " + PosesFolder + ")")
-                + "; or pass a clip asset path/GUID";
-            return false;
+            if (!clip.isHumanMotion)
+            {
+                err = "clip '" + source + "' is not a humanoid muscle clip (isHumanMotion=false)";
+                clip = null;
+                return false;
+            }
+            return true;
         }
 
         /// <summary>

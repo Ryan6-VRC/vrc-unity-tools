@@ -5,9 +5,8 @@ using Ryan6Vrc.AvatarTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Tests
 {
-    // Pure helpers ONLY (FramingDistance / TryParseBg / PoseCatalog / NormalizeToken / ResolvePose).
-    // Everything expression-side resolves against a BAKED avatar, so it is a scene object and is
-    // verified live
+    // Pure helpers ONLY (FramingDistance / TryParseBg / BundledPoses / NormalizeToken / ResolvePose).
+    // Everything expression-side resolves against a BAKED avatar, so it is a scene object verified live
     // (execute_code) by the coordinator, never in NUnit; see
     // docs/2026-07-17-render-thumbnail-design.md §Verification. No test here may create a GameObject,
     // add a VRC_AvatarDescriptor, or call RenderThumbnail.Render — that class of EditMode test
@@ -49,49 +48,46 @@ namespace Ryan6Vrc.AvatarTools.Tests
         // ===== Pose vocabulary = the Poses/ folder glob (no hard-wired array) =====
 
         [Test]
-        public void PoseCatalog_IsNonEmpty()
+        public void BundledPoses_IsNonEmpty()
         {
-            var catalog = RenderThumbnail.PoseCatalog();
-
-            Assert.IsNotEmpty(catalog,
-                "no RTPose_*.anim found under " + RenderThumbnail.PosesFolder
-                + " — the bundled pose vocabulary is sourced entirely from that glob");
+            Assert.IsNotEmpty(RenderThumbnail.BundledPoses(),
+                "no RTPose_*.anim found in " + RenderThumbnail.PosesFolder
+                + " — the bundled pose vocabulary is sourced entirely from that folder");
         }
 
         [Test]
-        public void PoseCatalog_EveryEntryResolvesAndIsHumanoid()
+        public void BundledPoses_EachResolvesToItsOwnHumanoidClip()
         {
-            // Doubles as a content gate on the bundled set: any RTPose_* that is not a humanoid muscle
-            // clip would not retarget across rigs, and ResolvePose rejects it pre-bake.
-            foreach (var entry in RenderThumbnail.PoseCatalog())
+            // Doubles as a content gate: any RTPose_* that is not a humanoid muscle clip would not
+            // retarget across rigs, and ResolvePose rejects it pre-bake.
+            foreach (var entry in RenderThumbnail.BundledPoses())
             {
-                Assert.IsTrue(RenderThumbnail.ResolvePose(entry.Token, out AnimationClip clip, out string err),
-                    entry.Token + " (" + entry.Path + ") failed to resolve: " + err);
-                Assert.IsNotNull(clip, entry.Token + " resolved null");
-                // Assert WHICH clip came back, not merely that one did: without this, a token collision
-                // resolves both entries to the same clip and the test still passes green.
-                Assert.AreEqual(entry.Path, UnityEditor.AssetDatabase.GetAssetPath(clip),
-                    "token '" + entry.Token + "' resolved to the wrong asset");
-                Assert.IsTrue(clip.isHumanMotion, entry.Token + " must be a humanoid muscle clip");
+                Assert.IsTrue(RenderThumbnail.ResolvePose(entry.Key, out AnimationClip clip, out string err),
+                    entry.Key + " (" + entry.Value + ") failed to resolve: " + err);
+                // Assert WHICH clip came back, not merely that one did: with first-match-wins, a name
+                // collision resolves two entries to the same clip and the test would still pass green.
+                Assert.AreEqual(entry.Value, UnityEditor.AssetDatabase.GetAssetPath(clip),
+                    "'" + entry.Key + "' resolved to the wrong asset");
+                Assert.IsTrue(clip.isHumanMotion, entry.Key + " must be a humanoid muscle clip");
             }
         }
 
         [Test]
-        public void PoseToken_NormalizesCaseAndPunctuation()
+        public void Token_NormalizesCaseAndPunctuation()
         {
-            // "Hand-On-Hip", "hand_on_hip" and "handonhip" are the same token; RTPose_HandOnHip.anim
-            // normalizes to that same key, which is what lets the glob replace the old switch.
+            // Shared by pose names and FX state names: "Hand-On-Hip", "hand_on_hip" and "HandOnHip" are
+            // one token, as are "Thumbs up" and "thumbsup".
             Assert.AreEqual(RenderThumbnail.NormalizeToken("handonhip"), RenderThumbnail.NormalizeToken("Hand-On-Hip"));
             Assert.AreEqual(RenderThumbnail.NormalizeToken("handonhip"), RenderThumbnail.NormalizeToken("hand_on_hip"));
-            Assert.AreEqual("handonhip", RenderThumbnail.NormalizeToken("RTPose_HandOnHip"));
+            Assert.AreEqual("thumbsup", RenderThumbnail.NormalizeToken("Thumbs up"));
         }
 
         [Test]
-        public void Pose_CatalogTokenMatchesCaseInsensitive()
+        public void Pose_NameMatchesCaseInsensitive()
         {
-            var first = RenderThumbnail.PoseCatalog().First();
+            string first = RenderThumbnail.BundledPoses().Keys.First();
 
-            Assert.IsTrue(RenderThumbnail.ResolvePose(first.Token.ToUpperInvariant(), out AnimationClip clip, out string err), err);
+            Assert.IsTrue(RenderThumbnail.ResolvePose(first.ToUpperInvariant(), out AnimationClip clip, out string err), err);
             Assert.IsNotNull(clip);
         }
 
@@ -106,43 +102,37 @@ namespace Ryan6Vrc.AvatarTools.Tests
         }
 
         [Test]
-        public void Pose_Unknown_ErrEnumeratesTheGlob()
+        public void Pose_Unknown_ErrEnumeratesTheFolder()
         {
-            // The advertised vocabulary is derived from disk, so it can never drift from what ships.
-            var catalog = RenderThumbnail.PoseCatalog();
+            // The advertised vocabulary is derived from disk, so it cannot drift from what ships.
+            var bundled = RenderThumbnail.BundledPoses();
 
             bool ok = RenderThumbnail.ResolvePose("nope", out AnimationClip clip, out string err);
 
             Assert.IsFalse(ok);
             Assert.IsNull(clip);
-            foreach (var entry in catalog)
+            foreach (var name in bundled.Keys)
             {
-                StringAssert.Contains(entry.Label, err);
-                // What it advertises must be what it accepts: the readable Label round-trips to Token.
-                Assert.AreEqual(entry.Token, RenderThumbnail.NormalizeToken(entry.Label),
-                    "advertised label '" + entry.Label + "' does not normalize back to its match token");
+                StringAssert.Contains(name, err);
+                // What it advertises must be what it accepts.
+                Assert.IsTrue(RenderThumbnail.ResolvePose(name, out AnimationClip _, out string _),
+                    "advertised pose '" + name + "' does not resolve");
             }
             StringAssert.Contains("path/GUID", err);
         }
 
-
-
-
-
-
         [Test]
-        public void PoseCatalog_TokensAreUnique()
+        public void BundledPoses_NormalizedNamesAreUnique()
         {
-            // A collision would make the winner depend on FindAssets order through an unstable sort.
-            // THIS TEST IS THE ONLY GUARD. There is no runtime collision check — two files normalizing to
-            // one token would otherwise resolve by FindAssets order through an unstable sort, silently
-            // making one pose unreachable. Catching it at build time is the point: poses land by dropping
-            // files, with nobody reviewing the tool.
-            var tokens = RenderThumbnail.PoseCatalog().Select(e => e.Token).ToList();
+            // THIS TEST IS THE ONLY GUARD. There is no runtime collision check: matching is
+            // first-match-wins, so two files normalizing to one name would silently make one pose
+            // unreachable. Build time is the right place to catch it — poses land by dropping files into
+            // the folder, with nobody reviewing this tool.
+            var names = RenderThumbnail.BundledPoses().Keys
+                .Select(RenderThumbnail.NormalizeToken).ToList();
 
-            CollectionAssert.AllItemsAreUnique(tokens);
+            CollectionAssert.AllItemsAreUnique(names);
         }
-
 
     }
 }
