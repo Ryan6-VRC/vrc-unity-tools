@@ -773,4 +773,71 @@ public class ReportShapeOverlapTests
         Assert.IsTrue(ReportShapeOverlap.ModularAvatarInstalled(),
             "MA is referenced by the test asmdef; the presence probe's assembly name must match");
     }
+
+    // ── Review follow-up: markdown-cell encoding + unknown-enum drift + overlap precompute ──────────────
+
+    // Finding #1 (unit): a pathological blendshape name carrying a newline (row break + heading injection),
+    // a pipe (column break), a backtick (code-span break) and a tab must render on ONE physical line with all
+    // structural characters neutralized — no character survives that could escape its table cell.
+    [Test]
+    public void Cell_neutralizesRowAndColumnBreakers()
+    {
+        string encoded = ReportShapeOverlap.Cell("Evil`\r\n\n## injected | x\ty");
+        StringAssert.DoesNotContain("\n", encoded); // no physical newline survives → stays one row
+        StringAssert.DoesNotContain("\r", encoded);
+        StringAssert.DoesNotContain("\t", encoded);
+        StringAssert.Contains("\\n", encoded);       // rendered as a visible escape instead
+        StringAssert.Contains("\\|", encoded);       // pipe escaped → cannot inject a column
+        StringAssert.Contains("\\`", encoded);       // backtick escaped
+    }
+
+    // Finding #1 (integration): the encoder is actually wired into the render path — a shape name with a pipe
+    // appears backslash-escaped in the RunLog, never in its raw column-breaking form.
+    [Test]
+    public void Report_shapeNameWithPipe_escapedInRunLog()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "a|b", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+
+        var md = ReadLog(ReportShapeOverlap.Report(Path(body), new[] { "a|b" }, Path(avatar)));
+        StringAssert.Contains(@"`a\|b`", md);     // pipe backslash-escaped inside the code cell
+        StringAssert.DoesNotContain("`a|b`", md); // never the raw, column-breaking form
+    }
+
+    // Finding #3: an out-of-range ShapeChangeType (a future MA mode or corrupt serialized enum) renders loudly
+    // as UNKNOWN(n) with an `unknown` resolved-target and a drift warning — never silently defaulted to Set.
+    [Test]
+    public void Report_unknownChangeType_renderedUnknownNotSet()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Drifted", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChanger(avatar, "Outfit", body, ("Drifted", (ShapeChangeType)2));
+        LogAssert.Expect(LogType.Warning,
+            new System.Text.RegularExpressions.Regex(@"ShapeChangeType drift.*Drifted"));
+
+        var row = ResolutionRow(ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar))), "Drifted");
+        StringAssert.Contains("UNKNOWN(2)", row);
+        StringAssert.Contains("| unknown |", row); // resolved-target = unknown, not a fabricated Set value
+        Assert.IsFalse(row.Contains("Set="), "an unknown change type must not render as Set");
+    }
+
+    // Finding #4: the overlap column (now precomputed once per shape instead of re-scanning a.Pairs per shape)
+    // still reports each shape's max containment — a fully-swallowed pair surfaces 1.00 on both rows.
+    [Test]
+    public void Report_resolutionOverlapColumn_reportsContainment()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Big", 0, 14, 0.05f);  // 15 verts
+        AddSpan(m, "Small", 0, 9, 0.05f); // 10 verts, fully inside Big ⇒ |A∩B|/min = 10/10 = 1.00
+        var body = NewChildBody(avatar, "Body", m);
+
+        var md = ReadLog(ReportShapeOverlap.Report(Path(body), new[] { "Big", "Small" }, Path(avatar)));
+        StringAssert.Contains("1.00", ResolutionRow(md, "Small")); // swallowed shape ⇒ containment 1.00
+        StringAssert.Contains("1.00", ResolutionRow(md, "Big"));   // the same pair rides the larger shape's row
+    }
 }

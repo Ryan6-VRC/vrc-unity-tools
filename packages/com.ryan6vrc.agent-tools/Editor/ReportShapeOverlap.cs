@@ -209,6 +209,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                             var target = getMethod.Invoke(objRef, new object[] { comp }) as GameObject;
                             if (target != bodyGO) continue; // only rows that write the resolved body mesh
 
+                            if (changeType != 0 && changeType != 1)
+                                Debug.LogWarning("[ReportShapeOverlap] MA ShapeChangeType drift on shape '" + shapeName +
+                                    "': unexpected value " + changeType + " (expected Delete=0 / Set=1); rendered UNKNOWN. " +
+                                    "MA may have added a shape-change mode this tool does not model.");
+
                             add(shapeName);
                             result.ReactionTypes[shapeName] = changeType; // last-wins type (Task 1 handoff)
                             if (!result.Reactions.TryGetValue(shapeName, out var ri))
@@ -355,6 +360,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 "row is never flagged (the reaction owns it at runtime); disposition is not `current≠resolved-target`._\n\n");
             sb.Append("| shape | reaction | current | resolved-target | overlap | disposition |\n");
             sb.Append("| --- | --- | --- | --- | --- | --- |\n");
+            // Per-shape max containment, precomputed in one pass over the pairs (an O(1) lookup per union
+            // shape instead of re-scanning a.Pairs — which is itself O(shapes²) — for every shape).
+            var maxOverlap = new Dictionary<string, float>();
+            foreach (var p in a.Pairs)
+            {
+                if (!maxOverlap.TryGetValue(p.A, out var oa) || p.Containment > oa) maxOverlap[p.A] = p.Containment;
+                if (!maxOverlap.TryGetValue(p.B, out var ob) || p.Containment > ob) maxOverlap[p.B] = p.Containment;
+            }
             foreach (var name in ingested.Names)
             {
                 var f = a.Footprints.First(x => x.Name == name);
@@ -370,20 +383,19 @@ namespace Ryan6Vrc.AgentTools.Editor
                 else if (ri.Conflict)
                 {
                     reactionCell = "CONFLICT: " + string.Join(" / ",
-                        ri.Declares.Select(d => d.type == 0 ? "Delete" : "Set=" + Num(d.value)));
+                        ri.Declares.Select(d => ReactionLabel(d.type, d.value)));
                     resolvedTarget = "conflict";
                 }
                 else
                 {
-                    reactionCell = ri.ChangeType == 0 ? "Delete" : "Set=" + Num(ri.Value);
-                    resolvedTarget = ri.ChangeType == 0 ? "100" : Num(ri.Value);
+                    reactionCell = ReactionLabel(ri.ChangeType, ri.Value);
+                    resolvedTarget = ResolvedTarget(ri.ChangeType, ri.Value);
                 }
 
-                float ov = -1f;
-                foreach (var p in a.Pairs) if (p.A == name || p.B == name) ov = Mathf.Max(ov, p.Containment);
-                string overlapCell = ov < 0f ? "—" : ov.ToString("F2", CultureInfo.InvariantCulture);
+                string overlapCell = maxOverlap.TryGetValue(name, out var ov)
+                    ? ov.ToString("F2", CultureInfo.InvariantCulture) : "—";
 
-                sb.Append("| `").Append(name).Append("` | ").Append(reactionCell).Append(" | ")
+                sb.Append("| `").Append(Cell(name)).Append("` | ").Append(reactionCell).Append(" | ")
                   .Append(present ? Num(weight) : "—").Append(" | ").Append(resolvedTarget).Append(" | ")
                   .Append(overlapCell).Append(" | ").Append(mismatch ? "**MISMATCH**" : "—").Append(" |\n");
             }
@@ -393,7 +405,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("_the full weight state (the resolution table above is scoped to the co-active union; this is not)._\n\n");
             sb.Append("| shape | weight |\n| --- | --- |\n");
             for (int i = 0; i < mesh.blendShapeCount; i++)
-                sb.Append("| `").Append(mesh.GetBlendShapeName(i)).Append("` | ")
+                sb.Append("| `").Append(Cell(mesh.GetBlendShapeName(i))).Append("` | ")
                   .Append(Num(smr.GetBlendShapeWeight(i))).Append(" |\n");
 
             sb.Append("\n## Footprints — touched vertices per shape\n");
@@ -403,9 +415,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("| --- | --- | --- | --- | --- |\n");
             foreach (var f in a.Footprints)
             {
-                if (f.Missing) { sb.Append("| `").Append(f.Name).Append("` | — | — | **MISSING** | — |\n"); continue; }
+                if (f.Missing) { sb.Append("| `").Append(Cell(f.Name)).Append("` | — | — | **MISSING** | — |\n"); continue; }
                 float pct = a.VertexCount == 0 ? 0f : 100f * f.Touched / a.VertexCount;
-                sb.Append("| `").Append(f.Name).Append("` | ").Append(Mm(f.P95)).Append(" | ").Append(Mm(f.Threshold))
+                sb.Append("| `").Append(Cell(f.Name)).Append("` | ").Append(Mm(f.P95)).Append(" | ").Append(Mm(f.Threshold))
                   .Append(" | ").Append(f.Touched).Append(" | ").Append(pct.ToString("F1", CultureInfo.InvariantCulture)).Append("% |\n");
             }
 
@@ -420,7 +432,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var p in a.Pairs)
                 {
                     string flag = p.Containment >= FlagContainment ? " *" : "";
-                    sb.Append("| `").Append(p.A).Append("` | `").Append(p.B).Append("` | ").Append(p.Intersect)
+                    sb.Append("| `").Append(Cell(p.A)).Append("` | `").Append(Cell(p.B)).Append("` | ").Append(p.Intersect)
                       .Append(" | ").Append(p.MinFootprint).Append(" | ")
                       .Append(p.Containment.ToString("F2", CultureInfo.InvariantCulture)).Append(flag).Append(" |\n");
                 }
@@ -434,6 +446,40 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── Helpers ──────────────────────────────────────────────────────────────────────────────────────
 
         private static string Mm(float meters) => (meters * 1000f).ToString("F3", CultureInfo.InvariantCulture);
+
+        // Encode a dynamic name (a blendshape name off the mesh) for a single Markdown table cell. A
+        // pathological name can carry CR/LF, a pipe, or a backtick — which would break the row, break the
+        // column, or close the code span, injecting structure (a fake heading, extra cells) into the RunLog
+        // an agent reads and trusts. Neutralize exactly those: CR/LF/tab → visible escapes so the name stays
+        // on one physical row; other control chars → space; '|' and '`' → backslash-escaped. Structural
+        // safety does not rest on the backtick escape (a stray backtick can't leave a cell once newlines and
+        // pipes are neutralized) — it only keeps the code span legible.
+        internal static string Cell(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s ?? "";
+            var sb = new StringBuilder(s.Length);
+            foreach (char c in s)
+                switch (c)
+                {
+                    case '\r': sb.Append("\\r"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    case '|':  sb.Append("\\|"); break;
+                    case '`':  sb.Append("\\`"); break;
+                    default:   sb.Append(char.IsControl(c) ? ' ' : c); break;
+                }
+            return sb.ToString();
+        }
+
+        // MA ShapeChangeType is {Delete=0, Set=1}. Render any other value loudly as UNKNOWN(n) with an
+        // `unknown` resolved-target rather than silently defaulting to Set — a new MA mode or a corrupt
+        // serialized enum is exactly the "reflection goes silently green on MA drift" trap this tool guards.
+        private static string ReactionLabel(int changeType, float value) =>
+            changeType == 0 ? "Delete"
+            : changeType == 1 ? "Set=" + Num(value)
+            : "UNKNOWN(" + changeType.ToString(CultureInfo.InvariantCulture) + ")";
+        private static string ResolvedTarget(int changeType, float value) =>
+            changeType == 0 ? "100" : changeType == 1 ? Num(value) : "unknown";
 
         // Compact weight/value formatter: integral weights render clean (100, 0, 42), fractional keep up to 3 dp.
         // A NONZERO weight must never render as "0": worn/mismatch classification is strictly `!= 0`, so a tiny
