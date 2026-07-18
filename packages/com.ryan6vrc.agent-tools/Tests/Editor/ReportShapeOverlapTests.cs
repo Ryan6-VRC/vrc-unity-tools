@@ -531,4 +531,172 @@ public class ReportShapeOverlapTests
         Assert.AreEqual(0, ing.ReactionTypes["B"]); // Delete
         Assert.AreEqual(1, ing.ReactionTypes["C"]); // Set
     }
+
+    // ── Task 2: resolution table + weight audit + disposition + summary ─────────────────────────────────
+
+    // A ShapeChanger row carrying a custom Set value (the base fixture hardcodes 100) — needed to distinguish a
+    // Set's resolved-target (its own value) from a Delete's (always 100).
+    private ModularAvatarShapeChanger AddShapeChangerValued(GameObject avatar, string name, GameObject target,
+        params (string shape, ShapeChangeType type, float value)[] rows)
+    {
+        var outfit = new GameObject(name);
+        outfit.transform.SetParent(avatar.transform, false);
+        var sc = outfit.AddComponent<ModularAvatarShapeChanger>();
+        var list = new List<ChangedShape>();
+        foreach (var (shape, type, value) in rows)
+        {
+            var objRef = new AvatarObjectReference();
+            objRef.Set(target);
+            list.Add(new ChangedShape { Object = objRef, ShapeName = shape, ChangeType = type, Value = value });
+        }
+        sc.Shapes = list;
+        return sc;
+    }
+
+    // The single Resolution-table line for `shape` (one line per union shape, between "## Resolution" and the
+    // next "## " section header). Lets a test assert one row's columns without matching the whole document.
+    private static string ResolutionRow(string body, string shape)
+    {
+        int start = body.IndexOf("## Resolution", StringComparison.Ordinal);
+        if (start < 0) return "";
+        int end = body.IndexOf("\n## ", start + 3, StringComparison.Ordinal);
+        string section = end < 0 ? body.Substring(start) : body.Substring(start, end - start);
+        foreach (var line in section.Split('\n'))
+            if (line.Contains("`" + shape + "`")) return line;
+        return "";
+    }
+
+    // (a) The anti-flood invariant: a reaction-declared shape sits at static weight 0 (the reaction owns it at
+    // runtime), yet its row is NOT flagged MISMATCH — flagging every correctly-owned row would flood the report.
+    [Test]
+    public void Report_reactionDeclaredAtZeroWeight_notFlagged()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m); // weight 0
+        AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+
+        var md = ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar)));
+        var row = ResolutionRow(md, "Shrink_Hip");
+        StringAssert.Contains("Set=", row);                       // it IS reaction-declared
+        Assert.IsFalse(row.Contains("MISMATCH"), "reaction-declared row is never flagged, even at static weight 0");
+        // no table DATA row anywhere is flagged (the legend line explaining the marker is not a "| `" data row).
+        foreach (var line in md.Split('\n'))
+            if (line.StartsWith("| `", StringComparison.Ordinal))
+                Assert.IsFalse(line.Contains("MISMATCH"), "no data row should be flagged: " + line);
+    }
+
+    // (b) The hazard case: a shape worn at nonzero weight with NO reaction declaring it ⇒ MISMATCH.
+    [Test]
+    public void Report_wornButUndeclared_flaggedMismatch()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_stocking", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+        smr.SetBlendShapeWeight(m.GetBlendShapeIndex("Shrink_stocking"), 100f); // worn, undeclared
+
+        var md = ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar)));
+        var row = ResolutionRow(md, "Shrink_stocking");
+        StringAssert.Contains("**MISMATCH**", row);
+        StringAssert.Contains("none", row); // no reaction owns it
+    }
+
+    // (c) A Delete reaction bakes to fully-applied ⇒ resolved-target 100 (regardless of its Value field).
+    [Test]
+    public void Report_deleteReaction_resolvedTargetIs100()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Del_Shape", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChangerValued(avatar, "Outfit", body, ("Del_Shape", ShapeChangeType.Delete, 30f));
+
+        var row = ResolutionRow(ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar))), "Del_Shape");
+        StringAssert.Contains("Delete", row);
+        StringAssert.Contains("| 100 |", row); // resolved-target column = 100 for a Delete, not the Value
+    }
+
+    // (d) A Set reaction's resolved-target = its declared Value (here 42, distinct from a Delete's 100).
+    [Test]
+    public void Report_setReaction_resolvedTargetIsValue()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Set_Shape", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChangerValued(avatar, "Outfit", body, ("Set_Shape", ShapeChangeType.Set, 42f));
+
+        var row = ResolutionRow(ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar))), "Set_Shape");
+        StringAssert.Contains("Set=42", row);
+        StringAssert.Contains("| 42 |", row); // resolved-target column = the Set value
+    }
+
+    // (e) Two ShapeChangers declaring one shape at different values surface as a CONFLICT — not collapsed to
+    // last-wins — both on the ingestion record and in the rendered row.
+    [Test]
+    public void Report_multiReactionDifferentValue_conflict()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Clash", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChangerValued(avatar, "Outfit1", body, ("Clash", ShapeChangeType.Set, 50f));
+        AddShapeChangerValued(avatar, "Outfit2", body, ("Clash", ShapeChangeType.Set, 80f));
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+
+        var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new string[0], avatar);
+        Assert.IsTrue(ing.Reactions["Clash"].Conflict, "two Set reactions at different values conflict");
+
+        var row = ResolutionRow(ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar))), "Clash");
+        StringAssert.Contains("CONFLICT", row);
+        StringAssert.Contains("50", row);
+        StringAssert.Contains("80", row); // both values surfaced, not collapsed
+    }
+
+    // (f) The weight audit lists EVERY blendshape on the mesh, including ones never in the co-active union — but
+    // the footprint/pairwise pass stays scoped to the union (audit shapes are not footprinted).
+    [Test]
+    public void Report_weightAudit_listsAllShapes_footprintsStayScoped()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "InUnion", 0, 9, 0.05f);
+        AddSpan(m, "Idle1", 10, 12, 0.05f);
+        AddSpan(m, "Idle2", 13, 15, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+
+        var md = ReadLog(ReportShapeOverlap.Report(Path(body), new[] { "InUnion" }, Path(avatar)));
+        StringAssert.Contains("## Weight audit", md);
+        StringAssert.Contains("`Idle1`", md);
+        StringAssert.Contains("`Idle2`", md);
+
+        int fstart = md.IndexOf("## Footprints", StringComparison.Ordinal);
+        string footprintsOnward = md.Substring(fstart); // footprints + pairwise
+        StringAssert.DoesNotContain("`Idle1`", footprintsOnward); // audit-only shape is never footprinted
+        StringAssert.DoesNotContain("`Idle2`", footprintsOnward);
+    }
+
+    // (g) The updated summary carries reacted=/worn=/missing= and keeps => OK, with no PASS/FAIL verdict token.
+    [Test]
+    public void Report_summary_reactedWornMissingOk_noVerdict()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Worn1", 0, 4, 0.05f);
+        AddSpan(m, "React1", 5, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+        smr.SetBlendShapeWeight(m.GetBlendShapeIndex("Worn1"), 100f);     // worn, undeclared
+        AddShapeChanger(avatar, "Outfit", body, ("React1", ShapeChangeType.Set)); // reacted, weight 0
+
+        var r = ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar));
+        StringAssert.Contains("=> OK", r);
+        StringAssert.Contains("reacted=1", r);
+        StringAssert.Contains("worn=1", r);
+        StringAssert.Contains("missing=0", r);
+        Assert.IsFalse(r.Contains("PASS") || r.Contains("=> FAIL"), "a Report emits no verdict token");
+    }
 }

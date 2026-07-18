@@ -45,13 +45,26 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal struct Footprint { public string Name; public bool Missing; public int Touched; public float P95; public float Threshold; }
         internal struct Pair { public string A; public string B; public int Intersect; public int MinFootprint; public float Containment; }
 
+        // Per-shape record of the MA ShapeChanger reaction(s) declaring it. ChangeType/Value are the LAST
+        // declared (matching ReactionTypes' last-wins), but every declaration is kept in Declares so two rows
+        // asking for different (type,value) surface as a Conflict instead of silently collapsing to last-wins.
+        internal class ReactionInfo
+        {
+            public int ChangeType;          // MA ShapeChangeType of the last declaration (Delete=0, Set=1)
+            public float Value;             // Set value of the last declaration (irrelevant for Delete)
+            public readonly List<(int type, float value)> Declares = new List<(int type, float value)>();
+            public bool Conflict => Declares.Distinct().Count() > 1; // 2+ differing (type,value) rows on one shape
+        }
+
         // Minimal ingestion record fed to Analyze. Names is the ORDERED, deduped co-active union
         // ({passed} ∪ {worn} ∪ {reaction-targeted}). ReactionTypes captures each reaction-driven shape's MA
-        // ShapeChangeType (Delete=0, Set=1) so Task 2 can render the resolution table — this task only ingests.
+        // ShapeChangeType (Delete=0, Set=1); Reactions additionally carries the declared Value(s) + conflict so
+        // Emit can render the resolved-target column and surface multi-declaration conflicts.
         internal class Ingested
         {
             public List<string> Names = new List<string>();
             public Dictionary<string, int> ReactionTypes = new Dictionary<string, int>();
+            public Dictionary<string, ReactionInfo> Reactions = new Dictionary<string, ReactionInfo>();
         }
         internal class Analysis
         {
@@ -98,7 +111,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return Fail("no shape names — pass the candidate co-active set (the shapes you believe are on together)");
 
             var analysis = Analyze(mesh, ingested.Names);
-            return Emit(go, mesh, analysis);
+            return Emit(go, smr, mesh, analysis, ingested);
         }
 
         // ── Ingestion: assemble the co-active shape-name union fed to Analyze ────────────────────────────────
@@ -151,12 +164,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             var objField = csType?.GetField("Object");
             var nameField = csType?.GetField("ShapeName");
             var ctField = csType?.GetField("ChangeType");
+            var valField = csType?.GetField("Value");
             var aorType = FindType("nadena.dev.modular_avatar.core.AvatarObjectReference");
             var getMethod = aorType?.GetMethod("Get", new[] { typeof(Component) }); // Get(Component container)
-            if (shapesProp == null || objField == null || nameField == null || ctField == null || getMethod == null)
+            if (shapesProp == null || objField == null || nameField == null || ctField == null || valField == null || getMethod == null)
             {
                 Debug.LogWarning("[ReportShapeOverlap] MA ShapeChanger reflection drift — a member (Shapes / " +
-                    "ChangedShape.Object|ShapeName|ChangeType / AvatarObjectReference.Get) did not resolve; reactions " +
+                    "ChangedShape.Object|ShapeName|ChangeType|Value / AvatarObjectReference.Get) did not resolve; reactions " +
                     "NOT ingested. The co-active set may be missing weight-0 ShapeChanger shapes.");
                 return;
             }
@@ -177,13 +191,22 @@ namespace Ryan6Vrc.AgentTools.Editor
                             var shapeName = nameField.GetValue(row) as string;
                             if (objRef == null || string.IsNullOrEmpty(shapeName)) continue;
                             int changeType = Convert.ToInt32(ctField.GetValue(row), CultureInfo.InvariantCulture);
+                            float value = Convert.ToSingle(valField.GetValue(row), CultureInfo.InvariantCulture);
 
                             // AvatarObjectReference.Get can throw (TargetInvocationException) on a stale/deleted ref.
                             var target = getMethod.Invoke(objRef, new object[] { comp }) as GameObject;
                             if (target != bodyGO) continue; // only rows that write the resolved body mesh
 
                             add(shapeName);
-                            result.ReactionTypes[shapeName] = changeType; // captured for the Task-2 resolution table
+                            result.ReactionTypes[shapeName] = changeType; // last-wins type (Task 1 handoff)
+                            if (!result.Reactions.TryGetValue(shapeName, out var ri))
+                            {
+                                ri = new ReactionInfo();
+                                result.Reactions[shapeName] = ri;
+                            }
+                            ri.ChangeType = changeType;
+                            ri.Value = value;
+                            ri.Declares.Add((changeType, value)); // every declaration kept ⇒ conflict is detectable
                         }
                         catch (Exception e)
                         {
@@ -260,15 +283,28 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // ── Output (Report envelope: summary + markdown body + WriteRunLog to Snapshots; no verdict token) ──
-        private static string Emit(GameObject go, Mesh mesh, Analysis a)
+        // Beyond the geometric footprint/pairwise digest, Emit renders the RESOLUTION view the de-conflict skill
+        // reads: per union shape its reaction, current static weight, resolved-target, and overlap — plus a full
+        // weight audit and the worn-but-undeclared MISMATCH flag. It stays a Report: the table states facts and
+        // marks worn-but-undeclared rows for the reader; the accept-vs-CaptureDiff decision lives in the skill.
+        private static string Emit(GameObject go, SkinnedMeshRenderer smr, Mesh mesh, Analysis a, Ingested ingested)
         {
             int requested = a.Footprints.Count;
             int resolved = requested - a.Missing.Count;
-            int flagged = a.Pairs.Count(p => p.Containment >= FlagContainment);
+            int pairFlagged = a.Pairs.Count(p => p.Containment >= FlagContainment);
+
+            // reacted = union shapes declared by a reaction; worn = union shapes at nonzero static weight.
+            int reacted = ingested.Reactions.Count;
+            int worn = 0;
+            foreach (var name in ingested.Names)
+            {
+                int wi = mesh.GetBlendShapeIndex(name);
+                if (wi >= 0 && Mathf.Abs(smr.GetBlendShapeWeight(wi)) > 0f) worn++;
+            }
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[ReportShapeOverlap] {0}: shapes={1}/{2} pairs={3} flagged={4} missing={5} => OK",
-                mesh.name, resolved, requested, a.Pairs.Count, flagged, a.Missing.Count);
+                "[ReportShapeOverlap] {0}: shapes={1}/{2} reacted={3} worn={4} pairs={5} flagged={6} missing={7} => OK",
+                mesh.name, resolved, requested, reacted, worn, a.Pairs.Count, pairFlagged, a.Missing.Count);
 
             var sb = new StringBuilder();
             sb.Append("# ReportShapeOverlap: ").Append(mesh.name).Append('\n');
@@ -276,6 +312,54 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("mesh: `").Append(mesh.name).Append("`  verts=").Append(a.VertexCount)
               .Append("  shapes=").Append(mesh.blendShapeCount).Append("\n\n");
             sb.Append(summary.Substring("[ReportShapeOverlap] ".Length)).Append('\n');
+
+            // ── Resolution — one row per union shape ────────────────────────────────────────────────────────
+            sb.Append("\n## Resolution — reaction / current weight / resolved-target / overlap\n");
+            sb.Append("_resolved-target: Set→its value, Delete→100 (bakes fully-applied), no reaction→0 (declared-or-zero). " +
+                "**MISMATCH** marks a row worn (weight≠0) yet undeclared — the double-subtraction hazard. A reaction-declared " +
+                "row is never flagged (the reaction owns it at runtime); disposition is not `current≠resolved-target`._\n\n");
+            sb.Append("| shape | reaction | current | resolved-target | overlap | disposition |\n");
+            sb.Append("| --- | --- | --- | --- | --- | --- |\n");
+            foreach (var name in ingested.Names)
+            {
+                var f = a.Footprints.First(x => x.Name == name);
+                bool present = !f.Missing;
+                int idx = present ? mesh.GetBlendShapeIndex(name) : -1;
+                float weight = idx >= 0 ? smr.GetBlendShapeWeight(idx) : 0f;
+                ingested.Reactions.TryGetValue(name, out var ri);
+                bool isWorn = present && Mathf.Abs(weight) > 0f;
+                bool mismatch = ri == null && isWorn; // worn-but-undeclared ONLY — the anti-flood invariant
+
+                string reactionCell, resolvedTarget;
+                if (ri == null) { reactionCell = "none"; resolvedTarget = "0"; }
+                else if (ri.Conflict)
+                {
+                    reactionCell = "CONFLICT: " + string.Join(" / ",
+                        ri.Declares.Select(d => d.type == 0 ? "Delete" : "Set=" + Num(d.value)));
+                    resolvedTarget = "conflict";
+                }
+                else
+                {
+                    reactionCell = ri.ChangeType == 0 ? "Delete" : "Set=" + Num(ri.Value);
+                    resolvedTarget = ri.ChangeType == 0 ? "100" : Num(ri.Value);
+                }
+
+                float ov = -1f;
+                foreach (var p in a.Pairs) if (p.A == name || p.B == name) ov = Mathf.Max(ov, p.Containment);
+                string overlapCell = ov < 0f ? "—" : ov.ToString("F2", CultureInfo.InvariantCulture);
+
+                sb.Append("| `").Append(name).Append("` | ").Append(reactionCell).Append(" | ")
+                  .Append(present ? Num(weight) : "—").Append(" | ").Append(resolvedTarget).Append(" | ")
+                  .Append(overlapCell).Append(" | ").Append(mismatch ? "**MISMATCH**" : "—").Append(" |\n");
+            }
+
+            // ── Weight audit — every blendshape on the mesh (cheap; NOT footprinted) ─────────────────────────
+            sb.Append("\n## Weight audit — every blendshape on the mesh, with its current static weight\n");
+            sb.Append("_the full weight state (the resolution table above is scoped to the co-active union; this is not)._\n\n");
+            sb.Append("| shape | weight |\n| --- | --- |\n");
+            for (int i = 0; i < mesh.blendShapeCount; i++)
+                sb.Append("| `").Append(mesh.GetBlendShapeName(i)).Append("` | ")
+                  .Append(Num(smr.GetBlendShapeWeight(i))).Append(" |\n");
 
             sb.Append("\n## Footprints — touched vertices per shape\n");
             sb.Append("_thr = max(").Append(Mm(AbsFloorMeters)).Append("mm, ")
@@ -315,6 +399,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── Helpers ──────────────────────────────────────────────────────────────────────────────────────
 
         private static string Mm(float meters) => (meters * 1000f).ToString("F3", CultureInfo.InvariantCulture);
+
+        // Compact weight/value formatter: integral weights render clean (100, 0, 42), fractional keep up to 3 dp.
+        private static string Num(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
 
         // Resolve the SkinnedMeshRenderer carrying blendshapes from the named scene object (its mesh is .sharedMesh;
         // weight reads come off the SMR itself). Prefer the SMR on the object; else a unique blendshape-bearing SMR
