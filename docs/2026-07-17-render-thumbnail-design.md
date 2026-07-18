@@ -45,7 +45,7 @@ doesn't — that single fact decides the correct capture surface for each.
 | Upload seam | **Post-upload `UpdateAvatarImage`** | Deferred to follow-up; decoupled, identical first/re-upload. |
 | Framing | **SDK `PositionPortraitCamera`** | Bust (head+shoulders) from `ViewPosition`, at the SDK-calibrated default 60° FOV. A `framing` enum dollies back for more body. |
 | Pose source | **Author our own** `.anim` poses | No permissively-licensed curated portrait poses exist (two independent searches; GoGo Loco / BUDDYWORKS are no-redistribution EULAs, Mixamo forbids standalone redistribution, CMU/ACCAD/Quaternius are motion libraries whose freeze-frames are mid-stride). Single-keyframe humanoid clips we author are committable and retarget to any rig. |
-| Lighting/bg | **In-scene 3-point rig + solid/gradient backdrop**, overridable | Lights live **in the preview scene** (never `RenderSettings` — that's global, see Non-destructiveness). Constants are cosmetic taste defaults. |
+| Lighting/bg | **In-scene 3-point rig + solid background** (camera `SolidColor` clear), overridable | Lights live **in the preview scene** (never `RenderSettings` — that's global, see Non-destructiveness). Solid (uniform) bg keeps the silhouette reference trivial; gradient is deferred polish. Constants are cosmetic taste defaults. |
 
 ## Verified mechanism (callables + source-verified traps)
 
@@ -66,7 +66,9 @@ doesn't — that single fact decides the correct capture surface for each.
   the SDK nor CAU does); set only clip planes (`near=0.01`, `far=100`) and `cullingMask=0xFFFFFFDF`, as
   CAU does. `framing` (dolly) moves the camera back along local-forward — **never** via FOV.
 - **Pose:** `AnimationMode.StartAnimationMode()` → `BeginSampling()` →
-  `SampleAnimationClip(bakedClone, clip, t)` → `EndSampling()` → `StopAnimationMode()`. Humanoid
+  `SampleAnimationClip(bakedClone, clip, t)` → `EndSampling()` — then the pose is **held**;
+  `StopAnimationMode()` runs later in teardown *after* the render (stopping it here reverts the pose).
+  Humanoid
   retargeting **works on the baked clone** — MA re-runs `RebindHumanoidAvatar` as a build pass
   (`RebindHumanoidAvatar.cs`, MA `PluginDefinition.cs:150`/`197`), so `animator.avatar`/`isHuman`
   survive. Two guards: the clip must be a real muscle clip — **assert `clip.isHumanMotion == true`** (a
@@ -148,17 +150,21 @@ Setup snapshots (for restore): each open scene's `isDirty`, the set of live-scen
    pre-existing-folder wholesale-delete can never touch a user's kept bake, and interleaved runs never
    collide.
 3. `preview = EditorSceneManager.NewPreviewScene()`; `SceneManager.MoveGameObjectToScene(baked, preview)`.
-4. Build the lit stage **in `preview`**: 3-point directional rig (key/fill/rim) + a backdrop quad
-   (runtime gradient texture, or solid when `bg` set), all `HideFlags.DontSave`, one parent for one-destroy
-   teardown. **No `RenderSettings` writes** (ambient/skybox are global/active-scene — they leak into and
-   dirty the live scene; CAU stays lights-only for this reason).
-5. If posing: `animator.Rebind()`; then **nested guards** — `StartAnimationMode()` `try{` `BeginSampling()`
-   `try{ SampleAnimationClip(baked, clip, t) } finally{ EndSampling() }` `} finally{ if
-   (AnimationMode.InAnimationMode()) StopAnimationMode() }`. (`t` = a chosen still frame; our clips are one
-   keyframe.)
-6. Camera (§Capture): `PositionPortraitCamera` + `framing` dolly; render → RT → PNG. Measure silhouette
-   coverage for the verdict.
-7. **`finally`** (runs on every exit, success or throw): stop animation mode if in it;
+4. Build the lit stage **in `preview`**: 3-point directional rig (key/fill/rim), all `HideFlags.DontSave`,
+   one parent for one-destroy teardown. **Background is the camera's `clearFlags = SolidColor`** (the `bg`
+   color, else the neutral default) — a uniform solid, no backdrop object (which also keeps the silhouette
+   reference trivial). A gradient backdrop is deferred polish. **No `RenderSettings` writes** (ambient/skybox
+   are global/active-scene — they leak into and dirty the live scene; CAU stays lights-only for this reason).
+5. If posing (and `animator.isHuman`, else fail loud): capture Head-bone + root world positions;
+   `animator.Rebind()`; `StartAnimationMode()` → `BeginSampling()` → `try{ SampleAnimationClip(baked, clip, t)
+   } finally{ EndSampling() }`. **Do NOT stop animation mode here** — the sampled pose is *held*, and
+   `StopAnimationMode()` runs only in the teardown `finally` (step 7) *after* the render, or the avatar would
+   revert to unposed before capture. Capture Head + root again post-sample for the framing delta
+   (§Verified mechanism → Pose). (`t` = a chosen still frame; our clips are one keyframe.)
+6. Camera (§Capture): `PositionPortraitCamera` + `framing` dolly + posed-head delta; render → RT → PNG.
+   Measure silhouette coverage for the verdict.
+7. **`finally`** (runs on every exit, success or throw): stop animation mode **only if this run started it**
+   (snapshot-guarded — never end an operator's pre-existing recording session);
    `ClosePreviewScene(preview)`; `DestroyImmediate` the baked clone and any **live-scene root new since the
    step-0 snapshot** (catches a reference-less orphan from a bake that threw); restore `Selection`;
    `ClearSceneDirtiness` on each scene that was clean at snapshot; delete the run's unique
@@ -185,8 +191,9 @@ serial-venue guidance elsewhere in the workshop.
 
 ## Non-destructiveness & the Plum-Remy test venue
 
-The real invariant is **"the project and editor are byte-for-byte as found after any run, success or
-failure."** It is enforced structurally, not by hope:
+The real invariant is **"the project and editor are left as found after any run, success or failure"** —
+with one deliberate exception: an **empty** `ZZZ_GeneratedAssets` folder is deleted even if it pre-existed
+(operator's request — an empty folder relies on nothing). It is enforced structurally, not by hope:
 
 - **No user asset is ever destroyed:** the unique-named clone (step 2) removes NDMF's same-name
   wholesale-delete hazard — the single highest-consequence risk on a real/messy project.
@@ -230,7 +237,8 @@ Rendering mutates, so most behavior is proven live, not in NUnit
 - **Live `execute_code`** against the Plum-Remy composed avatar:
   1. **Pristine-after-run invariant** (the real non-destructiveness gate the eyeball can't provide):
      snapshot before/after a normal run and assert equal — `ZZZ_GeneratedAssets` listing, each open
-     scene's `isDirty`, `AnimationMode.InAnimationMode() == false`, `Selection.objects`, and **no residual
+     scene's `isDirty`, `AnimationMode` restored to its **pre-run** state (the tool stops it only if it
+     started it — never ends an operator's recording), `Selection` unchanged, and **no residual
      `*__rt_*(Clone)` root** in any open scene.
   2. **Fault-injection run:** force a throw *after* a successful bake (e.g. a clip that fails to sample)
      and assert the same invariants still hold — the only proof teardown fires on the exception path.
@@ -243,7 +251,8 @@ Rendering mutates, so most behavior is proven live, not in NUnit
   fixed by the posed-head framing correction (§Verified mechanism → Pose). Residual, still open: a
   user-supplied clip that carries a real **root-rotation** curve would break the world-space delta's
   orientation assumption — out of scope for the bundled upper-body clips, revisit if such a clip is used.
-- **Gradient backdrop.** If the runtime-generated gradient is fiddly, ship the solid-color fallback first;
-  render correctness doesn't depend on it.
+- **Gradient backdrop — deferred.** v1 ships a solid `SolidColor` clear (uniform bg also keeps the
+  silhouette reference trivial); a runtime gradient is optional polish, render correctness doesn't depend
+  on it.
 - **Lighting constants** are taste defaults (named, obvious, top-of-file); expect the operator to tune
   key/fill/rim after seeing real output.
