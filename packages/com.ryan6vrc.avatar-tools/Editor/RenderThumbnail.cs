@@ -179,18 +179,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // (regardless of timer resolution), so a pre-existing-folder wholesale-delete can never
                 // touch a user's kept bake.
                 //
-                // THE BAKE DOOR IS THE VRC SDK PREPROCESS CHAIN, NOT NDMF DIRECTLY. `ManualProcessAvatar`
-                // runs NDMF's plugin chain ONLY, so every tool that hooks the SDK instead of NDMF is
-                // silently skipped — measured on a real avatar carrying d4rkAvatarOptimizer: NDMF-only
-                // left the face mesh at 618 blendshapes (i.e. changed nothing), while the SDK chain cut it
-                // to 118 and merged 20 renderers down to 15. A thumbnail is FOR the uploaded avatar, so
-                // rendering the un-optimized one is rendering something that never ships. This is the same
-                // door VRCFury's own "build a test copy" uses (VRCFuryTestCopyMenuItem), and it works
-                // whether or not VRCFury is installed. See docs/nondestructive.md §The bake door.
-                //
-                // Unlike ManualProcessAvatar (clone in, new object out), OnPreprocessAvatar mutates the
-                // object IN PLACE and returns false when a hook blocks the build — so `mine` IS the baked
-                // avatar, and there is no second object to destroy.
+                // The bake door is the SDK preprocess chain, NOT ManualProcessAvatar — see
+                // nondestructive.md §The bake door for why (NDMF-only skips d4rk/VRCFury/Limitex
+                // silently; on one real avatar it left the face mesh at 618 shapes where the SDK chain
+                // cut it to 118). Unlike ManualProcessAvatar (clone in, new object out), this mutates
+                // IN PLACE, so `mine` IS the baked avatar and there is no second object to destroy.
                 string stamp = Guid.NewGuid().ToString("N").Substring(0, 8);
                 var mine = UnityEngine.Object.Instantiate(root);
                 string mineName = root.name + "__rt_" + stamp;
@@ -287,12 +280,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
 
                 // ---- Step 5b: expression, applied AFTER the pose and deliberately NOT through the
-                // animation system. A second SampleAnimationClip in the same block re-runs the Animator's
-                // humanoid solver, which re-solves muscles toward default and PARTIALLY UNDOES the pose —
-                // measured, not theorized: sampling the face clip after the pose moved the left upper arm
-                // (301.6,303.5,76.7) -> (321.6,344.4,33.2). Pose and expression bind disjoint properties
-                // but not disjoint systems. Writing the blendshape weights straight onto the renderers
-                // touches neither the Animator nor AnimationMode, and leaves the pose byte-identical.
+                // animation system. A second SampleAnimationClip re-runs the Animator's humanoid solver
+                // and PARTIALLY UNDOES the pose — the left upper arm moved (301.6,303.5,76.7) ->
+                // (321.6,344.4,33.2). Pose and expression bind disjoint properties, not disjoint systems.
+                // Writing weights straight onto the renderers leaves the pose byte-identical.
                 int shapesApplied = 0, shapesTotal = 0, shapesIgnored = 0;
                 string resolvedExpression = null;
                 if (wantExpression)
@@ -498,14 +489,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Write the clip's <c>blendShape.*</c> curves straight onto the baked clone's renderers and
-        /// return how many landed (<paramref name="total"/> receives how many were tried). Only
-        /// blendShape curves are applied — by contract an expression IS its blendshape curves; any other
-        /// binding in the clip is ignored.
-        /// <para>Applying rather than sampling is what keeps the pose intact (see the call site), and the
-        /// applied/total counts are what keep the verdict honest: a clip authored for a DIFFERENT body,
-        /// or a bake that renamed the face mesh, lands fewer curves than it tried, and a caller can see
-        /// that instead of wondering why the portrait's face looks half-right.</para>
+        /// Write the clip's <c>blendShape.*</c> curves straight onto the baked clone's renderers.
+        /// Returns how many landed; <paramref name="total"/> receives how many were tried and
+        /// <paramref name="ignored"/> how many non-blendShape curves were passed over (an expression IS
+        /// its blendshape curves, so nothing else is applied — but a caller must be able to see that a
+        /// clip carrying toggles or material swaps renders only partly).
+        /// <para>Applying rather than sampling is what keeps the pose intact (see the call site). The
+        /// counts are what keep the verdict honest: a clip authored for a different body, or a bake that
+        /// renamed the face mesh, lands fewer than it tried.</para>
         /// </summary>
         private static int ApplyExpression(GameObject baked, AnimationClip clip, out int total, out int ignored)
         {
@@ -744,14 +735,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// The avatar's selectable expressions, read from its FX controller's gesture layers (1–2 by the
-        /// VRChat convention — worlds rely on gesture expressions living there, so authors and optimizers
-        /// keep to it). Only clips that pass <see cref="IsExpressionClip"/> qualify, which drops the
-        /// 0-binding <c>Dummy</c>/<c>Empty</c> idles automatically.
-        /// <para><b>Call this on the BAKED avatar</b> for anything load-bearing: the bake rewrites the
-        /// blendshape namespace (an optimizer merged a real face mesh from 618 shapes to 118), so a clip
-        /// taken from the pre-bake asset can bind names the baked avatar no longer has. The gesture slot
-        /// survives the bake; the clip's identity does not.</para>
+        /// The avatar's selectable expressions, from its FX controller's gesture layers (1–2 by the
+        /// VRChat convention — worlds depend on gesture expressions living there, so authors and
+        /// optimizers hold to it). <see cref="IsExpressionClip"/> gates membership, which drops the
+        /// 0-binding <c>Dummy</c>/<c>Empty</c> idles.
+        /// <para><b>Call this on the BAKED avatar.</b> The bake rewrites the blendshape namespace (one
+        /// real face mesh went 618 shapes to 118), so a clip from the pre-bake asset can bind names the
+        /// baked avatar no longer has. The slot survives the bake; the clip's identity does not.</para>
         /// </summary>
         internal static List<ExpressionEntry> ExpressionCatalog(GameObject avatarRoot)
         {
