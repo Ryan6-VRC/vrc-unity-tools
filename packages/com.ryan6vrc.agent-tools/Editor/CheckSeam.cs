@@ -115,18 +115,18 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             // ≥2 weighted humanoid ⇒ coincidence gate: compare edit-time WORLD positions at ε tolerance.
-            float eps = Mathf.Max(0.5f, 0.002f * human.SpanMm);
+            float eps = Mathf.Max(0.5f, 0.003f * human.SpanMm);
             var hipsBase = HipsOf(baseGO); // fromHips anchor; null ⇒ report 0 (robust, non-load-bearing)
-            var offenders = new List<(string bone, float mm, float fromHips)>();
+            // Collect EVERY weighted-humanoid offset (not just the > ε subset): the > ε ones are offenders, but
+            // the sub-ε band rides through to Emit so a PASS can surface maxWithinEps for the downstream skill.
+            var allOffsets = new List<(string bone, float mm, float fromHips)>();
             foreach (var p in weightedHum)
             {
                 float mm = Vector3.Distance(p.Base.position, p.Merge.position) * 1000f;
-                if (mm > eps)
-                {
-                    float fromHips = hipsBase != null ? Vector3.Distance(hipsBase.position, p.Base.position) * 1000f : 0f;
-                    offenders.Add((p.Base.name, mm, fromHips));
-                }
+                float fromHips = hipsBase != null ? Vector3.Distance(hipsBase.position, p.Base.position) * 1000f : 0f;
+                allOffsets.Add((p.Base.name, mm, fromHips));
             }
+            var offenders = allOffsets.Where(o => o.mm > eps).ToList();
             offenders.Sort((a, b) => b.mm.CompareTo(a.mm)); // worst (largest offset) first
 
             // Non-humanoid mapped bones NEVER gate (they legitimately deviate on a correct fit). Partition the
@@ -149,7 +149,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 context.Add((p.Base.name, mm, fromHips));
             }
             context.Sort((a, b) => b.mm.CompareTo(a.mm)); // worst (largest offset) first
-            return Emit(baseGO, mergeGO, weightedHum.Count, offenders, context, dropped, eps);
+            return Emit(baseGO, mergeGO, weightedHum.Count, offenders, allOffsets, context, dropped, eps);
         }
 
         // ── Output (mirrors CheckAvatar.Emit: summary + markdown body + WriteRunLog + severity-by-verdict) ─
@@ -158,17 +158,32 @@ namespace Ryan6Vrc.AgentTools.Editor
         // PASS beside wild context deltas doesn't read like a clean one.
         private static string Emit(GameObject baseGO, GameObject mergeGO, int weightedCount,
             List<(string bone, float mm, float fromHips)> offenders,
+            List<(string bone, float mm, float fromHips)> allOffsets,
             List<(string bone, float mm, float fromHips)> context, int dropped, float eps)
         {
             int m = offenders.Count, k = context.Count;
             string verdict = m == 0 ? "PASS" : "NOT-PASS";
 
-            // maxOffset carries the worst humanoid seam-offset magnitude onto the one-liner so a NOT-PASS
-            // reads sub-mm-noise vs wrong-base at a glance (offenders are sorted worst-first). Descriptive
-            // only — the disposition doctrine (fix-to-PASS vs accept-with-flag) stays A8's, not this tool's.
-            string maxTail = m > 0
-                ? " maxOffset=" + offenders[0].mm.ToString("F1", CultureInfo.InvariantCulture) + "mm"
-                : "";
+            // NOT-PASS: maxOffset carries the worst humanoid seam-offset magnitude onto the one-liner so it
+            // reads sub-mm-noise vs wrong-base at a glance (offenders sorted worst-first). PASS: widening ε
+            // absorbs base drift but retires the "few peripheral bones just over ε" flag, so surface the sub-ε
+            // band instead — maxWithinEps (max + median of the within-ε offsets) for the downstream skill.
+            // Descriptive only — the disposition doctrine (fix-to-PASS vs accept-with-flag) stays A8's, not
+            // this tool's. NEVER emit maxOffset on PASS (G37 invariant).
+            string withinEpsBand = null; // PASS-only body line + summary tail
+            string maxTail;
+            if (m > 0)
+            {
+                maxTail = " maxOffset=" + offenders[0].mm.ToString("F1", CultureInfo.InvariantCulture) + "mm";
+            }
+            else
+            {
+                float maxW = allOffsets.Count > 0 ? allOffsets.Max(o => o.mm) : 0f;
+                float medW = Median(allOffsets.Select(o => o.mm));
+                withinEpsBand = "maxWithinEps=" + maxW.ToString("F2", CultureInfo.InvariantCulture)
+                    + "mm (median " + medW.ToString("F2", CultureInfo.InvariantCulture) + "mm)";
+                maxTail = " " + withinEpsBand;
+            }
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[CheckSeam] {0}→{1}: weightedHumanoid={2} offenders={3}{4} context={5} dropped={6} => {7}",
                 mergeGO.name, baseGO.name, weightedCount, m, maxTail, k, dropped, verdict);
@@ -181,7 +196,11 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             sb.Append("\n## Gate — weighted humanoid bones (ε=")
               .Append(eps.ToString("F2", CultureInfo.InvariantCulture)).Append("mm)\n\n");
-            if (offenders.Count == 0) sb.Append("_(all within ε)_\n");
+            if (offenders.Count == 0)
+            {
+                sb.Append("_(all within ε)_\n");
+                if (withinEpsBand != null) sb.Append(withinEpsBand).Append('\n');
+            }
             else foreach (var o in offenders)
                 sb.Append("- **seam-offset** bone=`").Append(o.bone)
                   .Append("` offset=").Append(o.mm.ToString("F1", CultureInfo.InvariantCulture))
@@ -202,6 +221,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "checkseam_" + mergeGO.name, summary, sb.ToString(), ".md");
             if (verdict == "PASS") Debug.Log(res); else Debug.LogWarning(res);
             return res;
+        }
+
+        // Median of a set of offsets (mm) — even count averages the two middles. Empty ⇒ 0 (never reached on
+        // PASS, where ≥2 weighted-humanoid offsets always exist).
+        private static float Median(IEnumerable<float> values)
+        {
+            var s = values.OrderBy(v => v).ToList();
+            if (s.Count == 0) return 0f;
+            int mid = s.Count / 2;
+            return s.Count % 2 == 1 ? s[mid] : 0.5f * (s[mid - 1] + s[mid]);
         }
 
         // Base Hips transform for the fromHips report distance; null unless the base has a humanoid Animator
