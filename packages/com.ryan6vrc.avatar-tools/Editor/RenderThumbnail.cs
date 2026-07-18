@@ -89,6 +89,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (descriptor == null)
                 return Fail(label, "no VRC_AvatarDescriptor on '" + label + "'");
 
+            // Validate framing + bg up front so BOTH whatIf and the render path reject a bad framing/bg before
+            // proceeding — a whatIf WOULD-RENDER must never precede an immediate render FAIL on the same inputs.
+            float dolly;
+            try { dolly = FramingDistance(framing); }
+            catch (ArgumentException ex) { return Fail(label, ex.Message); }
+            string framingToken = (framing ?? "bust").Trim().ToLowerInvariant();
+
+            Color bgColor = DefaultBackground;
+            if (bg != null && !TryParseBg(bg, out bgColor))
+                return Fail(label, "unparseable bg '" + bg + "' — expected #RRGGBB or #RRGGBBAA");
+
             if (whatIf)
             {
                 if (!ResolvePose(pose, out AnimationClip _, out string poseErr))
@@ -109,15 +120,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // matches the whatIf branch's poseToken convention above.
             string poseName = string.IsNullOrEmpty(pose) ? "floor" : pose;
 
-            float dolly;
-            try { dolly = FramingDistance(framing); }
-            catch (ArgumentException ex) { return Fail(label, ex.Message); }
-            string framingToken = (framing ?? "bust").Trim().ToLowerInvariant();
-
-            Color bgColor = DefaultBackground;
-            if (bg != null && !TryParseBg(bg, out bgColor))
-                return Fail(label, "unparseable bg '" + bg + "' — expected #RRGGBB or #RRGGBBAA");
-
             // ---- Snapshots for restore (before any mutation), used by the finally teardown ----
             Scene targetScene = root.scene;
             var sceneDirtyAtStart = new Dictionary<Scene, bool>();
@@ -129,7 +131,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var preRootIds = new HashSet<int>();
             foreach (var go in targetScene.GetRootGameObjects()) preRootIds.Add(go.GetInstanceID());
             var savedSelection = Selection.objects;
-            var savedActive = Selection.activeGameObject;
+            // activeObject (not activeGameObject): restoring the latter would null a non-GameObject selection
+            // (an asset/material — common in this workflow). Snapshot AnimationMode too, so teardown stops it
+            // only when WE started it — never ending an operator's in-progress Animation-window recording.
+            UnityEngine.Object savedActive = Selection.activeObject;
+            bool animModeAtStart = AnimationMode.InAnimationMode();
 
             Scene preview = default;
             GameObject baked = null;
@@ -139,6 +145,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string result = null;
             string residualNote = "";
 
+            // OUTER try — converts any exception from the pipeline (broken rig, null bake, non-humanoid clip)
+            // into a Fail verdict, the house convention. Its catch sits OUTSIDE the inner try/finally, so
+            // teardown runs and populates residualNote BEFORE the catch builds its return string.
+            try
+            {
             try
             {
                 // ---- Step 2: unique private clone -> bake (the non-destructiveness keystone) ----
@@ -205,6 +216,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (animator == null)
                         throw new InvalidOperationException(
                             "baked clone has no Animator — cannot sample pose '" + poseName + "'");
+                    if (!animator.isHuman)
+                        // Generic rig: GetBoneTransform(Head) is null and SampleAnimationClip is a silent no-op,
+                        // yet the verdict would still claim pose=<name>. Fail loud instead (outer catch -> Fail).
+                        throw new InvalidOperationException(
+                            "baked avatar '" + label + "' is not humanoid — cannot sample pose '" + poseName + "'");
                     var headBone = animator.GetBoneTransform(HumanBodyBones.Head);
                     Vector3 restHead = headBone != null ? headBone.position : baked.transform.position;
                     Vector3 restRoot = baked.transform.position;
@@ -290,9 +306,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 if (fraction < MinSilhouetteFraction)
                 {
-                    // Fail loud — do NOT write a blank PNG.
-                    result = prefix + " => ERROR silhouette≈0% (nothing drew — isolation/bake failed?)";
-                    Debug.LogError(result);
+                    // Fail loud, uniform (=> FAIL: like every other input error, ASCII) — do NOT write a blank PNG.
+                    result = Fail(label, "silhouette ~0% (nothing drew — isolation/bake failed?)");
                 }
                 else
                 {
@@ -311,7 +326,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (rt != null) UnityEngine.Object.DestroyImmediate(rt);
                 if (tex != null) UnityEngine.Object.DestroyImmediate(tex);
 
-                if (AnimationMode.InAnimationMode()) AnimationMode.StopAnimationMode();
+                if (!animModeAtStart && AnimationMode.InAnimationMode()) AnimationMode.StopAnimationMode();
 
                 if (preview.IsValid())
                     UnityEditor.SceneManagement.EditorSceneManager.ClosePreviewScene(preview); // destroys baked + lights + camera
@@ -328,7 +343,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
 
                 Selection.objects = savedSelection;
-                Selection.activeGameObject = savedActive;
+                Selection.activeObject = savedActive;
 
                 // Restore scene cleanliness for scenes that were clean at snapshot but are now dirty (the bake
                 // instantiates the clone into the live scene, dirtying it; the orphan sweep dirties it too).
@@ -366,7 +381,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (!string.IsNullOrEmpty(residualNote)) Debug.LogError("[RenderThumbnail]" + residualNote);
             }
 
-            return result + residualNote;
+                return result + residualNote;
+            }
+            catch (Exception ex)
+            {
+                // Inner finally has already run (teardown complete, residualNote populated) — surface the
+                // pipeline exception as a Fail verdict rather than letting it propagate out of the tool.
+                return Fail(label, ex.Message) + residualNote;
+            }
         }
 
         // ===== Pure helpers (unit-tested; do not touch the scene or the asset database beyond reads) ====
