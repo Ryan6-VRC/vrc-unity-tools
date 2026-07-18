@@ -40,14 +40,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// during normalization (e.g. our "Body" ← vendor "Face"). Matched case-insensitively. Null/omitted ⇒
         /// match by own name. Unmatched renderers (after overrides) still FAIL, so a missed rename surfaces loudly.
         ///
-        /// <para><b>Direction — it runs opposite to the transplant kit's map, deliberately.</b> The kit-wide
-        /// invariant (canonical at <see cref="IndexedPath.Substitute"/>) is that a rename map's KEY names the
-        /// hierarchy the tool WALKS and its VALUE the hierarchy it RESOLVES INTO. This tool walks OUR renderers
-        /// and looks each one up in the source, so the key is ours — whereas <c>CopyComponents</c> /
-        /// <c>GraftHierarchy</c> walk the vendor hierarchy and resolve into ours, giving them
-        /// <c>vendorToOwned</c>. Same rule, opposite traversal. Consequently this map may be MANY-TO-ONE (two
-        /// owned meshes can both take one source renderer's materials) while theirs must be injective;
-        /// inverting this one would make that case inexpressible, so do not "reconcile" the two.</para></param>
+        /// <para><b>Keyed on OUR name — opposite to the transplant kit's <c>vendorToOwned</c>, deliberately.</b>
+        /// This tool walks our renderers and resolves into the source, so under the kit-wide invariant
+        /// (<see cref="IndexedPath.Substitute"/>) the key is ours. Two consequences a caller reusing "one map"
+        /// will hit: this one may be MANY-TO-ONE where theirs must be injective, and it matches
+        /// case-insensitively where theirs is Ordinal.</para></param>
         public static string Run(GameObject ownedRoot, GameObject source, IDictionary<string, string> ownedToSource = null, bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
@@ -246,13 +243,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Lowercases an optional {ourName → sourceName} override map for case-insensitive matching.
         /// Returns null when no usable entries were supplied.
         ///
-        /// <para>Lowercasing can collide: keys differing only in case (<c>Body</c> / <c>body</c>) fold to
-        /// one entry, last-write-wins, silently. That is NOT symmetric with the transplant kit, where
-        /// <see cref="IndexedPath.ValidateRenameMap"/> rejects its analogous collision as a loud FAIL —
-        /// there a collision cannot address a unique dst sibling, whereas here it only means the caller
-        /// wrote two spellings of one renderer name. Harmless in practice (renderer names within a
-        /// hierarchy don't differ by case alone), but noted because case-insensitivity is a documented
-        /// contract of this parameter, so its edge deserves to be written down rather than discovered.</para>
+        /// <para>Keys differing only in case fold together, last-write-wins, silently. Deliberately not
+        /// symmetric with <see cref="IndexedPath.ValidateRenameMap"/>'s loud rejection: there a collision
+        /// cannot address a unique dst sibling, here it only means two spellings of one renderer name.</para>
         /// </summary>
         private static Dictionary<string, string> NormalizeRenameMap(IDictionary<string, string> ownedToSource)
         {

@@ -201,19 +201,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Matching is Ordinal/case-sensitive (GameObject-name lookup via <see cref="NthChildWithName"/> is);
         /// never lowercase.
         ///
-        /// <para><b>The kit-wide rename-map invariant.</b> A rename map's KEY names the hierarchy the tool
-        /// WALKS; its VALUE names the hierarchy the tool RESOLVES INTO. You cannot index a dictionary by its
-        /// values, so the direction is fixed by which side the tool iterates — it is not a style choice, and a
-        /// tool cannot flip its map without inverting its own traversal.</para>
+        /// <para><b>The kit-wide rename-map invariant — canonical here.</b> A rename map's KEY names the
+        /// hierarchy its tool WALKS; its VALUE names the hierarchy that tool RESOLVES INTO. Direction therefore
+        /// follows traversal and is not a style choice: no tool can flip its map without inverting its own walk,
+        /// since a dictionary cannot be indexed by its values.</para>
         ///
-        /// <para>This is why the kit's two map directions are both correct rather than one being backwards.
-        /// The transplant tools (<see cref="RemapReferencesByPath"/>, <c>CopyComponents</c>,
-        /// <c>GraftHierarchy</c>) push vendor→owned: they walk the vendor hierarchy and resolve into ours, so
-        /// their map is <c>vendorToOwned</c> and MUST be injective — two keys on one value cannot address a
-        /// unique dst sibling, which <see cref="ValidateRenameMap"/> rejects. <c>ConformRenderers</c> pulls the
-        /// other way: it walks OUR renderers and resolves into the source, so its map is <c>ownedToSource</c>
-        /// and many-to-one is legitimate (two owned meshes may both take one source renderer's materials).
-        /// Inverting it would make that case inexpressible.</para>
+        /// <para>Hence the kit runs two opposite directions, both correct. The transplant tools walk vendor and
+        /// resolve into ours (<c>vendorToOwned</c>); <c>ConformRenderers</c> walks our renderers and resolves
+        /// into the source (<c>ownedToSource</c>). Cardinality follows: <c>vendorToOwned</c> must be injective
+        /// or it cannot address a unique dst sibling (<see cref="ValidateRenameMap"/> rejects it), while
+        /// <c>ownedToSource</c> is legitimately many-to-one — two owned meshes may take one source renderer's
+        /// materials, which inverting it would make inexpressible. <b>Do not "reconcile" the two.</b></para>
         /// </summary>
         internal static string Substitute(string name, IDictionary<string, string> map)
             => map != null && name != null && map.TryGetValue(name, out var v) ? v : name;

@@ -787,13 +787,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// threaded to host prediction / scaffold / ref-remap. Empty/absent/null ⇒ byte-identical to today.
         /// Direction/case rationale is canonical at <see cref="IndexedPath.Substitute"/> /
         /// <see cref="IndexedPath.ValidateRenameMap"/>.
-        ///
-        /// <para><b>Direction.</b> Key names the hierarchy this tool WALKS (the vendor source), value the one it
-        /// RESOLVES INTO (ours) — the kit-wide invariant at <see cref="IndexedPath.Substitute"/>. Note that
-        /// <c>ConformRenderers</c> takes the OPPOSITE direction (<c>ownedToSource</c>) under that same rule,
-        /// because it walks our renderers and resolves into the source. Holding one map in mind for both tools
-        /// gets one of them backwards: they are not interchangeable, and this one must additionally be injective
-        /// (rejected loud above) where its is free to be many-to-one.</para></param>
+        /// <c>ConformRenderers</c> runs the OPPOSITE direction under the same invariant, so the two maps are
+        /// not interchangeable — see <see cref="IndexedPath.Substitute"/> before reusing one for both.</param>
         public static string Run(GameObject ownedRoot, GameObject vendorSource,
                                  string[] typeNames, string[] force = null,
                                  IDictionary<string, string> vendorToOwned = null, bool whatIf = false)

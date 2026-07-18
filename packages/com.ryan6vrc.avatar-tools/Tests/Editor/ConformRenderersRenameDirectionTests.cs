@@ -5,13 +5,9 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// Pins the DIRECTION and CARDINALITY of ConformRenderers' ownedToSource map.
-//
-// The map runs opposite to the transplant kit's vendorToOwned (CopyComponents / GraftHierarchy). Both obey
-// one invariant — key names the hierarchy the tool WALKS, value the one it RESOLVES INTO — and this tool
-// walks OUR renderers, so the key is ours. Nothing pinned that before: a regression flipping the lookup
-// would have passed the whole suite, and the asymmetry reads as an accident to anyone who hasn't traced
-// both traversals. These tests make the direction a contract rather than a comment.
+// Pins the DIRECTION and CARDINALITY of ConformRenderers' ownedToSource map (rationale:
+// IndexedPath.Substitute). Without these a regression flipping the lookup passes the whole suite, and the
+// asymmetry against the transplant kit reads as an accident rather than a contract.
 public class ConformRenderersRenameDirectionTests
 {
     static Material MakeMat(string name) => new Material(Shader.Find("Unlit/Color")) { name = name };
@@ -45,7 +41,7 @@ public class ConformRenderersRenameDirectionTests
     static SkinnedMeshRenderer Find(GameObject root, string name) =>
         root.transform.Find(name).GetComponent<SkinnedMeshRenderer>();
 
-    // Our renderer is "Body"; the source calls the same mesh "Face". The correct map is keyed on OUR name.
+    // Our "Body" is the source's "Face": the key is ours.
     [Test]
     public void Map_is_keyed_on_OUR_name_not_the_sources()
     {
@@ -64,8 +60,7 @@ public class ConformRenderersRenameDirectionTests
         Object.DestroyImmediate(src);
     }
 
-    // The same map written backwards must NOT silently work. Without this, a flipped implementation would
-    // still pass every other test in the suite.
+    // The backwards map must not silently work — the assertion the rest of the suite cannot make.
     [Test]
     public void Reversed_map_does_not_resolve_and_fails_loud()
     {
@@ -86,8 +81,8 @@ public class ConformRenderersRenameDirectionTests
         Object.DestroyImmediate(src);
     }
 
-    // Cardinality: the docs claim many-to-one is legitimate here (and is the reason this map cannot simply
-    // be inverted to match the transplant kit's). Assert it, or that claim is only aspirational.
+    // Many-to-one is why this map cannot be inverted to match the kit's; assert it or the claim is
+    // aspirational.
     [Test]
     public void Many_owned_renderers_may_map_onto_one_source_renderer()
     {
@@ -111,8 +106,7 @@ public class ConformRenderersRenameDirectionTests
         Object.DestroyImmediate(src);
     }
 
-    // Case-insensitivity is this tool's own convention (NormalizeRenameMap lowercases) and diverges from the
-    // transplant kit's Ordinal matching — the second way a caller holding "one map" gets surprised.
+    // Diverges from the kit's Ordinal matching — the second way "one map" surprises a caller.
     [Test]
     public void Map_matching_is_case_insensitive_unlike_the_transplant_kit()
     {
