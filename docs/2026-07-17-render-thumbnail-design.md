@@ -198,16 +198,19 @@ failure."** It is enforced structurally, not by hope:
 Rendering mutates, so most behavior is proven live, not in NUnit
 (`vrc-unity-tools-editmode-batchmode`, `subagent-editmode-verify-serial`). Three tiers:
 
-- **Pre-implementation spike — DONE, PASSED** (2026-07-17, live Plum-Remy `@6401`, `Chocolat`, a real
-  MA/VRCFury avatar): unique-clone → `ManualProcessAvatar` (baked clone kept `isHuman=True`,
-  `avatar=ChocolatAvatar`) → `MoveGameObjectToScene(preview)` → `animator.Rebind()` →
-  `SampleAnimationClip(Chiffon_Fist)` rotated the right-hand finger proximals **47–83°** (cross-rig
-  humanoid muscle retarget — the Chiffon clip posed the Chocolat rig). Full teardown verified: no orphan
-  in the live scene, `InAnimationMode=False` after, unique `ZZZ_GeneratedAssets` subfolder deleted and
-  the now-empty parent folder removed, console 0 errors. Confirmed incidentally: `nadena.dev.ndmf.
-  AvatarProcessor.ManualProcessAvatar` binds directly (no reflection), validating the hard-NDMF-ref
-  decision. Not exercised (scene was already dirty from operator work, so the restore branch didn't run):
-  the `ClearSceneDirtiness` path — covered by the invariant test below.
+- **Pre-implementation spike — DONE, PASSED** (2026-07-17, live Plum-Remy `@6401`, **`Shinano_kisekae`** —
+  a genuinely MA/VRCFury-composed avatar: 6 ModularAvatar components incl. `MergeArmature`, 18 skinned
+  meshes; a first pass on the non-composed `Chocolat` was discarded for not exercising the merge). On the
+  merged case: unique-clone → `ManualProcessAvatar` fully processed it (**MA components 6→0**, 18 meshes
+  survived, baked clone `isHuman=True` `avatar=Shinano_kisekaeAvatar`) → `MoveGameObjectToScene(preview)`
+  → `animator.Rebind()` → `SampleAnimationClip(Chiffon_Fist)` rotated the finger proximals **48–83°**.
+  **Clothing-follows-body confirmed:** all 18 merged meshes are weighted to the unified right-hand bone
+  chain, so posing it drives body + every outfit piece off one skeleton — the exact premise the bake
+  exists to satisfy. Teardown verified: no orphan, `InAnimationMode=False` after, unique
+  `ZZZ_GeneratedAssets` subfolder deleted and the now-empty parent removed, console 0 errors. Confirmed
+  incidentally: `nadena.dev.ndmf.AvatarProcessor.ManualProcessAvatar` binds directly (no reflection),
+  validating the hard-NDMF-ref decision. Not exercised (scene was already dirty from operator work): the
+  `ClearSceneDirtiness` restore branch — covered by the invariant test below.
 - **Headless EditMode** (`tools/run-editmode-tests.ps1` against `TestEditor`, run serially): pure helpers
   only — `pose` resolution order, `framing`→distance mapping, cleanup subfolder-name derivation, verdict
   formatting, `bg` parse, and each bundled clip's `isHumanMotion == true`. Fail-loud branches use
