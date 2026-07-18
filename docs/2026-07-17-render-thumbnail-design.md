@@ -154,7 +154,10 @@ Setup snapshots (for restore): each open scene's `isDirty`, the set of live-scen
    step-0 snapshot** (catches a reference-less orphan from a bake that threw); restore `Selection`;
    `ClearSceneDirtiness` on each scene that was clean at snapshot; delete the run's unique
    `ZZZ_GeneratedAssets/<...>(Clone)` subfolder via `AssetDatabase.DeleteAsset` (handles its `.meta`),
-   and remove the parent `ZZZ_GeneratedAssets` only if this run created it and it is now empty.
+   and then **delete the parent `ZZZ_GeneratedAssets` folder itself whenever it is now empty** (whether or
+   not this run created it — an empty folder means nothing else is relying on it, so leave the project as
+   if we were never here). A pre-existing user bake in a sibling subfolder keeps the folder non-empty, so
+   this only fires when it's genuinely empty.
 
 **Concurrency:** the bake's `AssetDatabase.StartAssetEditing`, `AnimationMode`, and `Selection` are
 global editor state — **serialize `RenderThumbnail` calls** (do not run two at once), consistent with the
@@ -195,10 +198,16 @@ failure."** It is enforced structurally, not by hope:
 Rendering mutates, so most behavior is proven live, not in NUnit
 (`vrc-unity-tools-editmode-batchmode`, `subagent-editmode-verify-serial`). Three tiers:
 
-- **Pre-implementation spike** (do this first — it can invalidate the pose feature): in Plum-Remy, bake →
-  move to preview → `animator.Rebind()` → `SampleAnimationClip` a known humanoid clip → **read back a
-  hand-bone world rotation** and confirm it changed. If it doesn't move even with `Rebind()`, the pose
-  path needs rethinking before any tool code is written.
+- **Pre-implementation spike — DONE, PASSED** (2026-07-17, live Plum-Remy `@6401`, `Chocolat`, a real
+  MA/VRCFury avatar): unique-clone → `ManualProcessAvatar` (baked clone kept `isHuman=True`,
+  `avatar=ChocolatAvatar`) → `MoveGameObjectToScene(preview)` → `animator.Rebind()` →
+  `SampleAnimationClip(Chiffon_Fist)` rotated the right-hand finger proximals **47–83°** (cross-rig
+  humanoid muscle retarget — the Chiffon clip posed the Chocolat rig). Full teardown verified: no orphan
+  in the live scene, `InAnimationMode=False` after, unique `ZZZ_GeneratedAssets` subfolder deleted and
+  the now-empty parent folder removed, console 0 errors. Confirmed incidentally: `nadena.dev.ndmf.
+  AvatarProcessor.ManualProcessAvatar` binds directly (no reflection), validating the hard-NDMF-ref
+  decision. Not exercised (scene was already dirty from operator work, so the restore branch didn't run):
+  the `ClearSceneDirtiness` path — covered by the invariant test below.
 - **Headless EditMode** (`tools/run-editmode-tests.ps1` against `TestEditor`, run serially): pure helpers
   only — `pose` resolution order, `framing`→distance mapping, cleanup subfolder-name derivation, verdict
   formatting, `bg` parse, and each bundled clip's `isHumanMotion == true`. Fail-loud branches use
