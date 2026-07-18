@@ -35,7 +35,7 @@ return verdict
     ;   // generated assets are the SDK hooks' own business — OnPostprocessAvatar fires their cleanup
 ```
 
-Observed pass: `... silhouette≈12-14% => OK | png=<temp>/...png` with `animMode=False roots 6->6
+Observed pass: `... fov=30 headYaw=-8.4 camYaw=-26.4 head=(0.45,0.62) => OK | png=<temp>/...png` with `animMode=False roots 6->6
 dirty True->True sel 0->0`. (`dirty True->True` = the scene was already dirty from
 operator work and was left exactly that way — the `ClearSceneDirtiness` restore only fires for a scene
 that was *clean* at snapshot.)
@@ -82,7 +82,8 @@ return a + "
 ```
 
 Expect the second verdict to carry `expression=Open (<clip>)` — the clip that state name resolved to on
-the baked controller — and matching `silhouette=` on both. **The PNGs are the assertion**: identical
+the baked controller — and matching `camYaw=`/`head=` on both, since an expression moves blendshapes
+only and must not disturb the camera solve. **The PNGs are the assertion**: identical
 body, different face. A face that did not change while the verdict still names a clip is exactly the
 failure this case exists to catch.
 

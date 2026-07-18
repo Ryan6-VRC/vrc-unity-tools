@@ -5,7 +5,8 @@ using Ryan6Vrc.AvatarTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Tests
 {
-    // Pure helpers ONLY (FramingDistance / TryParseBg / BundledPoses / NormalizeToken / ResolvePose).
+    // Pure helpers ONLY (FramingGeometry / TryParseBg / YawOf / PitchOf / BundledPoses / NormalizeToken /
+    // ResolvePose).
     // Everything expression-side resolves against a BAKED avatar, so it is a scene object verified live
     // (execute_code) by the coordinator, never in NUnit; see
     // docs/2026-07-17-render-thumbnail-design.md §Verification. No test here may create a GameObject,
@@ -18,31 +19,120 @@ namespace Ryan6Vrc.AvatarTools.Tests
     [TestFixture]
     public class RenderThumbnailTests
     {
+        // Asserts the VALUES, not just their order: framing changed meaning (dolly distance -> subject
+        // span), and an ordering-only assertion stays green straight through a semantic swap like that.
         [Test]
-        public void Framing_ThreeDistinctDistances()
+        public void Framing_SpansAreSubjectHeights()
         {
-            float bust = RenderThumbnail.FramingDistance("bust");
-            float half = RenderThumbnail.FramingDistance("half");
-            float full = RenderThumbnail.FramingDistance("full");
+            RenderThumbnail.FramingGeometry("bust", out float bustSpan, out float bustDrop);
+            RenderThumbnail.FramingGeometry("half", out float halfSpan, out float halfDrop);
+            RenderThumbnail.FramingGeometry("full", out float fullSpan, out float fullDrop);
 
-            Assert.Less(bust, half, "bust must dolly less than half");
-            Assert.Less(half, full, "half must dolly less than full");
+            Assert.AreEqual(0.48f, bustSpan, 0.001f, "bust covers a head-and-shoulders height");
+            Assert.AreEqual(0.96f, halfSpan, 0.001f);
+            Assert.AreEqual(2.00f, fullSpan, 0.001f, "full must cover a whole standing avatar");
+
+            // The eyes sit near the TOP of the subject, so the aim has to drop further as the span grows —
+            // a single coefficient cuts the feet off at full framing.
+            Assert.AreEqual(0.12f, bustDrop, 0.001f);
+            Assert.AreEqual(0.12f, halfDrop, 0.001f, "bust and half share an aim drop");
+            Assert.AreEqual(0.37f, fullDrop, 0.001f, "full must aim lower to seat the feet in frame — "
+                + "ordering alone would pass 0.001/0.001/10 and destroy the framing");
+
+            // Deliberately NOT asserting full crown clearance: some crop is wanted (a thumbnail is
+            // displayed small, and a tight one reads as intentional), and chasing it on tall anime hair
+            // would cost the bust crop. Feet in frame at `full` IS load-bearing, though.
+            const float WorstFeetBelowEyes = 0.95f, Ref = 1.6f;
+            Assert.Greater(fullSpan / Ref * (0.5f + fullDrop), WorstFeetBelowEyes,
+                "full framing must seat the feet — measured, the lowest drawn point sits ~0.95 x view "
+                + "height below the view point across the vendor bases");
         }
 
         [Test]
         public void Framing_Unknown_Throws()
         {
-            var ex = Assert.Throws<System.ArgumentException>(() => RenderThumbnail.FramingDistance("zoom"));
+            var ex = Assert.Throws<System.ArgumentException>(
+                () => RenderThumbnail.FramingGeometry("zoom", out _, out _));
             StringAssert.Contains("bust", ex.Message);
         }
 
         [Test]
-        public void Bg_HexParses_GarbageFails()
+        public void Bg_SolidHexParses_GarbageFails()
         {
-            Assert.IsTrue(RenderThumbnail.TryParseBg("#204060", out Color c));
-            Assert.AreEqual(0x20 / 255f, c.r, 0.01f);
+            Assert.IsTrue(RenderThumbnail.TryParseBg("#204060", out Color top, out Color bottom));
+            Assert.AreEqual(0x20 / 255f, top.r, 0.01f);
+            Assert.AreEqual(top, bottom, "a solid bg must yield an identical pair — that is what selects the "
+                + "solid-clear path over the gradient command buffer");
 
-            Assert.IsFalse(RenderThumbnail.TryParseBg("blue", out _));
+            Assert.IsFalse(RenderThumbnail.TryParseBg("blue", out _, out _));
+        }
+
+        [Test]
+        public void Bg_GradientPairParses()
+        {
+            Assert.IsTrue(RenderThumbnail.TryParseBg("#204060:#8090A0", out Color top, out Color bottom));
+            Assert.AreEqual(0x20 / 255f, top.r, 0.01f, "the FIRST stop is the top of the frame");
+            Assert.AreEqual(0x80 / 255f, bottom.r, 0.01f);
+            Assert.AreNotEqual(top, bottom);
+
+            // #RRGGBBAA must keep resolving as one solid colour — the ':' is what distinguishes the forms.
+            Assert.IsTrue(RenderThumbnail.TryParseBg("#204060FF", out Color solid, out Color solidB));
+            Assert.AreEqual(solid, solidB);
+
+            Assert.IsFalse(RenderThumbnail.TryParseBg("#204060:", out _, out _));
+            Assert.IsFalse(RenderThumbnail.TryParseBg("#204060:8090A0", out _, out _), "both stops need '#'");
+        }
+
+        // The camera solve's sign convention, which is invisible in code review and inverts the whole
+        // feature if wrong: positive yaw points toward +X, and the automatic oblique must land on the SAME
+        // side as the head's turn (measured off a real rig — see the pose-angle study table).
+        [Test]
+        public void YawOf_IsSignedAboutY_PositiveTowardX()
+        {
+            Assert.AreEqual(0f, RenderThumbnail.YawOf(Vector3.forward), 0.01f);
+            Assert.AreEqual(90f, RenderThumbnail.YawOf(Vector3.right), 0.01f);
+            Assert.AreEqual(-90f, RenderThumbnail.YawOf(Vector3.left), 0.01f);
+        }
+
+        [Test]
+        public void PitchOf_IsPositiveLookingUp()
+        {
+            Assert.AreEqual(0f, RenderThumbnail.PitchOf(Vector3.forward), 0.01f);
+            Assert.Greater(RenderThumbnail.PitchOf(new Vector3(0f, 1f, 1f)), 0f, "chin raised reads positive");
+            Assert.Less(RenderThumbnail.PitchOf(new Vector3(0f, -1f, 1f)), 0f);
+        }
+
+        // The rig-portability property the whole head-tracking feature rests on, and the one the canonical
+        // YawOf/PitchOf tests above CANNOT catch by construction.
+        //
+        // Unity does not normalize humanoid bone axes. Extracting an angle from each forward vector and
+        // subtracting cancels a constant offset but NOT the axis dependence: on a head bone whose +Z runs up
+        // the neck — how Blender authors orient a bone, so most of the VRChat population — that form returns
+        // yaw 0 for every pose (tracking silently dead) and inverts pitch (a chin-up pose shot from below).
+        // Taking the delta rotation FIRST and extracting once is invariant to the rest orientation.
+        [Test]
+        public void HeadAngles_AreInvariantToTheRestBoneOrientation()
+        {
+            var rests = new[]
+            {
+                Quaternion.identity,                      // bone +Z = character forward
+                Quaternion.Euler(-90f, 0f, 0f),           // bone +Z = up, along the neck
+                Quaternion.Euler(0f, 90f, 0f),            // bone +Z = sideways
+                Quaternion.Euler(23f, 41f, 17f),          // arbitrary skew
+            };
+            var yawTurn = Quaternion.AngleAxis(30f, Vector3.up);
+            var chinUp = Quaternion.AngleAxis(-20f, Vector3.right);
+
+            foreach (var rest in rests)
+            {
+                Vector3 yawFwd = (yawTurn * rest * Quaternion.Inverse(rest)) * Vector3.forward;
+                Vector3 pitchFwd = (chinUp * rest * Quaternion.Inverse(rest)) * Vector3.forward;
+
+                Assert.AreEqual(30f, RenderThumbnail.YawOf(yawFwd), 0.01f,
+                    "a 30 deg head turn must read 30 deg whatever way the head bone happens to point");
+                Assert.AreEqual(20f, RenderThumbnail.PitchOf(pitchFwd), 0.01f,
+                    "a chin raise must read positive whatever way the head bone happens to point");
+            }
         }
 
         // ===== Pose vocabulary = the Poses/ folder glob (no hard-wired array) =====
