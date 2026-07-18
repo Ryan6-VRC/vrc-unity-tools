@@ -134,7 +134,10 @@ namespace Ryan6Vrc.AvatarTools.Tests
         public void PoseCatalog_TokensAreUnique()
         {
             // A collision would make the winner depend on FindAssets order through an unstable sort.
-            // ResolvePose surfaces a collision as an err; this asserts the shipped set is clean.
+            // THIS TEST IS THE ONLY GUARD. There is no runtime collision check — two files normalizing to
+            // one token would otherwise resolve by FindAssets order through an unstable sort, silently
+            // making one pose unreachable. Catching it at build time is the point: poses land by dropping
+            // files, with nobody reviewing the tool.
             var tokens = RenderThumbnail.PoseCatalog().Select(e => e.Token).ToList();
 
             CollectionAssert.AllItemsAreUnique(tokens);

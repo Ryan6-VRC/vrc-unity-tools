@@ -71,16 +71,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <param name="target">avatar root: scene hierarchy path, instance id, or name (first match).</param>
         /// <param name="pose">null =&gt; floor (unposed); a bundled token (see <see cref="PoseCatalog"/>);
         /// or a clip asset path/GUID.</param>
-        /// <param name="expression">null =&gt; no expression (a fully supported outcome); else a gesture
-        /// slot (<c>Open</c>, <c>Peace</c>), a clip name, or a clip asset path/GUID, composited with
-        /// <paramref name="pose"/>. Slot and clip name resolve against the BAKED FX controller; a
-        /// path/GUID is an escape hatch loaded as given. An unknown value enumerates what this avatar
-        /// offers.</param>
+        /// <param name="expression">null =&gt; no expression (a fully supported outcome); else a state name
+        /// on the baked FX controller (a gesture slot such as <c>Open</c>/<c>Peace</c>), or a clip asset
+        /// path/GUID, whose blendShape curves are composited with <paramref name="pose"/>. Resolved after
+        /// the bake — read the controller with ReportController to see what a given avatar offers.</param>
         /// <param name="framing">"bust" | "half" | "full" — dolly distance over the SDK's
         /// PositionPortraitCamera transform.</param>
         /// <param name="bg">null =&gt; default backdrop; "#RRGGBB" =&gt; solid color.</param>
-        /// <param name="whatIf">preflight only: resolve target/descriptor/pose/expression, report, bake
-        /// nothing.</param>
+        /// <param name="whatIf">preflight only: resolve target/descriptor/pose, report, bake nothing.
+        /// <paramref name="expression"/> is echoed unresolved — it needs the baked controller.</param>
         public static string Render(
             string target,
             string pose = null,
@@ -700,18 +699,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             string key = NormalizeToken(trimmed);
+            bool nameMatched = false;   // matched a state, but its motion was not a clip
             foreach (var layer in FxLayers(baked))
             {
                 if (layer.stateMachine == null) continue;
                 foreach (var cs in layer.stateMachine.states)
                 {
                     if (NormalizeToken(cs.state.name) != key) continue;
+                    nameMatched = true;
                     var clip = cs.state.motion as AnimationClip;
                     if (clip != null) return clip;
                 }
             }
-            err = "no state named '" + expression + "' on the baked FX controller — read the controller "
-                + "with ReportController to see what it offers, or pass a clip asset path/GUID";
+
+            // Two different failures, and conflating them costs real time: the caller's answer to "that
+            // name doesn't exist" is to try another name, and every retry is a full SDK bake that can
+            // wedge the editor on a hook's modal dialog. Say which it is. (A blend-tree state is not
+            // walked into — that would be re-growing the traversal heuristics this path exists without.)
+            err = nameMatched
+                ? "state '" + expression + "' matched but holds no clip (blend tree, or empty) — pass a "
+                  + "clip asset path/GUID instead"
+                : "no state named '" + expression + "' on the baked FX controller — read the controller "
+                  + "with ReportController to see what it offers, or pass a clip asset path/GUID";
             return null;
         }
 

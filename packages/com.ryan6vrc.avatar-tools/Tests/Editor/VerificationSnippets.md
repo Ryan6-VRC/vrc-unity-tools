@@ -81,6 +81,11 @@ return a + "
 " + b;
 ```
 
-Expect `shapes=<n>/<n>` (all landed) on the second, and matching `silhouette=` on both. Open the two
-PNGs: identical body, different face. A slot measurably beats the pre-bake asset path here — on one
-avatar, `42/42` against `42/86`, because the bake rewrites the shape names the source asset binds.
+Expect the second verdict to carry `expression=Open (<clip>)` — the clip that state name resolved to on
+the baked controller — and matching `silhouette=` on both. **The PNGs are the assertion**: identical
+body, different face. A face that did not change while the verdict still names a clip is exactly the
+failure this case exists to catch.
+
+A state name beats a pre-bake clip path because the bake rewrites the blendshape names a source asset
+binds; a path that no longer matches fails loud (`moved no blendshape`) instead of rendering a blank
+face.
