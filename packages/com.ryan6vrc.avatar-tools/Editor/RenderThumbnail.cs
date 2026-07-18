@@ -10,18 +10,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
     /// Renders a baked-avatar thumbnail via a dedicated off-screen camera rather than RenderAvatar's
-    /// Scene-View window-grab, because baking (<c>nadena.dev.ndmf.AvatarProcessor.ManualProcessAvatar</c>)
-    /// gives real resolved meshes that a fixed-size off-screen camera can render at a guaranteed
-    /// 1200×900 — RenderAvatar never bakes, so it must composite through the Scene View instead, capped
-    /// to the pane's size and showing NDMF preview proxies. See docs/2026-07-17-render-thumbnail-design.md.
+    /// Scene-View window-grab, because baking (the VRC SDK preprocess chain,
+    /// <c>VRCBuildPipelineCallbacks.OnPreprocessAvatar</c>) gives real resolved meshes that a fixed-size
+    /// off-screen camera can render at a guaranteed 1200×900 — RenderAvatar never bakes, so it must
+    /// composite through the Scene View instead, capped to the pane's size and showing NDMF preview
+    /// proxies. The bake is the FULL SDK chain, not NDMF alone, so the portrait shows the avatar that
+    /// actually uploads (optimizers included). See docs/2026-07-17-render-thumbnail-design.md.
     /// </summary>
     [AgentTool]
     public static class RenderThumbnail
     {
-        /// <summary>Case-insensitive vocabulary <see cref="ResolvePose"/> matches against
-        /// <c>Editor/Poses/RTPose_&lt;PascalName&gt;.anim</c> before treating <c>pose</c> as an asset
-        /// path/GUID.</summary>
-        internal static readonly string[] BundledPoses = { "clasped", "hand-on-hip" };
+        /// <summary>The bundled pose vocabulary is this folder's <c>RTPose_*.anim</c> glob — there is no
+        /// hard-wired name list. Poses are added by dropping files here, and the unknown-pose error
+        /// enumerates the glob, so the advertised vocabulary cannot drift from what actually ships.</summary>
+        internal const string PosesFolder = "Packages/com.ryan6vrc.avatar-tools/Editor/Poses";
 
         // Dolly-back distance (meters, added along camera local-forward beyond the SDK-calibrated
         // PositionPortraitCamera transform) per framing. Cosmetic taste defaults — bust is the SDK's own
@@ -69,13 +71,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <param name="target">avatar root: scene hierarchy path, instance id, or name (first match).</param>
         /// <param name="pose">null =&gt; floor (unposed); a bundled name (see <see cref="BundledPoses"/>);
         /// or a clip asset path/GUID.</param>
+        /// <param name="expression">null =&gt; no expression (a fully supported outcome); else a state name
+        /// on the baked FX controller (a gesture slot such as <c>Open</c>/<c>Peace</c>), or a clip asset
+        /// path/GUID, whose blendShape curves are composited with <paramref name="pose"/>. Resolved after
+        /// the bake — read the controller with ReportController to see what a given avatar offers.</param>
         /// <param name="framing">"bust" | "half" | "full" — dolly distance over the SDK's
         /// PositionPortraitCamera transform.</param>
         /// <param name="bg">null =&gt; default backdrop; "#RRGGBB" =&gt; solid color.</param>
-        /// <param name="whatIf">preflight only: resolve target/descriptor/pose, report, bake nothing.</param>
+        /// <param name="whatIf">preflight only: resolve target/descriptor/pose, report, bake nothing.
+        /// <paramref name="expression"/> is echoed unresolved — it needs the baked controller.</param>
         public static string Render(
             string target,
             string pose = null,
+            string expression = null,
             string framing = "bust",
             string bg = null,
             bool whatIf = false)
@@ -106,9 +114,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return Fail(label, poseErr);
 
                 string poseToken = string.IsNullOrEmpty(pose) ? "floor" : pose;
+                // Not preflighted: an expression resolves against the BAKED controller, which whatIf by
+                // definition does not have. Echoed so the caller can see what will be attempted.
+                string exprToken = string.IsNullOrEmpty(expression) ? "none" : expression + " (at bake)";
                 string ok = string.Format(CultureInfo.InvariantCulture,
-                    "[RenderThumbnail] Render {0} whatIf pose={1} descriptor=OK => WOULD-RENDER (no bake)",
-                    label, poseToken);
+                    "[RenderThumbnail] Render {0} whatIf pose={1} expression={2} descriptor=OK => WOULD-RENDER (no bake)",
+                    label, poseToken, exprToken);
                 Debug.Log(ok);
                 return ok;
             }
@@ -116,9 +127,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ---- Preflight resolution (fail fast, before any mutation) ----
             if (!ResolvePose(pose, out AnimationClip poseClip, out string renderPoseErr))
                 return Fail(label, renderPoseErr);
+            bool wantExpression = !string.IsNullOrEmpty(expression);
             // poseName is the ORIGINAL pose argument (for verdict display), not the resolved asset path —
-            // matches the whatIf branch's poseToken convention above.
+            // matches the whatIf branch's poseToken convention above. Same for expressionName.
             string poseName = string.IsNullOrEmpty(pose) ? "floor" : pose;
+            string expressionName = string.IsNullOrEmpty(expression) ? "none" : expression;
 
             // ---- Snapshots for restore (before any mutation), used by the finally teardown ----
             Scene targetScene = root.scene;
@@ -139,7 +152,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             Scene preview = default;
             GameObject baked = null;
-            string bakedName = null;      // captured after bake; the ZZZ subfolder is named this
+            // Set the instant preprocess is entered: teardown owes the SDK its paired OnPostprocessAvatar
+            // even when a hook throws midway.
+            bool bakePreprocessed = false;
             RenderTexture rt = null;
             Texture2D tex = null;
             string result = null;      // non-null on the silhouette-fail / non-success paths only
@@ -155,22 +170,41 @@ namespace Ryan6Vrc.AvatarTools.Editor
             try
             {
                 // ---- Step 2: unique private clone -> bake (the non-destructiveness keystone) ----
-                // The GUID suffix makes the ZZZ_GeneratedAssets subfolder provably exclusive to this run
-                // (regardless of timer resolution), so NDMF's pre-existing-folder wholesale-delete can never
+                // The GUID suffix makes any generated-asset subfolder provably exclusive to this run
+                // (regardless of timer resolution), so a pre-existing-folder wholesale-delete can never
                 // touch a user's kept bake.
+                //
+                // The bake door is the SDK preprocess chain, NOT ManualProcessAvatar — see
+                // nondestructive.md §The bake door. Unlike ManualProcessAvatar (clone in, new object
+                // out), this mutates IN PLACE, so `mine` IS the baked avatar with nothing else to destroy.
                 string stamp = Guid.NewGuid().ToString("N").Substring(0, 8);
                 var mine = UnityEngine.Object.Instantiate(root);
                 string mineName = root.name + "__rt_" + stamp;
                 mine.name = mineName;
-                // Predict the ZZZ subfolder name NOW: NDMF creates it DURING the bake (named after the
-                // "(Clone)" that ManualProcessAvatar's own Instantiate makes), so a mid-bake throw must still
-                // find bakedName set for teardown to clean it. Reaffirmed authoritatively after success below.
-                bakedName = mineName + "(Clone)";
-                try { baked = nadena.dev.ndmf.AvatarProcessor.ManualProcessAvatar(mine); }
-                finally { if (mine != null) UnityEngine.Object.DestroyImmediate(mine); }
-                if (baked == null)
-                    throw new InvalidOperationException("ManualProcessAvatar returned null for '" + mineName + "'");
-                bakedName = baked.name; // authoritative on success (== the prediction above)
+                mine.SetActive(true); // an inactive avatar is not a valid preprocess target
+
+                bool preprocessOk;
+                bakePreprocessed = true;
+                try
+                {
+                    preprocessOk = VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks
+                        .OnPreprocessAvatar(mine);
+                }
+                catch
+                {
+                    UnityEngine.Object.DestroyImmediate(mine);
+                    throw;
+                }
+                if (!preprocessOk)
+                {
+                    UnityEngine.Object.DestroyImmediate(mine);
+                    // A hook REFUSED the build (VRCFury misconfiguration, a failed optimizer pass, an SDK
+                    // validation). It logs its own reason to the console; surface that it happened.
+                    throw new InvalidOperationException(
+                        "VRC build preprocess refused '" + label + "' — a build hook blocked it (its reason "
+                        + "is in the Unity console). The avatar would not upload in this state either.");
+                }
+                baked = mine;
 
                 // ---- Step 3: preview scene ----
                 preview = UnityEditor.SceneManagement.EditorSceneManager.NewPreviewScene();
@@ -234,6 +268,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     Vector3 posedHead = headBone != null ? headBone.position : baked.transform.position;
                     Vector3 posedRoot = baked.transform.position;
                     poseHeadDelta = (posedHead - posedRoot) - (restHead - restRoot);
+                }
+
+                // ---- Step 5b: expression, applied AFTER the pose and deliberately NOT through the
+                // animation system. A second SampleAnimationClip re-runs the Animator's humanoid solver
+                // and PARTIALLY UNDOES the pose — the left upper arm moved (301.6,303.5,76.7) ->
+                // (321.6,344.4,33.2). Pose and expression bind disjoint properties, not disjoint systems.
+                // Writing weights straight onto the renderers leaves the pose byte-identical.
+                string resolvedExpression = null;
+                if (wantExpression)
+                {
+                    var bakedExpr = FindExpressionClip(baked, expression, out string bakedErr);
+                    if (bakedExpr == null) throw new InvalidOperationException(bakedErr);
+
+                    resolvedExpression = bakedExpr.name;
+                    if (ApplyExpression(baked, bakedExpr) == 0)
+                        throw new InvalidOperationException(
+                            "expression '" + expressionName + "' (clip '" + resolvedExpression
+                            + "') moved no blendshape on the baked avatar — it binds shapes this avatar "
+                            + "does not have, or only meshes that are not drawn");
                 }
 
                 // ---- Step 6: camera + off-screen sRGB capture (§Capture, source-verified) ----
@@ -303,7 +356,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 float fraction = pixels.Length > 0 ? (float)drawn / pixels.Length : 0f;
                 int pct = Mathf.RoundToInt(fraction * 100f);
 
-                prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName + " framing="
+                // Which clip the selector actually resolved to post-bake — the one thing the reader
+                // cannot infer from the arguments.
+                string shapesToken = wantExpression ? " (" + resolvedExpression + ")" : "";
+                prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName
+                    + " expression=" + expressionName + shapesToken + " framing="
                     + framingToken + " silhouette=" + pct.ToString(CultureInfo.InvariantCulture) + "%";
 
                 if (fraction < MinSilhouetteFraction)
@@ -311,7 +368,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // Fail loud, uniform (=> FAIL:), keeping the REAL measured values — do NOT write a blank PNG.
                     result = Fail(label, "silhouette " + pct.ToString(CultureInfo.InvariantCulture) + "% below "
                         + MinSilhouetteFraction.ToString(CultureInfo.InvariantCulture) + " (pose=" + poseName
-                        + " framing=" + framingToken + ") — nothing drew");
+                        + " expression=" + expressionName + " framing=" + framingToken + ") — nothing drew");
                 }
                 else
                 {
@@ -325,8 +382,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             finally
             {
-                // ---- Step 7: teardown — runs on EVERY exit (success or throw). Every item guarded so a throw
-                // partway through setup still tears down cleanly. Order matters. ----
+                // ---- Step 7: teardown — runs on EVERY exit (success or throw). Order matters.
+                // The body is itself wrapped so the SDK postprocess pairing below can never be skipped:
+                // the steps here are guarded against null, not against throwing (the reflected
+                // ClearSceneDirtiness can raise TargetInvocationException; DestroyImmediate can raise on
+                // an already-destroyed object), and losing the pairing would leak exactly what it exists
+                // to clean while replacing the real pipeline exception with a teardown one. ----
+                try
+                {
                 if (rt != null) UnityEngine.Object.DestroyImmediate(rt);
                 if (tex != null) UnityEngine.Object.DestroyImmediate(tex);
 
@@ -362,24 +425,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         residualNote += " note=scene-dirty-uncleared: EditorSceneManager.ClearSceneDirtiness internals drifted";
                 }
 
-                // Delete this run's unique ZZZ subfolder, then the parent whenever it is now empty (a pre-existing
-                // user bake in a sibling subfolder keeps it non-empty, so this only fires when genuinely empty).
-                if (bakedName != null)
+                }
+                finally
                 {
-                    string sub = "Assets/ZZZ_GeneratedAssets/" + bakedName;
-                    if (AssetDatabase.IsValidFolder(sub)) AssetDatabase.DeleteAsset(sub);
-                    if (AssetDatabase.IsValidFolder(sub))
-                        residualNote += " note=cleanup-residual: " + sub + " not removed"; // surfaced, not swallowed
-
-                    if (AssetDatabase.IsValidFolder("Assets/ZZZ_GeneratedAssets"))
+                    // The SDK's preprocess/postprocess pair is a contract: OnPreprocessAvatar was called,
+                    // so OnPostprocessAvatar must be too. It fires every hook's OWN cleanup (NDMF's
+                    // temporary-asset sweep among them) rather than this tool guessing folder names it
+                    // does not control. Assets that outlive it are not chased — projects accumulate some.
+                    if (bakePreprocessed)
                     {
-                        var subs = AssetDatabase.GetSubFolders("Assets/ZZZ_GeneratedAssets");
-                        var assetsIn = AssetDatabase.FindAssets("", new[] { "Assets/ZZZ_GeneratedAssets" });
-                        if (subs.Length == 0 && assetsIn.Length == 0)
-                            AssetDatabase.DeleteAsset("Assets/ZZZ_GeneratedAssets");
+                        try { VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPostprocessAvatar(); }
+                        catch (Exception cleanupEx)
+                        {
+                            // Surfaced, not swallowed — but never fatal: the PNG is already written.
+                            residualNote += " note=postprocess-cleanup-threw: " + cleanupEx.GetType().Name;
+                        }
                     }
                 }
-
             }
 
                 // Verdict assembled HERE, after teardown, so residualNote (a cleanup failure) is known before we
@@ -404,6 +466,47 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Debug.LogException(ex);
                 return Fail(label, ex.GetType().Name + ": " + ex.Message) + residualNote;
             }
+        }
+
+        /// <summary>
+        /// Write the clip's <c>blendShape.*</c> curves straight onto the baked clone's renderers and
+        /// return how many landed on a DRAWN one. Only blendShape curves are applied — an expression is
+        /// its blendshape curves. Applying rather than sampling is what keeps the pose intact (see the
+        /// call site); a zero return is the caller's signal that the clip and the baked avatar do not
+        /// match.
+        /// </summary>
+        private static int ApplyExpression(GameObject baked, AnimationClip clip)
+        {
+            int applied = 0;
+
+            foreach (var binding in AnimationUtility.GetCurveBindings(clip))
+            {
+                if (binding.propertyName == null
+                    || !binding.propertyName.StartsWith("blendShape.", StringComparison.Ordinal)) continue;
+
+                Transform t = string.IsNullOrEmpty(binding.path)
+                    ? baked.transform
+                    : baked.transform.Find(binding.path);
+                var smr = t != null ? t.GetComponent<SkinnedMeshRenderer>() : null;
+                if (smr == null || smr.sharedMesh == null) continue;
+
+                // A weight written to a disabled or inactive renderer changes nothing visible, so it does
+                // not count as landed — optimizers and MA routinely leave blush/star-eye meshes inactive.
+                if (!smr.enabled || !smr.gameObject.activeInHierarchy) continue;
+
+                int index = smr.sharedMesh.GetBlendShapeIndex(binding.propertyName.Substring("blendShape.".Length));
+                if (index < 0) continue;
+
+                var curve = AnimationUtility.GetEditorCurve(clip, binding);
+                if (curve == null || curve.length == 0) continue;
+
+                // Evaluate at clip.length, matching the pose's sample-at-clip.length convention. Curves
+                // default to ClampForever, so for the single-key clips expressions almost always are this
+                // is the only key; for a multi-key clip it is deliberately the END state.
+                smr.SetBlendShapeWeight(index, curve.Evaluate(clip.length));
+                applied++;
+            }
+            return applied;
         }
 
         // ===== Pure helpers (unit-tested; do not touch the scene or the asset database beyond reads) ====
@@ -433,12 +536,52 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
+        /// The bundled poses: readable name (the file name minus <c>RTPose_</c>) to asset path, sorted so
+        /// the unknown-pose error is stable. The folder IS the vocabulary — adding a pose is dropping a
+        /// file, and the error is derived from disk, so what the tool advertises cannot drift from what
+        /// ships.
+        /// </summary>
+        internal static SortedDictionary<string, string> BundledPoses()
+        {
+            var found = new SortedDictionary<string, string>(StringComparer.Ordinal);
+            if (!AssetDatabase.IsValidFolder(PosesFolder)) return found;
+
+            foreach (var guid in AssetDatabase.FindAssets("t:AnimationClip", new[] { PosesFolder }))
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guid);
+                // FindAssets descends child folders; a Poses/Archive/RTPose_Old.anim must not become
+                // advertised vocabulary, so the glob is pinned to this folder exactly.
+                if (System.IO.Path.GetDirectoryName(path).Replace('\\', '/') != PosesFolder) continue;
+                string file = System.IO.Path.GetFileNameWithoutExtension(path);
+                if (!file.StartsWith("RTPose_", StringComparison.OrdinalIgnoreCase)) continue;
+                found[file.Substring("RTPose_".Length)] = path;
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// Fold a name to its match key: lowercase, drop every non-alphanumeric character. This is what
+        /// makes <c>hand-on-hip</c>, <c>hand_on_hip</c> and <c>HandOnHip</c> one token, for both pose
+        /// names and FX state names.
+        /// </summary>
+        internal static string NormalizeToken(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+
+            var sb = new System.Text.StringBuilder(s.Length);
+            foreach (char ch in s)
+                if (char.IsLetterOrDigit(ch)) sb.Append(char.ToLowerInvariant(ch));
+            return sb.ToString();
+        }
+
+        /// <summary>
         /// Resolve <paramref name="pose"/> to a clip: null/empty =&gt; floor (<paramref name="clip"/> null,
-        /// no error); a bundled name (case-insensitive, see <see cref="BundledPoses"/>) =&gt; that package
-        /// clip; else a value containing '/' or a 32-hex GUID =&gt; loaded as an asset path/GUID; else a
-        /// named FAIL enumerating the bundled vocabulary. Any loaded clip that is not
-        /// <c>isHumanMotion</c> (a generic/transform clip) fails loud here, before any bake — such a clip
-        /// would not retarget across rigs.
+        /// no error); a clip asset path or 32-hex GUID loads directly; anything else is matched (via
+        /// <see cref="NormalizeToken"/>) against <see cref="BundledPoses"/>, first match wins.
+        /// <para>The one guard that has to stay: a clip that is not <c>isHumanMotion</c> would not retarget
+        /// across rigs, and <c>SampleAnimationClip</c> is a SILENT no-op for it on a humanoid — so without
+        /// this the verdict would claim <c>pose=&lt;name&gt;</c> over an unposed avatar. Unlike the
+        /// expression side, nothing downstream catches it.</para>
         /// </summary>
         internal static bool ResolvePose(string pose, out AnimationClip clip, out string err)
         {
@@ -447,75 +590,118 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (string.IsNullOrEmpty(pose)) return true; // floor
 
             string trimmed = pose.Trim();
+            string source;
 
-            foreach (var bundled in BundledPoses)
+            if (trimmed.IndexOf('/') >= 0 || IsGuid(trimmed))
             {
-                if (!string.Equals(bundled, trimmed, StringComparison.OrdinalIgnoreCase)) continue;
-
-                string bundledPath = "Packages/com.ryan6vrc.avatar-tools/Editor/Poses/RTPose_"
-                    + BundledPascalName(bundled) + ".anim";
-                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(bundledPath);
+                source = IsGuid(trimmed) ? AssetDatabase.GUIDToAssetPath(trimmed) : trimmed;
+                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(source);
                 if (clip == null)
                 {
-                    err = "bundled pose '" + bundled + "' is not authored yet (expected " + bundledPath
-                        + ") — see Task 3";
+                    err = "no AnimationClip at '" + trimmed + "'";
                     return false;
                 }
-                if (!clip.isHumanMotion)
-                {
-                    err = "clip '" + bundledPath + "' is not a humanoid muscle clip (isHumanMotion=false)";
-                    clip = null;
-                    return false;
-                }
-                return true;
             }
+            else
+            {
+                var bundled = BundledPoses();
+                string key = NormalizeToken(trimmed);
+                source = null;
+                foreach (var entry in bundled)
+                    if (NormalizeToken(entry.Key) == key) { source = entry.Value; break; }
 
-            string assetPath = null;
-            if (trimmed.IndexOf('/') >= 0)
-            {
-                assetPath = trimmed;
-            }
-            else if (IsGuid(trimmed))
-            {
-                assetPath = AssetDatabase.GUIDToAssetPath(trimmed);
-                if (string.IsNullOrEmpty(assetPath))
+                if (source == null)
                 {
-                    err = "GUID '" + trimmed + "' did not resolve to any asset";
+                    var names = new List<string>(bundled.Keys);
+                    err = "unknown pose '" + pose + "' — bundled: "
+                        + (names.Count > 0 ? string.Join(", ", names.ToArray()) : "(none in " + PosesFolder + ")")
+                        + "; or pass a clip asset path/GUID";
                     return false;
                 }
-            }
-
-            if (assetPath != null)
-            {
-                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(assetPath);
+                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(source);
                 if (clip == null)
                 {
-                    err = "no AnimationClip found at '" + assetPath + "'";
+                    err = "bundled pose '" + pose + "' did not load from " + source;
                     return false;
                 }
-                if (!clip.isHumanMotion)
-                {
-                    err = "clip '" + assetPath + "' is not a humanoid muscle clip (isHumanMotion=false)";
-                    clip = null;
-                    return false;
-                }
-                return true;
             }
 
-            err = "unknown pose '" + pose + "' — bundled: " + string.Join(", ", BundledPoses) + "; or pass a clip asset path/GUID";
-            return false;
+            if (!clip.isHumanMotion)
+            {
+                err = "clip '" + source + "' is not a humanoid muscle clip (isHumanMotion=false)";
+                clip = null;
+                return false;
+            }
+            return true;
         }
 
-        private static string BundledPascalName(string bundled)
+        /// <summary>
+        /// Find the clip for <paramref name="expression"/> on the BAKED avatar: a clip asset path or
+        /// 32-hex GUID loads directly; anything else is matched (via <see cref="NormalizeToken"/>)
+        /// against the state names of the baked FX controller's layers. Null with a null
+        /// <paramref name="err"/> means no expression was asked for.
+        /// <para>Resolving on the baked avatar rather than the source asset is the whole mechanism: the
+        /// bake renames and merges blendshapes, so a pre-bake clip can bind names the baked avatar no
+        /// longer has, while a state name survives. This makes no judgement about what "is" an
+        /// expression — it resolves the name the caller chose. Choosing is the caller's job.</para>
+        /// </summary>
+        internal static AnimationClip FindExpressionClip(GameObject baked, string expression, out string err)
         {
-            switch (bundled)
+            err = null;
+            if (string.IsNullOrEmpty(expression)) return null;
+
+            string trimmed = expression.Trim();
+
+            if (trimmed.IndexOf('/') >= 0 || IsGuid(trimmed))
             {
-                case "clasped": return "Clasped";
-                case "hand-on-hip": return "HandOnHip";
-                default:
-                    throw new ArgumentException("no PascalName mapping for bundled pose '" + bundled + "'");
+                string path = IsGuid(trimmed) ? AssetDatabase.GUIDToAssetPath(trimmed) : trimmed;
+                var asset = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
+                if (asset == null) err = "no AnimationClip at '" + trimmed + "'";
+                return asset;
             }
+
+            string key = NormalizeToken(trimmed);
+            bool nameMatched = false;   // matched a state, but its motion was not a clip
+            foreach (var layer in FxLayers(baked))
+            {
+                if (layer.stateMachine == null) continue;
+                foreach (var cs in layer.stateMachine.states)
+                {
+                    if (NormalizeToken(cs.state.name) != key) continue;
+                    nameMatched = true;
+                    var clip = cs.state.motion as AnimationClip;
+                    if (clip != null) return clip;
+                }
+            }
+
+            // Two different failures, and conflating them costs real time: the caller's answer to "that
+            // name doesn't exist" is to try another name, and every retry is a full SDK bake that can
+            // wedge the editor on a hook's modal dialog. Say which it is. (A blend-tree state is not
+            // walked into — that would be re-growing the traversal heuristics this path exists without.)
+            err = nameMatched
+                ? "state '" + expression + "' matched but holds no clip (blend tree, or empty) — pass a "
+                  + "clip asset path/GUID instead"
+                : "no state named '" + expression + "' on the baked FX controller — read the controller "
+                  + "with ReportController to see what it offers, or pass a clip asset path/GUID";
+            return null;
         }
+
+        /// <summary>The baked avatar's FX layers, or empty when it has no FX controller.</summary>
+        private static UnityEditor.Animations.AnimatorControllerLayer[] FxLayers(GameObject baked)
+        {
+            var descriptor = baked != null
+                ? baked.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>()
+                : null;
+            if (descriptor == null || descriptor.baseAnimationLayers == null)
+                return new UnityEditor.Animations.AnimatorControllerLayer[0];
+
+            foreach (var layer in descriptor.baseAnimationLayers)
+                if (layer.type == VRC.SDK3.Avatars.Components.VRCAvatarDescriptor.AnimLayerType.FX
+                    && layer.animatorController is UnityEditor.Animations.AnimatorController fx)
+                    return fx.layers;
+            return new UnityEditor.Animations.AnimatorControllerLayer[0];
+        }
+
 
         private static bool IsGuid(string s)
         {

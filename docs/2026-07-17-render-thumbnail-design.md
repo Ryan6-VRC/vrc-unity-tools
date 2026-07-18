@@ -49,17 +49,15 @@ doesn't — that single fact decides the correct capture surface for each.
 
 ## Verified mechanism (callables + source-verified traps)
 
-- **Bake:** `nadena.dev.ndmf` → `AvatarProcessor.ManualProcessAvatar(GameObject)` (`AvatarProcessor.cs:105`,
-  `[PublicAPI]`). Clones the passed object internally, returns the fully-baked clone (all phases → MA +
-  VRCFury + skeleton merge), original untouched. **Traps:** (1) it instantiates that clone **into the
-  live scene**, unhidden, shifted `+2` Z, and returns it only on success — an exception mid-bake strands
-  a reference-less orphan and dirties the live scene; (2) it writes generated assets to a **persistent**
-  folder named after the clone: `Assets/ZZZ_GeneratedAssets/<name>(Clone)/`, and **if that folder
-  already exists it is deleted wholesale** inside the bake (`AssetSaver.cs:39`; folder name from
-  `BuildContext.cs:158`). Both traps are handled by the **unique private clone** below. Do **not** use the
-  in-place `ProcessAvatar(GameObject)` overloads (mutate the root), and do **not** call
-  `AvatarProcessor.CleanTemporaryAssets()` post-bake (its temp-dir override is already disposed, so it
-  targets the wrong folder).
+- **Bake:** `VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPreprocessAvatar(GameObject)`
+  — the SDK preprocess chain (see `nondestructive.md` §The bake door for why NDMF's
+  `ManualProcessAvatar` is the wrong door). It mutates the object **in place** and returns `false` when
+  a hook blocks the build. **Traps:** (1) we must clone first — the argument is consumed, so a
+  uniquely-named private clone is made and the original never touched; (2) hooks can open **modal
+  dialogs** (VRCFury prompts per build on a broken Write Defaults mix), which wedges an MCP-driven
+  render — a timed-out bake means read the dialog, not retry; (3) the paired
+  `OnPostprocessAvatar()` **must** run, since that is what fires each hook's own cleanup — teardown
+  calls it from an inner `finally` so no earlier teardown step can skip it by throwing.
 - **Framing:** `VRC.SDKBase.VRC_AvatarDescriptor.PositionPortraitCamera(Transform)` (compiled in
   `VRCSDKBase.dll`; call sites SDK `RuntimeBlueprintCreation.cs:47`, CAU `Uploader.cs:615`). Sets the
   camera **transform only**, calibrated to the **default 60° FOV** — so **do not override FOV** (neither
@@ -101,54 +99,68 @@ doesn't — that single fact decides the correct capture surface for each.
 ```csharp
 public static string Render(
     string target,            // avatar root: scene path or name (resolve like RenderAvatar's target)
-    string pose = null,       // null => floor (unposed); a bundled pose name; or a clip asset path/GUID
+    string pose = null,       // null => floor (unposed); a bundled pose token; or a clip asset path/GUID
+    string expression = null, // null => none; else a gesture slot, clip name, or clip asset path/GUID
     string framing = "bust",  // bust | half | full — dolly distance over PositionPortraitCamera
     string bg = null,         // null => default backdrop; "#RRGGBB" => solid color (fail named on unparseable)
-    bool   whatIf = false)    // preflight: resolve target/descriptor/pose, report, bake NOTHING
+    bool   whatIf = false)    // preflight: resolve target/descriptor/pose/expression, report, bake NOTHING
 ```
 
-- **Verdict grammar** (matches the family — `[Tool] Verb <label> … => OK | key=val`; RunLog is
-  intentionally **not** used — a render tool's artifact is the PNG, as with RenderAvatar):
-  - render: `[RenderThumbnail] Render <label> baked pose=<name|floor> framing=bust silhouette=41% => OK | png=<temp>/renderthumbnail_<label>_<stamp>.png`
-  - preflight: `[RenderThumbnail] Render <label> whatIf pose=clasped descriptor=OK => WOULD-RENDER (no bake)` (pose token = the resolved name, or `floor`)
-  - the `png=` token is load-bearing (the deferred upload step consumes it) — keep it verbatim.
-- **Fail loud, named** (CLAUDE.md rule 7): missing `VRC_AvatarDescriptor`, unresolvable `pose`
-  (error **enumerates the bundled vocabulary**: `unknown pose 'x' — bundled: clasped, hand-on-hip;
-  or pass a clip asset path/GUID`), unparseable `bg`, a non-`isHumanMotion` clip, a bake exception, or a
-  near-empty silhouette (`silhouette≈0%` = "nothing drew"). `silhouette=NN%` is **reported**, not
-  gated on a tuned middle threshold (per `dont-tune-tools-against-one-clean-asset`) — only ~0 fails; a
-  low-but-nonzero value is surfaced for the operator to judge, replacing an unbacked "MA+VRCFury
-  resolved" assertion.
-- **Cleanup failure is surfaced, not swallowed** (it's the only host-project write): residue appends
-  `note=cleanup-residual: Assets/ZZZ_GeneratedAssets/<sub> not removed` to the verdict — a failed
-  cleanup can't hide behind a still-`OK` render.
-- **Output:** fixed **1200×900** PNG to `Application.temporaryCachePath` (outside `Assets/`, like
-  RenderAvatar). Resolution is not a param (YAGNI; the SDK re-crops on upload).
-- **`pose` resolution order:** `null` → floor (no sampling); else a bundled name under the package's
-  `Poses/` → the clip asset; else treat as an asset path or GUID and load it. The path/GUID branch is the
-  extension point for referencing an installed paid clip later **without committing it** (deferred P2).
-- **`framing`:** `bust` (SDK default distance) · `half` · `full` map to fixed dolly-back distances.
-  Named/outcome-shaped rather than a numeric knob (a raw "zoom" reads inverted vs. camera convention).
+### The pose vocabulary is a folder glob
 
-**NDMF dependency — deliberate:** unlike RenderAvatar (which reflects into NDMF *internal* preview
-state precisely to avoid an asmdef reference), RenderThumbnail takes a **hard asmdef + package.json
-reference on `nadena.dev.ndmf`** — `ManualProcessAvatar` is a supported `[PublicAPI]` build dependency,
-not internal state. This is an intentional divergence from the family's reflect-to-decouple habit; the
-package manifest change is expected.
+There is no hard-wired name array. `Editor/Poses/RTPose_<Name>.anim` IS the vocabulary, matched the same
+way `expression` matches FX state names — `NormalizeToken` on both sides, first match wins — so
+`hand-on-hip`, `hand_on_hip` and `HandOnHip` are one name. **Adding a pose is dropping a file**, and the
+unknown-pose error enumerates the folder, so what the tool advertises cannot drift from what ships.
+
+One guard stays that the expression side does not need: a clip must be `isHumanMotion`. A generic clip
+would not retarget across rigs, and `SampleAnimationClip` is a *silent* no-op for it on a humanoid — the
+verdict would claim `pose=<name>` over an unposed avatar, and nothing downstream would catch it. There
+is no runtime check for two files normalizing to the same name; a unit test guards that at build time,
+which is where it belongs when poses land by dropping files.
+
+### The bake door
+
+`VRCBuildPipelineCallbacks.OnPreprocessAvatar`, per `nondestructive.md` §The bake door — the rule and
+its evidence live there, not here. Three consequences this tool absorbs. The call mutates its argument
+**in place**, so the clone *is* the baked avatar with no second object to destroy. It returns `false`
+when a hook blocks the build, surfaced as a FAIL because such an avatar would not upload either. And
+its paired `OnPostprocessAvatar` **must** be called — it fires each hook's own cleanup, so teardown
+runs it from an inner `finally` that no earlier teardown step can skip by throwing.
+
+### `expression` — a second clip, applied not sampled
+
+The tool holds **no opinion about what an expression is**. It resolves the name the caller chose and
+applies it; choosing is the caller's job, and a heuristic here would be the tool doing the LLM's.
+
+`expression` is a state name on the baked FX controller, or a clip asset path/GUID. State-name
+resolution is the mechanism that matters: the bake renames and merges blendshapes, so a clip taken
+from a pre-bake asset can bind names the baked avatar no longer has, while a **state name survives**.
+Resolution therefore runs on the baked clone — which is also why `whatIf` cannot preflight it and
+simply echoes the token.
+
+Matching is `NormalizeToken` over every FX layer's state names, first match wins. No layer window (the
+bake reorders layers — Modular Avatar's `MergeBlendTreePass` uses `LayerPriority(int.MinValue)`, a sort
+key, so it prepends) and no filtering of what "counts" (a caller asking for `Open` will not
+accidentally match a `Shirt` toggle; the name they chose is the filter).
+
+Applying writes `blendShape.*` curves straight onto the renderers rather than sampling a second clip,
+because a second `SampleAnimationClip` re-runs the Animator's humanoid solver and partially undoes the
+pose — measured, left upper arm `(301.6,303.5,76.7)` → `(321.6,344.4,33.2)`. Pose and expression bind
+disjoint properties, not disjoint systems. A clip that moves nothing on the baked avatar is a named
+FAIL: it binds shapes this avatar lacks, or only meshes that are not drawn.
 
 ## Render pipeline (every step teardown-guarded)
 
 Setup snapshots (for restore): each open scene's `isDirty`, the set of live-scene root GameObjects,
 `Selection.objects`/`activeGameObject`.
 
-1. Resolve `target`; assert a `VRC_AvatarDescriptor`. If `whatIf`: resolve `pose`, report, **return** (no
-   bake).
+1. Resolve `target`; assert a `VRC_AvatarDescriptor`. If `whatIf`: resolve `pose`, echo `expression`,
+   report, **return** (no bake).
 2. **Unique private clone** (the keystone non-destructiveness fix): `var mine = Object.Instantiate(target);
-   mine.name = target.name + "__rt_" + stamp;` then `var baked = AvatarProcessor.ManualProcessAvatar(mine);`
-   `Object.DestroyImmediate(mine);`. The generated folder is now
-   `Assets/ZZZ_GeneratedAssets/<name>__rt_<stamp>(Clone)/` — provably exclusive to this run, so NDMF's
-   pre-existing-folder wholesale-delete can never touch a user's kept bake, and interleaved runs never
-   collide.
+   mine.name = target.name + "__rt_" + stamp;` then `OnPreprocessAvatar(mine)`, which mutates it in
+   place — `mine` *is* the baked avatar, with no second object to destroy. The unique name keeps
+   interleaved runs from colliding and any name-derived generated folder exclusive to this run.
 3. `preview = EditorSceneManager.NewPreviewScene()`; `SceneManager.MoveGameObjectToScene(baked, preview)`.
 4. Build the lit stage **in `preview`**: 3-point directional rig (key/fill/rim), all `HideFlags.DontSave`,
    one parent for one-destroy teardown. **Background is the camera's `clearFlags = SolidColor`** (the `bg`
@@ -167,12 +179,10 @@ Setup snapshots (for restore): each open scene's `isDirty`, the set of live-scen
    (snapshot-guarded — never end an operator's pre-existing recording session);
    `ClosePreviewScene(preview)`; `DestroyImmediate` the baked clone and any **live-scene root new since the
    step-0 snapshot** (catches a reference-less orphan from a bake that threw); restore `Selection`;
-   `ClearSceneDirtiness` on each scene that was clean at snapshot; delete the run's unique
-   `ZZZ_GeneratedAssets/<...>(Clone)` subfolder via `AssetDatabase.DeleteAsset` (handles its `.meta`),
-   and then **delete the parent `ZZZ_GeneratedAssets` folder itself whenever it is now empty** (whether or
-   not this run created it — an empty folder means nothing else is relying on it, so leave the project as
-   if we were never here). A pre-existing user bake in a sibling subfolder keeps the folder non-empty, so
-   this only fires when it's genuinely empty.
+   `ClearSceneDirtiness` on each scene that was clean at snapshot; then, from an **inner `finally` that
+   no earlier teardown step can skip by throwing**, call `OnPostprocessAvatar()` — the SDK's paired half,
+   which fires each hook's own cleanup rather than this tool guessing at folders it does not own.
+   Generated assets that outlive it are not chased; every project accumulates some.
 
 **Concurrency:** the bake's `AssetDatabase.StartAssetEditing`, `AnimationMode`, and `Selection` are
 global editor state — **serialize `RenderThumbnail` calls** (do not run two at once), consistent with the
@@ -191,20 +201,21 @@ serial-venue guidance elsewhere in the workshop.
 
 ## Non-destructiveness & the Plum-Remy test venue
 
-The real invariant is **"the project and editor are left as found after any run, success or failure"** —
-with one deliberate exception: an **empty** `ZZZ_GeneratedAssets` folder is deleted even if it pre-existed
-(operator's request — an empty folder relies on nothing). It is enforced structurally, not by hope:
+The real invariant is **"the scene and editor are left as found after any run, success or failure"**.
+Generated assets are the exception, deliberately: the bake's hooks own those, `OnPostprocessAvatar`
+fires their cleanup, and anything surviving it is left alone rather than guessed at. It is enforced
+structurally, not by hope:
 
-- **No user asset is ever destroyed:** the unique-named clone (step 2) removes NDMF's same-name
-  wholesale-delete hazard — the single highest-consequence risk on a real/messy project.
-- **The live scene is restored:** `ManualProcessAvatar` *does* dirty the active scene (it instantiates
-  the clone there) — so `isDirty` is snapshotted and `ClearSceneDirtiness` restores a scene that was
-  clean; the orphan-sweep destroys any stranded clone.
+- **No user asset is ever destroyed:** the unique-named clone (step 2) keeps any name-derived generated
+  folder exclusive to this run — the single highest-consequence risk on a real/messy project.
+- **The live scene is restored:** the bake dirties the active scene (the clone lives there until it is
+  moved) — so `isDirty` is snapshotted and `ClearSceneDirtiness` restores a scene that was clean; the
+  orphan-sweep destroys any stranded clone.
 - **Global editor state is restored:** `AnimationMode` (nested idempotent guards), `Selection`
   (snapshot/restore like `RenderAvatar.cs:426`,`683` — **not** CAU, which clobbers it), and **no**
   `RenderSettings` writes at all.
-- **The only host-project write** is the run's unique `ZZZ_GeneratedAssets` subfolder, deleted in
-  `finally`; a failure to delete is surfaced in the verdict.
+- **Generated assets are the hooks' own:** teardown calls the SDK's paired `OnPostprocessAvatar` from
+  an inner `finally`, which fires each hook's cleanup; a throw there is surfaced in the verdict.
 - **Venue** (`worktree-unity-editor`): host this worktree's `com.ryan6vrc.avatar-tools` in the live
   **Plum-Remy-3.0** editor (`@6401`) — a real MA/VRCFury avatar, the merged-skeleton case. Back up
   `Packages/manifest.json`, repoint the one package (absolute `file:`), `Resolve` + `Refresh`; after
@@ -219,24 +230,24 @@ Rendering mutates, so most behavior is proven live, not in NUnit
 - **Pre-implementation spike — DONE, PASSED** (2026-07-17, live Plum-Remy `@6401`, **`Shinano_kisekae`** —
   a genuinely MA/VRCFury-composed avatar: 6 ModularAvatar components incl. `MergeArmature`, 18 skinned
   meshes; a first pass on the non-composed `Chocolat` was discarded for not exercising the merge). On the
-  merged case: unique-clone → `ManualProcessAvatar` fully processed it (**MA components 6→0**, 18 meshes
+  merged case: unique-clone → the bake fully processed it (**MA components 6→0**, 18 meshes
   survived, baked clone `isHuman=True` `avatar=Shinano_kisekaeAvatar`) → `MoveGameObjectToScene(preview)`
   → `animator.Rebind()` → `SampleAnimationClip(Chiffon_Fist)` rotated the finger proximals **48–83°**.
   **Clothing-follows-body confirmed:** all 18 merged meshes are weighted to the unified right-hand bone
   chain, so posing it drives body + every outfit piece off one skeleton — the exact premise the bake
-  exists to satisfy. Teardown verified: no orphan, `InAnimationMode=False` after, unique
-  `ZZZ_GeneratedAssets` subfolder deleted and the now-empty parent removed, console 0 errors. Confirmed
-  incidentally: `nadena.dev.ndmf.AvatarProcessor.ManualProcessAvatar` binds directly (no reflection),
-  validating the hard-NDMF-ref decision. Not exercised (scene was already dirty from operator work): the
-  `ClearSceneDirtiness` restore branch — covered by the invariant test below.
+  exists to satisfy. Teardown verified: no orphan, `InAnimationMode=False` after, console 0 errors.
+  (Run against NDMF's `ManualProcessAvatar`, before the bake door moved to the SDK chain — the
+  clothing-follows-body premise it established is unaffected.) Not exercised (scene was already dirty
+  from operator work): the `ClearSceneDirtiness` restore branch — covered by the invariant test below.
 - **Headless EditMode** (`tools/run-editmode-tests.ps1` against `TestEditor`, run serially): pure helpers
-  only — `pose` resolution order, `framing`→distance mapping, cleanup subfolder-name derivation, verdict
-  formatting, `bg` parse, and each bundled clip's `isHumanMotion == true`. Fail-loud branches use
+  only — `pose` resolution order and token normalization, pose-token uniqueness (the sole guard against
+  a glob collision), `framing`→distance mapping, `bg` parse, and each bundled clip's
+  `isHumanMotion == true`. Fail-loud branches use
   `LogAssert.Expect`. The bake/render/sample path is **not** in NUnit (mutates live objects → crashes the
   suite).
 - **Live `execute_code`** against the Plum-Remy composed avatar:
   1. **Pristine-after-run invariant** (the real non-destructiveness gate the eyeball can't provide):
-     snapshot before/after a normal run and assert equal — `ZZZ_GeneratedAssets` listing, each open
+     snapshot before/after a normal run and assert equal — each open
      scene's `isDirty`, `AnimationMode` restored to its **pre-run** state (the tool stops it only if it
      started it — never ends an operator's recording), `Selection` unchanged, and **no residual
      `*__rt_*(Clone)` root** in any open scene.

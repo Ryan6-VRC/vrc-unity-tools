@@ -1,6 +1,7 @@
 # RenderThumbnail — live verification snippets
 
-`RenderThumbnail.Render` bakes an avatar (NDMF `ManualProcessAvatar`), samples a humanoid clip, and
+`RenderThumbnail.Render` bakes an avatar (the VRC SDK preprocess chain, `OnPreprocessAvatar`), samples
+a humanoid clip, applies an expression, and
 renders through an off-screen camera — all of which **mutate live `UnityEngine.Object`s**, which
 SIGSEGV-crash this project's headless NUnit suite (`vrc-unity-tools-editmode-batchmode`). So the
 render/bake/teardown path is verified **live** via MCP `execute_code`, not in NUnit; the EditMode tests
@@ -23,41 +24,68 @@ var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
 bool dirtyBefore = scene.isDirty;
 int rootsBefore = scene.GetRootGameObjects().Length;
 int selBefore = UnityEditor.Selection.objects.Length;
-bool zzzBefore = UnityEditor.AssetDatabase.IsValidFolder("Assets/ZZZ_GeneratedAssets");
 
-string verdict = (string)m.Invoke(null, new object[] { "Shinano_kisekae", null, "bust", null, false });
+string verdict = (string)m.Invoke(null, new object[] { "Shinano_kisekae", null, null, "bust", null, false });
 
 return verdict
     + "\nanimMode=" + UnityEditor.AnimationMode.InAnimationMode()   // expect False
     + " roots " + rootsBefore + "->" + scene.GetRootGameObjects().Length   // expect equal (no orphan *__rt_*(Clone))
     + " dirty " + dirtyBefore + "->" + scene.isDirty                // expect unchanged
     + " sel " + selBefore + "->" + UnityEditor.Selection.objects.Length   // expect equal
-    + " zzz " + zzzBefore + "->" + UnityEditor.AssetDatabase.IsValidFolder("Assets/ZZZ_GeneratedAssets"); // empty folder deleted
+    ;   // generated assets are the SDK hooks' own business — OnPostprocessAvatar fires their cleanup
 ```
 
 Observed pass: `... silhouette≈12-14% => OK | png=<temp>/...png` with `animMode=False roots 6->6
-dirty True->True sel 0->0 zzz False->False`. (`dirty True->True` = the scene was already dirty from
+dirty True->True sel 0->0`. (`dirty True->True` = the scene was already dirty from
 operator work and was left exactly that way — the `ClearSceneDirtiness` restore only fires for a scene
 that was *clean* at snapshot.)
 
 ## 2. Fail-loud, no-bake on a bad input (preflight)
 
-A non-humanoid clip must fail **named**, before any bake — so no `ZZZ_GeneratedAssets` is created:
+A non-humanoid clip must fail **named**, before any bake:
 
 ```csharp
-string bad = (string)m.Invoke(null, new object[] { "Shinano_kisekae", "<path-to-a-non-isHumanMotion-clip>.anim", "bust", null, false });
-return bad + " | zzzCreated=" + UnityEditor.AssetDatabase.IsValidFolder("Assets/ZZZ_GeneratedAssets");
+string bad = (string)m.Invoke(null, new object[] { "Shinano_kisekae", "<path-to-a-non-isHumanMotion-clip>.anim", null, "bust", null, false });
+return bad;
 ```
 
-Observed pass: `... => FAIL: clip '<path>' is not a humanoid muscle clip (isHumanMotion=false) | zzzCreated=False`.
+Observed pass: `... => FAIL: clip '<path>' is not a humanoid muscle clip (isHumanMotion=false)`.
 Same shape for an unparseable `bg` or an unknown pose name (error enumerates the bundled vocabulary).
 
 ## 3. Teardown on a post-bake exception
 
 The teardown runs inside a `finally`, so C# guarantees it fires when an exception propagates after the
-bake. This is confirmed indirectly by §1: a normal posed run exercises every teardown line (AnimationMode
-started then `InAnimationMode()==False` after; the unique `ZZZ_GeneratedAssets/<name>__rt_<guid>(Clone)`
-subfolder created then deleted; no orphan root). A dedicated forced-throw harness would require a test
-hook that does not belong in production code; the `finally` guarantee plus the §1 normal-path teardown
-proof cover the exception path. If a hard forced-throw check is wanted later, inject it via a temporary
-build of the tool, not a shipped seam.
+bake. §1 evidences the observable half on a normal run: AnimationMode started then
+`InAnimationMode()==False` after, selection restored, no orphan root.
+
+**What §1 cannot evidence is the SDK pairing.** `OnPostprocessAvatar` produces no signal a snippet can
+read — that is why it lives in an inner `finally` that no earlier teardown step can skip by throwing,
+rather than relying on a normal-path observation. The reachable check is the interrupted bake: a render
+wedged on a VRCFury modal dialog (§1's note) and then dismissed still ends with `animMode=False` and no
+`*__rt_*` root, which exercises teardown along an abnormal path. Run the root/animMode assertions from
+§1 after any such interruption.
+
+A dedicated forced-throw harness would need a test hook that does not belong in production code; if one
+is wanted later, inject it via a temporary build of the tool, not a shipped seam.
+
+## 4. Expression composited onto the pose
+
+A gesture slot resolves against the BAKED controller, so its bindings match the baked meshes. The body
+must be unchanged from the same pose rendered without an expression — the pose is what a second
+`SampleAnimationClip` would have disturbed.
+
+```csharp
+string a = (string)m.Invoke(null, new object[] { "<avatar>", "<pose-token>", null,   "bust", null, false });
+string b = (string)m.Invoke(null, new object[] { "<avatar>", "<pose-token>", "Open", "bust", null, false });
+return a + "
+" + b;
+```
+
+Expect the second verdict to carry `expression=Open (<clip>)` — the clip that state name resolved to on
+the baked controller — and matching `silhouette=` on both. **The PNGs are the assertion**: identical
+body, different face. A face that did not change while the verdict still names a clip is exactly the
+failure this case exists to catch.
+
+A state name beats a pre-bake clip path because the bake rewrites the blendshape names a source asset
+binds; a path that no longer matches fails loud (`moved no blendshape`) instead of rendering a blank
+face.
