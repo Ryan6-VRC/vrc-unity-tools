@@ -20,7 +20,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>Case-insensitive vocabulary <see cref="ResolvePose"/> matches against
         /// <c>Editor/Poses/RTPose_&lt;PascalName&gt;.anim</c> before treating <c>pose</c> as an asset
         /// path/GUID.</summary>
-        public static readonly string[] BundledPoses = { "contrapposto", "hand-on-hip" };
+        internal static readonly string[] BundledPoses = { "contrapposto", "hand-on-hip" };
 
         // Dolly-back distance (meters, added along camera local-forward beyond the SDK-calibrated
         // PositionPortraitCamera transform) per framing. Cosmetic taste defaults — bust is the SDK's own
@@ -79,7 +79,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ===== Pure helpers (unit-tested; do not touch the scene or the asset database beyond reads) ====
 
         /// <summary>Dolly-back distance in meters for a named framing. Throws for anything else.</summary>
-        public static float FramingDistance(string framing)
+        internal static float FramingDistance(string framing)
         {
             switch ((framing ?? "").Trim().ToLowerInvariant())
             {
@@ -95,7 +95,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>Parses a solid backdrop color. Hex only (<c>#RRGGBB</c>/<c>#RRGGBBAA</c>) — a leading
         /// '#' is required even though <see cref="ColorUtility.TryParseHtmlString"/> would otherwise also
         /// accept some CSS color names, which this tool's contract deliberately excludes.</summary>
-        public static bool TryParseBg(string s, out Color c)
+        internal static bool TryParseBg(string s, out Color c)
         {
             c = default;
             if (string.IsNullOrEmpty(s) || s[0] != '#') return false;
@@ -108,7 +108,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// clip; else a value containing '/' or a 32-hex GUID =&gt; loaded as an asset path/GUID; else a
         /// named FAIL enumerating the bundled vocabulary. Does not assert humanoid-ness — see Task 2.
         /// </summary>
-        public static bool ResolvePose(string pose, out AnimationClip clip, out string err)
+        internal static bool ResolvePose(string pose, out AnimationClip clip, out string err)
         {
             clip = null;
             err = null;
@@ -168,7 +168,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 case "contrapposto": return "Contrapposto";
                 case "hand-on-hip": return "HandOnHip";
-                default: return bundled; // unreachable — every entry in BundledPoses is mapped above
+                default:
+                    throw new ArgumentException("no PascalName mapping for bundled pose '" + bundled + "'");
             }
         }
 

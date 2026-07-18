@@ -2,11 +2,14 @@ using NUnit.Framework;
 using UnityEngine;
 using Ryan6Vrc.AvatarTools.Editor;
 
-namespace Ryan6Vrc.AvatarTools.Editor.Tests
+namespace Ryan6Vrc.AvatarTools.Tests
 {
-    // Task 0: pure helpers + the whatIf preflight only — RenderThumbnail's bake/capture pipeline mutates
-    // live objects and is verified live (execute_code), never in NUnit; see
-    // docs/2026-07-17-render-thumbnail-design.md §Verification.
+    // Pure helpers ONLY (FramingDistance / TryParseBg / ResolvePose). Render — including the whatIf
+    // preflight and the target resolver it drives — mutates/reads live scene objects and is verified
+    // live (execute_code) by the coordinator, never in NUnit; see
+    // docs/2026-07-17-render-thumbnail-design.md §Verification. No test here may create a GameObject,
+    // add a VRC_AvatarDescriptor, or call RenderThumbnail.Render — that class of EditMode test
+    // SIGSEGV-crashes this project's suite.
     [TestFixture]
     public class RenderThumbnailTests
     {
@@ -55,6 +58,20 @@ namespace Ryan6Vrc.AvatarTools.Editor.Tests
             Assert.IsFalse(ok);
             StringAssert.Contains("contrapposto", err);
             StringAssert.Contains("path/GUID", err);
+        }
+
+        [Test]
+        public void Pose_BundledName_MatchesCaseInsensitive_ButClipNotYetAuthored()
+        {
+            // "CONTRAPPOSTO" must match the bundled vocabulary case-insensitively — it should fail only
+            // because the .anim isn't authored until Task 3, never fall through to the "unknown pose"
+            // branch (that would mean the case-insensitive match silently didn't fire).
+            bool ok = RenderThumbnail.ResolvePose("CONTRAPPOSTO", out AnimationClip clip, out string err);
+
+            Assert.IsFalse(ok);
+            Assert.IsNull(clip);
+            StringAssert.DoesNotContain("unknown pose", err);
+            StringAssert.Contains("Task 3", err);
         }
     }
 }
