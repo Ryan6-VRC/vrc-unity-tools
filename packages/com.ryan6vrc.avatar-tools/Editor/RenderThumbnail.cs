@@ -15,7 +15,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// off-screen camera can render at a guaranteed 1200×900 — RenderAvatar never bakes, so it must
     /// composite through the Scene View instead, capped to the pane's size and showing NDMF preview
     /// proxies. The bake is the FULL SDK chain, not NDMF alone, so the portrait shows the avatar that
-    /// actually uploads (optimizers included). See docs/2026-07-17-render-thumbnail-design.md.
+    /// actually uploads (optimizers included).
     /// </summary>
     [AgentTool]
     public static class RenderThumbnail
@@ -33,7 +33,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // Spans are operator-judged taste, nudged ~7% wider than the first pass, which cropped the crown
         // tightly enough to read as an accident. Some crop is DESIRABLE — a thumbnail is displayed small,
         // and a tight one reads as deliberate — so these do not chase full crown clearance, which on tall
-        // anime hair would cost the bust crop entirely. See docs/2026-07-18-render-thumbnail-camera.md.
+        // anime hair would cost the bust crop entirely.
         private const float ReferenceViewHeight = 1.6f;
         private const float BustSpan = 0.48f, BustAimDrop = 0.12f;
         private const float HalfSpan = 0.96f, HalfAimDrop = 0.12f;

@@ -8,8 +8,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
     // Pure helpers ONLY (FramingGeometry / TryParseBg / YawOf / PitchOf / BundledPoses / NormalizeToken /
     // ResolvePose).
     // Everything expression-side resolves against a BAKED avatar, so it is a scene object verified live
-    // (execute_code) by the coordinator, never in NUnit; see
-    // docs/2026-07-17-render-thumbnail-design.md §Verification. No test here may create a GameObject,
+    // (execute_code) by the coordinator, never in NUnit. No test here may create a GameObject,
     // add a VRC_AvatarDescriptor, or call RenderThumbnail.Render — that class of EditMode test
     // SIGSEGV-crashes this project's suite. In-memory AnimationClips are fine (no scene object).
     //
