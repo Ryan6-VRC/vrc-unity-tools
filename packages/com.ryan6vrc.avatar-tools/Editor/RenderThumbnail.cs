@@ -105,10 +105,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ---- Preflight resolution (fail fast, before any mutation) ----
             if (!ResolvePose(pose, out AnimationClip poseClip, out string renderPoseErr))
                 return Fail(label, renderPoseErr);
-            if (poseClip != null)
-                // Floor is the only render path wired in Task 1; a resolved pose clip is honestly not yet
-                // sampled onto the baked clone. Task 2 replaces this throw with the AnimationMode sampling.
-                throw new NotImplementedException("pose sampling — Task 2");
+            // poseName is the ORIGINAL pose argument (for verdict display), not the resolved asset path —
+            // matches the whatIf branch's poseToken convention above.
+            string poseName = string.IsNullOrEmpty(pose) ? "floor" : pose;
 
             float dolly;
             try { dolly = FramingDistance(framing); }
@@ -184,8 +183,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 MakeLight("__rt_rim", RimIntensity, RimEuler);
 
                 // ---- Step 5: pose ----
-                // TASK 2: sample pose clip here (after MoveGameObjectToScene + animator.Rebind, before
-                // cam.Render). The floor path (Task 1) samples nothing — the baked clone renders at rest.
+                // The floor path (poseClip == null) samples nothing — the baked clone renders at rest,
+                // byte-for-byte the Task-1 path. A resolved pose is SAMPLED AND HELD here: StopAnimationMode
+                // is deliberately NOT called before cam.Render() below — EndSampling leaves the pose applied,
+                // it does not revert it. Reverting happens once, defensively, in the outer teardown `finally`
+                // (below) after capture, so a throw mid-sampling still can't leak animation-mode state.
+                if (poseClip != null)
+                {
+                    var animator = baked.GetComponent<UnityEngine.Animator>();
+                    if (animator == null)
+                        throw new InvalidOperationException(
+                            "baked clone has no Animator — cannot sample pose '" + poseName + "'");
+                    animator.Rebind();
+                    AnimationMode.StartAnimationMode();
+                    AnimationMode.BeginSampling();
+                    try { AnimationMode.SampleAnimationClip(baked, poseClip, poseClip.length); }
+                    finally { AnimationMode.EndSampling(); }
+                }
 
                 // ---- Step 6: camera + off-screen sRGB capture (§Capture, source-verified) ----
                 var descriptorBaked = baked.GetComponent<VRC.SDKBase.VRC_AvatarDescriptor>();
@@ -252,7 +266,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 float fraction = pixels.Length > 0 ? (float)drawn / pixels.Length : 0f;
                 int pct = Mathf.RoundToInt(fraction * 100f);
 
-                string prefix = "[RenderThumbnail] Render " + label + " baked pose=floor framing="
+                string prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName + " framing="
                     + framingToken + " silhouette=" + pct.ToString(CultureInfo.InvariantCulture) + "%";
 
                 if (fraction < MinSilhouetteFraction)
@@ -362,7 +376,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Resolve <paramref name="pose"/> to a clip: null/empty =&gt; floor (<paramref name="clip"/> null,
         /// no error); a bundled name (case-insensitive, see <see cref="BundledPoses"/>) =&gt; that package
         /// clip; else a value containing '/' or a 32-hex GUID =&gt; loaded as an asset path/GUID; else a
-        /// named FAIL enumerating the bundled vocabulary. Does not assert humanoid-ness — see Task 2.
+        /// named FAIL enumerating the bundled vocabulary. Any loaded clip that is not
+        /// <c>isHumanMotion</c> (a generic/transform clip) fails loud here, before any bake — such a clip
+        /// would not retarget across rigs.
         /// </summary>
         internal static bool ResolvePose(string pose, out AnimationClip clip, out string err)
         {
@@ -383,6 +399,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     err = "bundled pose '" + bundled + "' is not authored yet (expected " + bundledPath
                         + ") — see Task 3";
+                    return false;
+                }
+                if (!clip.isHumanMotion)
+                {
+                    err = "clip '" + bundledPath + "' is not a humanoid muscle clip (isHumanMotion=false)";
+                    clip = null;
                     return false;
                 }
                 return true;
@@ -409,6 +431,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (clip == null)
                 {
                     err = "no AnimationClip found at '" + assetPath + "'";
+                    return false;
+                }
+                if (!clip.isHumanMotion)
+                {
+                    err = "clip '" + assetPath + "' is not a humanoid muscle clip (isHumanMotion=false)";
+                    clip = null;
                     return false;
                 }
                 return true;
