@@ -4,6 +4,8 @@ An `avatar-tools` editor tool that produces a real-shader, cleanly-lit, optional
 portrait PNG of a **baked** avatar, to replace VRChat's default rest-pose upload thumbnail. Source
 brief: `Atelier/kickoffs.md` block **U2**. Reader is the implementing agent — this records the
 decisions, the load-bearing source facts, and the traps; it does not re-derive what the code shows.
+Revised after a three-lens review (mechanism / interface / non-destructiveness); the traps below are
+source-verified, not anticipated.
 
 ## Scope
 
@@ -12,9 +14,9 @@ returns that path. It does **not** upload.
 
 **Out (deferred follow-up — operator's call):** the upload wiring — a thumbnail-PNG parameter on
 `UploadAvatar` that calls `VRCApi.UpdateAvatarImage` after the record exists, and the `upload-avatar`
-skill step that renders-then-uploads. The tool is designed so that follow-up is trivial: it returns the
-PNG path, and the seam (`VRCApi.UpdateAvatarImage(id, data, pathToImage)`) is already proven in-repo
-(`references/ContinuousAvatarUploader/Editor/Uploader.cs:353-370`; the SDK method is
+skill step. The tool is designed so that follow-up is trivial: its verdict carries a `png=<path>` token
+(same token RenderAvatar uses), and the seam (`VRCApi.UpdateAvatarImage(id, data, pathToImage)`) is
+proven in-repo (`references/ContinuousAvatarUploader/Editor/Uploader.cs:353`; SDK method
 `AvatarProject/Packages/com.vrchat.base/Editor/VRCSDK/Dependencies/VRChat/API/VRCApi.cs:603`). No
 blueprint IDs are in scope for this PR — rendering never touches an account.
 
@@ -25,43 +27,61 @@ they sit in the scene and reconciles nothing" and is a build-time NDMF phase; VR
 align options apply at build, not edit mode (`docs/nondestructive.md`). The reactive preview resolves
 blendshapes / mesh-hiding / material-setters only — never skeletal merge. So sampling a pose onto the
 base at edit time leaves merged clothing/hair in rest pose. The real build-on-a-clone is the only thing
-that produces a posed avatar whose outfit follows the body. `RenderAvatar` is not the source: it renders
-the live hierarchy + preview proxies through the Scene View with `sceneLighting=false` (headlight),
-orthographic — "truthful for geometry/silhouette/clipping/fit, not matcap/rim/fresnel"
-(`docs/unity-tools.md`). We always bake (locked decision below) so the portrait is uniformly the
-"what-ships" avatar — VRCFury toggle side-effects resolved even when unposed.
+that produces a posed avatar whose outfit follows the body.
+
+**Why not reuse RenderAvatar's capture path** (so a future reader doesn't "simplify" toward it):
+RenderAvatar renders through the Scene View (window-grab, resolution capped by pane size, headlight,
+orthographic) because it does **not** bake — it must show NDMF *preview proxies*, which only the Scene
+View composites. RenderThumbnail **bakes**, so the clone has real resolved meshes any camera renders
+faithfully; that is exactly what unlocks a dedicated off-screen camera + fixed-size RenderTexture
+(guaranteed 1200×900, headless-safe, real lighting). The two tools diverge because one bakes and one
+doesn't — that single fact decides the correct capture surface for each.
 
 ## Locked decisions (operator sign-off)
 
 | Decision | Choice | Note |
 |---|---|---|
-| Bake policy | **Always bake** | One code path; pose is just an optional clip sampled onto the baked clone. Bake cost ≈ a play-mode build, run once per upload. |
-| Upload seam | **Post-upload `UpdateAvatarImage`** | Deferred to follow-up; decoupled, identical for first/re-upload, minimal additive change. |
-| Framing | **SDK `PositionPortraitCamera`** | Bust (head+shoulders) from the descriptor's `ViewPosition`. Plus an optional `zoom` pull-back (below) so full-body posed shots are possible without a second path. |
-| Pose source | **Author our own** `.anim` poses | No permissively-licensed curated portrait poses exist — corroborated by two independent searches. GoGo Loco / BUDDYWORKS are no-redistribution EULAs; Mixamo forbids standalone redistribution; CMU/ACCAD/Quaternius are motion libraries whose freeze-frames are mid-stride. Single-keyframe humanoid clips we author are 100% ours, committable, and retarget to any rig. |
-| Lighting/bg | **Neutral 3-point rig + soft mid-gray gradient backdrop**, overridable | Deterministic (rendered in an isolated preview scene, no live-scene lights leak in). Constants are cosmetic taste defaults, not physics — freely tunable. |
+| Bake policy | **Always bake** | One code path; pose is an optional clip sampled onto the baked clone. Cost ≈ a play-mode build (seconds→minutes on a real composed avatar), once per upload. |
+| Upload seam | **Post-upload `UpdateAvatarImage`** | Deferred to follow-up; decoupled, identical first/re-upload. |
+| Framing | **SDK `PositionPortraitCamera`** | Bust (head+shoulders) from `ViewPosition`, at the SDK-calibrated default 60° FOV. A `framing` enum dollies back for more body. |
+| Pose source | **Author our own** `.anim` poses | No permissively-licensed curated portrait poses exist (two independent searches; GoGo Loco / BUDDYWORKS are no-redistribution EULAs, Mixamo forbids standalone redistribution, CMU/ACCAD/Quaternius are motion libraries whose freeze-frames are mid-stride). Single-keyframe humanoid clips we author are committable and retarget to any rig. |
+| Lighting/bg | **In-scene 3-point rig + solid/gradient backdrop**, overridable | Lights live **in the preview scene** (never `RenderSettings` — that's global, see Non-destructiveness). Constants are cosmetic taste defaults. |
 
-## Verified mechanism (callables, from source)
+## Verified mechanism (callables + source-verified traps)
 
 - **Bake:** `nadena.dev.ndmf` → `AvatarProcessor.ManualProcessAvatar(GameObject)` (`AvatarProcessor.cs:105`,
-  `[PublicAPI]`). **Clones internally, returns the fully-baked clone**; original untouched; runs all
-  phases (MA + VRCFury + skeleton merge). Two traps: (1) it shifts the clone `+2` on Z; (2) it writes
-  generated assets to a **persistent** `Assets/ZZZ_GeneratedAssets` folder in the host project — cleanup
-  is on us (see Non-destructiveness). Do **not** use the in-place `ProcessAvatar(GameObject)` overloads —
-  they mutate the passed root and don't clone.
+  `[PublicAPI]`). Clones the passed object internally, returns the fully-baked clone (all phases → MA +
+  VRCFury + skeleton merge), original untouched. **Traps:** (1) it instantiates that clone **into the
+  live scene**, unhidden, shifted `+2` Z, and returns it only on success — an exception mid-bake strands
+  a reference-less orphan and dirties the live scene; (2) it writes generated assets to a **persistent**
+  folder named after the clone: `Assets/ZZZ_GeneratedAssets/<name>(Clone)/`, and **if that folder
+  already exists it is deleted wholesale** inside the bake (`AssetSaver.cs:39`; folder name from
+  `BuildContext.cs:158`). Both traps are handled by the **unique private clone** below. Do **not** use the
+  in-place `ProcessAvatar(GameObject)` overloads (mutate the root), and do **not** call
+  `AvatarProcessor.CleanTemporaryAssets()` post-bake (its temp-dir override is already disposed, so it
+  targets the wrong folder).
 - **Framing:** `VRC.SDKBase.VRC_AvatarDescriptor.PositionPortraitCamera(Transform)` (compiled in
-  `VRCSDKBase.dll`; no source — call sites: SDK `RuntimeBlueprintCreation.cs:47`, CAU `Uploader.cs:615`).
-  Sets the camera **transform only** (position/rotation for bust framing from `ViewPosition`); we set FOV
-  / clip planes / culling mask ourselves, as CAU does.
-- **Pose:** `AnimationMode.BeginSampling()` / `AnimationMode.SampleAnimationClip(bakedClone, clip, time)` /
-  `AnimationMode.EndSampling()`, bracketed by `StartAnimationMode()` / `StopAnimationMode()`. Works on the
-  baked clone (clip binding paths resolve against the merged hierarchy). Nothing in-repo uses it yet —
-  fresh introduction. Sample a single frame (time = clip.length or a chosen still frame; our authored
-  clips are one keyframe).
-- **Capture + lifecycle model:** mirror CAU `TakePicture` (`Uploader.cs:592-645`) — a disabled `Camera`
-  with `HideFlags.DontSave`, render into a `RenderTexture` → `Texture2D.ReadPixels` → `EncodeToPNG`, all
-  wrapped in `using`/RAII (`DestroyLater<T>`, `PreviewSceneScope` in CAU `Utils.cs`). We render in a fresh
-  `EditorSceneManager.NewPreviewScene()` (not the live scene) for deterministic lighting.
+  `VRCSDKBase.dll`; call sites SDK `RuntimeBlueprintCreation.cs:47`, CAU `Uploader.cs:615`). Sets the
+  camera **transform only**, calibrated to the **default 60° FOV** — so **do not override FOV** (neither
+  the SDK nor CAU does); set only clip planes (`near=0.01`, `far=100`) and `cullingMask=0xFFFFFFDF`, as
+  CAU does. `framing` (dolly) moves the camera back along local-forward — **never** via FOV.
+- **Pose:** `AnimationMode.StartAnimationMode()` → `BeginSampling()` →
+  `SampleAnimationClip(bakedClone, clip, t)` → `EndSampling()` → `StopAnimationMode()`. Humanoid
+  retargeting **works on the baked clone** — MA re-runs `RebindHumanoidAvatar` as a build pass
+  (`RebindHumanoidAvatar.cs`, MA `PluginDefinition.cs:150`/`197`), so `animator.avatar`/`isHuman`
+  survive. Two guards: the clip must be a real muscle clip — **assert `clip.isHumanMotion == true`** (a
+  silently-generic clip won't retarget, defeating "one clip everywhere"); and after
+  `MoveGameObjectToScene` call **`animator.Rebind()`** before sampling (stale bind → no-op). All of
+  `Start`/`Stop` and `Begin`/`End` are **global editor state** — nest their guards (below).
+- **Capture:** dedicated disabled `Camera` (`HideFlags.DontSave`), `camera.scene = previewScene`,
+  render into `new RenderTexture(1200, 900, 24, GraphicsFormat.R8G8B8A8_SRGB){ antiAliasing =
+  Max(1, QualitySettings.antiAliasing) }`, `allowHDR = false` → `Texture2D(RGBA32).ReadPixels` →
+  `EncodeToPNG`. **The sRGB RT format is mandatory** — the project is Linear (`ProjectSettings.asset`
+  `m_ActiveColorSpace: 1`); a default linear RT ships a dark, wrong-gamma PNG. This is copied verbatim
+  from CAU `TakePicture` (`Uploader.cs:611`,`619-621`) for exactly that reason. GrabPass (Poiyomi
+  refraction/rim) renders correctly under a single `camera.Render()` — non-issue. `camera.clearFlags =
+  SolidColor` with the chosen background (a preview scene has no skybox; default Skybox clear is
+  nondeterministic at the backdrop edges).
 
 ## Tool contract
 
@@ -70,92 +90,137 @@ orthographic — "truthful for geometry/silhouette/clipping/fit, not matcap/rim/
 ```csharp
 public static string Render(
     string target,            // avatar root: scene path or name (resolve like RenderAvatar's target)
-    string pose = null,       // null/"none"/"unposed" => floor; a bundled pose name; or a clip asset path/GUID
-    float  zoom = 1.0f,       // pull-back factor over PositionPortraitCamera bust framing; >1 shows more body
-    string bg   = null)       // null => default gradient backdrop; a hex color => solid background
+    string pose = null,       // null => floor (unposed); a bundled pose name; or a clip asset path/GUID
+    string framing = "bust",  // bust | half | full — dolly distance over PositionPortraitCamera
+    string bg = null,         // null => default backdrop; "#RRGGBB" => solid color (fail named on unparseable)
+    bool   whatIf = false)    // preflight: resolve target/descriptor/pose, report, bake NOTHING
 ```
 
-- **Returns** a one-line legible verdict string ending with the PNG path, e.g.
-  `RenderThumbnail: baked (MA+VRCFury resolved), pose 'contrapposto', 1200x900 -> <temp>/renderthumbnail_<label>_<stamp>.png`.
-  Fail loud: an empty silhouette, a missing descriptor, an unresolvable pose, or a bake exception is a
-  thrown/verbose error, never a silent blank PNG.
-- **Output:** fixed **1200×900** (VRChat 4:3 thumbnail aspect), PNG, written to
-  `Application.temporaryCachePath` (outside `Assets/`, like RenderAvatar). Resolution is not a param
-  (YAGNI); the SDK re-crops on upload anyway.
-- **`pose` resolution order:** exact `none`/`unposed`/null → floor (no sampling); else try a bundled pose
-  name under the package's `Poses/` folder; else treat as an asset path or GUID and load the clip. The
-  path/GUID branch is the extension point for referencing an installed paid clip later **without
-  committing it** — the deferred P2 upside.
+- **Verdict grammar** (matches the family — `[Tool] Verb <label> … => OK | key=val`; RunLog is
+  intentionally **not** used — a render tool's artifact is the PNG, as with RenderAvatar):
+  - render: `[RenderThumbnail] Render <label> baked pose=<name|floor> framing=bust silhouette=41% => OK | png=<temp>/renderthumbnail_<label>_<stamp>.png`
+  - preflight: `[RenderThumbnail] Render <label> whatIf pose=contrapposto(resolved) descriptor=OK => WOULD-RENDER (no bake)`
+  - the `png=` token is load-bearing (the deferred upload step consumes it) — keep it verbatim.
+- **Fail loud, named** (CLAUDE.md rule 7): missing `VRC_AvatarDescriptor`, unresolvable `pose`
+  (error **enumerates the bundled vocabulary**: `unknown pose 'x' — bundled: contrapposto, hand-on-hip;
+  or pass a clip asset path/GUID`), unparseable `bg`, a non-`isHumanMotion` clip, a bake exception, or a
+  near-empty silhouette (`silhouette≈0%` = "nothing drew"). `silhouette=NN%` is **reported**, not
+  gated on a tuned middle threshold (per `dont-tune-tools-against-one-clean-asset`) — only ~0 fails; a
+  low-but-nonzero value is surfaced for the operator to judge, replacing an unbacked "MA+VRCFury
+  resolved" assertion.
+- **Cleanup failure is surfaced, not swallowed** (it's the only host-project write): residue appends
+  `note=cleanup-residual: Assets/ZZZ_GeneratedAssets/<sub> not removed` to the verdict — a failed
+  cleanup can't hide behind a still-`OK` render.
+- **Output:** fixed **1200×900** PNG to `Application.temporaryCachePath` (outside `Assets/`, like
+  RenderAvatar). Resolution is not a param (YAGNI; the SDK re-crops on upload).
+- **`pose` resolution order:** `null` → floor (no sampling); else a bundled name under the package's
+  `Poses/` → the clip asset; else treat as an asset path or GUID and load it. The path/GUID branch is the
+  extension point for referencing an installed paid clip later **without committing it** (deferred P2).
+- **`framing`:** `bust` (SDK default distance) · `half` · `full` map to fixed dolly-back distances.
+  Named/outcome-shaped rather than a numeric knob (a raw "zoom" reads inverted vs. camera convention).
 
-## Render pipeline
+**NDMF dependency — deliberate:** unlike RenderAvatar (which reflects into NDMF *internal* preview
+state precisely to avoid an asmdef reference), RenderThumbnail takes a **hard asmdef + package.json
+reference on `nadena.dev.ndmf`** — `ManualProcessAvatar` is a supported `[PublicAPI]` build dependency,
+not internal state. This is an intentional divergence from the family's reflect-to-decouple habit; the
+package manifest change is expected.
 
-1. Resolve `target` to the live avatar GameObject; assert it has a `VRC_AvatarDescriptor`.
-2. Snapshot the pre-existing `Assets/ZZZ_GeneratedAssets` contents (for cleanup bookkeeping).
-3. `bakedClone = AvatarProcessor.ManualProcessAvatar(target)`.
-4. `preview = EditorSceneManager.NewPreviewScene()`; `SceneManager.MoveGameObjectToScene(bakedClone, preview)`.
-5. Build the lit stage in `preview`: 3-point rig (key/fill/rim directional lights + modest neutral
-   ambient) and a backdrop — a runtime-generated vertical-gradient unlit quad, or a solid quad when `bg`
-   is a hex color. All objects `HideFlags.DontSave`, parented so teardown is one destroy.
-6. If posing: `StartAnimationMode()` → `BeginSampling()` → `SampleAnimationClip(bakedClone, clip, t)` →
-   `EndSampling()` (leave animation mode on until after capture; stop in `finally`).
-7. Camera: disabled `Camera`, `camera.scene = preview`, set FOV/clip/cullingMask, then
-   `descriptor.PositionPortraitCamera(camera.transform)`; apply `zoom` by moving the camera back along its
-   local forward (bust → more body as zoom rises). Render into a `RenderTexture` → `ReadPixels` →
-   `EncodeToPNG` → write PNG.
-8. `finally`: stop animation mode; `ClosePreviewScene(preview)` (destroys clone + rig + backdrop);
-   `DestroyImmediate` any stragglers; **clean `ZZZ_GeneratedAssets`** — delete only assets our bake added
-   (or the whole folder iff it didn't exist at step 2). Leave the project as found.
+## Render pipeline (every step teardown-guarded)
 
-Every step is `using`/`finally`-guarded so an exception mid-pipeline still tears the preview scene and the
-clone down and restores the asset folder — non-destructiveness must survive failure.
+Setup snapshots (for restore): each open scene's `isDirty`, the set of live-scene root GameObjects,
+`Selection.objects`/`activeGameObject`.
+
+1. Resolve `target`; assert a `VRC_AvatarDescriptor`. If `whatIf`: resolve `pose`, report, **return** (no
+   bake).
+2. **Unique private clone** (the keystone non-destructiveness fix): `var mine = Object.Instantiate(target);
+   mine.name = target.name + "__rt_" + stamp;` then `var baked = AvatarProcessor.ManualProcessAvatar(mine);`
+   `Object.DestroyImmediate(mine);`. The generated folder is now
+   `Assets/ZZZ_GeneratedAssets/<name>__rt_<stamp>(Clone)/` — provably exclusive to this run, so NDMF's
+   pre-existing-folder wholesale-delete can never touch a user's kept bake, and interleaved runs never
+   collide.
+3. `preview = EditorSceneManager.NewPreviewScene()`; `SceneManager.MoveGameObjectToScene(baked, preview)`.
+4. Build the lit stage **in `preview`**: 3-point directional rig (key/fill/rim) + a backdrop quad
+   (runtime gradient texture, or solid when `bg` set), all `HideFlags.DontSave`, one parent for one-destroy
+   teardown. **No `RenderSettings` writes** (ambient/skybox are global/active-scene — they leak into and
+   dirty the live scene; CAU stays lights-only for this reason).
+5. If posing: `animator.Rebind()`; then **nested guards** — `StartAnimationMode()` `try{` `BeginSampling()`
+   `try{ SampleAnimationClip(baked, clip, t) } finally{ EndSampling() }` `} finally{ if
+   (AnimationMode.InAnimationMode()) StopAnimationMode() }`. (`t` = a chosen still frame; our clips are one
+   keyframe.)
+6. Camera (§Capture): `PositionPortraitCamera` + `framing` dolly; render → RT → PNG. Measure silhouette
+   coverage for the verdict.
+7. **`finally`** (runs on every exit, success or throw): stop animation mode if in it;
+   `ClosePreviewScene(preview)`; `DestroyImmediate` the baked clone and any **live-scene root new since the
+   step-0 snapshot** (catches a reference-less orphan from a bake that threw); restore `Selection`;
+   `ClearSceneDirtiness` on each scene that was clean at snapshot; delete the run's unique
+   `ZZZ_GeneratedAssets/<...>(Clone)` subfolder via `AssetDatabase.DeleteAsset` (handles its `.meta`),
+   and remove the parent `ZZZ_GeneratedAssets` only if this run created it and it is now empty.
+
+**Concurrency:** the bake's `AssetDatabase.StartAssetEditing`, `AnimationMode`, and `Selection` are
+global editor state — **serialize `RenderThumbnail` calls** (do not run two at once), consistent with the
+serial-venue guidance elsewhere in the workshop.
 
 ## Owned pose assets
 
-- Bundle in the package: `com.ryan6vrc.avatar-tools/Editor/Poses/` (or a package-root `Poses/`), as
-  single-keyframe **humanoid** `.anim` clips. v1 set: `unposed` is the implicit floor (no asset); plus
-  **contrapposto** and **hand-on-hip** — authored **upper-body-focused**, since bust framing crops the
-  legs. Author by hand-posing the humanoid rig in Unity and saving the muscle-space clip; a Quaternius
-  CC0 idle frame may seed a starting stance (the one asset we could also keep as reference), but the
-  committed poses are ours.
-- Humanoid muscle-space clips retarget to any rig with no per-avatar bake — one clip works across every
-  avatar. The bake is per-upload (skeleton merge); the clip is universal.
+- Bundle under `com.ryan6vrc.avatar-tools/Editor/Poses/` as single-keyframe **humanoid muscle** `.anim`
+  clips. v1 set: `floor` (implicit, no asset) + **contrapposto** + **hand-on-hip**, authored
+  **upper-body-focused** (bust framing crops the legs). Author by posing a humanoid rig in muscle mode and
+  saving; a Quaternius CC0 idle frame may seed a starting stance, but the committed clips are ours.
+- Each bundled clip is asserted `isHumanMotion == true` in tests — the guard against a silently-generic
+  save that would only pose identical-bone-path rigs.
 
 ## Non-destructiveness & the Plum-Remy test venue
 
-- The **live authoring scene is never mutated**: `ManualProcessAvatar` clones, and we move the *clone*
-  (not the original) into the preview scene. The original avatar, its scene, and vendor assets are
-  untouched.
-- The one real residue is `Assets/ZZZ_GeneratedAssets` in the host project — clean it per step 8. This is
-  the only way the tool writes into a host project; the cleanup is mandatory, not best-effort.
-- **Venue** (`worktree-unity-editor` convention): host this worktree's `com.ryan6vrc.avatar-tools` in the
-  live **Plum-Remy-3.0** editor (`@6401`) — a real MA/VRCFury-composed avatar, the merged-skeleton case
-  the tool must handle. Back up `Packages/manifest.json`, repoint the one package at the worktree
-  (absolute `file:` path), `Resolve` + `Refresh`; after verifying, **restore the manifest** and
-  re-resolve, and clean any `ZZZ_GeneratedAssets` the test bakes left in Plum-Remy's `Assets/`. Leave the
-  editor as found. Its blueprint IDs are real and never enter a commit (and this PR doesn't upload, so
-  none are even read).
+The real invariant is **"the project and editor are byte-for-byte as found after any run, success or
+failure."** It is enforced structurally, not by hope:
+
+- **No user asset is ever destroyed:** the unique-named clone (step 2) removes NDMF's same-name
+  wholesale-delete hazard — the single highest-consequence risk on a real/messy project.
+- **The live scene is restored:** `ManualProcessAvatar` *does* dirty the active scene (it instantiates
+  the clone there) — so `isDirty` is snapshotted and `ClearSceneDirtiness` restores a scene that was
+  clean; the orphan-sweep destroys any stranded clone.
+- **Global editor state is restored:** `AnimationMode` (nested idempotent guards), `Selection`
+  (snapshot/restore like `RenderAvatar.cs:426`,`683` — **not** CAU, which clobbers it), and **no**
+  `RenderSettings` writes at all.
+- **The only host-project write** is the run's unique `ZZZ_GeneratedAssets` subfolder, deleted in
+  `finally`; a failure to delete is surfaced in the verdict.
+- **Venue** (`worktree-unity-editor`): host this worktree's `com.ryan6vrc.avatar-tools` in the live
+  **Plum-Remy-3.0** editor (`@6401`) — a real MA/VRCFury avatar, the merged-skeleton case. Back up
+  `Packages/manifest.json`, repoint the one package (absolute `file:`), `Resolve` + `Refresh`; after
+  verifying, **restore the manifest** and re-resolve. Its blueprint IDs are real and never enter a commit
+  (and this PR doesn't upload).
 
 ## Verification
 
-Two tiers (rendering inherently mutates, so most behavior is proven live, not in NUnit —
-`vrc-unity-tools-editmode-batchmode`, `subagent-editmode-verify-serial`):
+Rendering mutates, so most behavior is proven live, not in NUnit
+(`vrc-unity-tools-editmode-batchmode`, `subagent-editmode-verify-serial`). Three tiers:
 
-- **Headless EditMode** (`tools/run-editmode-tests.ps1` against the generated `TestEditor`, run serially):
-  pure helpers only — `pose` resolution order, the `zoom` camera-offset math, `ZZZ_GeneratedAssets`
-  cleanup bookkeeping (delete-only-our-additions), param/verdict formatting, and fail-loud branches
-  (`LogAssert.Expect` on the error paths). Do not put the bake/render/sample in NUnit — it mutates live
-  objects and would crash the suite.
-- **Live `execute_code`** against the Plum-Remy composed avatar: call `RenderThumbnail.Render(...)` for
-  unposed and for each authored pose, then surface the returned PNGs to the operator (SendUserFile) — the
-  eyeball is the real gate that the posed portrait renders correctly on a merged-skeleton avatar with real
-  shaders and clean lighting. Compare against the status-quo default thumbnail to confirm the win.
+- **Pre-implementation spike** (do this first — it can invalidate the pose feature): in Plum-Remy, bake →
+  move to preview → `animator.Rebind()` → `SampleAnimationClip` a known humanoid clip → **read back a
+  hand-bone world rotation** and confirm it changed. If it doesn't move even with `Rebind()`, the pose
+  path needs rethinking before any tool code is written.
+- **Headless EditMode** (`tools/run-editmode-tests.ps1` against `TestEditor`, run serially): pure helpers
+  only — `pose` resolution order, `framing`→distance mapping, cleanup subfolder-name derivation, verdict
+  formatting, `bg` parse, and each bundled clip's `isHumanMotion == true`. Fail-loud branches use
+  `LogAssert.Expect`. The bake/render/sample path is **not** in NUnit (mutates live objects → crashes the
+  suite).
+- **Live `execute_code`** against the Plum-Remy composed avatar:
+  1. **Pristine-after-run invariant** (the real non-destructiveness gate the eyeball can't provide):
+     snapshot before/after a normal run and assert equal — `ZZZ_GeneratedAssets` listing, each open
+     scene's `isDirty`, `AnimationMode.InAnimationMode() == false`, `Selection.objects`, and **no residual
+     `*__rt_*(Clone)` root** in any open scene.
+  2. **Fault-injection run:** force a throw *after* a successful bake (e.g. a clip that fails to sample)
+     and assert the same invariants still hold — the only proof teardown fires on the exception path.
+  3. **Eyeball:** render floor + each pose, `SendUserFile` the PNGs to the operator; compare against the
+     status-quo default thumbnail. The eyeball gates *appearance*; tiers 1–2 gate *safety*.
 
 ## Open risks / notes
 
-- **Pose vs. bust framing:** `PositionPortraitCamera` reads static `ViewPosition`, not the posed head, so
-  a large pose could misframe slightly; upper-body-focused poses + the `zoom` param keep this minor.
-  Acceptable for v1; revisit if a pose visibly breaks framing.
-- **Gradient backdrop:** if the runtime-generated gradient proves fiddly, ship the solid neutral fallback
-  first and add the gradient as polish — the render correctness doesn't depend on it.
-- **Lighting constants** are taste defaults; expect the operator to tune key/fill/rim after seeing real
-  output. Keep them as named, obvious constants at the top of the file.
+- **Pose vs. bust framing / hips height.** `PositionPortraitCamera` reads static `ViewPosition`, not the
+  posed head; and a single humanoid keyframe carries body-position/root T, so it can shift hips *height*
+  as well as head angle. Upper-body poses + `framing` keep both minor for v1; revisit if a pose visibly
+  misframes.
+- **Gradient backdrop.** If the runtime-generated gradient is fiddly, ship the solid-color fallback first;
+  render correctness doesn't depend on it.
+- **Lighting constants** are taste defaults (named, obvious, top-of-file); expect the operator to tune
+  key/fill/rim after seeing real output.
