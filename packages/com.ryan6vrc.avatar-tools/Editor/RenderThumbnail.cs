@@ -149,11 +149,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var mine = UnityEngine.Object.Instantiate(root);
                 string mineName = root.name + "__rt_" + stamp;
                 mine.name = mineName;
+                // Predict the ZZZ subfolder name NOW: NDMF creates it DURING the bake (named after the
+                // "(Clone)" that ManualProcessAvatar's own Instantiate makes), so a mid-bake throw must still
+                // find bakedName set for teardown to clean it. Reaffirmed authoritatively after success below.
+                bakedName = mineName + "(Clone)";
                 try { baked = nadena.dev.ndmf.AvatarProcessor.ManualProcessAvatar(mine); }
                 finally { if (mine != null) UnityEngine.Object.DestroyImmediate(mine); }
                 if (baked == null)
                     throw new InvalidOperationException("ManualProcessAvatar returned null for '" + mineName + "'");
-                bakedName = baked.name; // "<name>__rt_<stamp>(Clone)"
+                bakedName = baked.name; // authoritative on success (== the prediction above)
 
                 // ---- Step 3: preview scene ----
                 preview = UnityEditor.SceneManagement.EditorSceneManager.NewPreviewScene();
@@ -264,7 +268,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // Reference = a SAMPLED corner pixel of the read-back texture, NOT a computed color. This is
                 // color-space-agnostic: it sidesteps the Linear-project/sRGB-RT gamma bookkeeping entirely
                 // (a computed bgColor.gamma read the whole background as "drawn" → silhouette 100%, and also
-                // defeated the empty-guard). The top-left corner is background for any portrait framing.
+                // defeated the empty-guard). GetPixel(0,0) is a background corner (bottom-left in Unity's
+                // texture coords) — a corner is background for any portrait framing.
                 // Reported, not gated on a tuned middle threshold — only ~0 fails.
                 Color32 bgRef = tex.GetPixel(0, 0);
                 Color32[] pixels = tex.GetPixels32();
@@ -355,6 +360,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             AssetDatabase.DeleteAsset("Assets/ZZZ_GeneratedAssets");
                     }
                 }
+
+                // The success path folds residualNote into the returned verdict; a thrown Render never reaches
+                // that return, so surface any residue here too — a failed host-project write must never be silent.
+                if (!string.IsNullOrEmpty(residualNote)) Debug.LogError("[RenderThumbnail]" + residualNote);
             }
 
             return result + residualNote;
