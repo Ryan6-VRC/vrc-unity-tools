@@ -99,7 +99,7 @@ public static string Render(
 - **Verdict grammar** (matches the family — `[Tool] Verb <label> … => OK | key=val`; RunLog is
   intentionally **not** used — a render tool's artifact is the PNG, as with RenderAvatar):
   - render: `[RenderThumbnail] Render <label> baked pose=<name|floor> framing=bust silhouette=41% => OK | png=<temp>/renderthumbnail_<label>_<stamp>.png`
-  - preflight: `[RenderThumbnail] Render <label> whatIf pose=contrapposto(resolved) descriptor=OK => WOULD-RENDER (no bake)`
+  - preflight: `[RenderThumbnail] Render <label> whatIf pose=contrapposto descriptor=OK => WOULD-RENDER (no bake)` (pose token = the resolved name, or `floor`)
   - the `png=` token is load-bearing (the deferred upload step consumes it) — keep it verbatim.
 - **Fail loud, named** (CLAUDE.md rule 7): missing `VRC_AvatarDescriptor`, unresolvable `pose`
   (error **enumerates the bundled vocabulary**: `unknown pose 'x' — bundled: contrapposto, hand-on-hip;
