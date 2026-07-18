@@ -699,4 +699,47 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("missing=0", r);
         Assert.IsFalse(r.Contains("PASS") || r.Contains("=> FAIL"), "a Report emits no verdict token");
     }
+
+    // Two Delete rows on one shape with differing STORED Value fields are NOT a conflict: MA discards a Delete's
+    // Value (forces the shape to 100), so conflict detection must compare Delete on type only. (Regression: raw
+    // (type,value) comparison spuriously flagged 100 vs 30 as a conflict.)
+    [Test]
+    public void Report_twoDeleteRowsDifferingValues_noConflict()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "DelClash", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChangerValued(avatar, "Outfit1", body, ("DelClash", ShapeChangeType.Delete, 100f));
+        AddShapeChangerValued(avatar, "Outfit2", body, ("DelClash", ShapeChangeType.Delete, 30f));
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+
+        var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new string[0], avatar);
+        Assert.IsFalse(ing.Reactions["DelClash"].Conflict, "two Deletes (any stored values) are not a conflict");
+
+        var row = ResolutionRow(ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar))), "DelClash");
+        StringAssert.Contains("Delete", row);
+        StringAssert.Contains("| 100 |", row);       // resolved-target 100, not "conflict"
+        StringAssert.DoesNotContain("CONFLICT", row);
+    }
+
+    // The summary's mismatch= field counts ONLY worn-but-undeclared rows, distinct from worn= (which also counts
+    // declared-and-worn shapes) — proving worn= is not a proxy for the disposition signal.
+    [Test]
+    public void Report_summary_mismatchCountsWornUndeclaredOnly()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "WornUndeclared", 0, 4, 0.05f);
+        AddSpan(m, "WornDeclared", 5, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+        smr.SetBlendShapeWeight(m.GetBlendShapeIndex("WornUndeclared"), 100f); // worn, no reaction
+        smr.SetBlendShapeWeight(m.GetBlendShapeIndex("WornDeclared"), 100f);   // worn AND declared
+        AddShapeChanger(avatar, "Outfit", body, ("WornDeclared", ShapeChangeType.Set));
+
+        var r = ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar));
+        StringAssert.Contains("worn=2", r);     // both are worn
+        StringAssert.Contains("mismatch=1", r); // only the undeclared one is a mismatch
+    }
 }

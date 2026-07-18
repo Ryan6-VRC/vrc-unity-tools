@@ -206,7 +206,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                             }
                             ri.ChangeType = changeType;
                             ri.Value = value;
-                            ri.Declares.Add((changeType, value)); // every declaration kept ⇒ conflict is detectable
+                            // Canonicalize: MA discards a Delete row's Value (it forces the shape to 100), so two
+                            // Deletes with differing stale Value fields must NOT read as a conflict — compare Delete
+                            // on type only. Set keeps its value, so Set=100 vs Set=50 still conflicts.
+                            ri.Declares.Add((changeType, changeType == 0 ? 0f : value));
                         }
                         catch (Exception e)
                         {
@@ -293,18 +296,22 @@ namespace Ryan6Vrc.AgentTools.Editor
             int resolved = requested - a.Missing.Count;
             int pairFlagged = a.Pairs.Count(p => p.Containment >= FlagContainment);
 
-            // reacted = union shapes declared by a reaction; worn = union shapes at nonzero static weight.
+            // reacted = union shapes declared by a reaction; worn = union shapes at nonzero static weight;
+            // mismatch = worn-but-undeclared rows (the disposition signal — NOT a subset boundary of worn, since
+            // worn also counts declared-and-worn shapes; the two fields answer different questions).
             int reacted = ingested.Reactions.Count;
-            int worn = 0;
+            int worn = 0, mismatchCount = 0;
             foreach (var name in ingested.Names)
             {
                 int wi = mesh.GetBlendShapeIndex(name);
-                if (wi >= 0 && Mathf.Abs(smr.GetBlendShapeWeight(wi)) > 0f) worn++;
+                bool isWorn = wi >= 0 && Mathf.Abs(smr.GetBlendShapeWeight(wi)) > 0f;
+                if (isWorn) worn++;
+                if (isWorn && !ingested.Reactions.ContainsKey(name)) mismatchCount++;
             }
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[ReportShapeOverlap] {0}: shapes={1}/{2} reacted={3} worn={4} pairs={5} flagged={6} missing={7} => OK",
-                mesh.name, resolved, requested, reacted, worn, a.Pairs.Count, pairFlagged, a.Missing.Count);
+                "[ReportShapeOverlap] {0}: shapes={1}/{2} reacted={3} worn={4} mismatch={5} pairs={6} flagged={7} missing={8} => OK",
+                mesh.name, resolved, requested, reacted, worn, mismatchCount, a.Pairs.Count, pairFlagged, a.Missing.Count);
 
             var sb = new StringBuilder();
             sb.Append("# ReportShapeOverlap: ").Append(mesh.name).Append('\n');
