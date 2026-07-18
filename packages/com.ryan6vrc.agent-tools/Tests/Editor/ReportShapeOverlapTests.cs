@@ -776,32 +776,9 @@ public class ReportShapeOverlapTests
 
     // ── Review follow-up: markdown-cell encoding + unknown-enum drift + overlap precompute ──────────────
 
-    // Finding #1 (unit): a pathological blendshape name carrying a newline (row break + heading injection),
-    // a pipe (column break), a backtick (code-span break) and a tab must render on ONE physical line with all
-    // structural characters neutralized — no character survives that could escape its table cell.
-    [Test]
-    public void Cell_neutralizesRowAndColumnBreakers()
-    {
-        string encoded = ReportShapeOverlap.Cell("Evil`\r\n\n## injected | x\ty");
-        StringAssert.DoesNotContain("\n", encoded); // no physical newline survives → stays one row
-        StringAssert.DoesNotContain("\r", encoded);
-        StringAssert.DoesNotContain("\t", encoded);
-        StringAssert.Contains("\\n", encoded);       // rendered as a visible escape instead
-        StringAssert.Contains("\\|", encoded);       // pipe escaped → cannot inject a column
-        StringAssert.Contains("\\`", encoded);       // backtick escaped
-
-        // Regression: a backslash immediately before a pipe must not defeat the pipe escape. Without escaping
-        // the backslash, "a\|b" → "a\\|b", where GFM reads "\\" as an escaped backslash and the pipe is left
-        // BARE (a column break). The pipe must stay escaped: an ODD run of backslashes must precede it.
-        string bp = ReportShapeOverlap.Cell("a\\|b");
-        int pipe = bp.IndexOf('|');
-        int run = 0;
-        for (int i = pipe - 1; i >= 0 && bp[i] == '\\'; i--) run++;
-        Assert.IsTrue(run % 2 == 1, "pipe must be escaped (odd backslash run precedes it), was '" + bp + "'");
-    }
-
-    // Finding #1 (integration): the encoder is actually wired into the render path — a shape name with a pipe
-    // appears backslash-escaped in the RunLog, never in its raw column-breaking form.
+    // The encoder's own escaping rules are pinned once, in RunLogFormatTests — this tool only proves it is
+    // wired into the render path: a shape name with a pipe appears backslash-escaped in the RunLog, never in
+    // its raw column-breaking form.
     [Test]
     public void Report_shapeNameWithPipe_escapedInRunLog()
     {

@@ -740,11 +740,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static string F(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
 
-        // Keep cell text on one table row: escape the column delimiter and collapse newlines.
-        private static string Cell(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return "";
-            return s.Replace("|", "\\|").Replace("\r", " ").Replace("\n", " ");
-        }
+        private static string Cell(string s) => RunLogFormat.Cell(s);
     }
 }

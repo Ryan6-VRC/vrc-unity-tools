@@ -100,6 +100,32 @@ namespace Ryan6Vrc.AgentTools.Editor
             return i >= 0 ? p.Substring(i + 1) : p;
         }
 
+        /// <summary>Encode a dynamic value (a name, path, or property read off an asset) for one Markdown
+        /// table cell — the single hardened encoder the report tools converge on. The non-obvious parts:
+        /// backslash is escaped FIRST, because a raw '\' immediately before a pipe consumes the pipe's own
+        /// '\' escape (GFM counts the backslash run) and leaves the pipe bare, breaking the column;
+        /// U+2028/U+2029 are line separators <c>char.IsControl</c> does NOT catch; and backticks are
+        /// deliberately left alone — most call sites wrap the value in a code span, where backslash escapes
+        /// are inert, so '\`' would neither keep the span closed nor render cleanly. Structural safety rests
+        /// on the row/column handling, which holds either way; a stray backtick is cosmetic and stays inside
+        /// its own cell.</summary>
+        public static string Cell(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            var sb = new StringBuilder(s.Length);
+            foreach (char c in s)
+                switch (c)
+                {
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    case '|':  sb.Append("\\|"); break;
+                    default:   sb.Append(char.IsControl(c) || c == '\u2028' || c == '\u2029' ? ' ' : c); break;
+                }
+            return sb.ToString();
+        }
+
         /// <summary>Resolve a string asset handle — an asset path OR a GUID — to the loaded asset, or
         /// null if it names none. The path/GUID counterpart of the report/check doors' typed-object entry
         /// points: a door that takes an <c>AnimatorController</c>/<c>AnimationClip</c> asset exposes a
