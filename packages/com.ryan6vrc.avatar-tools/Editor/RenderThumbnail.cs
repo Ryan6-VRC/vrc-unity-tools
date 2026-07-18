@@ -71,9 +71,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <param name="target">avatar root: scene hierarchy path, instance id, or name (first match).</param>
         /// <param name="pose">null =&gt; floor (unposed); a bundled token (see <see cref="PoseCatalog"/>);
         /// or a clip asset path/GUID.</param>
-        /// <param name="expression">null =&gt; no expression (a fully supported outcome); else a facial
-        /// clip asset path/GUID, composited with <paramref name="pose"/>. Avatar-specific, so there is
-        /// no bundled vocabulary — discover candidates with ReportController/ReportClip.</param>
+        /// <param name="expression">null =&gt; no expression (a fully supported outcome); else a gesture
+        /// slot (<c>Open</c>, <c>Peace</c>), a clip name, or a clip asset path/GUID, composited with
+        /// <paramref name="pose"/>. Slot and clip name resolve against the BAKED FX controller; a
+        /// path/GUID is an escape hatch loaded as given. An unknown value enumerates what this avatar
+        /// offers.</param>
         /// <param name="framing">"bust" | "half" | "full" — dolly distance over the SDK's
         /// PositionPortraitCamera transform.</param>
         /// <param name="bg">null =&gt; default backdrop; "#RRGGBB" =&gt; solid color.</param>
@@ -111,14 +113,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (!ResolvePose(pose, out AnimationClip _, out string poseErr))
                     return Fail(label, poseErr);
-                // Preflight resolves against the PRE-bake avatar — best-effort, since the authoritative
-                // lookup needs the baked clone. Slot names survive the bake, so a slot that resolves here
-                // resolves there; this catches a typo without paying for a bake.
-                if (!ResolveExpressionOn(root, expression, out AnimationClip _, out string exprErr))
+                if (!PreflightExpression(expression, out string exprErr, out bool exprDeferred))
                     return Fail(label, exprErr);
 
                 string poseToken = string.IsNullOrEmpty(pose) ? "floor" : pose;
                 string exprToken = string.IsNullOrEmpty(expression) ? "none" : expression;
+                if (exprDeferred) exprToken += " (resolved at bake)";
                 string ok = string.Format(CultureInfo.InvariantCulture,
                     "[RenderThumbnail] Render {0} whatIf pose={1} expression={2} descriptor=OK => WOULD-RENDER (no bake)",
                     label, poseToken, exprToken);
@@ -129,10 +129,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ---- Preflight resolution (fail fast, before any mutation) ----
             if (!ResolvePose(pose, out AnimationClip poseClip, out string renderPoseErr))
                 return Fail(label, renderPoseErr);
-            // Pre-bake check only, so a bad selector fails before we pay for a bake. The clip that is
-            // actually applied is re-resolved on the BAKED clone below — the bake can rewrite the
-            // blendshape namespace, so the pre-bake clip is not authoritative.
-            if (!ResolveExpressionOn(root, expression, out AnimationClip _, out string renderExprErr))
+            if (!PreflightExpression(expression, out string renderExprErr, out bool _))
                 return Fail(label, renderExprErr);
             bool wantExpression = !string.IsNullOrEmpty(expression);
             // poseName is the ORIGINAL pose argument (for verdict display), not the resolved asset path —
@@ -159,7 +156,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             Scene preview = default;
             GameObject baked = null;
-            string bakedName = null;      // captured after bake; the ZZZ subfolder is named this
+            // Set the instant preprocess is entered: teardown owes the SDK its paired OnPostprocessAvatar
+            // even when a hook throws midway.
+            bool bakePreprocessed = false;
             RenderTexture rt = null;
             Texture2D tex = null;
             string result = null;      // non-null on the silhouette-fail / non-success paths only
@@ -187,11 +186,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string mineName = root.name + "__rt_" + stamp;
                 mine.name = mineName;
                 mine.SetActive(true); // an inactive avatar is not a valid preprocess target
-                // Generated-asset folders are named after the object being processed, so record the name
-                // NOW — a mid-bake throw must still leave teardown able to find and clean them.
-                bakedName = mineName;
 
                 bool preprocessOk;
+                bakePreprocessed = true;
                 try
                 {
                     preprocessOk = VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks
@@ -442,24 +439,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         residualNote += " note=scene-dirty-uncleared: EditorSceneManager.ClearSceneDirtiness internals drifted";
                 }
 
-                // Delete this run's unique ZZZ subfolder, then the parent whenever it is now empty (a pre-existing
-                // user bake in a sibling subfolder keeps it non-empty, so this only fires when genuinely empty).
-                if (bakedName != null)
+                // The SDK's preprocess/postprocess pair is a contract: OnPreprocessAvatar was called, so
+                // OnPostprocessAvatar must be too. It fires every hook's OWN cleanup (NDMF's temporary-asset
+                // sweep among them) rather than this tool guessing folder names it does not control.
+                // Generated assets that outlive it are not chased — every project accumulates some.
+                if (bakePreprocessed)
                 {
-                    string sub = "Assets/ZZZ_GeneratedAssets/" + bakedName;
-                    if (AssetDatabase.IsValidFolder(sub)) AssetDatabase.DeleteAsset(sub);
-                    if (AssetDatabase.IsValidFolder(sub))
-                        residualNote += " note=cleanup-residual: " + sub + " not removed"; // surfaced, not swallowed
-
-                    if (AssetDatabase.IsValidFolder("Assets/ZZZ_GeneratedAssets"))
+                    try { VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPostprocessAvatar(); }
+                    catch (Exception cleanupEx)
                     {
-                        var subs = AssetDatabase.GetSubFolders("Assets/ZZZ_GeneratedAssets");
-                        var assetsIn = AssetDatabase.FindAssets("", new[] { "Assets/ZZZ_GeneratedAssets" });
-                        if (subs.Length == 0 && assetsIn.Length == 0)
-                            AssetDatabase.DeleteAsset("Assets/ZZZ_GeneratedAssets");
+                        // Surfaced, not swallowed — but never fatal: the PNG is already written.
+                        residualNote += " note=postprocess-cleanup-threw: " + cleanupEx.GetType().Name;
                     }
                 }
-
             }
 
                 // Verdict assembled HERE, after teardown, so residualNote (a cleanup failure) is known before we
@@ -504,6 +496,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Skip causes are counted separately so a zero/partial landing NAMES its reason instead of
             // leaving the reader a four-way guess.
             int pathMiss = 0, noMesh = 0, shapeMiss = 0, notDrawn = 0, emptyCurve = 0;
+
+            // Material and sprite swaps are objectReference curves, a SEPARATE list from the float curves
+            // below — counting only the float list would report ignored=0 for a clip that visibly swaps a
+            // material, which is precisely the "renders only partly" case ignored= exists to reveal.
+            ignored += AnimationUtility.GetObjectReferenceCurveBindings(clip).Length;
 
             foreach (var binding in AnimationUtility.GetCurveBindings(clip))
             {
@@ -599,6 +596,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var guid in AssetDatabase.FindAssets("t:AnimationClip", new[] { PosesFolder }))
             {
                 string path = AssetDatabase.GUIDToAssetPath(guid);
+                // FindAssets descends child folders; a Poses/Archive/RTPose_Old.anim must not become
+                // advertised vocabulary, so the glob is pinned to this folder exactly.
+                if (System.IO.Path.GetDirectoryName(path).Replace('\\', '/') != PosesFolder) continue;
                 string file = System.IO.Path.GetFileNameWithoutExtension(path);
                 if (!file.StartsWith("RTPose_", StringComparison.OrdinalIgnoreCase)) continue;
                 entries.Add(new PoseEntry
@@ -610,17 +610,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             entries.Sort((a, b) => string.CompareOrdinal(a.Token, b.Token));
 
-            // Two files normalizing to one token (RTPose_Hand_On_Hip vs RTPose_HandOnHip) would make the
-            // winner depend on FindAssets order through an unstable sort, while the error message
-            // advertised both as reachable. The glob's whole point is that poses land WITHOUT anyone
-            // reviewing this file — which is exactly the condition under which such a collision ships
-            // unnoticed. Fail loud instead; a silently unreachable pose is worse than a build error.
-            for (int i = 1; i < entries.Count; i++)
-                if (entries[i].Token == entries[i - 1].Token)
-                    throw new InvalidOperationException(
-                        "two bundled poses normalize to the same token '" + entries[i].Token + "': "
-                        + entries[i - 1].Path + " and " + entries[i].Path
-                        + " — rename one (tokens ignore case and punctuation)");
             return entries;
         }
 
@@ -656,6 +645,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             string trimmed = pose.Trim();
             var catalog = PoseCatalog();
+
+            // Two files normalizing to one token (RTPose_Hand_On_Hip vs RTPose_HandOnHip) would make the
+            // winner depend on FindAssets order through an unstable sort while the error advertised both
+            // as reachable. The glob's whole point is that poses land without anyone reviewing this file,
+            // which is exactly when such a collision ships unnoticed. Surfaced as a FAIL verdict rather
+            // than an exception: every consumer parses the one-line grammar, and a throw here would also
+            // poison calls that pass no pose at all.
+            for (int i = 1; i < catalog.Count; i++)
+                if (catalog[i].Token == catalog[i - 1].Token)
+                {
+                    err = "two bundled poses normalize to the same token '" + catalog[i].Token + "': "
+                        + catalog[i - 1].Path + " and " + catalog[i].Path
+                        + " — rename one (tokens ignore case and punctuation)";
+                    return false;
+                }
 
             // A bundled token never contains '/', so the vocabulary lookup can safely precede the
             // path/GUID branch.
@@ -722,6 +726,39 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return false;
         }
 
+        /// <summary>
+        /// Pre-bake gate for <c>expression</c>, deliberately narrow: it rejects only what a pre-bake read
+        /// can actually adjudicate — an asset selector (path/GUID) that will not load or is not an
+        /// expression clip. A bare slot or clip name is <b>deferred</b> (<paramref name="deferred"/> true),
+        /// never rejected.
+        /// <para>Gesture layers are frequently <i>installed during preprocess</i>: on a VRCFury/MA avatar
+        /// the descriptor's FX slot is often <c>isDefault</c> (no controller at all) or the stock hands
+        /// layer whose states hold <c>proxy_hands_*</c> muscle clips. Enumerating pre-bake there yields
+        /// nothing, so gating on it would hard-fail exactly the composed avatars this tool exists for —
+        /// and would empty the discovery route besides. The authoritative resolve happens on the baked
+        /// clone.</para>
+        /// </summary>
+        internal static bool PreflightExpression(string expression, out string err, out bool deferred)
+        {
+            err = null;
+            deferred = false;
+            if (string.IsNullOrEmpty(expression)) return true;
+
+            if (!IsAssetSelector(expression.Trim()))
+            {
+                deferred = true;   // a slot/clip name is only knowable post-bake
+                return true;
+            }
+            return ResolveExpressionOn(null, expression, out AnimationClip _, out err);
+        }
+
+        /// <summary>True when the selector names an asset (contains '/' or is a 32-hex GUID) rather than a
+        /// gesture slot or clip name.</summary>
+        private static bool IsAssetSelector(string s)
+        {
+            return s.IndexOf('/') >= 0 || IsGuid(s);
+        }
+
         /// <summary>One selectable expression: the gesture <c>Slot</c> it sits on (the portable name —
         /// state names like <c>Peace</c>/<c>Open</c> are stable across vendors where clip names are not),
         /// the <c>ClipName</c>, and the <c>Clip</c> itself.</summary>
@@ -755,20 +792,49 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     fx = layer.animatorController as UnityEditor.Animations.AnimatorController;
             if (fx == null) return entries;
 
-            var seen = new HashSet<AnimationClip>();
+            // Deduped on (slot, clip) — NOT on the clip alone. Layers 1 and 2 mirror each other, which is
+            // what needs collapsing, but vendors also map several slots to ONE clip (Victory and Peace both
+            // playing the same smile). Keying on the clip would register whichever slot came first and make
+            // the other a hard miss on a name the operator can read in the Animator.
+            var seen = new HashSet<string>();
             for (int i = 1; i <= 2 && i < fx.layers.Length; i++)
-            {
-                var sm = fx.layers[i].stateMachine;
-                if (sm == null) continue;
-                foreach (var cs in sm.states)
-                {
-                    var clip = cs.state.motion as AnimationClip;
-                    if (clip == null || !seen.Add(clip)) continue;   // layers 1 and 2 mirror each other
-                    if (!IsExpressionClip(clip, out string _)) continue;
-                    entries.Add(new ExpressionEntry { Slot = cs.state.name, ClipName = clip.name, Clip = clip });
-                }
-            }
+                CollectExpressionStates(fx.layers[i].stateMachine, seen, entries);
             return entries;
+        }
+
+        /// <summary>Walk a gesture layer's states and sub-state-machines, registering the first expression
+        /// clip each state offers. A state's motion may be a BlendTree (analog-gesture layers), whose
+        /// children are searched rather than skipped.</summary>
+        private static void CollectExpressionStates(
+            UnityEditor.Animations.AnimatorStateMachine sm, HashSet<string> seen, List<ExpressionEntry> entries)
+        {
+            if (sm == null) return;
+
+            foreach (var cs in sm.states)
+            {
+                var clip = FirstExpressionClip(cs.state.motion);
+                if (clip == null) continue;
+                if (!seen.Add(cs.state.name + " " + clip.name)) continue;
+                entries.Add(new ExpressionEntry { Slot = cs.state.name, ClipName = clip.name, Clip = clip });
+            }
+            foreach (var child in sm.stateMachines)
+                CollectExpressionStates(child.stateMachine, seen, entries);
+        }
+
+        /// <summary>The first clip in a motion (itself, or depth-first through a BlendTree) that reads as a
+        /// facial expression. Null when the motion offers none.</summary>
+        private static AnimationClip FirstExpressionClip(Motion motion)
+        {
+            if (motion is AnimationClip clip)
+                return IsExpressionClip(clip, out string _) ? clip : null;
+
+            if (motion is UnityEditor.Animations.BlendTree tree)
+                foreach (var child in tree.children)
+                {
+                    var hit = FirstExpressionClip(child.motion);
+                    if (hit != null) return hit;
+                }
+            return null;
         }
 
         /// <summary>
