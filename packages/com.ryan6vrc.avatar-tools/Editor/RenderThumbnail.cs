@@ -89,8 +89,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // ---- Preflight resolution (fail fast, before any mutation) ----
-            if (!ResolvePose(pose, out AnimationClip poseClip, out string poseErr))
-                return Fail(label, poseErr);
+            if (!ResolvePose(pose, out AnimationClip poseClip, out string renderPoseErr))
+                return Fail(label, renderPoseErr);
             if (poseClip != null)
                 // Floor is the only render path wired in Task 1; a resolved pose clip is honestly not yet
                 // sampled onto the baked clone. Task 2 replaces this throw with the AnimationMode sampling.
