@@ -101,20 +101,53 @@ doesn't — that single fact decides the correct capture surface for each.
 ```csharp
 public static string Render(
     string target,            // avatar root: scene path or name (resolve like RenderAvatar's target)
-    string pose = null,       // null => floor (unposed); a bundled pose name; or a clip asset path/GUID
+    string pose = null,       // null => floor (unposed); a bundled pose token; or a clip asset path/GUID
+    string expression = null, // null => no expression; else a facial clip asset path/GUID (no vocabulary)
     string framing = "bust",  // bust | half | full — dolly distance over PositionPortraitCamera
     string bg = null,         // null => default backdrop; "#RRGGBB" => solid color (fail named on unparseable)
-    bool   whatIf = false)    // preflight: resolve target/descriptor/pose, report, bake NOTHING
+    bool   whatIf = false)    // preflight: resolve target/descriptor/pose/expression, report, bake NOTHING
 ```
+
+### The pose vocabulary is a folder glob
+
+There is no hard-wired name array. `Editor/Poses/RTPose_<Name>.anim` IS the vocabulary: a token matches
+by normalizing both sides (lowercase, strip non-alphanumerics), so `hand-on-hip`, `hand_on_hip` and
+`HandOnHip` are one token. **Adding a pose is dropping a file** — no code edit — and the unknown-pose
+error enumerates the glob, so what the tool advertises cannot drift from what ships.
+
+### `expression` — a second clip, applied not sampled
+
+Deliberately **no bundled vocabulary**: expressions are avatar-specific, so a bare name fails with a
+pointer at the discovery route (`ReportController` on the FX controller — candidates sit on layers 1–2 —
+then `ReportClip` to confirm blendShape curves on the face mesh). Those two tools already return every
+datum needed; a third discovery tool would only re-derive them.
+
+Validation is the **mirror image of pose** — pose requires `isHumanMotion=true`, expression requires
+`isHumanMotion=false` plus ≥1 `blendShape.*` binding — so passing the two swapped fails named instead of
+silently no-opping.
+
+**The expression is written directly onto the renderers, never sampled.** A second
+`SampleAnimationClip` in the pose's sampling block re-runs the Animator's humanoid solver, which
+re-solves muscles toward default and *partially undoes the pose*: measured on Chocolat, the left upper
+arm moved `(301.6,303.5,76.7)` → `(321.6,344.4,33.2)` when the face clip was sampled after the pose.
+Pose and expression bind disjoint **properties** but not disjoint **systems**. Evaluating each
+`blendShape.*` curve and calling `SetBlendShapeWeight` touches neither the Animator nor AnimationMode
+and leaves the pose byte-identical. Only blendShape curves are applied — by contract an expression *is*
+its blendshape curves.
+
+`shapes=<applied>/<total>` rides the verdict whenever an expression was requested. A clip authored for a
+different body, or a bake that renamed the face mesh, lands fewer curves than it tried; zero landing is
+a named FAIL rather than a portrait with a blank face and a verdict still claiming `expression=<name>`.
 
 - **Verdict grammar** (matches the family — `[Tool] Verb <label> … => OK | key=val`; RunLog is
   intentionally **not** used — a render tool's artifact is the PNG, as with RenderAvatar):
-  - render: `[RenderThumbnail] Render <label> baked pose=<name|floor> framing=bust silhouette=41% => OK | png=<temp>/renderthumbnail_<label>_<stamp>.png`
-  - preflight: `[RenderThumbnail] Render <label> whatIf pose=clasped descriptor=OK => WOULD-RENDER (no bake)` (pose token = the resolved name, or `floor`)
+  - render: `[RenderThumbnail] Render <label> baked pose=<name|floor> expression=<path|none> [shapes=53/67] framing=bust silhouette=41% => OK | png=<temp>/renderthumbnail_<label>_<stamp>.png`
+  - preflight: `[RenderThumbnail] Render <label> whatIf pose=clasped expression=none descriptor=OK => WOULD-RENDER (no bake)` (pose/expression tokens = the arguments as passed, or `floor`/`none`)
   - the `png=` token is load-bearing (the deferred upload step consumes it) — keep it verbatim.
 - **Fail loud, named** (CLAUDE.md rule 7): missing `VRC_AvatarDescriptor`, unresolvable `pose`
-  (error **enumerates the bundled vocabulary**: `unknown pose 'x' — bundled: clasped, hand-on-hip;
-  or pass a clip asset path/GUID`), unparseable `bg`, a non-`isHumanMotion` clip, a bake exception, or a
+  (error **enumerates the glob**: `unknown pose 'x' — bundled: Clasped, HandOnHip; or pass a clip asset
+  path/GUID`), an `expression` that is a muscle clip / carries no blendShape curves / lands zero shapes
+  on the baked avatar, unparseable `bg`, a non-`isHumanMotion` pose clip, a bake exception, or a
   near-empty silhouette (`silhouette≈0%` = "nothing drew"). `silhouette=NN%` is **reported**, not
   gated on a tuned middle threshold (per `dont-tune-tools-against-one-clean-asset`) — only ~0 fails; a
   low-but-nonzero value is surfaced for the operator to judge, replacing an unbacked "MA+VRCFury

@@ -18,10 +18,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
     [AgentTool]
     public static class RenderThumbnail
     {
-        /// <summary>Case-insensitive vocabulary <see cref="ResolvePose"/> matches against
-        /// <c>Editor/Poses/RTPose_&lt;PascalName&gt;.anim</c> before treating <c>pose</c> as an asset
-        /// path/GUID.</summary>
-        internal static readonly string[] BundledPoses = { "clasped", "hand-on-hip" };
+        /// <summary>The bundled pose vocabulary is this folder's <c>RTPose_*.anim</c> glob — there is no
+        /// hard-wired name list. Poses are added by dropping files here, and the unknown-pose error
+        /// enumerates the glob, so the advertised vocabulary cannot drift from what actually ships.</summary>
+        internal const string PosesFolder = "Packages/com.ryan6vrc.avatar-tools/Editor/Poses";
 
         // Dolly-back distance (meters, added along camera local-forward beyond the SDK-calibrated
         // PositionPortraitCamera transform) per framing. Cosmetic taste defaults — bust is the SDK's own
@@ -67,15 +67,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// and returns without baking or touching the project.
         /// </summary>
         /// <param name="target">avatar root: scene hierarchy path, instance id, or name (first match).</param>
-        /// <param name="pose">null =&gt; floor (unposed); a bundled name (see <see cref="BundledPoses"/>);
+        /// <param name="pose">null =&gt; floor (unposed); a bundled token (see <see cref="PoseCatalog"/>);
         /// or a clip asset path/GUID.</param>
+        /// <param name="expression">null =&gt; no expression (a fully supported outcome); else a facial
+        /// clip asset path/GUID, composited with <paramref name="pose"/>. Avatar-specific, so there is
+        /// no bundled vocabulary — discover candidates with ReportController/ReportClip.</param>
         /// <param name="framing">"bust" | "half" | "full" — dolly distance over the SDK's
         /// PositionPortraitCamera transform.</param>
         /// <param name="bg">null =&gt; default backdrop; "#RRGGBB" =&gt; solid color.</param>
-        /// <param name="whatIf">preflight only: resolve target/descriptor/pose, report, bake nothing.</param>
+        /// <param name="whatIf">preflight only: resolve target/descriptor/pose/expression, report, bake
+        /// nothing.</param>
         public static string Render(
             string target,
             string pose = null,
+            string expression = null,
             string framing = "bust",
             string bg = null,
             bool whatIf = false)
@@ -104,11 +109,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (!ResolvePose(pose, out AnimationClip _, out string poseErr))
                     return Fail(label, poseErr);
+                if (!ResolveExpression(expression, out AnimationClip _, out string exprErr))
+                    return Fail(label, exprErr);
 
                 string poseToken = string.IsNullOrEmpty(pose) ? "floor" : pose;
+                string exprToken = string.IsNullOrEmpty(expression) ? "none" : expression;
                 string ok = string.Format(CultureInfo.InvariantCulture,
-                    "[RenderThumbnail] Render {0} whatIf pose={1} descriptor=OK => WOULD-RENDER (no bake)",
-                    label, poseToken);
+                    "[RenderThumbnail] Render {0} whatIf pose={1} expression={2} descriptor=OK => WOULD-RENDER (no bake)",
+                    label, poseToken, exprToken);
                 Debug.Log(ok);
                 return ok;
             }
@@ -116,9 +124,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ---- Preflight resolution (fail fast, before any mutation) ----
             if (!ResolvePose(pose, out AnimationClip poseClip, out string renderPoseErr))
                 return Fail(label, renderPoseErr);
+            if (!ResolveExpression(expression, out AnimationClip exprClip, out string renderExprErr))
+                return Fail(label, renderExprErr);
             // poseName is the ORIGINAL pose argument (for verdict display), not the resolved asset path —
-            // matches the whatIf branch's poseToken convention above.
+            // matches the whatIf branch's poseToken convention above. Same for expressionName.
             string poseName = string.IsNullOrEmpty(pose) ? "floor" : pose;
+            string expressionName = string.IsNullOrEmpty(expression) ? "none" : expression;
 
             // ---- Snapshots for restore (before any mutation), used by the finally teardown ----
             Scene targetScene = root.scene;
@@ -236,6 +247,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     poseHeadDelta = (posedHead - posedRoot) - (restHead - restRoot);
                 }
 
+                // ---- Step 5b: expression, applied AFTER the pose and deliberately NOT through the
+                // animation system. A second SampleAnimationClip in the same block re-runs the Animator's
+                // humanoid solver, which re-solves muscles toward default and PARTIALLY UNDOES the pose —
+                // measured, not theorized: sampling the face clip after the pose moved the left upper arm
+                // (301.6,303.5,76.7) -> (321.6,344.4,33.2). Pose and expression bind disjoint properties
+                // but not disjoint systems. Writing the blendshape weights straight onto the renderers
+                // touches neither the Animator nor AnimationMode, and leaves the pose byte-identical.
+                int shapesApplied = 0, shapesTotal = 0;
+                if (exprClip != null)
+                {
+                    shapesApplied = ApplyExpression(baked, exprClip, out shapesTotal);
+                    if (shapesApplied == 0)
+                        throw new InvalidOperationException(
+                            "expression '" + expressionName + "' moved no blendshape on the BAKED avatar (0 of "
+                            + shapesTotal + " curves landed) — the bake renamed, merged, or dropped the face "
+                            + "mesh, or the clip belongs to a different body");
+                }
+
                 // ---- Step 6: camera + off-screen sRGB capture (§Capture, source-verified) ----
                 var descriptorBaked = baked.GetComponent<VRC.SDKBase.VRC_AvatarDescriptor>();
                 if (descriptorBaked == null)
@@ -303,7 +332,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 float fraction = pixels.Length > 0 ? (float)drawn / pixels.Length : 0f;
                 int pct = Mathf.RoundToInt(fraction * 100f);
 
-                prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName + " framing="
+                // shapes=applied/total rides along only when an expression was requested — a clip authored
+                // for another body lands fewer than it tried, and that must be visible, not inferred.
+                string shapesToken = exprClip != null
+                    ? " shapes=" + shapesApplied.ToString(CultureInfo.InvariantCulture)
+                        + "/" + shapesTotal.ToString(CultureInfo.InvariantCulture)
+                    : "";
+                prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName
+                    + " expression=" + expressionName + shapesToken + " framing="
                     + framingToken + " silhouette=" + pct.ToString(CultureInfo.InvariantCulture) + "%";
 
                 if (fraction < MinSilhouetteFraction)
@@ -311,7 +347,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // Fail loud, uniform (=> FAIL:), keeping the REAL measured values — do NOT write a blank PNG.
                     result = Fail(label, "silhouette " + pct.ToString(CultureInfo.InvariantCulture) + "% below "
                         + MinSilhouetteFraction.ToString(CultureInfo.InvariantCulture) + " (pose=" + poseName
-                        + " framing=" + framingToken + ") — nothing drew");
+                        + " expression=" + expressionName + " framing=" + framingToken + ") — nothing drew");
                 }
                 else
                 {
@@ -406,6 +442,47 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
+        /// <summary>
+        /// Write the clip's <c>blendShape.*</c> curves straight onto the baked clone's renderers and
+        /// return how many landed (<paramref name="total"/> receives how many were tried). Only
+        /// blendShape curves are applied — by contract an expression IS its blendshape curves; any other
+        /// binding in the clip is ignored.
+        /// <para>Applying rather than sampling is what keeps the pose intact (see the call site), and the
+        /// applied/total counts are what keep the verdict honest: a clip authored for a DIFFERENT body,
+        /// or a bake that renamed the face mesh, lands fewer curves than it tried, and a caller can see
+        /// that instead of wondering why the portrait's face looks half-right.</para>
+        /// </summary>
+        private static int ApplyExpression(GameObject baked, AnimationClip clip, out int total)
+        {
+            int applied = 0;
+            total = 0;
+
+            foreach (var binding in AnimationUtility.GetCurveBindings(clip))
+            {
+                if (binding.propertyName == null
+                    || !binding.propertyName.StartsWith("blendShape.", StringComparison.Ordinal)) continue;
+                total++;
+
+                Transform t = string.IsNullOrEmpty(binding.path)
+                    ? baked.transform
+                    : baked.transform.Find(binding.path);
+                var smr = t != null ? t.GetComponent<SkinnedMeshRenderer>() : null;
+                if (smr == null || smr.sharedMesh == null) continue;
+
+                int index = smr.sharedMesh.GetBlendShapeIndex(binding.propertyName.Substring("blendShape.".Length));
+                if (index < 0) continue;
+
+                var curve = AnimationUtility.GetEditorCurve(clip, binding);
+                if (curve == null || curve.length == 0) continue;
+
+                // Expression clips are single-key; evaluating at the last key matches the pose's
+                // sample-at-clip.length convention and is the same frame for a one-key curve.
+                smr.SetBlendShapeWeight(index, curve.Evaluate(curve[curve.length - 1].time));
+                applied++;
+            }
+            return applied;
+        }
+
         // ===== Pure helpers (unit-tested; do not touch the scene or the asset database beyond reads) ====
 
         /// <summary>Dolly-back distance in meters for a named framing. Throws for anything else.</summary>
@@ -432,13 +509,65 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return ColorUtility.TryParseHtmlString(s, out c);
         }
 
+        /// <summary>One bundled pose: <c>Token</c> is the normalized match key, <c>Label</c> the readable
+        /// name as it appears on disk (what the unknown-pose error advertises — any casing/punctuation of
+        /// it normalizes back to Token), and <c>Path</c> the asset it loads.</summary>
+        internal struct PoseEntry
+        {
+            public string Token;
+            public string Label;
+            public string Path;
+        }
+
+        /// <summary>
+        /// The bundled pose vocabulary, globbed from <see cref="PosesFolder"/>: every
+        /// <c>RTPose_&lt;Name&gt;.anim</c> becomes the token <c>normalize(&lt;Name&gt;)</c>. Sorted for a
+        /// stable error message. Content-driven by design — adding a pose is dropping a file.
+        /// </summary>
+        internal static List<PoseEntry> PoseCatalog()
+        {
+            var entries = new List<PoseEntry>();
+            if (!AssetDatabase.IsValidFolder(PosesFolder)) return entries;
+
+            foreach (var guid in AssetDatabase.FindAssets("t:AnimationClip", new[] { PosesFolder }))
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guid);
+                string file = System.IO.Path.GetFileNameWithoutExtension(path);
+                if (!file.StartsWith("RTPose_", StringComparison.OrdinalIgnoreCase)) continue;
+                entries.Add(new PoseEntry
+                {
+                    Token = NormalizeToken(file),
+                    Label = file.Substring("RTPose_".Length),
+                    Path = path,
+                });
+            }
+            entries.Sort((a, b) => string.CompareOrdinal(a.Token, b.Token));
+            return entries;
+        }
+
+        /// <summary>
+        /// Fold a pose name to its match key: drop a leading <c>RTPose_</c>, lowercase, and strip every
+        /// non-alphanumeric character. This is what makes <c>hand-on-hip</c>, <c>hand_on_hip</c> and
+        /// <c>HandOnHip</c> the same token, replacing the old hand-maintained name→PascalCase switch.
+        /// </summary>
+        internal static string NormalizeToken(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            if (s.StartsWith("RTPose_", StringComparison.OrdinalIgnoreCase)) s = s.Substring("RTPose_".Length);
+
+            var sb = new System.Text.StringBuilder(s.Length);
+            foreach (char ch in s)
+                if (char.IsLetterOrDigit(ch)) sb.Append(char.ToLowerInvariant(ch));
+            return sb.ToString();
+        }
+
         /// <summary>
         /// Resolve <paramref name="pose"/> to a clip: null/empty =&gt; floor (<paramref name="clip"/> null,
-        /// no error); a bundled name (case-insensitive, see <see cref="BundledPoses"/>) =&gt; that package
-        /// clip; else a value containing '/' or a 32-hex GUID =&gt; loaded as an asset path/GUID; else a
-        /// named FAIL enumerating the bundled vocabulary. Any loaded clip that is not
-        /// <c>isHumanMotion</c> (a generic/transform clip) fails loud here, before any bake — such a clip
-        /// would not retarget across rigs.
+        /// no error); a bundled token (see <see cref="PoseCatalog"/>, matched via
+        /// <see cref="NormalizeToken"/>) =&gt; that package clip; else a value containing '/' or a 32-hex
+        /// GUID =&gt; loaded as an asset path/GUID; else a named FAIL enumerating the globbed vocabulary.
+        /// Any loaded clip that is not <c>isHumanMotion</c> (a generic/transform clip) fails loud here,
+        /// before any bake — such a clip would not retarget across rigs.
         /// </summary>
         internal static bool ResolvePose(string pose, out AnimationClip clip, out string err)
         {
@@ -447,27 +576,31 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (string.IsNullOrEmpty(pose)) return true; // floor
 
             string trimmed = pose.Trim();
+            var catalog = PoseCatalog();
 
-            foreach (var bundled in BundledPoses)
+            // A bundled token never contains '/', so the vocabulary lookup can safely precede the
+            // path/GUID branch.
+            if (trimmed.IndexOf('/') < 0)
             {
-                if (!string.Equals(bundled, trimmed, StringComparison.OrdinalIgnoreCase)) continue;
+                string key = NormalizeToken(trimmed);
+                foreach (var entry in catalog)
+                {
+                    if (entry.Token != key) continue;
 
-                string bundledPath = "Packages/com.ryan6vrc.avatar-tools/Editor/Poses/RTPose_"
-                    + BundledPascalName(bundled) + ".anim";
-                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(bundledPath);
-                if (clip == null)
-                {
-                    err = "bundled pose '" + bundled + "' is not authored yet (expected " + bundledPath
-                        + ") — see Task 3";
-                    return false;
+                    clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(entry.Path);
+                    if (clip == null)
+                    {
+                        err = "bundled pose '" + entry.Token + "' did not load from " + entry.Path;
+                        return false;
+                    }
+                    if (!clip.isHumanMotion)
+                    {
+                        err = "clip '" + entry.Path + "' is not a humanoid muscle clip (isHumanMotion=false)";
+                        clip = null;
+                        return false;
+                    }
+                    return true;
                 }
-                if (!clip.isHumanMotion)
-                {
-                    err = "clip '" + bundledPath + "' is not a humanoid muscle clip (isHumanMotion=false)";
-                    clip = null;
-                    return false;
-                }
-                return true;
             }
 
             string assetPath = null;
@@ -502,19 +635,93 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return true;
             }
 
-            err = "unknown pose '" + pose + "' — bundled: " + string.Join(", ", BundledPoses) + "; or pass a clip asset path/GUID";
+            var tokens = new List<string>();
+            foreach (var entry in catalog) tokens.Add(entry.Label);
+            err = "unknown pose '" + pose + "' — bundled: "
+                + (tokens.Count > 0 ? string.Join(", ", tokens.ToArray()) : "(none under " + PosesFolder + ")")
+                + "; or pass a clip asset path/GUID";
             return false;
         }
 
-        private static string BundledPascalName(string bundled)
+        /// <summary>
+        /// Resolve <paramref name="expression"/> to a facial clip: null/empty =&gt; no expression
+        /// (<paramref name="clip"/> null, no error — the supported outcome for an avatar with no facial
+        /// clips, not a degraded one); else an asset path or 32-hex GUID, validated by
+        /// <see cref="IsExpressionClip"/>. There is deliberately NO bundled vocabulary — expressions are
+        /// avatar-specific, so a bare name gets pointed at the discovery route instead.
+        /// </summary>
+        internal static bool ResolveExpression(string expression, out AnimationClip clip, out string err)
         {
-            switch (bundled)
+            clip = null;
+            err = null;
+            if (string.IsNullOrEmpty(expression)) return true; // no expression
+
+            string trimmed = expression.Trim();
+
+            string assetPath = null;
+            if (trimmed.IndexOf('/') >= 0)
             {
-                case "clasped": return "Clasped";
-                case "hand-on-hip": return "HandOnHip";
-                default:
-                    throw new ArgumentException("no PascalName mapping for bundled pose '" + bundled + "'");
+                assetPath = trimmed;
             }
+            else if (IsGuid(trimmed))
+            {
+                assetPath = AssetDatabase.GUIDToAssetPath(trimmed);
+                if (string.IsNullOrEmpty(assetPath))
+                {
+                    err = "GUID '" + trimmed + "' did not resolve to any asset";
+                    return false;
+                }
+            }
+            else
+            {
+                // No vocabulary to enumerate — hand over the discovery route instead of guessing.
+                err = "expression '" + expression + "' is not a clip asset path/GUID — expressions are "
+                    + "avatar-specific, so there is no bundled vocabulary; find the avatar's facial clips "
+                    + "with ReportController on its FX controller (candidates sit on layers 1-2), then "
+                    + "confirm with ReportClip that the clip is blendShape curves on the face mesh";
+                return false;
+            }
+
+            clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(assetPath);
+            if (clip == null)
+            {
+                err = "no AnimationClip found at '" + assetPath + "'";
+                return false;
+            }
+            if (!IsExpressionClip(clip, out string why))
+            {
+                err = "clip '" + assetPath + "' " + why;
+                clip = null;
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// A facial expression clip is the mirror image of a pose clip: NOT <c>isHumanMotion</c> (muscle
+        /// curves would sample over the pose rather than composite with it) and carrying at least one
+        /// <c>blendShape.*</c> binding. Measured on real vendor FX: expression clips are 100%
+        /// blendShape curves on the face mesh, while gesture/pose clips are 100% muscle — the two bind
+        /// disjoint sets and cannot fight, which is what makes compositing them safe.
+        /// </summary>
+        internal static bool IsExpressionClip(AnimationClip clip, out string err)
+        {
+            err = null;
+            if (clip == null) { err = "is null"; return false; }
+
+            if (clip.isHumanMotion)
+            {
+                err = "is a humanoid muscle clip (isHumanMotion=true) — that is a body pose, pass it as `pose`";
+                return false;
+            }
+
+            foreach (var binding in AnimationUtility.GetCurveBindings(clip))
+                if (binding.propertyName != null
+                    && binding.propertyName.StartsWith("blendShape.", StringComparison.Ordinal))
+                    return true;
+
+            err = "has no blendShape.* curves — not a facial expression";
+            return false;
         }
 
         private static bool IsGuid(string s)
