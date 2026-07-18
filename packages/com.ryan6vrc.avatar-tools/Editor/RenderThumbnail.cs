@@ -207,16 +207,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 RenderTexture.active = prevActive;
 
                 // ---- Silhouette coverage = fraction of pixels differing from the background ----
-                // Compare against bgColor.gamma, NOT bgColor: the project is Linear and the RT is sRGB, so the
-                // read-back stores the gamma-encoded clear color; comparing raw (linear) bgColor would flag the
-                // entire background as "drawn". Reported, not gated on a tuned middle threshold — only ~0 fails.
-                Color bgRef = bgColor.gamma;
-                Color[] pixels = tex.GetPixels();
+                // Reference = a SAMPLED corner pixel of the read-back texture, NOT a computed color. This is
+                // color-space-agnostic: it sidesteps the Linear-project/sRGB-RT gamma bookkeeping entirely
+                // (a computed bgColor.gamma read the whole background as "drawn" → silhouette 100%, and also
+                // defeated the empty-guard). The top-left corner is background for any portrait framing.
+                // Reported, not gated on a tuned middle threshold — only ~0 fails.
+                Color32 bgRef = tex.GetPixel(0, 0);
+                Color32[] pixels = tex.GetPixels32();
                 int drawn = 0;
-                const float thr = 0.06f;
+                const int thr = 16; // per-channel byte delta (~0.06 of 255)
                 for (int i = 0; i < pixels.Length; i++)
                 {
-                    Color p = pixels[i];
+                    Color32 p = pixels[i];
                     if (Math.Abs(p.r - bgRef.r) > thr || Math.Abs(p.g - bgRef.g) > thr || Math.Abs(p.b - bgRef.b) > thr)
                         drawn++;
                 }
