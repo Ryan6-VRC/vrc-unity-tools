@@ -142,7 +142,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string bakedName = null;      // captured after bake; the ZZZ subfolder is named this
             RenderTexture rt = null;
             Texture2D tex = null;
-            string result = null;
+            string result = null;      // non-null on the silhouette-fail / non-success paths only
+            string prefix = null;      // the OK verdict head, consumed after teardown once residualNote is known
+            string pngPath = null;     // the written PNG path, ditto
             string residualNote = "";
 
             // OUTER try — converts any exception from the pipeline (broken rig, null bake, non-humanoid clip)
@@ -301,22 +303,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 float fraction = pixels.Length > 0 ? (float)drawn / pixels.Length : 0f;
                 int pct = Mathf.RoundToInt(fraction * 100f);
 
-                string prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName + " framing="
+                prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName + " framing="
                     + framingToken + " silhouette=" + pct.ToString(CultureInfo.InvariantCulture) + "%";
 
                 if (fraction < MinSilhouetteFraction)
                 {
-                    // Fail loud, uniform (=> FAIL: like every other input error, ASCII) — do NOT write a blank PNG.
-                    result = Fail(label, "silhouette ~0% (nothing drew — isolation/bake failed?)");
+                    // Fail loud, uniform (=> FAIL:), keeping the REAL measured values — do NOT write a blank PNG.
+                    result = Fail(label, "silhouette " + pct.ToString(CultureInfo.InvariantCulture) + "% below "
+                        + MinSilhouetteFraction.ToString(CultureInfo.InvariantCulture) + " (pose=" + poseName
+                        + " framing=" + framingToken + ") — nothing drew");
                 }
                 else
                 {
                     string safeLabel = RunLogFormat.Sanitize(label);
-                    string path = System.IO.Path.Combine(Application.temporaryCachePath,
+                    pngPath = System.IO.Path.Combine(Application.temporaryCachePath,
                         "renderthumbnail_" + safeLabel + "_" + stamp + ".png");
-                    System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
-                    result = prefix + " => OK | png=" + path;
-                    Debug.Log(result);
+                    System.IO.File.WriteAllBytes(pngPath, tex.EncodeToPNG());
+                    // Verdict is built AFTER teardown (once residualNote is known) — leave `result` null to
+                    // signal the success path, so a cleanup-failed run never ships an "=> OK | png=" token.
                 }
             }
             finally
@@ -376,18 +380,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // The success path folds residualNote into the returned verdict; a thrown Render never reaches
-                // that return, so surface any residue here too — a failed host-project write must never be silent.
-                if (!string.IsNullOrEmpty(residualNote)) Debug.LogError("[RenderThumbnail]" + residualNote);
             }
 
-                return result + residualNote;
+                // Verdict assembled HERE, after teardown, so residualNote (a cleanup failure) is known before we
+                // decide whether a success run may ship its load-bearing "=> OK | png=" token.
+                if (result != null) return result + residualNote;   // silhouette-fail / non-success paths
+                if (string.IsNullOrEmpty(residualNote))
+                {
+                    string ok = prefix + " => OK | png=" + pngPath;
+                    Debug.Log(ok);
+                    return ok;
+                }
+                // Rendered fine, but teardown left residue — NO success-form png= token (a machine consumer must
+                // not read this as clean success); the residue is the headline, the path is informational only.
+                string degraded = prefix + " => CLEANUP-FAILED — png written to " + pngPath + residualNote;
+                Debug.LogError(degraded);
+                return degraded;
             }
             catch (Exception ex)
             {
-                // Inner finally has already run (teardown complete, residualNote populated) — surface the
-                // pipeline exception as a Fail verdict rather than letting it propagate out of the tool.
-                return Fail(label, ex.Message) + residualNote;
+                // Inner finally has already run (teardown complete, residualNote populated) — surface the pipeline
+                // exception as a Fail verdict, keeping the type + stack so a deep NDMF/MA pass failure is nameable.
+                Debug.LogException(ex);
+                return Fail(label, ex.GetType().Name + ": " + ex.Message) + residualNote;
             }
         }
 
