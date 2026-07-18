@@ -9,6 +9,8 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
+using nadena.dev.modular_avatar.core;
+using VRC.SDK3.Avatars.Components;
 
 // ReportShapeOverlap proof obligations. The pure core (Analyze) reads blendshape deltas off an in-memory
 // Mesh, so most tests build a Mesh with AddBlendShapeFrame and known per-vertex deltas and assert the
@@ -324,5 +326,132 @@ public class ReportShapeOverlapTests
         var go = new GameObject(name);
         go.transform.SetParent(parent.transform, false);
         go.AddComponent<SkinnedMeshRenderer>().sharedMesh = mesh;
+    }
+
+    // ── ShapeChanger reaction ingestion (Task 1) ───────────────────────────────────────────────────────
+    // AvatarObjectReference.Get resolves relative to an avatar root, so fixtures hang off a VRCAvatarDescriptor
+    // (registered as an avatar-root type by NDMF's VRChat platform at editor load). The body SMR and the
+    // ShapeChanger-bearing outfit both live under it; the reaction's Object points at the body's GameObject.
+
+    private GameObject NewAvatarRoot(string name)
+    {
+        var go = new GameObject(name);
+        go.transform.SetParent(_root.transform, false);
+        go.AddComponent<VRCAvatarDescriptor>();
+        return go;
+    }
+
+    private GameObject NewChildBody(GameObject parent, string name, Mesh mesh)
+    {
+        var go = new GameObject(name);
+        go.transform.SetParent(parent.transform, false);
+        go.AddComponent<SkinnedMeshRenderer>().sharedMesh = mesh;
+        return go;
+    }
+
+    private ModularAvatarShapeChanger AddShapeChanger(GameObject avatar, string name, GameObject target,
+        params (string shape, ShapeChangeType type)[] rows)
+    {
+        var outfit = new GameObject(name);
+        outfit.transform.SetParent(avatar.transform, false);
+        var sc = outfit.AddComponent<ModularAvatarShapeChanger>();
+        var list = new List<ChangedShape>();
+        foreach (var (shape, type) in rows)
+        {
+            var objRef = new AvatarObjectReference();
+            objRef.Set(target); // resolve relative to the avatar root the outfit hangs under
+            list.Add(new ChangedShape { Object = objRef, ShapeName = shape, ChangeType = type, Value = 100f });
+        }
+        sc.Shapes = list;
+        return sc;
+    }
+
+    // A Set-mode ShapeChanger writing the body mesh contributes its shape to the analyzed set even though its
+    // scene weight is 0 (the caller passes only the worn Stocking; Shrink_Hip is pulled in by the reaction).
+    [Test]
+    public void Report_shapeChangerSet_ingestedAtZeroWeight()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        AddSpan(m, "Stocking", 5, 14, 0.05f);
+        var body = NewChildBody(avatar, "Body", m); // weights default 0
+        AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+
+        var r = ReportShapeOverlap.Report(Path(body), new[] { "Stocking" }, Path(avatar));
+        StringAssert.Contains("=> OK", r);
+        StringAssert.Contains("shapes=2/2", r); // Stocking (passed) + Shrink_Hip (reaction, weight 0)
+        StringAssert.Contains("`Shrink_Hip`", ReadLog(r));
+    }
+
+    // A ShapeChanger whose write-target is a DIFFERENT mesh is ignored (the reaction to OtherBody must not be
+    // pulled into Body's analyzed set — even though Shrink_Hip exists on Body's mesh, so a mis-ingest would show).
+    [Test]
+    public void Report_shapeChangerDifferentMesh_ignored()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Stocking", 5, 14, 0.05f);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+
+        var m2 = MakeMesh(20);
+        AddSpan(m2, "Shrink_Hip", 0, 9, 0.05f);
+        var other = NewChildBody(avatar, "OtherBody", m2);
+
+        AddShapeChanger(avatar, "Outfit", other, ("Shrink_Hip", ShapeChangeType.Set));
+
+        var r = ReportShapeOverlap.Report(Path(body), new[] { "Stocking" }, Path(avatar));
+        StringAssert.Contains("shapes=1/1", r); // only the passed Stocking; the OtherBody reaction is excluded
+    }
+
+    // A Delete-mode row is ingested like any other declared shape (not dropped), and its ChangeType (Delete=0)
+    // is captured on the ingestion record for the Task-2 resolution table.
+    [Test]
+    public void BuildAnalyzeSet_deleteRow_ingestedWithTypeCaptured()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Del_Shape", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChanger(avatar, "Outfit", body, ("Del_Shape", ShapeChangeType.Delete));
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+
+        var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new string[0], avatar);
+        CollectionAssert.Contains(ing.Names, "Del_Shape");
+        Assert.AreEqual(0, ing.ReactionTypes["Del_Shape"], "Delete captured as ChangeType 0");
+    }
+
+    // A Set row captures ChangeType 1 (the mirror of the Delete case, over the same ingestion path).
+    [Test]
+    public void BuildAnalyzeSet_setRow_typeCapturedAsOne()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Set_Shape", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChanger(avatar, "Outfit", body, ("Set_Shape", ShapeChangeType.Set));
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+
+        var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new string[0], avatar);
+        Assert.AreEqual(1, ing.ReactionTypes["Set_Shape"], "Set captured as ChangeType 1");
+    }
+
+    // The {worn} tier: a shape at nonzero weight on the resolved SMR is ingested off the SMR (not the Mesh),
+    // while a zero-weight sibling is not. No outfit root ⇒ the MA path is untouched (MA-absent-safe).
+    [Test]
+    public void BuildAnalyzeSet_wornShape_ingestedFromNonzeroWeight()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "WornShape", 0, 9, 0.05f);
+        AddSpan(m, "Idle", 10, 14, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var smr = body.GetComponent<SkinnedMeshRenderer>();
+        smr.SetBlendShapeWeight(m.GetBlendShapeIndex("WornShape"), 100f);
+
+        var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new string[0], null);
+        CollectionAssert.Contains(ing.Names, "WornShape");
+        CollectionAssert.DoesNotContain(ing.Names, "Idle");
     }
 }

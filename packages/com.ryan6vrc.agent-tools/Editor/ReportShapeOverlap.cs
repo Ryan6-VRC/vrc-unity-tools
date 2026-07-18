@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
@@ -42,6 +44,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── Data the pure core returns (directly asserted by tests) ─────────────────────────────────────────
         internal struct Footprint { public string Name; public bool Missing; public int Touched; public float P95; public float Threshold; }
         internal struct Pair { public string A; public string B; public int Intersect; public int MinFootprint; public float Containment; }
+
+        // Minimal ingestion record fed to Analyze. Names is the ORDERED, deduped co-active union
+        // ({passed} ∪ {worn} ∪ {reaction-targeted}). ReactionTypes captures each reaction-driven shape's MA
+        // ShapeChangeType (Delete=0, Set=1) so Task 2 can render the resolution table — this task only ingests.
+        internal class Ingested
+        {
+            public List<string> Names = new List<string>();
+            public Dictionary<string, int> ReactionTypes = new Dictionary<string, int>();
+        }
         internal class Analysis
         {
             public int VertexCount;
@@ -58,23 +69,111 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// (<c>… => OK | log=&lt;path&gt;</c>); misuse (object/mesh/names bad) is a bare
         /// <c>[ReportShapeOverlap] FAIL: …</c> with no trailer. A shape name absent from the mesh is NOT a
         /// failure — it is reported as <c>MISSING</c> and the resolvable shapes are still analysed.</summary>
-        public static string Report(string meshObject, string[] shapeNames)
+        public static string Report(string meshObject, string[] shapeNames = null, string outfitRoot = null)
         {
             var go = Resolve(meshObject);
             if (go == null) return Fail("scene object '" + meshObject + "' not found in the active scene");
-            var mesh = ResolveMesh(go, out var why); // only returns a mesh with blendShapeCount > 0
-            if (mesh == null) return Fail(why);
-            if (shapeNames == null || shapeNames.Length == 0)
-                return Fail("no shape names — pass the candidate co-active set (the shapes you believe are on together)");
-            // A null/blank element would throw in GetBlendShapeIndex; reject it here rather than let a raw
+            var smr = ResolveMesh(go, out var why); // only returns an SMR whose mesh has blendShapeCount > 0
+            if (smr == null) return Fail(why);
+            var mesh = smr.sharedMesh;
+
+            var passed = shapeNames ?? Array.Empty<string>();
+            // A null/blank passed element would throw in GetBlendShapeIndex; reject it here rather than let a raw
             // exception escape the FAIL envelope. Promoting blank names to FAIL is the honest signal for a
             // malformed graph read (an unset shape row) — a benign MISSING would mask it.
-            if (shapeNames.Any(string.IsNullOrWhiteSpace))
+            if (passed.Any(string.IsNullOrWhiteSpace))
                 return Fail("shape names must be non-empty — a blank entry means a malformed candidate set");
 
-            var analysis = Analyze(mesh, shapeNames);
+            GameObject outfitGO = null;
+            if (outfitRoot != null)
+            {
+                outfitGO = Resolve(outfitRoot);
+                if (outfitGO == null) return Fail("outfit root '" + outfitRoot + "' not found in the active scene");
+            }
+
+            // The set fed to Analyze is the co-active union: caller-passed ∪ scene-worn ∪ MA ShapeChanger
+            // reactions that write THIS mesh (weight 0 at edit time, so the caller can't see them).
+            var ingested = BuildAnalyzeSet(smr, passed, outfitGO);
+            if (ingested.Names.Count == 0)
+                return Fail("no shape names — pass the candidate co-active set (the shapes you believe are on together)");
+
+            var analysis = Analyze(mesh, ingested.Names);
             return Emit(go, mesh, analysis);
         }
+
+        // ── Ingestion: assemble the co-active shape-name union fed to Analyze ────────────────────────────────
+
+        /// <summary>Union of the caller-passed set, the shapes currently at nonzero weight on
+        /// <paramref name="smr"/> (read off the SMR, not the Mesh), and — when <paramref name="outfitRoot"/> is
+        /// non-null — the MA <c>ShapeChanger</c> rows under it that write <paramref name="smr"/>'s GameObject.
+        /// Order-preserving, deduped. Reaction rows also record their <c>ShapeChangeType</c> for Task 2.</summary>
+        internal static Ingested BuildAnalyzeSet(SkinnedMeshRenderer smr, IEnumerable<string> passed, GameObject outfitRoot)
+        {
+            var result = new Ingested();
+            var seen = new HashSet<string>();
+            void Add(string n) { if (!string.IsNullOrEmpty(n) && seen.Add(n)) result.Names.Add(n); }
+
+            if (passed != null) foreach (var n in passed) Add(n);
+
+            // Worn: shapes at nonzero weight on the RESOLVED SMR (not a re-fetched GetComponent).
+            var mesh = smr.sharedMesh;
+            if (mesh != null)
+                for (int i = 0; i < mesh.blendShapeCount; i++)
+                    if (Mathf.Abs(smr.GetBlendShapeWeight(i)) > 0f)
+                        Add(mesh.GetBlendShapeName(i));
+
+            if (outfitRoot != null)
+                IngestShapeChangers(outfitRoot, smr.gameObject, result, Add);
+
+            return result;
+        }
+
+        // Reflectively read MA ModularAvatarShapeChanger rows under `outfitRoot` and ingest the ShapeName of every
+        // row whose write-target resolves to `bodyGO` (the resolved body SMR's GameObject). ChangeType is captured
+        // (Delete=0, Set=1); a Delete row is ingested like any other declared shape, not dropped. This asmdef has
+        // no MA assembly reference, so everything is by-name reflection (mirrors CheckSeam.FindType). MA absent or
+        // any member drift ⇒ yields nothing and never throws — reaction ingestion is best-effort context.
+        private static void IngestShapeChangers(GameObject outfitRoot, GameObject bodyGO, Ingested result, Action<string> add)
+        {
+            try
+            {
+                var scType = FindType("nadena.dev.modular_avatar.core.ModularAvatarShapeChanger");
+                if (scType == null) return; // MA not installed ⇒ no reactions
+                var shapesProp = scType.GetProperty("Shapes", BindingFlags.Public | BindingFlags.Instance);
+                if (shapesProp == null) return;
+
+                foreach (var comp in outfitRoot.GetComponentsInChildren(scType, true))
+                {
+                    if (comp == null) continue;
+                    var shapes = shapesProp.GetValue(comp) as System.Collections.IEnumerable;
+                    if (shapes == null) continue;
+                    foreach (var row in shapes)
+                    {
+                        if (row == null) continue;
+                        var rt = row.GetType();
+                        var objRef = rt.GetField("Object")?.GetValue(row);
+                        var shapeName = rt.GetField("ShapeName")?.GetValue(row) as string;
+                        var ctField = rt.GetField("ChangeType");
+                        if (objRef == null || string.IsNullOrEmpty(shapeName) || ctField == null) continue;
+                        int changeType = Convert.ToInt32(ctField.GetValue(row), CultureInfo.InvariantCulture);
+
+                        // AvatarObjectReference.Get(Component) resolves the write target relative to the component.
+                        var getMethod = objRef.GetType().GetMethod("Get", new[] { typeof(Component) });
+                        var target = getMethod?.Invoke(objRef, new object[] { comp }) as GameObject;
+                        if (target != bodyGO) continue; // only rows that write the resolved body mesh
+
+                        add(shapeName);
+                        result.ReactionTypes[shapeName] = changeType; // captured for the Task-2 resolution table
+                    }
+                }
+            }
+            catch { /* MA member drift / a row that won't resolve ⇒ ingest nothing, never throw */ }
+        }
+
+        internal static Type FindType(string fullName) =>
+            AppDomain.CurrentDomain.GetAssemblies()
+                .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
+                .FirstOrDefault(t => t.FullName == fullName);
 
         // ── Pure core ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -187,20 +286,20 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static string Mm(float meters) => (meters * 1000f).ToString("F3", CultureInfo.InvariantCulture);
 
-        // Resolve the mesh to inspect from the named scene object: the SkinnedMeshRenderer carrying blendshapes.
-        // Prefer the SMR on the object itself; else a unique blendshape-bearing SMR among its descendants. Two or
-        // more is ambiguous — REFUSE and name them, so the agent points at the specific renderer (speak the
-        // substrate: it is a scene object it already holds during de-conflict).
-        private static Mesh ResolveMesh(GameObject go, out string why)
+        // Resolve the SkinnedMeshRenderer carrying blendshapes from the named scene object (its mesh is .sharedMesh;
+        // weight reads come off the SMR itself). Prefer the SMR on the object; else a unique blendshape-bearing SMR
+        // among its descendants. Two or more is ambiguous — REFUSE and name them, so the agent points at the specific
+        // renderer (speak the substrate: it is a scene object it already holds during de-conflict).
+        private static SkinnedMeshRenderer ResolveMesh(GameObject go, out string why)
         {
             why = null;
             var own = go.GetComponent<SkinnedMeshRenderer>();
-            if (own != null && own.sharedMesh != null && own.sharedMesh.blendShapeCount > 0) return own.sharedMesh;
+            if (own != null && own.sharedMesh != null && own.sharedMesh.blendShapeCount > 0) return own;
 
             var withShapes = go.GetComponentsInChildren<SkinnedMeshRenderer>(true)
                 .Where(s => s.sharedMesh != null && s.sharedMesh.blendShapeCount > 0)
                 .ToList();
-            if (withShapes.Count == 1) return withShapes[0].sharedMesh;
+            if (withShapes.Count == 1) return withShapes[0];
             if (withShapes.Count == 0) { why = "no SkinnedMeshRenderer with blendshapes on or under '" + go.name + "'"; return null; }
             why = "ambiguous: " + withShapes.Count + " blendshape meshes under '" + go.name + "' (" +
                   string.Join(", ", withShapes.Select(s => s.name)) + ") — point at the specific renderer";
