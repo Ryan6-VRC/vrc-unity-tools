@@ -46,6 +46,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private const float RimIntensity = 1.0f;
         private static readonly Vector3 RimEuler = new Vector3(30f, 340f, 0f);   // rim : behind + above
 
+        // Silhouette measurement: a pixel counts as "drawn" when it differs from the sampled corner
+        // background by more than this per-channel byte delta (~0.06 of 255); a run whose drawn fraction
+        // is below MinSilhouetteFraction fails loud (nothing rendered).
+        private const int SilhouetteChannelThreshold = 16;
+        private const float MinSilhouetteFraction = 0.005f;
+
+        // Cached once — EditorSceneManager.ClearSceneDirtiness is internal, reflected to restore a scene
+        // that was clean at snapshot. Null means the API drifted; teardown surfaces that (fail-loud) rather
+        // than silently leaving a scene dirty.
+        private static readonly System.Reflection.MethodInfo ClearSceneDirtinessMethod =
+            typeof(UnityEditor.SceneManagement.EditorSceneManager).GetMethod(
+                "ClearSceneDirtiness",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+
         /// <summary>
         /// Render a 1200×900 portrait PNG of the baked <paramref name="target"/> avatar and return a
         /// one-line verdict whose <c>png=</c> trailer is the written path. <paramref name="whatIf"/>
@@ -129,13 +143,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             try
             {
                 // ---- Step 2: unique private clone -> bake (the non-destructiveness keystone) ----
-                // The stamped name makes the ZZZ_GeneratedAssets subfolder provably exclusive to this run,
-                // so NDMF's pre-existing-folder wholesale-delete can never touch a user's kept bake.
-                string stamp = DateTime.Now.Ticks.ToString(CultureInfo.InvariantCulture);
+                // The GUID suffix makes the ZZZ_GeneratedAssets subfolder provably exclusive to this run
+                // (regardless of timer resolution), so NDMF's pre-existing-folder wholesale-delete can never
+                // touch a user's kept bake.
+                string stamp = Guid.NewGuid().ToString("N").Substring(0, 8);
                 var mine = UnityEngine.Object.Instantiate(root);
-                mine.name = root.name + "__rt_" + stamp;
+                string mineName = root.name + "__rt_" + stamp;
+                mine.name = mineName;
                 try { baked = nadena.dev.ndmf.AvatarProcessor.ManualProcessAvatar(mine); }
                 finally { if (mine != null) UnityEngine.Object.DestroyImmediate(mine); }
+                if (baked == null)
+                    throw new InvalidOperationException("ManualProcessAvatar returned null for '" + mineName + "'");
                 bakedName = baked.name; // "<name>__rt_<stamp>(Clone)"
 
                 // ---- Step 3: preview scene ----
@@ -183,7 +201,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 cam.backgroundColor = bgColor;
                 cam.nearClipPlane = 0.01f;
                 cam.farClipPlane = 100f;
-                cam.cullingMask = unchecked((int)0xFFFFFFDF);
+                cam.cullingMask = ~(1 << 5); // exclude UI layer (5) — world-space canvases would render into the thumbnail
                 cam.allowHDR = false;                 // Linear project — the sRGB RT below carries the gamma
                 // FOV: DO NOT SET — leave Unity's default 60°; PositionPortraitCamera is calibrated to it.
                 descriptorBaked.PositionPortraitCamera(cam.transform);
@@ -202,9 +220,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 tex = new Texture2D(W, H, TextureFormat.RGBA32, false);
                 var prevActive = RenderTexture.active;
                 RenderTexture.active = rt;
-                tex.ReadPixels(new Rect(0, 0, W, H), 0, 0);
-                tex.Apply(false);
-                RenderTexture.active = prevActive;
+                try
+                {
+                    tex.ReadPixels(new Rect(0, 0, W, H), 0, 0);
+                    tex.Apply(false);
+                }
+                finally
+                {
+                    // Always release the active RT — otherwise a throw here leaves rt active when the outer
+                    // finally DestroyImmediates it.
+                    RenderTexture.active = prevActive;
+                }
 
                 // ---- Silhouette coverage = fraction of pixels differing from the background ----
                 // Reference = a SAMPLED corner pixel of the read-back texture, NOT a computed color. This is
@@ -215,11 +241,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Color32 bgRef = tex.GetPixel(0, 0);
                 Color32[] pixels = tex.GetPixels32();
                 int drawn = 0;
-                const int thr = 16; // per-channel byte delta (~0.06 of 255)
                 for (int i = 0; i < pixels.Length; i++)
                 {
                     Color32 p = pixels[i];
-                    if (Math.Abs(p.r - bgRef.r) > thr || Math.Abs(p.g - bgRef.g) > thr || Math.Abs(p.b - bgRef.b) > thr)
+                    if (Math.Abs(p.r - bgRef.r) > SilhouetteChannelThreshold
+                        || Math.Abs(p.g - bgRef.g) > SilhouetteChannelThreshold
+                        || Math.Abs(p.b - bgRef.b) > SilhouetteChannelThreshold)
                         drawn++;
                 }
                 float fraction = pixels.Length > 0 ? (float)drawn / pixels.Length : 0f;
@@ -228,7 +255,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string prefix = "[RenderThumbnail] Render " + label + " baked pose=floor framing="
                     + framingToken + " silhouette=" + pct.ToString(CultureInfo.InvariantCulture) + "%";
 
-                if (fraction < 0.005f)
+                if (fraction < MinSilhouetteFraction)
                 {
                     // Fail loud — do NOT write a blank PNG.
                     result = prefix + " => ERROR silhouette≈0% (nothing drew — isolation/bake failed?)";
@@ -256,8 +283,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (preview.IsValid())
                     UnityEditor.SceneManagement.EditorSceneManager.ClosePreviewScene(preview); // destroys baked + lights + camera
 
-                // Orphan sweep: any root new in the target's scene since the step-0 snapshot (catches a
-                // reference-less clone stranded by a bake that threw after instantiating it, before returning).
+                // Orphan sweep: any root new in the target's scene since the step-0 snapshot. Our own `mine`
+                // is already destroyed by the inner finally and `baked` by ClosePreviewScene — this is the
+                // backstop for a stray NDMF intermediate, or a `baked` stranded by a bake that threw after
+                // instantiating the clone into the live scene but before we could move it to the preview.
                 if (targetScene.IsValid())
                 {
                     foreach (var go in targetScene.GetRootGameObjects())
@@ -270,14 +299,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 // Restore scene cleanliness for scenes that were clean at snapshot but are now dirty (the bake
                 // instantiates the clone into the live scene, dirtying it; the orphan sweep dirties it too).
-                var clearDirty = typeof(UnityEditor.SceneManagement.EditorSceneManager)
-                    .GetMethod("ClearSceneDirtiness",
-                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
                 foreach (var kv in sceneDirtyAtStart)
                 {
                     Scene sc = kv.Key;
-                    if (!kv.Value && sc.IsValid() && sc.isDirty)
-                        clearDirty?.Invoke(null, new object[] { sc });
+                    if (kv.Value || !sc.IsValid() || !sc.isDirty) continue;
+                    if (ClearSceneDirtinessMethod != null)
+                        ClearSceneDirtinessMethod.Invoke(null, new object[] { sc });
+                    else
+                        // API drifted — surface it rather than silently leaving a scene dirty (rule 7).
+                        residualNote += " note=scene-dirty-uncleared: EditorSceneManager.ClearSceneDirtiness internals drifted";
                 }
 
                 // Delete this run's unique ZZZ subfolder, then the parent whenever it is now empty (a pre-existing
@@ -287,7 +317,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     string sub = "Assets/ZZZ_GeneratedAssets/" + bakedName;
                     if (AssetDatabase.IsValidFolder(sub)) AssetDatabase.DeleteAsset(sub);
                     if (AssetDatabase.IsValidFolder(sub))
-                        residualNote = " note=cleanup-residual: " + sub + " not removed"; // surfaced, not swallowed
+                        residualNote += " note=cleanup-residual: " + sub + " not removed"; // surfaced, not swallowed
 
                     if (AssetDatabase.IsValidFolder("Assets/ZZZ_GeneratedAssets"))
                     {
