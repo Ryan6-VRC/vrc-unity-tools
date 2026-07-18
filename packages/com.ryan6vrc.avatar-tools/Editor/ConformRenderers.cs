@@ -245,6 +245,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>
         /// Lowercases an optional {ourName → sourceName} override map for case-insensitive matching.
         /// Returns null when no usable entries were supplied.
+        ///
+        /// <para>Lowercasing can collide: keys differing only in case (<c>Body</c> / <c>body</c>) fold to
+        /// one entry, last-write-wins, silently. That is NOT symmetric with the transplant kit, where
+        /// <see cref="IndexedPath.ValidateRenameMap"/> rejects its analogous collision as a loud FAIL —
+        /// there a collision cannot address a unique dst sibling, whereas here it only means the caller
+        /// wrote two spellings of one renderer name. Harmless in practice (renderer names within a
+        /// hierarchy don't differ by case alone), but noted because case-insensitivity is a documented
+        /// contract of this parameter, so its edge deserves to be written down rather than discovered.</para>
         /// </summary>
         private static Dictionary<string, string> NormalizeRenameMap(IDictionary<string, string> ownedToSource)
         {
