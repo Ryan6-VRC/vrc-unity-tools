@@ -25,34 +25,60 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// enumerates the glob, so the advertised vocabulary cannot drift from what actually ships.</summary>
         internal const string PosesFolder = "Packages/com.ryan6vrc.avatar-tools/Editor/Poses";
 
-        // Dolly-back distance (meters, added along camera local-forward beyond the SDK-calibrated
-        // PositionPortraitCamera transform) per framing. Cosmetic taste defaults — bust is the SDK's own
-        // distance (no dolly); half/full back off for more body. Tune after seeing real output.
-        private const float BustFramingDistance = 0f;
-        private const float HalfFramingDistance = 0.45f;
-        private const float FullFramingDistance = 1.1f;
+        // Framing = the SUBJECT HEIGHT the frame covers, in meters at ReferenceViewHeight; the camera
+        // distance is solved from it and the FOV, so the two are independent knobs. AimDrop lowers the aim
+        // below the view point as a fraction of that span: the anchor (the eyes) sits near the TOP of the
+        // subject, not its center, so one coefficient cannot serve three spans.
+        //
+        // Spans are operator-judged taste, nudged ~7% wider than the first pass, which cropped the crown
+        // tightly enough to read as an accident. Some crop is DESIRABLE — a thumbnail is displayed small,
+        // and a tight one reads as deliberate — so these do not chase full crown clearance, which on tall
+        // anime hair would cost the bust crop entirely. See docs/2026-07-18-render-thumbnail-camera.md.
+        private const float ReferenceViewHeight = 1.6f;
+        private const float BustSpan = 0.48f, BustAimDrop = 0.12f;
+        private const float HalfSpan = 0.96f, HalfAimDrop = 0.12f;
+        private const float FullSpan = 2.00f, FullAimDrop = 0.37f;
+
+        // Camera angles, degrees. The camera tracks the posed head ONE-FOR-ONE (no follow coefficient): at
+        // any partial coefficient the face-to-lens angle becomes a function of the pose, sweeping frontal to
+        // looking-away across one library; at 1:1 it is exactly DefaultOblique everywhere, which is the
+        // point. DefaultOblique then sets the shot's obliquity — measured, the bundled poses twist the torso
+        // <8 deg, so obliquity has to come from the camera. ObliqueDeadband resolves the near-frontal poses
+        // (9 of 23 turn the head <5 deg) to one consistent side instead of letting retarget noise pick.
+        private const float DefaultOblique = 13f;
+        private const float ObliqueDeadband = 5f;
+        private const float PitchFollow = 0.5f;
+        private const float MaxTrackYaw = 60f;    // guards a user clip, never reached by the bundled poses
+        private const float MaxCamPitch = 20f;    // ditto: PitchFollow peaks near 15 deg on this library
+        private const float LateralOffset = 0.06f; // fraction of span, looking-room in the landscape frame
+        private const float MinFov = 10f, MaxFov = 90f;
 
         // Solid background when no bg override is passed (a preview scene has no skybox; SolidColor clear
         // is the deterministic backdrop). A named, neutral mid-dark gray.
         private static readonly Color DefaultBackground = new Color(0.23f, 0.23f, 0.24f);
+        private const int RampHeight = 256;       // gradient ramp texture, 1 x N, stretched by the blit
 
         // 3-point directional rig — cosmetic TASTE DEFAULTS, named + here so the operator tunes them after
-        // seeing real output. For a directional light only rotation matters. The avatar faces +Z and the
-        // portrait camera sits on the +Z side looking -Z, so (from the camera's view) screen-left = +X world
-        // and screen-right = -X world; each euler below aims the light's forward (photon direction) onto the
-        // avatar accordingly. Shadows off in v1 for a clean, artifact-free portrait.
-        private const float KeyIntensity = 1.2f;
+        // seeing real output. For a directional light only rotation matters. The rig is CAMERA-relative:
+        // the eulers below are authored for a camera on the avatar's +Z side, and the holder is yawed to
+        // match the solved camera, so orbiting never lights a shot from behind. From that camera, screen-left
+        // = +X world and screen-right = -X world. Shadows off for a clean, artifact-free portrait.
+        // Total intensity is ~1.2: lilToon/Poiyomi are calibrated so a single directional near 1.0 is correct
+        // exposure, and allowHDR is off, so the old 2.7 total clipped faces to flat white.
+        private const float KeyIntensity = 0.70f;
         private static readonly Vector3 KeyEuler = new Vector3(40f, 220f, 0f);   // key : front-upper-left
-        private const float FillIntensity = 0.5f;
+        private const float FillIntensity = 0.30f;
         private static readonly Vector3 FillEuler = new Vector3(15f, 140f, 0f);  // fill: front-right, softer
-        private const float RimIntensity = 1.0f;
+        private const float RimIntensity = 0.20f;
         private static readonly Vector3 RimEuler = new Vector3(30f, 340f, 0f);   // rim : behind + above
 
-        // Silhouette measurement: a pixel counts as "drawn" when it differs from the sampled corner
-        // background by more than this per-channel byte delta (~0.06 of 255); a run whose drawn fraction
-        // is below MinSilhouetteFraction fails loud (nothing rendered).
+        // Empty-frame guard: a pixel counts as "drawn" when it differs from ITS OWN ROW's column-0 pixel by
+        // more than this per-channel byte delta (~0.06 of 255). Sampling the rendered image per row — rather
+        // than computing the expected background — is what keeps this color-space-agnostic and correct under
+        // a gradient; a computed reference in a Linear project writing an sRGB target reads the whole
+        // background as "drawn" and defeats the guard. Genuinely boolean: the fail condition is ZERO drawn
+        // pixels, so there is no tuned fraction here to drift.
         private const int SilhouetteChannelThreshold = 16;
-        private const float MinSilhouetteFraction = 0.005f;
 
         // Cached once — EditorSceneManager.ClearSceneDirtiness is internal, reflected to restore a scene
         // that was clean at snapshot. Null means the API drifted; teardown surfaces that (fail-loud) rather
@@ -75,9 +101,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// on the baked FX controller (a gesture slot such as <c>Open</c>/<c>Peace</c>), or a clip asset
         /// path/GUID, whose blendShape curves are composited with <paramref name="pose"/>. Resolved after
         /// the bake — read the controller with ReportController to see what a given avatar offers.</param>
-        /// <param name="framing">"bust" | "half" | "full" — dolly distance over the SDK's
-        /// PositionPortraitCamera transform.</param>
-        /// <param name="bg">null =&gt; default backdrop; "#RRGGBB" =&gt; solid color.</param>
+        /// <param name="framing">"bust" | "half" | "full" — the subject height the frame covers. The
+        /// camera distance is solved from it and <paramref name="fov"/>, so the two are independent.</param>
+        /// <param name="bg">null =&gt; default backdrop; "#RRGGBB" =&gt; solid; "#TOP:#BOTTOM" =&gt;
+        /// vertical two-stop gradient.</param>
+        /// <param name="fov">vertical field of view in degrees (10–90). Changes the LOOK, not the framing:
+        /// narrower backs the camera off and flattens perspective.</param>
+        /// <param name="yaw">null =&gt; an automatic flattering oblique, signed to the side the pose turns
+        /// its head. A number is an OFFSET added to head-tracking, not an absolute heading — so
+        /// <c>yaw: 0</c> means "track the head with no oblique", not "frontal". Positive orbits the camera
+        /// toward world +X (screen-left).</param>
         /// <param name="whatIf">preflight only: resolve target/descriptor/pose, report, bake nothing.
         /// <paramref name="expression"/> is echoed unresolved — it needs the baked controller.</param>
         public static string Render(
@@ -86,6 +119,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string expression = null,
             string framing = "bust",
             string bg = null,
+            float fov = 30f,
+            float? yaw = null,
             bool whatIf = false)
         {
             var root = Resolve(target);
@@ -97,16 +132,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (descriptor == null)
                 return Fail(label, "no VRC_AvatarDescriptor on '" + label + "'");
 
-            // Validate framing + bg up front so BOTH whatIf and the render path reject a bad framing/bg before
-            // proceeding — a whatIf WOULD-RENDER must never precede an immediate render FAIL on the same inputs.
-            float dolly;
-            try { dolly = FramingDistance(framing); }
+            // Validate framing + bg + camera up front so BOTH whatIf and the render path reject bad inputs
+            // before proceeding — a whatIf WOULD-RENDER must never precede an immediate render FAIL on the
+            // same inputs.
+            float span, aimDrop;
+            try { FramingGeometry(framing, out span, out aimDrop); }
             catch (ArgumentException ex) { return Fail(label, ex.Message); }
             string framingToken = (framing ?? "bust").Trim().ToLowerInvariant();
 
-            Color bgColor = DefaultBackground;
-            if (bg != null && !TryParseBg(bg, out bgColor))
-                return Fail(label, "unparseable bg '" + bg + "' — expected #RRGGBB or #RRGGBBAA");
+            Color bgTop = DefaultBackground, bgBottom = DefaultBackground;
+            if (bg != null && !TryParseBg(bg, out bgTop, out bgBottom))
+                return Fail(label, "unparseable bg '" + bg + "' — expected #RRGGBB, #RRGGBBAA, or #TOP:#BOTTOM");
+
+            // Bounded because the distance solve goes as 1/tan(fov/2): at 90 a bust frame puts the camera
+            // 0.23 m from the view point, inside the hair mesh, which renders as hair interior and would
+            // sail past the empty-frame guard.
+            if (!(fov >= MinFov && fov <= MaxFov))
+                return Fail(label, "fov " + fov.ToString(CultureInfo.InvariantCulture) + " out of range — expected "
+                    + MinFov.ToString(CultureInfo.InvariantCulture) + "–" + MaxFov.ToString(CultureInfo.InvariantCulture));
+            if (yaw.HasValue && (float.IsNaN(yaw.Value) || float.IsInfinity(yaw.Value)))
+                return Fail(label, "yaw must be a finite number of degrees, or null for the automatic oblique");
+
+            string camToken = "fov=" + fov.ToString("0.#", CultureInfo.InvariantCulture)
+                + " yaw=" + (yaw.HasValue ? yaw.Value.ToString("0.#", CultureInfo.InvariantCulture) : "auto");
 
             if (whatIf)
             {
@@ -118,8 +166,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // definition does not have. Echoed so the caller can see what will be attempted.
                 string exprToken = string.IsNullOrEmpty(expression) ? "none" : expression + " (at bake)";
                 string ok = string.Format(CultureInfo.InvariantCulture,
-                    "[RenderThumbnail] Render {0} whatIf pose={1} expression={2} descriptor=OK => WOULD-RENDER (no bake)",
-                    label, poseToken, exprToken);
+                    "[RenderThumbnail] Render {0} whatIf pose={1} expression={2} framing={3} {4} descriptor=OK => WOULD-RENDER (no bake)",
+                    label, poseToken, exprToken, framingToken, camToken);
                 Debug.Log(ok);
                 return ok;
             }
@@ -157,6 +205,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             bool bakePreprocessed = false;
             RenderTexture rt = null;
             Texture2D tex = null;
+            Texture2D ramp = null;                                  // gradient backdrop source, if any
+            UnityEngine.Rendering.CommandBuffer bgCmd = null;       // draws it inside the camera's pass
             string result = null;      // non-null on the silhouette-fail / non-success paths only
             string prefix = null;      // the OK verdict head, consumed after teardown once residualNote is known
             string pngPath = null;     // the written PNG path, ditto
@@ -233,19 +283,37 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 MakeLight("__rt_fill", FillIntensity, FillEuler);
                 MakeLight("__rt_rim", RimIntensity, RimEuler);
 
-                // ---- Step 5: pose ----
-                // The floor path (poseClip == null) samples nothing — the baked clone renders at rest,
-                // byte-for-byte the Task-1 path. A resolved pose is SAMPLED AND HELD here: StopAnimationMode
-                // is deliberately NOT called before cam.Render() below — EndSampling leaves the pose applied,
-                // it does not revert it. Reverting happens once, defensively, in the outer teardown `finally`
-                // (below) after capture, so a throw mid-sampling still can't leak animation-mode state.
-                // How much the pose moves the head RELATIVE TO THE ROOT — the part PositionPortraitCamera does
-                // NOT handle. Sampling also moves the avatar root to origin (undoing NDMF's +2 Z shift), but the
-                // SDK's framing runs AFTER sampling so it already accounts for the root move; a world-space head
-                // delta would double-count it and fling the camera past the avatar. Root-local isolates the
-                // head's own drop. Zero on the floor path, so that branch stays byte-for-byte unchanged; Step 6
-                // adds it to follow the head.
-                Vector3 poseHeadDelta = Vector3.zero;
+                // ---- Step 5: view point, then pose ----
+                // The view point (the creator-authored viewball) is the camera's target. It is computed on
+                // EVERY path — the floor path is the default and must keep rendering on a non-humanoid rig,
+                // which has no head bone — and it needs no Animator: ViewPosition is root-local.
+                var descriptorBaked = baked.GetComponent<VRC.SDKBase.VRC_AvatarDescriptor>();
+                if (descriptorBaked == null)
+                    throw new InvalidOperationException("baked clone has no VRC_AvatarDescriptor — bake dropped it");
+
+                // Pose-INDEPENDENT subject scale. Deliberately not the posed view point's world height: that
+                // drops when the avatar sits, which would shrink the span on exactly the seated poses and
+                // destroy framing comparability across the library. lossyScale because span feeds a world
+                // metre distance and VRChat avatars are routinely scaled at the root.
+                float viewHeight = descriptorBaked.ViewPosition.y * baked.transform.lossyScale.y;
+                Vector3 viewpoint = baked.transform.TransformPoint(descriptorBaked.ViewPosition);
+                // Degenerate viewball or a zero-scaled parent collapses span AND distance to 0: the camera
+                // lands exactly on `aim`, LookRotation gets a zero vector, and the run would surface as
+                // "nothing drew" — naming the wrong cause. A misplaced viewball is the operator's to see; an
+                // unusable one is ours to name.
+                if (!(viewHeight > 0.01f))
+                    throw new InvalidOperationException(
+                        "unusable view height " + viewHeight.ToString("0.###", CultureInfo.InvariantCulture)
+                        + " m on '" + label + "' — ViewPosition.y="
+                        + descriptorBaked.ViewPosition.y.ToString("0.###", CultureInfo.InvariantCulture)
+                        + " times root scale " + baked.transform.lossyScale.y.ToString("0.###", CultureInfo.InvariantCulture)
+                        + "; the camera solve has no subject scale to work from");
+
+                // A resolved pose is SAMPLED AND HELD here: StopAnimationMode is deliberately NOT called
+                // before cam.Render() below — EndSampling leaves the pose applied, it does not revert it.
+                // Reverting happens once, defensively, in the outer teardown `finally` (below) after capture,
+                // so a throw mid-sampling still can't leak animation-mode state.
+                float headYaw = 0f, headPitch = 0f;   // both exactly zero on the floor path
                 if (poseClip != null)
                 {
                     var animator = baked.GetComponent<UnityEngine.Animator>();
@@ -257,17 +325,46 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         // yet the verdict would still claim pose=<name>. Fail loud instead (outer catch -> Fail).
                         throw new InvalidOperationException(
                             "baked avatar '" + label + "' is not humanoid — cannot sample pose '" + poseName + "'");
-                    var headBone = animator.GetBoneTransform(HumanBodyBones.Head);
-                    Vector3 restHead = headBone != null ? headBone.position : baked.transform.position;
-                    Vector3 restRoot = baked.transform.position;
+
+                    // Rebind FIRST, then read rest: the sampled clip is applied relative to the BIND pose, so
+                    // that is what "rest" has to mean. Anchoring to the pre-Rebind scene pose instead would
+                    // bake a per-avatar constant into the view-point offset and into every angle below.
                     animator.Rebind();
+                    var headBone = animator.GetBoneTransform(HumanBodyBones.Head);
+                    if (headBone == null)
+                        throw new InvalidOperationException(
+                            "baked avatar '" + label + "' has no Head bone — cannot aim a posed portrait");
+
+                    // Re-parent the view point onto the head so it follows the head's TRANSLATION AND
+                    // ROTATION through the pose. Eye bones are not used: many rigs lack them, and a bake can
+                    // rename them, whereas Head is mandatory on the humanoid rig asserted above.
+                    Vector3 viewInHead = headBone.InverseTransformPoint(viewpoint);
+                    Quaternion restHeadLocal = Quaternion.Inverse(baked.transform.rotation) * headBone.rotation;
+
                     AnimationMode.StartAnimationMode();
                     AnimationMode.BeginSampling();
                     try { AnimationMode.SampleAnimationClip(baked, poseClip, poseClip.length); }
                     finally { AnimationMode.EndSampling(); }
-                    Vector3 posedHead = headBone != null ? headBone.position : baked.transform.position;
-                    Vector3 posedRoot = baked.transform.position;
-                    poseHeadDelta = (posedHead - posedRoot) - (restHead - restRoot);
+
+                    viewpoint = headBone.TransformPoint(viewInHead);
+
+                    // Head facing as a DELTA FROM BIND, in the root's basis. Unity does not normalize humanoid
+                    // bone axes, so anything derived from where the bone's own +Z points is rig-dependent.
+                    //
+                    // Take the DELTA ROTATION FIRST, then extract once. Extracting an angle from each forward
+                    // vector and subtracting is NOT equivalent: it cancels a constant offset but not the axis
+                    // dependence, and it fails hardest on the most common convention. Measured, for a 30 deg
+                    // yaw + 20 deg chin-raise applied to a bone whose +Z runs UP the neck (Blender authors
+                    // orient a bone along its length, which is most of the VRChat population): subtract-form
+                    // yields yaw 0.0 — tracking silently dead, every shot getting the bare oblique — and
+                    // pitch -20 instead of +20, which would shoot a chin-up pose from BELOW. The delta form
+                    // returns 30/+20 for every rest orientation, including arbitrary skew.
+                    //
+                    // Still extracted off the forward VECTOR rather than eulers: no wrap or gimbal question.
+                    Quaternion posedHeadLocal = Quaternion.Inverse(baked.transform.rotation) * headBone.rotation;
+                    Vector3 deltaFwd = (posedHeadLocal * Quaternion.Inverse(restHeadLocal)) * Vector3.forward;
+                    headYaw = YawOf(deltaFwd);      // Atan2 already yields [-180,180]
+                    headPitch = PitchOf(deltaFwd);
                 }
 
                 // ---- Step 5b: expression, applied AFTER the pose and deliberately NOT through the
@@ -290,25 +387,82 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
 
                 // ---- Step 6: camera + off-screen sRGB capture (§Capture, source-verified) ----
-                var descriptorBaked = baked.GetComponent<VRC.SDKBase.VRC_AvatarDescriptor>();
-                if (descriptorBaked == null)
-                    throw new InvalidOperationException("baked clone has no VRC_AvatarDescriptor — bake dropped it");
-
                 var camGO = EditorUtility.CreateGameObjectWithHideFlags("__rt_cam", HideFlags.DontSave, typeof(Camera));
                 SceneManager.MoveGameObjectToScene(camGO, preview);
                 var cam = camGO.GetComponent<Camera>();
                 cam.enabled = false;
                 cam.scene = preview;
                 cam.clearFlags = CameraClearFlags.SolidColor;
-                cam.backgroundColor = bgColor;
+                cam.backgroundColor = bgTop;
                 cam.nearClipPlane = 0.01f;
                 cam.farClipPlane = 100f;
                 cam.cullingMask = ~(1 << 5); // exclude UI layer (5) — world-space canvases would render into the thumbnail
                 cam.allowHDR = false;                 // Linear project — the sRGB RT below carries the gamma
-                // FOV: DO NOT SET — leave Unity's default 60°; PositionPortraitCamera is calibrated to it.
-                descriptorBaked.PositionPortraitCamera(cam.transform);
-                cam.transform.position -= cam.transform.forward * dolly;   // framing dolly (bust = 0)
-                cam.transform.position += poseHeadDelta; // follow the head when a pose reset the body position (floor => zero)
+                cam.fieldOfView = fov;
+                // Forward explicitly: renderingPath defaults to the project's tier settings, and under
+                // Deferred the BeforeForwardOpaque command buffer below never fires — the gradient would
+                // silently not draw and a solid background would still sail past the empty-frame guard.
+                cam.renderingPath = RenderingPath.Forward;
+
+                // The camera tracks the head one-for-one, then adds the oblique. The deadband decides the
+                // oblique's side for the near-frontal poses (measured: 9 of 23 turn the head <5 deg) rather
+                // than letting retarget noise pick, which would swing the camera 2*DefaultOblique and shoot
+                // the same pose from opposite sides on two avatars.
+                float obliqueSign = headYaw < -ObliqueDeadband ? -1f : 1f;
+                // ONE shot offset drives both the orbit and the looking-room, so an explicit yaw cannot orbit
+                // the camera one way while the lateral aim opens the other — which is what keying the offset
+                // off headYaw did: yaw:-30 against a +10 head turn shifted the subject INTO its own gaze.
+                float shotOffset = yaw ?? (DefaultOblique * obliqueSign);
+                // Zero is its own case, not a tie broken toward positive: at yaw:0 the camera tracks the head
+                // exactly, so the face is dead-on the lens and there is no gaze in frame to leave room for.
+                float lateralSign = shotOffset > 0f ? 1f : (shotOffset < 0f ? -1f : 0f);
+                float camYaw = Mathf.Clamp(headYaw, -MaxTrackYaw, MaxTrackYaw) + shotOffset;
+                // Negated: a positive rotation about +X lowers the camera, and a chin-RAISED pose has to be
+                // shot from slightly ABOVE (from below it is a nostril shot).
+                float camPitch = Mathf.Clamp(-headPitch * PitchFollow, -MaxCamPitch, MaxCamPitch);
+
+                // Angles apply in the posed clone's root basis so an avatar sitting rotated in the scene still
+                // photographs frontally — the case that matters most on the floor path, where no sampling
+                // overwrites root rotation.
+                Quaternion rootRot = baked.transform.rotation;
+                Quaternion orbit = Quaternion.AngleAxis(camYaw, Vector3.up) * Quaternion.AngleAxis(camPitch, Vector3.right);
+                Vector3 screenRight = rootRot * (orbit * Vector3.left);   // left: the camera looks back along -forward
+
+                float scaledSpan = span * (viewHeight / ReferenceViewHeight);
+                float distance = (scaledSpan * 0.5f) / Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+
+                // Aim below the view point (the eyes sit near the TOP of the subject, not its centre) and
+                // laterally away from the side the face is turned, which opens looking-room in a landscape
+                // frame that would otherwise waste its width on a vertical subject.
+                // Vector3.up, not the root's up: camera roll stays world-level below, so the drop that decides
+                // where the head sits in frame has to share that basis. Divergent only for a tilted root.
+                Vector3 aim = viewpoint
+                            - Vector3.up * (scaledSpan * aimDrop)
+                            + screenRight * (scaledSpan * LateralOffset) * -lateralSign;
+
+                cam.transform.position = aim + rootRot * (orbit * (Vector3.forward * distance));
+                cam.transform.rotation = Quaternion.LookRotation(aim - cam.transform.position, Vector3.up);
+
+                // The rig is camera-relative by construction; without this, orbiting lights a yawed shot from
+                // behind. After MakeLight, which sets world rotation and then parents worldPositionStays.
+                lightHolder.transform.rotation = Quaternion.Euler(0f, baked.transform.eulerAngles.y + camYaw, 0f);
+
+                // Gradient backdrop: draw the ramp inside the camera's own pass, after its clear. Blitting into
+                // the RT before Render and clearing depth only would rely on colour contents surviving the
+                // render-target switch, which is not contractual on an MSAA target.
+                if (bgTop != bgBottom)
+                {
+                    ramp = new Texture2D(1, RampHeight, TextureFormat.RGBA32, false);
+                    ramp.hideFlags = HideFlags.DontSave;
+                    ramp.wrapMode = TextureWrapMode.Clamp;
+                    ramp.filterMode = FilterMode.Bilinear;
+                    for (int i = 0; i < RampHeight; i++)   // row 0 is the BOTTOM of the blit
+                        ramp.SetPixel(0, i, Color.Lerp(bgBottom, bgTop, i / (RampHeight - 1f)));
+                    ramp.Apply(false);
+                    bgCmd = new UnityEngine.Rendering.CommandBuffer { name = "__rt_bg_gradient" };
+                    bgCmd.Blit(ramp, UnityEngine.Rendering.BuiltinRenderTextureType.CurrentActive);
+                    cam.AddCommandBuffer(UnityEngine.Rendering.CameraEvent.BeforeForwardOpaque, bgCmd);
+                }
 
                 const int W = 1200, H = 900;
                 rt = new RenderTexture(W, H, 24, UnityEngine.Experimental.Rendering.GraphicsFormat.R8G8B8A8_SRGB)
@@ -319,6 +473,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 cam.targetTexture = rt;
                 cam.pixelRect = new Rect(0, 0, W, H);
                 cam.Render();
+
+                // Where the face landed, while the camera still exists. The VIEW POINT, not `aim` — the camera
+                // is aimed exactly at `aim` by construction, so projecting that would print (0.5,0.5) forever.
+                Vector3 headViewport = cam.WorldToViewportPoint(viewpoint);
 
                 tex = new Texture2D(W, H, TextureFormat.RGBA32, false);
                 var prevActive = RenderTexture.active;
@@ -335,40 +493,56 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     RenderTexture.active = prevActive;
                 }
 
-                // ---- Silhouette coverage = fraction of pixels differing from the background ----
-                // Reference = a SAMPLED corner pixel of the read-back texture, NOT a computed color. This is
-                // color-space-agnostic: it sidesteps the Linear-project/sRGB-RT gamma bookkeeping entirely
-                // (a computed bgColor.gamma read the whole background as "drawn" → silhouette 100%, and also
-                // defeated the empty-guard). GetPixel(0,0) is a background corner (bottom-left in Unity's
-                // texture coords) — a corner is background for any portrait framing.
-                // Reported, not gated on a tuned middle threshold — only ~0 fails.
-                Color32 bgRef = tex.GetPixel(0, 0);
+                // ---- Empty-frame guard: did ANYTHING draw? ----
+                // Reference = each row's own column-0 pixel of the read-back texture, NOT a computed color.
+                // Sampling the render is what keeps this color-space-agnostic (a computed reference in a Linear
+                // project writing an sRGB target reads the whole background as "drawn" and defeats the guard),
+                // and per-row is what makes it exact under a vertical gradient, which is constant along a row.
+                // A subject that reaches column 0 inverts at most that row: ~0.1% of the frame against a 0.5%
+                // threshold. Boolean by design — the old reported percentage was never judged on.
                 Color32[] pixels = tex.GetPixels32();
                 int drawn = 0;
-                for (int i = 0; i < pixels.Length; i++)
+                for (int y = 0; y < H; y++)
                 {
-                    Color32 p = pixels[i];
-                    if (Math.Abs(p.r - bgRef.r) > SilhouetteChannelThreshold
-                        || Math.Abs(p.g - bgRef.g) > SilhouetteChannelThreshold
-                        || Math.Abs(p.b - bgRef.b) > SilhouetteChannelThreshold)
-                        drawn++;
+                    Color32 rowRef = pixels[y * W];
+                    for (int x = 0; x < W; x++)
+                    {
+                        Color32 p = pixels[y * W + x];
+                        if (Math.Abs(p.r - rowRef.r) > SilhouetteChannelThreshold
+                            || Math.Abs(p.g - rowRef.g) > SilhouetteChannelThreshold
+                            || Math.Abs(p.b - rowRef.b) > SilhouetteChannelThreshold)
+                            drawn++;
+                    }
                 }
-                float fraction = pixels.Length > 0 ? (float)drawn / pixels.Length : 0f;
-                int pct = Mathf.RoundToInt(fraction * 100f);
+                // Strictly zero, not a fraction. Under the per-row reference a blank frame reads EXACTLY 0
+                // (measured), so the old 0.005 floor bought nothing and cost a lie: at 1200x900 it failed up
+                // to 5,399 genuinely-drawn pixels while asserting "nothing drew", and withheld the PNG that
+                // would have shown the operator what actually happened. The budget puts a visible-in-the-image
+                // problem in the operator's hands, not the tool's.
+                bool nothingDrew = drawn == 0;
 
-                // Which clip the selector actually resolved to post-bake — the one thing the reader
-                // cannot infer from the arguments.
+                // Which clip the selector actually resolved to post-bake, and where the camera ended up — the
+                // things the reader cannot infer from the arguments. camYaw is RESOLVED (tracking + oblique),
+                // so a saturated clamp is visible rather than silent; head is the view point's viewport
+                // position, origin bottom-left, REPORTED not gated — a bad crop is visible in the PNG, and
+                // failing would withhold the very image that would show it.
                 string shapesToken = wantExpression ? " (" + resolvedExpression + ")" : "";
                 prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName
-                    + " expression=" + expressionName + shapesToken + " framing="
-                    + framingToken + " silhouette=" + pct.ToString(CultureInfo.InvariantCulture) + "%";
+                    + " expression=" + expressionName + shapesToken + " framing=" + framingToken
+                    + " fov=" + fov.ToString("0.#", CultureInfo.InvariantCulture)
+                    + " headYaw=" + headYaw.ToString("0.#", CultureInfo.InvariantCulture)
+                    + " camYaw=" + camYaw.ToString("0.#", CultureInfo.InvariantCulture)
+                    + " head=(" + headViewport.x.ToString("0.00", CultureInfo.InvariantCulture)
+                    + "," + headViewport.y.ToString("0.00", CultureInfo.InvariantCulture) + ")";
 
-                if (fraction < MinSilhouetteFraction)
+                if (nothingDrew)
                 {
-                    // Fail loud, uniform (=> FAIL:), keeping the REAL measured values — do NOT write a blank PNG.
-                    result = Fail(label, "silhouette " + pct.ToString(CultureInfo.InvariantCulture) + "% below "
-                        + MinSilhouetteFraction.ToString(CultureInfo.InvariantCulture) + " (pose=" + poseName
-                        + " expression=" + expressionName + " framing=" + framingToken + ") — nothing drew");
+                    // Fail loud, uniform (=> FAIL:) — do NOT write a blank PNG. Named honestly: a frame the
+                    // subject fills EDGE TO EDGE also reads uniform, because then column 0 is subject too.
+                    result = Fail(label, "every pixel matches its row's background reference (pose=" + poseName
+                        + " expression=" + expressionName + " framing=" + framingToken + " camYaw="
+                        + camYaw.ToString("0.#", CultureInfo.InvariantCulture)
+                        + ") — nothing drew, or the subject fills the frame entirely");
                 }
                 else
                 {
@@ -392,6 +566,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                 if (rt != null) UnityEngine.Object.DestroyImmediate(rt);
                 if (tex != null) UnityEngine.Object.DestroyImmediate(tex);
+                // The camera owns the command buffer and ClosePreviewScene destroys it, but CommandBuffer wraps
+                // native memory and the ramp is an asset-less texture: a contact-sheet run leaks one of each per
+                // render without these.
+                if (bgCmd != null) bgCmd.Dispose();
+                if (ramp != null) UnityEngine.Object.DestroyImmediate(ramp);
 
                 if (!animModeAtStart && AnimationMode.InAnimationMode()) AnimationMode.StopAnimationMode();
 
@@ -468,6 +647,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
+        /// <summary>Yaw of a direction in degrees, signed about +Y: 0 = +Z, positive toward +X (which is
+        /// screen-LEFT for a camera on the +Z side). Taken off the forward vector rather than eulers so
+        /// there is no wrap or gimbal question, and so it matches the measured pose-angle table.</summary>
+        internal static float YawOf(Vector3 dir) => Mathf.Atan2(dir.x, dir.z) * Mathf.Rad2Deg;
+
+        /// <summary>Elevation of a direction in degrees. Positive = pointing up (chin raised).</summary>
+        internal static float PitchOf(Vector3 dir) =>
+            Mathf.Asin(Mathf.Clamp(dir.normalized.y, -1f, 1f)) * Mathf.Rad2Deg;
+
         /// <summary>
         /// Write the clip's <c>blendShape.*</c> curves straight onto the baked clone's renderers and
         /// return how many landed on a DRAWN one. Only blendShape curves are applied — an expression is
@@ -511,28 +699,44 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ===== Pure helpers (unit-tested; do not touch the scene or the asset database beyond reads) ====
 
-        /// <summary>Dolly-back distance in meters for a named framing. Throws for anything else.</summary>
-        internal static float FramingDistance(string framing)
+        /// <summary>The subject height a named framing covers (meters, at <see cref="ReferenceViewHeight"/>)
+        /// and how far below the view point to aim, as a fraction of that span. Throws for anything else.
+        /// <para>NOT a dolly distance — that was the v1 quantity, and it was calibrated to a fixed 60° FOV.
+        /// A span is FOV-independent: the camera distance is solved from the two.</para></summary>
+        internal static void FramingGeometry(string framing, out float span, out float aimDrop)
         {
             switch ((framing ?? "").Trim().ToLowerInvariant())
             {
-                case "bust": return BustFramingDistance;
-                case "half": return HalfFramingDistance;
-                case "full": return FullFramingDistance;
+                case "bust": span = BustSpan; aimDrop = BustAimDrop; return;
+                case "half": span = HalfSpan; aimDrop = HalfAimDrop; return;
+                case "full": span = FullSpan; aimDrop = FullAimDrop; return;
                 default:
                     throw new ArgumentException(
                         "unknown framing '" + framing + "' — valid: bust, half, full", nameof(framing));
             }
         }
 
-        /// <summary>Parses a solid backdrop color. Hex only (<c>#RRGGBB</c>/<c>#RRGGBBAA</c>) — a leading
-        /// '#' is required even though <see cref="ColorUtility.TryParseHtmlString"/> would otherwise also
-        /// accept some CSS color names, which this tool's contract deliberately excludes.</summary>
-        internal static bool TryParseBg(string s, out Color c)
+        /// <summary>Parses a backdrop: <c>#RRGGBB</c>/<c>#RRGGBBAA</c> gives one color in both outs (solid),
+        /// <c>#TOP:#BOTTOM</c> gives a vertical two-stop gradient. Hex only — a leading '#' is required even
+        /// though <see cref="ColorUtility.TryParseHtmlString"/> would otherwise also accept some CSS color
+        /// names, which this tool's contract deliberately excludes. The ':' is unambiguous against
+        /// <c>#RRGGBBAA</c>, so the two forms cannot be confused.</summary>
+        internal static bool TryParseBg(string s, out Color top, out Color bottom)
         {
-            c = default;
-            if (string.IsNullOrEmpty(s) || s[0] != '#') return false;
-            return ColorUtility.TryParseHtmlString(s, out c);
+            top = default; bottom = default;
+            if (string.IsNullOrEmpty(s)) return false;
+
+            int split = s.IndexOf(':');
+            if (split < 0)
+            {
+                if (s[0] != '#' || !ColorUtility.TryParseHtmlString(s, out top)) return false;
+                bottom = top;
+                return true;
+            }
+
+            string a = s.Substring(0, split), b = s.Substring(split + 1);
+            if (a.Length == 0 || b.Length == 0 || a[0] != '#' || b[0] != '#') return false;
+            return ColorUtility.TryParseHtmlString(a, out top) && ColorUtility.TryParseHtmlString(b, out bottom);
         }
 
         /// <summary>

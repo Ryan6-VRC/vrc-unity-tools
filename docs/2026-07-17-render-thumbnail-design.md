@@ -43,9 +43,9 @@ doesn't — that single fact decides the correct capture surface for each.
 |---|---|---|
 | Bake policy | **Always bake** | One code path; pose is an optional clip sampled onto the baked clone. Cost ≈ a play-mode build (seconds→minutes on a real composed avatar), once per upload. |
 | Upload seam | **Post-upload `UpdateAvatarImage`** | Deferred to follow-up; decoupled, identical first/re-upload. |
-| Framing | **SDK `PositionPortraitCamera`** | Bust (head+shoulders) from `ViewPosition`, at the SDK-calibrated default 60° FOV. A `framing` enum dollies back for more body. |
-| Pose source | **Author our own** `.anim` poses | No permissively-licensed curated portrait poses exist (two independent searches; GoGo Loco / BUDDYWORKS are no-redistribution EULAs, Mixamo forbids standalone redistribution, CMU/ACCAD/Quaternius are motion libraries whose freeze-frames are mid-stride). Single-keyframe humanoid clips we author are committable and retarget to any rig. |
-| Lighting/bg | **In-scene 3-point rig + solid background** (camera `SolidColor` clear), overridable | Lights live **in the preview scene** (never `RenderSettings` — that's global, see Non-destructiveness). Solid (uniform) bg keeps the silhouette reference trivial; gradient is deferred polish. Constants are cosmetic taste defaults. |
+| Framing | **Own head-anchored camera solve** | The SDK's `PositionPortraitCamera` is root-relative and pose-blind; `framing` names a subject height and distance is solved from `fov`. Superseded in full by `2026-07-18-render-thumbnail-camera.md`. |
+| Pose source | **Author our own** `.anim` poses | No permissively-licensed curated portrait poses exist (two independent searches): the popular VRChat pose/locomotion assets ship no-redistribution EULAs, the free retargeting services forbid redistributing their clips standalone, and the academic mocap libraries hold motion rather than poses — their freeze-frames are mid-stride. Single-keyframe humanoid clips we author are committable and retarget to any rig. |
+| Lighting/bg | **In-scene 3-point rig + camera-clear background** (`SolidColor`), overridable | Lights live **in the preview scene** (never `RenderSettings` — that's global, see Non-destructiveness). `bg` takes solid or gradient hex; the rig yaws with the camera. Levels and ramp mechanics: `2026-07-18-render-thumbnail-camera.md`. |
 
 ## Verified mechanism (callables + source-verified traps)
 
@@ -73,15 +73,9 @@ doesn't — that single fact decides the correct capture surface for each.
   silently-generic clip won't retarget, defeating "one clip everywhere"); and after
   `MoveGameObjectToScene` call **`animator.Rebind()`** before sampling (stale bind → no-op). All of
   `Start`/`Stop` and `Begin`/`End` are **global editor state** — nest their guards (below).
-- **Posed-head framing correction (measured, load-bearing).** Sampling resets the avatar's body
-  position — the whole skeleton relocates (the clone's root shifts to the animator origin, ≈0.8m down
-  and undoing NDMF's `+2` Z). `PositionPortraitCamera` runs *after* sampling so it already absorbs the
-  **root** move, but it aims at the static `ViewPosition`, not the dropped head. The residual is only the
-  head's **root-local** displacement: capture Head-bone + root world positions before `Rebind` and after
-  `EndSampling`, and translate the camera by `(posedHead−posedRoot)−(restHead−restRoot)` *after*
-  `PositionPortraitCamera` + the `framing` dolly. Floor path: the delta is `Vector3.zero` (no change). The
-  delta is a world-space `Transform.position` difference, so it is correct under any root orientation
-  provided the clip carries no root-rotation curve (the bundled clips carry none).
+- **Sampling relocates the whole skeleton** — the clone's root snaps to the animator origin (≈0.8 m
+  down, undoing NDMF's `+2` Z). This is why the camera anchors on the posed Head bone rather than on
+  any root-relative offset; the solve is in `2026-07-18-render-thumbnail-camera.md`.
 - **Capture:** dedicated disabled `Camera` (`HideFlags.DontSave`), `camera.scene = previewScene`,
   render into `new RenderTexture(1200, 900, 24, GraphicsFormat.R8G8B8A8_SRGB){ antiAliasing =
   Max(1, QualitySettings.antiAliasing) }`, `allowHDR = false` → `Texture2D(RGBA32).ReadPixels` →
@@ -101,8 +95,10 @@ public static string Render(
     string target,            // avatar root: scene path or name (resolve like RenderAvatar's target)
     string pose = null,       // null => floor (unposed); a bundled pose token; or a clip asset path/GUID
     string expression = null, // null => none; else a gesture slot, clip name, or clip asset path/GUID
-    string framing = "bust",  // bust | half | full — dolly distance over PositionPortraitCamera
-    string bg = null,         // null => default backdrop; "#RRGGBB" => solid color (fail named on unparseable)
+    string framing = "bust",  // bust | half | full — subject height; distance is solved from fov
+    string bg = null,         // null => default backdrop; "#RRGGBB[AA]" solid or "#TOP:#BOTTOM" gradient
+    float  fov = 30f,         // vertical degrees, [10,90]
+    float? yaw = null,        // null => automatic oblique; else an offset on the head-tracking term
     bool   whatIf = false)    // preflight: resolve target/descriptor/pose/expression, report, bake NOTHING
 ```
 
@@ -163,18 +159,19 @@ Setup snapshots (for restore): each open scene's `isDirty`, the set of live-scen
    interleaved runs from colliding and any name-derived generated folder exclusive to this run.
 3. `preview = EditorSceneManager.NewPreviewScene()`; `SceneManager.MoveGameObjectToScene(baked, preview)`.
 4. Build the lit stage **in `preview`**: 3-point directional rig (key/fill/rim), all `HideFlags.DontSave`,
-   one parent for one-destroy teardown. **Background is the camera's `clearFlags = SolidColor`** (the `bg`
-   color, else the neutral default) — a uniform solid, no backdrop object (which also keeps the silhouette
-   reference trivial). A gradient backdrop is deferred polish. **No `RenderSettings` writes** (ambient/skybox
+   one parent for one-destroy teardown. **Background is the camera's clear** (`SolidColor` plus, for the
+   gradient `bg` form, a `CommandBuffer` ramp — see the camera doc), never a backdrop object.
+   **No `RenderSettings` writes** (ambient/skybox
    are global/active-scene — they leak into and dirty the live scene; CAU stays lights-only for this reason).
-5. If posing (and `animator.isHuman`, else fail loud): capture Head-bone + root world positions;
-   `animator.Rebind()`; `StartAnimationMode()` → `BeginSampling()` → `try{ SampleAnimationClip(baked, clip, t)
-   } finally{ EndSampling() }`. **Do NOT stop animation mode here** — the sampled pose is *held*, and
+5. Compute the world view point and `viewHeight` on **every** path (the floor path must not touch the
+   Animator). If posing (and `animator.isHuman`, else fail loud):
+   `animator.Rebind()`; capture `restHeadRot`; `StartAnimationMode()` → `BeginSampling()` → `try{ SampleAnimationClip(baked, clip, t)
+   } finally{ EndSampling() }`; capture `posedHeadRot`. **Do NOT stop animation mode here** — the sampled pose is *held*, and
    `StopAnimationMode()` runs only in the teardown `finally` (step 7) *after* the render, or the avatar would
-   revert to unposed before capture. Capture Head + root again post-sample for the framing delta
-   (§Verified mechanism → Pose). (`t` = a chosen still frame; our clips are one keyframe.)
-6. Camera (§Capture): `PositionPortraitCamera` + `framing` dolly + posed-head delta; render → RT → PNG.
-   Measure silhouette coverage for the verdict.
+   revert to unposed before capture. (`t` = a chosen still frame; our clips are one keyframe.)
+6. Camera (§Capture): the head-anchored solve (`2026-07-18-render-thumbnail-camera.md`); render → RT → PNG.
+   Report the resolved `camYaw` and the view point's viewport coords in the verdict; fail only on a
+   blank frame.
 7. **`finally`** (runs on every exit, success or throw): stop animation mode **only if this run started it**
    (snapshot-guarded — never end an operator's pre-existing recording session);
    `ClosePreviewScene(preview)`; `DestroyImmediate` the baked clone and any **live-scene root new since the
@@ -194,7 +191,7 @@ serial-venue guidance elsewhere in the workshop.
   clips. v1 set: `floor` (implicit, no asset) + **clasped** (hands clasped in front) + **hand-on-hip**,
   authored via muscle curves. These are **starter poses** — recognizable and natural, but blind muscle-value
   authoring converges slowly, so they are explicitly tunable later (the Animation window with live visual
-  feedback, or a licensed clip via the `pose` path/GUID arg). The framing correction (below) is what makes
+  feedback, or a licensed clip via the `pose` path/GUID arg). Head-anchored framing is what makes
   any pose sit correctly; the specific stances are secondary.
 - Each bundled clip is asserted `isHumanMotion == true` in tests — the guard against a silently-generic
   save that would only pose identical-bone-path rigs.
@@ -241,7 +238,8 @@ Rendering mutates, so most behavior is proven live, not in NUnit
   from operator work): the `ClearSceneDirtiness` restore branch — covered by the invariant test below.
 - **Headless EditMode** (`tools/run-editmode-tests.ps1` against `TestEditor`, run serially): pure helpers
   only — `pose` resolution order and token normalization, pose-token uniqueness (the sole guard against
-  a glob collision), `framing`→distance mapping, `bg` parse, and each bundled clip's
+  a glob collision), `framing`→span mapping, `bg` parse (solid and gradient), the camera solve's pure
+  float math (signed euler wrap, `screenRight` sign, `AimDrop`), and each bundled clip's
   `isHumanMotion == true`. Fail-loud branches use
   `LogAssert.Expect`. The bake/render/sample path is **not** in NUnit (mutates live objects → crashes the
   suite).
@@ -258,12 +256,8 @@ Rendering mutates, so most behavior is proven live, not in NUnit
 
 ## Open risks / notes
 
-- **Pose framing — resolved.** The body-position reset that dropped the posed head below the frame is
-  fixed by the posed-head framing correction (§Verified mechanism → Pose). Residual, still open: a
-  user-supplied clip that carries a real **root-rotation** curve would break the world-space delta's
-  orientation assumption — out of scope for the bundled upper-body clips, revisit if such a clip is used.
-- **Gradient backdrop — deferred.** v1 ships a solid `SolidColor` clear (uniform bg also keeps the
-  silhouette reference trivial); a runtime gradient is optional polish, render correctness doesn't depend
-  on it.
+- **Pose framing — resolved** by the head-anchored camera (`2026-07-18-render-thumbnail-camera.md`),
+  which anchors on the posed head's own position *and* orientation, so a clip carrying root motion or
+  root rotation no longer breaks framing.
 - **Lighting constants** are taste defaults (named, obvious, top-of-file); expect the operator to tune
   key/fill/rim after seeing real output.
