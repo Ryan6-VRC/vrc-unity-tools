@@ -10,10 +10,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
     /// Renders a baked-avatar thumbnail via a dedicated off-screen camera rather than RenderAvatar's
-    /// Scene-View window-grab, because baking (<c>nadena.dev.ndmf.AvatarProcessor.ManualProcessAvatar</c>)
-    /// gives real resolved meshes that a fixed-size off-screen camera can render at a guaranteed
-    /// 1200×900 — RenderAvatar never bakes, so it must composite through the Scene View instead, capped
-    /// to the pane's size and showing NDMF preview proxies. See docs/2026-07-17-render-thumbnail-design.md.
+    /// Scene-View window-grab, because baking (the VRC SDK preprocess chain,
+    /// <c>VRCBuildPipelineCallbacks.OnPreprocessAvatar</c>) gives real resolved meshes that a fixed-size
+    /// off-screen camera can render at a guaranteed 1200×900 — RenderAvatar never bakes, so it must
+    /// composite through the Scene View instead, capped to the pane's size and showing NDMF preview
+    /// proxies. The bake is the FULL SDK chain, not NDMF alone, so the portrait shows the avatar that
+    /// actually uploads (optimizers included). See docs/2026-07-17-render-thumbnail-design.md.
     /// </summary>
     [AgentTool]
     public static class RenderThumbnail
@@ -109,7 +111,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (!ResolvePose(pose, out AnimationClip _, out string poseErr))
                     return Fail(label, poseErr);
-                if (!ResolveExpression(expression, out AnimationClip _, out string exprErr))
+                // Preflight resolves against the PRE-bake avatar — best-effort, since the authoritative
+                // lookup needs the baked clone. Slot names survive the bake, so a slot that resolves here
+                // resolves there; this catches a typo without paying for a bake.
+                if (!ResolveExpressionOn(root, expression, out AnimationClip _, out string exprErr))
                     return Fail(label, exprErr);
 
                 string poseToken = string.IsNullOrEmpty(pose) ? "floor" : pose;
@@ -124,8 +129,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ---- Preflight resolution (fail fast, before any mutation) ----
             if (!ResolvePose(pose, out AnimationClip poseClip, out string renderPoseErr))
                 return Fail(label, renderPoseErr);
-            if (!ResolveExpression(expression, out AnimationClip exprClip, out string renderExprErr))
+            // Pre-bake check only, so a bad selector fails before we pay for a bake. The clip that is
+            // actually applied is re-resolved on the BAKED clone below — the bake can rewrite the
+            // blendshape namespace, so the pre-bake clip is not authoritative.
+            if (!ResolveExpressionOn(root, expression, out AnimationClip _, out string renderExprErr))
                 return Fail(label, renderExprErr);
+            bool wantExpression = !string.IsNullOrEmpty(expression);
             // poseName is the ORIGINAL pose argument (for verdict display), not the resolved asset path —
             // matches the whatIf branch's poseToken convention above. Same for expressionName.
             string poseName = string.IsNullOrEmpty(pose) ? "floor" : pose;
@@ -166,22 +175,52 @@ namespace Ryan6Vrc.AvatarTools.Editor
             try
             {
                 // ---- Step 2: unique private clone -> bake (the non-destructiveness keystone) ----
-                // The GUID suffix makes the ZZZ_GeneratedAssets subfolder provably exclusive to this run
-                // (regardless of timer resolution), so NDMF's pre-existing-folder wholesale-delete can never
+                // The GUID suffix makes any generated-asset subfolder provably exclusive to this run
+                // (regardless of timer resolution), so a pre-existing-folder wholesale-delete can never
                 // touch a user's kept bake.
+                //
+                // THE BAKE DOOR IS THE VRC SDK PREPROCESS CHAIN, NOT NDMF DIRECTLY. `ManualProcessAvatar`
+                // runs NDMF's plugin chain ONLY, so every tool that hooks the SDK instead of NDMF is
+                // silently skipped — measured on a real avatar carrying d4rkAvatarOptimizer: NDMF-only
+                // left the face mesh at 618 blendshapes (i.e. changed nothing), while the SDK chain cut it
+                // to 118 and merged 20 renderers down to 15. A thumbnail is FOR the uploaded avatar, so
+                // rendering the un-optimized one is rendering something that never ships. This is the same
+                // door VRCFury's own "build a test copy" uses (VRCFuryTestCopyMenuItem), and it works
+                // whether or not VRCFury is installed. See docs/nondestructive.md §The bake door.
+                //
+                // Unlike ManualProcessAvatar (clone in, new object out), OnPreprocessAvatar mutates the
+                // object IN PLACE and returns false when a hook blocks the build — so `mine` IS the baked
+                // avatar, and there is no second object to destroy.
                 string stamp = Guid.NewGuid().ToString("N").Substring(0, 8);
                 var mine = UnityEngine.Object.Instantiate(root);
                 string mineName = root.name + "__rt_" + stamp;
                 mine.name = mineName;
-                // Predict the ZZZ subfolder name NOW: NDMF creates it DURING the bake (named after the
-                // "(Clone)" that ManualProcessAvatar's own Instantiate makes), so a mid-bake throw must still
-                // find bakedName set for teardown to clean it. Reaffirmed authoritatively after success below.
-                bakedName = mineName + "(Clone)";
-                try { baked = nadena.dev.ndmf.AvatarProcessor.ManualProcessAvatar(mine); }
-                finally { if (mine != null) UnityEngine.Object.DestroyImmediate(mine); }
-                if (baked == null)
-                    throw new InvalidOperationException("ManualProcessAvatar returned null for '" + mineName + "'");
-                bakedName = baked.name; // authoritative on success (== the prediction above)
+                mine.SetActive(true); // an inactive avatar is not a valid preprocess target
+                // Generated-asset folders are named after the object being processed, so record the name
+                // NOW — a mid-bake throw must still leave teardown able to find and clean them.
+                bakedName = mineName;
+
+                bool preprocessOk;
+                try
+                {
+                    preprocessOk = VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks
+                        .OnPreprocessAvatar(mine);
+                }
+                catch
+                {
+                    UnityEngine.Object.DestroyImmediate(mine);
+                    throw;
+                }
+                if (!preprocessOk)
+                {
+                    UnityEngine.Object.DestroyImmediate(mine);
+                    // A hook REFUSED the build (VRCFury misconfiguration, a failed optimizer pass, an SDK
+                    // validation). It logs its own reason to the console; surface that it happened.
+                    throw new InvalidOperationException(
+                        "VRC build preprocess refused '" + label + "' — a build hook blocked it (its reason "
+                        + "is in the Unity console). The avatar would not upload in this state either.");
+                }
+                baked = mine;
 
                 // ---- Step 3: preview scene ----
                 preview = UnityEditor.SceneManagement.EditorSceneManager.NewPreviewScene();
@@ -254,15 +293,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // (301.6,303.5,76.7) -> (321.6,344.4,33.2). Pose and expression bind disjoint properties
                 // but not disjoint systems. Writing the blendshape weights straight onto the renderers
                 // touches neither the Animator nor AnimationMode, and leaves the pose byte-identical.
-                int shapesApplied = 0, shapesTotal = 0;
-                if (exprClip != null)
+                int shapesApplied = 0, shapesTotal = 0, shapesIgnored = 0;
+                string resolvedExpression = null;
+                if (wantExpression)
                 {
-                    shapesApplied = ApplyExpression(baked, exprClip, out shapesTotal);
+                    // AUTHORITATIVE resolution: on the baked clone, whose FX controller holds the clips the
+                    // bake actually rewrote. A slot selector therefore lands on the post-bake clip, whose
+                    // bindings match the post-bake meshes by construction.
+                    if (!ResolveExpressionOn(baked, expression, out AnimationClip bakedExpr, out string bakedErr))
+                        throw new InvalidOperationException("after bake: " + bakedErr);
+
+                    resolvedExpression = bakedExpr.name;
+                    shapesApplied = ApplyExpression(baked, bakedExpr, out shapesTotal, out shapesIgnored);
                     if (shapesApplied == 0)
                         throw new InvalidOperationException(
-                            "expression '" + expressionName + "' moved no blendshape on the BAKED avatar (0 of "
-                            + shapesTotal + " curves landed) — the bake renamed, merged, or dropped the face "
-                            + "mesh, or the clip belongs to a different body");
+                            "expression '" + expressionName + "' (resolved to clip '" + resolvedExpression
+                            + "') moved no blendshape on the BAKED avatar — 0 of " + shapesTotal
+                            + " blendShape curves landed on a live renderer. The bake renamed, merged, or "
+                            + "dropped the face mesh, or the clip belongs to a different body.");
                 }
 
                 // ---- Step 6: camera + off-screen sRGB capture (§Capture, source-verified) ----
@@ -332,12 +380,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 float fraction = pixels.Length > 0 ? (float)drawn / pixels.Length : 0f;
                 int pct = Mathf.RoundToInt(fraction * 100f);
 
-                // shapes=applied/total rides along only when an expression was requested — a clip authored
-                // for another body lands fewer than it tried, and that must be visible, not inferred.
-                string shapesToken = exprClip != null
-                    ? " shapes=" + shapesApplied.ToString(CultureInfo.InvariantCulture)
-                        + "/" + shapesTotal.ToString(CultureInfo.InvariantCulture)
-                    : "";
+                // Everything about the expression that a reader needs to judge the portrait: which clip the
+                // selector actually resolved to post-bake, how many curves landed on a DRAWN renderer, and
+                // how many non-blendShape curves this tool does not apply at all.
+                string shapesToken = "";
+                if (wantExpression)
+                {
+                    shapesToken = "(" + resolvedExpression + ") shapes="
+                        + shapesApplied.ToString(CultureInfo.InvariantCulture)
+                        + "/" + shapesTotal.ToString(CultureInfo.InvariantCulture);
+                    if (shapesIgnored > 0)
+                        shapesToken += " ignored=" + shapesIgnored.ToString(CultureInfo.InvariantCulture);
+                    shapesToken = " " + shapesToken;
+                }
                 prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName
                     + " expression=" + expressionName + shapesToken + " framing="
                     + framingToken + " silhouette=" + pct.ToString(CultureInfo.InvariantCulture) + "%";
@@ -452,34 +507,57 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// or a bake that renamed the face mesh, lands fewer curves than it tried, and a caller can see
         /// that instead of wondering why the portrait's face looks half-right.</para>
         /// </summary>
-        private static int ApplyExpression(GameObject baked, AnimationClip clip, out int total)
+        private static int ApplyExpression(GameObject baked, AnimationClip clip, out int total, out int ignored)
         {
             int applied = 0;
             total = 0;
+            ignored = 0;
+            // Skip causes are counted separately so a zero/partial landing NAMES its reason instead of
+            // leaving the reader a four-way guess.
+            int pathMiss = 0, noMesh = 0, shapeMiss = 0, notDrawn = 0, emptyCurve = 0;
 
             foreach (var binding in AnimationUtility.GetCurveBindings(clip))
             {
                 if (binding.propertyName == null
-                    || !binding.propertyName.StartsWith("blendShape.", StringComparison.Ordinal)) continue;
+                    || !binding.propertyName.StartsWith("blendShape.", StringComparison.Ordinal))
+                {
+                    // Counted, not silently dropped: a clip carrying transform/material/toggle curves is
+                    // only PARTLY rendered by this tool, and the caller has to be able to see that.
+                    ignored++;
+                    continue;
+                }
                 total++;
 
                 Transform t = string.IsNullOrEmpty(binding.path)
                     ? baked.transform
                     : baked.transform.Find(binding.path);
-                var smr = t != null ? t.GetComponent<SkinnedMeshRenderer>() : null;
-                if (smr == null || smr.sharedMesh == null) continue;
+                if (t == null) { pathMiss++; continue; }
+
+                var smr = t.GetComponent<SkinnedMeshRenderer>();
+                if (smr == null || smr.sharedMesh == null) { noMesh++; continue; }
+
+                // A weight written to a disabled or inactive renderer changes nothing visible. Counting it
+                // as "landed" is exactly the lie shapes=N/N must not tell — optimizers and MA routinely
+                // leave blush/star-eye meshes inactive by default.
+                if (!smr.enabled || !smr.gameObject.activeInHierarchy) { notDrawn++; continue; }
 
                 int index = smr.sharedMesh.GetBlendShapeIndex(binding.propertyName.Substring("blendShape.".Length));
-                if (index < 0) continue;
+                if (index < 0) { shapeMiss++; continue; }
 
                 var curve = AnimationUtility.GetEditorCurve(clip, binding);
-                if (curve == null || curve.length == 0) continue;
+                if (curve == null || curve.length == 0) { emptyCurve++; continue; }
 
-                // Expression clips are single-key; evaluating at the last key matches the pose's
-                // sample-at-clip.length convention and is the same frame for a one-key curve.
-                smr.SetBlendShapeWeight(index, curve.Evaluate(curve[curve.length - 1].time));
+                // Evaluate at clip.length, matching the pose's sample-at-clip.length convention. Curves
+                // default to ClampForever, so for the single-key clips expressions almost always are this
+                // is the only key; for a multi-key clip it is deliberately the END state.
+                smr.SetBlendShapeWeight(index, curve.Evaluate(clip.length));
                 applied++;
             }
+
+            if (applied == 0 && total > 0)
+                Debug.LogWarning("[RenderThumbnail] expression clip '" + clip.name + "' landed nothing — "
+                    + "pathMiss=" + pathMiss + " noMesh=" + noMesh + " notDrawn=" + notDrawn
+                    + " shapeMiss=" + shapeMiss + " emptyCurve=" + emptyCurve);
             return applied;
         }
 
@@ -542,6 +620,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 });
             }
             entries.Sort((a, b) => string.CompareOrdinal(a.Token, b.Token));
+
+            // Two files normalizing to one token (RTPose_Hand_On_Hip vs RTPose_HandOnHip) would make the
+            // winner depend on FindAssets order through an unstable sort, while the error message
+            // advertised both as reachable. The glob's whole point is that poses land WITHOUT anyone
+            // reviewing this file — which is exactly the condition under which such a collision ships
+            // unnoticed. Fail loud instead; a silently unreachable pose is worse than a build error.
+            for (int i = 1; i < entries.Count; i++)
+                if (entries[i].Token == entries[i - 1].Token)
+                    throw new InvalidOperationException(
+                        "two bundled poses normalize to the same token '" + entries[i].Token + "': "
+                        + entries[i - 1].Path + " and " + entries[i].Path
+                        + " — rename one (tokens ignore case and punctuation)");
             return entries;
         }
 
@@ -643,14 +733,66 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return false;
         }
 
+        /// <summary>One selectable expression: the gesture <c>Slot</c> it sits on (the portable name —
+        /// state names like <c>Peace</c>/<c>Open</c> are stable across vendors where clip names are not),
+        /// the <c>ClipName</c>, and the <c>Clip</c> itself.</summary>
+        internal struct ExpressionEntry
+        {
+            public string Slot;
+            public string ClipName;
+            public AnimationClip Clip;
+        }
+
         /// <summary>
-        /// Resolve <paramref name="expression"/> to a facial clip: null/empty =&gt; no expression
-        /// (<paramref name="clip"/> null, no error — the supported outcome for an avatar with no facial
-        /// clips, not a degraded one); else an asset path or 32-hex GUID, validated by
-        /// <see cref="IsExpressionClip"/>. There is deliberately NO bundled vocabulary — expressions are
-        /// avatar-specific, so a bare name gets pointed at the discovery route instead.
+        /// The avatar's selectable expressions, read from its FX controller's gesture layers (1–2 by the
+        /// VRChat convention — worlds rely on gesture expressions living there, so authors and optimizers
+        /// keep to it). Only clips that pass <see cref="IsExpressionClip"/> qualify, which drops the
+        /// 0-binding <c>Dummy</c>/<c>Empty</c> idles automatically.
+        /// <para><b>Call this on the BAKED avatar</b> for anything load-bearing: the bake rewrites the
+        /// blendshape namespace (an optimizer merged a real face mesh from 618 shapes to 118), so a clip
+        /// taken from the pre-bake asset can bind names the baked avatar no longer has. The gesture slot
+        /// survives the bake; the clip's identity does not.</para>
         /// </summary>
-        internal static bool ResolveExpression(string expression, out AnimationClip clip, out string err)
+        internal static List<ExpressionEntry> ExpressionCatalog(GameObject avatarRoot)
+        {
+            var entries = new List<ExpressionEntry>();
+            if (avatarRoot == null) return entries;
+
+            var descriptor = avatarRoot.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
+            if (descriptor == null || descriptor.baseAnimationLayers == null) return entries;
+
+            UnityEditor.Animations.AnimatorController fx = null;
+            foreach (var layer in descriptor.baseAnimationLayers)
+                if (layer.type == VRC.SDK3.Avatars.Components.VRCAvatarDescriptor.AnimLayerType.FX)
+                    fx = layer.animatorController as UnityEditor.Animations.AnimatorController;
+            if (fx == null) return entries;
+
+            var seen = new HashSet<AnimationClip>();
+            for (int i = 1; i <= 2 && i < fx.layers.Length; i++)
+            {
+                var sm = fx.layers[i].stateMachine;
+                if (sm == null) continue;
+                foreach (var cs in sm.states)
+                {
+                    var clip = cs.state.motion as AnimationClip;
+                    if (clip == null || !seen.Add(clip)) continue;   // layers 1 and 2 mirror each other
+                    if (!IsExpressionClip(clip, out string _)) continue;
+                    entries.Add(new ExpressionEntry { Slot = cs.state.name, ClipName = clip.name, Clip = clip });
+                }
+            }
+            return entries;
+        }
+
+        /// <summary>
+        /// Resolve <paramref name="expression"/> against <paramref name="avatarRoot"/>: null/empty =&gt; no
+        /// expression (<paramref name="clip"/> null, no error — the supported outcome for an avatar with no
+        /// facial clips, not a degraded one); a gesture slot or clip name (matched via
+        /// <see cref="NormalizeToken"/> against <see cref="ExpressionCatalog"/>); or an asset path/GUID as
+        /// an escape hatch. There is no BUNDLED vocabulary — expressions are avatar-specific — but the
+        /// avatar supplies its own, which the unknown-expression error enumerates.
+        /// </summary>
+        internal static bool ResolveExpressionOn(
+            GameObject avatarRoot, string expression, out AnimationClip clip, out string err)
         {
             clip = null;
             err = null;
@@ -658,11 +800,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             string trimmed = expression.Trim();
 
+            // Escape hatch: an explicit asset. Honoured as given — but a pre-bake asset may bind shape
+            // names the baked avatar no longer has, which the verdict's shapes=applied/total then shows.
             string assetPath = null;
-            if (trimmed.IndexOf('/') >= 0)
-            {
-                assetPath = trimmed;
-            }
+            if (trimmed.IndexOf('/') >= 0) assetPath = trimmed;
             else if (IsGuid(trimmed))
             {
                 assetPath = AssetDatabase.GUIDToAssetPath(trimmed);
@@ -672,29 +813,45 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return false;
                 }
             }
-            else
+
+            if (assetPath != null)
             {
-                // No vocabulary to enumerate — hand over the discovery route instead of guessing.
-                err = "expression '" + expression + "' is not a clip asset path/GUID — expressions are "
-                    + "avatar-specific, so there is no bundled vocabulary; find the avatar's facial clips "
-                    + "with ReportController on its FX controller (candidates sit on layers 1-2), then "
-                    + "confirm with ReportClip that the clip is blendShape curves on the face mesh";
-                return false;
+                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(assetPath);
+                if (clip == null)
+                {
+                    err = "no AnimationClip found at '" + assetPath + "'";
+                    return false;
+                }
+                if (!IsExpressionClip(clip, out string why))
+                {
+                    err = "clip '" + assetPath + "' " + why;
+                    clip = null;
+                    return false;
+                }
+                return true;
             }
 
-            clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(assetPath);
-            if (clip == null)
+            var catalog = ExpressionCatalog(avatarRoot);
+            string key = NormalizeToken(trimmed);
+            foreach (var entry in catalog)
+                if (NormalizeToken(entry.Slot) == key || NormalizeToken(entry.ClipName) == key)
+                {
+                    clip = entry.Clip;
+                    return true;
+                }
+
+            if (catalog.Count == 0)
             {
-                err = "no AnimationClip found at '" + assetPath + "'";
+                err = "expression '" + expression + "' — this avatar exposes no facial expressions on its "
+                    + "FX gesture layers (nothing on layers 1-2 binds blendShape curves). Render without "
+                    + "an expression, or pass a clip asset path/GUID explicitly";
                 return false;
             }
-            if (!IsExpressionClip(clip, out string why))
-            {
-                err = "clip '" + assetPath + "' " + why;
-                clip = null;
-                return false;
-            }
-            return true;
+            var offered = new List<string>();
+            foreach (var entry in catalog) offered.Add(entry.Slot + "=" + entry.ClipName);
+            err = "unknown expression '" + expression + "' — this avatar offers: "
+                + string.Join(", ", offered.ToArray()) + "; or pass a clip asset path/GUID";
+            return false;
         }
 
         /// <summary>

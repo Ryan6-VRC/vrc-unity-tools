@@ -68,6 +68,10 @@ namespace Ryan6Vrc.AvatarTools.Tests
                 Assert.IsTrue(RenderThumbnail.ResolvePose(entry.Token, out AnimationClip clip, out string err),
                     entry.Token + " (" + entry.Path + ") failed to resolve: " + err);
                 Assert.IsNotNull(clip, entry.Token + " resolved null");
+                // Assert WHICH clip came back, not merely that one did: without this, a token collision
+                // resolves both entries to the same clip and the test still passes green.
+                Assert.AreEqual(entry.Path, UnityEditor.AssetDatabase.GetAssetPath(clip),
+                    "token '" + entry.Token + "' resolved to the wrong asset");
                 Assert.IsTrue(clip.isHumanMotion, entry.Token + " must be a humanoid muscle clip");
             }
         }
@@ -127,8 +131,8 @@ namespace Ryan6Vrc.AvatarTools.Tests
         public void Expression_Null_IsNone()
         {
             // No expression is a first-class outcome, not a degraded one: an avatar with no facial
-            // clips renders body-pose-only.
-            bool ok = RenderThumbnail.ResolveExpression(null, out AnimationClip clip, out string err);
+            // clips renders body-pose-only. Null short-circuits before the avatar is ever consulted.
+            bool ok = RenderThumbnail.ResolveExpressionOn(null, null, out AnimationClip clip, out string err);
 
             Assert.IsTrue(ok);
             Assert.IsNull(clip);
@@ -136,23 +140,10 @@ namespace Ryan6Vrc.AvatarTools.Tests
         }
 
         [Test]
-        public void Expression_BareName_ErrPointsAtDiscovery()
-        {
-            // Expressions are avatar-specific, so there is deliberately NO bundled vocabulary. The error
-            // has to hand the caller the discovery route instead of enumerating something.
-            bool ok = RenderThumbnail.ResolveExpression("smile", out AnimationClip clip, out string err);
-
-            Assert.IsFalse(ok);
-            Assert.IsNull(clip);
-            StringAssert.Contains("path/GUID", err);
-            StringAssert.Contains("ReportController", err);
-        }
-
-        [Test]
         public void Expression_MissingAsset_Fails()
         {
-            bool ok = RenderThumbnail.ResolveExpression("Packages/com.ryan6vrc.avatar-tools/Editor/nope.anim",
-                out AnimationClip clip, out string err);
+            bool ok = RenderThumbnail.ResolveExpressionOn(null,
+                "Packages/com.ryan6vrc.avatar-tools/Editor/nope.anim", out AnimationClip clip, out string err);
 
             Assert.IsFalse(ok);
             Assert.IsNull(clip);
@@ -160,17 +151,41 @@ namespace Ryan6Vrc.AvatarTools.Tests
         }
 
         [Test]
-        public void Expression_PoseClipRejected_NamingThePoseArg()
+        public void Expression_PoseClipRejected_NamingTheOtherArg()
         {
             // The load-bearing swap guard: a humanoid muscle clip passed as `expression` would sample
-            // over the pose instead of compositing with it. Fail loud, and say which arg it belongs to.
+            // over the pose instead of compositing with it. Assert on the DIAGNOSTIC, not on the word
+            // "pose" — the asset path alone contains "pose", so that assertion survived the guard being
+            // removed entirely.
             var pose = RenderThumbnail.PoseCatalog().First();
 
-            bool ok = RenderThumbnail.ResolveExpression(pose.Path, out AnimationClip clip, out string err);
+            bool ok = RenderThumbnail.ResolveExpressionOn(null, pose.Path, out AnimationClip clip, out string err);
 
             Assert.IsFalse(ok);
             Assert.IsNull(clip);
-            StringAssert.Contains("pose", err);
+            StringAssert.Contains("isHumanMotion", err);
+        }
+
+        [Test]
+        public void Expression_UnknownOnAvatarlessCall_ReportsNoCandidates()
+        {
+            // A bare token with no avatar to consult: the error must say the corpus is empty rather than
+            // implying the name was wrong.
+            bool ok = RenderThumbnail.ResolveExpressionOn(null, "smile", out AnimationClip clip, out string err);
+
+            Assert.IsFalse(ok);
+            Assert.IsNull(clip);
+            StringAssert.Contains("no facial expressions", err);
+        }
+
+        [Test]
+        public void PoseCatalog_TokensAreUnique()
+        {
+            // A collision would make the winner depend on FindAssets order through an unstable sort.
+            // PoseCatalog throws on one; this asserts the shipped set is clean (and that it can be read).
+            var tokens = RenderThumbnail.PoseCatalog().Select(e => e.Token).ToList();
+
+            CollectionAssert.AllItemsAreUnique(tokens);
         }
 
         [Test]

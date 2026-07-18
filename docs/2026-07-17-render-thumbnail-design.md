@@ -115,7 +115,44 @@ by normalizing both sides (lowercase, strip non-alphanumerics), so `hand-on-hip`
 `HandOnHip` are one token. **Adding a pose is dropping a file** — no code edit — and the unknown-pose
 error enumerates the glob, so what the tool advertises cannot drift from what ships.
 
+### The bake door is the SDK preprocess chain, not NDMF
+
+`VRCBuildPipelineCallbacks.OnPreprocessAvatar` — the same door VRCFury's "build a test copy" uses, and
+it works whether or not VRCFury is installed. **Not `AvatarProcessor.ManualProcessAvatar`**, which runs
+NDMF's plugin chain only and therefore silently skips every tool that hooks the SDK instead of NDMF —
+d4rkAvatarOptimizer, Limitex, and the rest.
+
+Measured on a real avatar carrying d4rk, same source, same settings:
+
+| bake path | face mesh | renderers |
+|---|---|---|
+| source (unbaked) | 618 shapes | 20 |
+| `ManualProcessAvatar` | **618 shapes** (no change) | 20 |
+| `OnPreprocessAvatar` | **118 shapes** | 15 |
+
+A thumbnail exists for the *uploaded* avatar, so baking the un-optimized one renders something that
+never ships. The API differs in shape: `OnPreprocessAvatar` mutates the object **in place** and returns
+`false` when a hook blocks the build (a refusal is surfaced, since such an avatar would not upload
+either), where `ManualProcessAvatar` took a clone and returned a new object.
+
 ### `expression` — a second clip, applied not sampled
+
+Selected by **gesture slot** (`Open`, `Peace`, …), by clip name, or by asset path/GUID as an escape
+hatch. The slot is the portable name: state names are stable across vendors where clip names are not,
+**and the slot survives the bake where the clip's identity does not**.
+
+Resolution is therefore **two-phase**: a pre-bake check so a bad selector fails before paying for a
+bake, then an authoritative re-resolve against the **baked** clone's FX controller — whose clips the
+bake itself rewrote, so their bindings match the baked meshes by construction. The cost of skipping
+that, measured on the same avatar and expression:
+
+```
+slot (post-bake sourcing) : shapes=42/42
+pre-bake asset path       : shapes=42/86    <- 44 curves bind names the bake removed
+```
+
+The unknown-expression error enumerates what the avatar actually offers
+(`Fist=F_blink, Open=F_smile_1, Peace=F_doya_1, …`), so discovery needs no separate tool.
 
 Deliberately **no bundled vocabulary**: expressions are avatar-specific, so a bare name fails with a
 pointer at the discovery route (`ReportController` on the FX controller — candidates sit on layers 1–2 —
