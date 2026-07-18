@@ -83,12 +83,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // drains in walk order, which need not match the YAML fill order.
             private readonly Dictionary<long, Queue<string>> _danglingByOwner;
 
+            // Declared animator parameter names — the discriminator between the two path-"" Animator
+            // binding meanings (an AAP param write vs an animator/muscle property curve).
+            private readonly HashSet<string> _animParamNames = new HashSet<string>();
+
             public WalkContext(AnimatorController controller, bool stripLayout)
             {
                 _controller = controller;
                 _stripLayout = stripLayout;
                 _controllerPath = AssetDatabase.GetAssetPath(controller);
                 _danglingByOwner = RecoverDanglingMotionGuids(controller);
+                foreach (var p in controller.parameters) _animParamNames.Add(p.name);
             }
 
             // The next dangling guid recorded against this owning object (a State or BlendTree), in the
@@ -1017,14 +1022,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return true;
             }
 
-            // Invert ControllerEmit.ResolveBinding: an animator-property binding (path "", type Animator) is a
-            // bare parameter name; otherwise "path/Component.property" (empty path drops the leading slash).
+            // Invert ControllerEmit.ResolveBinding. A path-"" Animator binding has TWO meanings, split by
+            // whether the property names a declared controller parameter: a parameter write (the AAP form,
+            // emitted bare) vs an animator/humanoid-muscle property curve ("RightHand.Index.1 Stretched" —
+            // emitted "Animator.<property>", the same form the compiler's generic split accepts). The old
+            // bare-name-always emit produced yaml the compiler then refused as an undeclared binding —
+            // doomed output, the exact silent-loss class this method's refusals exist to prevent.
+            // Otherwise "path/Component.property" (empty path drops the leading slash).
             // The emit resolver is the ORACLE: a binding whose type's simple name would not resolve back to
             // the SAME type could never recompile, so it is refused here (named + located, null return the
             // caller skips) instead of emitted as doomed yaml. One source of truth, both directions.
             private string ReconstructBindingTarget(EditorCurveBinding b, string clipName)
             {
-                if (b.type == typeof(Animator) && b.path == "") return b.propertyName;
+                if (b.type == typeof(Animator) && b.path == "")
+                    return _animParamNames.Contains(b.propertyName) ? b.propertyName : "Animator." + b.propertyName;
                 System.Type roundtrip = null;
                 if (b.type != null)
                     try { roundtrip = ControllerEmit.ResolveComponentType(b.type.Name); }

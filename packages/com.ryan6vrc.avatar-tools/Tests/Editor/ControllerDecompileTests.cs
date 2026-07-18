@@ -977,6 +977,45 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
+    // ---- path-"" Animator bindings: the declared-param discriminator ------------------------------
+    // A muscle curve ("RightHand.Index.1 Stretched") and an AAP write share the binding shape
+    // (path "", type Animator); only the declared-parameter set tells them apart. The muscle form
+    // must round-trip as "Animator.<property>" — the bare-name emit is reserved for real params
+    // (bare non-param output was doomed yaml: the compiler refused it as an undeclared binding).
+
+    private const string MuscleDoc =
+        "schema: 1\ncontroller: MuscleRT_Gesture\nbasis: mount-root\nrole: gesture\n" +
+        "parameters:\n  Mode: { type: int }\n  Aap: { type: float, aap: true }\n" +
+        "layers:\n  - name: L\n" +
+        "    states:\n      Open: { motion: ~, transitions: [ { to: Grip, when: [ Mode equals 2 ] } ] }\n" +
+        "      Grip:\n        motion: { clip: grip }\n        transitions:\n          - { to: Open, when: [ Mode notEqual 2 ] }\n" +
+        "    default: Open\n" +
+        "clips:\n  grip:\n    set:\n" +
+        "      \"Animator.RightHand.Index.1 Stretched\": -0.5\n" +
+        "      Aap: 1.0\n";
+
+    [Test]
+    public void MuscleBinding_Roundtrips_As_AnimatorProperty_And_Param_Stays_Bare()
+    {
+        var src = AnimatorSchemaYaml.Parse(MuscleDoc, "test");
+        ControllerEmit.Build(src, out var emitted);
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.AreEqual(0, w.Refusals.Count, "muscle binding is in-vocabulary: " + string.Join(" | ", w.Refusals));
+
+        var grip = w.Doc.Clips.First(c => c.Name == "grip");
+        Assert.IsTrue(grip.Sets.ContainsKey("Animator.RightHand.Index.1 Stretched"),
+            "muscle curve emits the Animator.<property> form, got: " + string.Join(", ", grip.Sets.Keys));
+        Assert.IsTrue(grip.Sets.ContainsKey("Aap"), "declared param write stays bare");
+
+        // Fixpoint: serialize -> reparse -> rebuild -> rewalk reproduces the same canonical string.
+        var y1 = AnimatorSchemaEmit.Serialize(w.Doc);
+        var doc2 = AnimatorSchemaYaml.Parse(y1, "roundtrip");
+        ControllerEmit.Build(doc2, out var emitted2);
+        var w2 = ControllerDecompile.Walk(emitted2.Controller);
+        Assert.AreEqual(0, w2.Refusals.Count, "second walk refusal: " + string.Join(" | ", w2.Refusals));
+        Assert.AreEqual(y1, AnimatorSchemaEmit.Serialize(w2.Doc), "muscle-binding doc is on the fixpoint");
+    }
+
     private static void EnsureScratch()
     {
         if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");

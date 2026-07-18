@@ -46,16 +46,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return loaded;
         }
 
-        // Copy a committed built/ folder (its .controller + .meta and any siblings) into Assets/ so the
-        // AssetDatabase imports it with the committed GUID, then load the controller. Assumes the package
-        // under test is NOT also loaded in this host — else the committed GUID exists twice (a collision).
+        // Copy ONE committed built controller (+ its .meta) into Assets/ so the AssetDatabase imports
+        // it with the committed GUID, then load it. Only the named controller is copied — a multi-
+        // controller entry (an FX + Gesture pair) would otherwise import every sibling's committed
+        // GUID once per checked document, colliding across scratch dirs. Assumes the package under
+        // test is NOT also loaded in this host — else the committed GUID exists twice (a collision).
         static AnimatorController ImportCommitted(string builtControllerPath, string destAssetsDir)
         {
             var full = Path.GetFullPath(destAssetsDir);
             Directory.CreateDirectory(full);
-            var srcDir = Path.GetDirectoryName(Path.GetFullPath(builtControllerPath));
-            foreach (var f in Directory.GetFiles(srcDir))
-                File.Copy(f, Path.Combine(full, Path.GetFileName(f)), true);
+            var src = Path.GetFullPath(builtControllerPath);
+            File.Copy(src, Path.Combine(full, Path.GetFileName(src)), true);
+            if (File.Exists(src + ".meta"))
+                File.Copy(src + ".meta", Path.Combine(full, Path.GetFileName(src) + ".meta"), true);
             AssetDatabase.Refresh();
             return AssetDatabase.LoadAssetAtPath<AnimatorController>(
                 ToAssetsRelative(Path.Combine(full, Path.GetFileName(builtControllerPath))));
@@ -93,8 +96,26 @@ namespace Ryan6Vrc.AvatarTools.Editor
             finally { AssetDatabase.DeleteAsset(scratch); }
         }
 
-        // -executeMethod entrypoint. Args after `--`: --root <dir>. Globs <dir>/*/controller.yaml
-        // (skipping dot-folders), Checks each, exits 0 iff all pass.
+        // Reads the `controller:` name off a schema document without compiling it. Null when the file
+        // carries no such key (e.g. a CompileClips document) — the caller decides what that means.
+        static string ParseControllerName(string yamlPath)
+        {
+            foreach (var line in File.ReadLines(yamlPath))
+            {
+                if (!line.StartsWith("controller:", StringComparison.Ordinal)) continue;
+                var v = line.Substring("controller:".Length);
+                int hash = v.IndexOf('#');
+                if (hash >= 0) v = v.Substring(0, hash);
+                v = v.Trim();
+                return v.Length == 0 ? null : v;
+            }
+            return null;
+        }
+
+        // -executeMethod entrypoint. Args after `--`: --root <dir>. An entry is a non-dot <dir>/* folder
+        // containing controller.yaml; EVERY top-level *.yaml in it with a `controller:` key is gated
+        // (a multi-controller entry ships an FX + Gesture pair), each against built/<name>.controller.
+        // A built controller no document claims is drift and fails the entry. Exits 0 iff all pass.
         public static void RunGate()
         {
             string root = null;
@@ -108,34 +129,62 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 .Where(d => File.Exists(Path.Combine(d, "controller.yaml")))
                 .OrderBy(d => d, StringComparer.Ordinal).ToList();
 
-            int failed = 0;
+            int failedEntries = 0, checkedDocs = 0;
             foreach (var dir in entries)
             {
-                var yaml = Path.Combine(dir, "controller.yaml");
+                var entry = Path.GetFileName(dir);
+                bool entryFailed = false;
                 var builtDir = Path.Combine(dir, "built");
-                var built = Directory.Exists(builtDir)
-                    ? Directory.GetFiles(builtDir, "*.controller").FirstOrDefault() : null;
 
                 // Tier is derived from files present; a GUID-consumer shape (a prefab, a non-empty assets/,
-                // or a built/ dir) MUST ship a built .controller. Without this, a Module/Asset-bound entry
-                // whose built controller went missing would silently pass as if it were a pure Pattern.
+                // or a built/ dir) MUST ship a built .controller per document. Without this, a Module/
+                // Asset-bound entry whose built controller went missing would silently pass as a Pattern.
                 var assetsDir = Path.Combine(dir, "assets");
                 bool guidConsumer = Directory.GetFiles(dir, "*.prefab").Length > 0
                     || Directory.Exists(builtDir)
                     || (Directory.Exists(assetsDir) && Directory.GetFiles(assetsDir)
                             .Any(f => !f.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)));
-                if (built == null && guidConsumer)
+
+                var claimed = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+                foreach (var yaml in Directory.GetFiles(dir, "*.yaml").OrderBy(f => f, StringComparer.Ordinal))
                 {
-                    Debug.Log($"[gate] FAIL {Path.GetFileName(dir)}: GUID-consumer entry (prefab/assets/built) has no built .controller");
-                    failed++; continue;
+                    var doc = $"{entry}/{Path.GetFileName(yaml)}";
+                    var name = ParseControllerName(yaml);
+                    if (name == null)
+                    {
+                        // Not a controller document (a clips file has its own compile path) — named, not silent.
+                        Debug.Log($"[gate] SKIP {doc}: no controller: key (not a controller document)");
+                        continue;
+                    }
+                    claimed.Add(name);
+                    var built = Path.Combine(builtDir, name + ".controller");
+                    var builtExists = File.Exists(built);
+                    if (!builtExists && guidConsumer)
+                    {
+                        Debug.Log($"[gate] FAIL {doc}: GUID-consumer entry (prefab/assets/built) has no built/{name}.controller");
+                        entryFailed = true; continue;
+                    }
+
+                    checkedDocs++;
+                    var (ok, msg) = Check(yaml, builtExists ? built : null);
+                    Debug.Log($"[gate] {(ok ? "PASS" : "FAIL")} {doc}: {msg}");
+                    if (!ok) entryFailed = true;
                 }
 
-                var (ok, msg) = Check(yaml, built);
-                Debug.Log($"[gate] {(ok ? "PASS" : "FAIL")} {Path.GetFileName(dir)}: {msg}");
-                if (!ok) failed++;
+                // A committed controller no document claims is drift (a renamed/deleted yaml left its
+                // built form behind) — the silent-skip this multi-yaml gate exists to prevent.
+                if (Directory.Exists(builtDir))
+                    foreach (var orphan in Directory.GetFiles(builtDir, "*.controller")
+                        .Select(Path.GetFileNameWithoutExtension).Where(n => !claimed.Contains(n)))
+                    {
+                        Debug.Log($"[gate] FAIL {entry}: built/{orphan}.controller matches no yaml document (drift)");
+                        entryFailed = true;
+                    }
+
+                if (entryFailed) failedEntries++;
             }
-            Debug.Log($"[gate] {entries.Count - failed}/{entries.Count} passed");
-            EditorApplication.Exit(failed == 0 ? 0 : 1);
+            Debug.Log($"[gate] {entries.Count - failedEntries}/{entries.Count} entries passed ({checkedDocs} documents)");
+            EditorApplication.Exit(failedEntries == 0 ? 0 : 1);
         }
     }
 }
