@@ -21,7 +21,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>Case-insensitive vocabulary <see cref="ResolvePose"/> matches against
         /// <c>Editor/Poses/RTPose_&lt;PascalName&gt;.anim</c> before treating <c>pose</c> as an asset
         /// path/GUID.</summary>
-        internal static readonly string[] BundledPoses = { "contrapposto", "hand-on-hip" };
+        internal static readonly string[] BundledPoses = { "clasped", "hand-on-hip" };
 
         // Dolly-back distance (meters, added along camera local-forward beyond the SDK-calibrated
         // PositionPortraitCamera transform) per framing. Cosmetic taste defaults — bust is the SDK's own
@@ -456,7 +456,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return true;
             }
 
-            err = "unknown pose '" + pose + "' — bundled: contrapposto, hand-on-hip; or pass a clip asset path/GUID";
+            err = "unknown pose '" + pose + "' — bundled: " + string.Join(", ", BundledPoses) + "; or pass a clip asset path/GUID";
             return false;
         }
 
@@ -464,7 +464,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             switch (bundled)
             {
-                case "contrapposto": return "Contrapposto";
+                case "clasped": return "Clasped";
                 case "hand-on-hip": return "HandOnHip";
                 default:
                     throw new ArgumentException("no PascalName mapping for bundled pose '" + bundled + "'");

@@ -99,10 +99,10 @@ public static string Render(
 - **Verdict grammar** (matches the family — `[Tool] Verb <label> … => OK | key=val`; RunLog is
   intentionally **not** used — a render tool's artifact is the PNG, as with RenderAvatar):
   - render: `[RenderThumbnail] Render <label> baked pose=<name|floor> framing=bust silhouette=41% => OK | png=<temp>/renderthumbnail_<label>_<stamp>.png`
-  - preflight: `[RenderThumbnail] Render <label> whatIf pose=contrapposto descriptor=OK => WOULD-RENDER (no bake)` (pose token = the resolved name, or `floor`)
+  - preflight: `[RenderThumbnail] Render <label> whatIf pose=clasped descriptor=OK => WOULD-RENDER (no bake)` (pose token = the resolved name, or `floor`)
   - the `png=` token is load-bearing (the deferred upload step consumes it) — keep it verbatim.
 - **Fail loud, named** (CLAUDE.md rule 7): missing `VRC_AvatarDescriptor`, unresolvable `pose`
-  (error **enumerates the bundled vocabulary**: `unknown pose 'x' — bundled: contrapposto, hand-on-hip;
+  (error **enumerates the bundled vocabulary**: `unknown pose 'x' — bundled: clasped, hand-on-hip;
   or pass a clip asset path/GUID`), unparseable `bg`, a non-`isHumanMotion` clip, a bake exception, or a
   near-empty silhouette (`silhouette≈0%` = "nothing drew"). `silhouette=NN%` is **reported**, not
   gated on a tuned middle threshold (per `dont-tune-tools-against-one-clean-asset`) — only ~0 fails; a
@@ -166,9 +166,11 @@ serial-venue guidance elsewhere in the workshop.
 ## Owned pose assets
 
 - Bundle under `com.ryan6vrc.avatar-tools/Editor/Poses/` as single-keyframe **humanoid muscle** `.anim`
-  clips. v1 set: `floor` (implicit, no asset) + **contrapposto** + **hand-on-hip**, authored
-  **upper-body-focused** (bust framing crops the legs). Author by posing a humanoid rig in muscle mode and
-  saving; a Quaternius CC0 idle frame may seed a starting stance, but the committed clips are ours.
+  clips. v1 set: `floor` (implicit, no asset) + **clasped** (hands clasped in front) + **hand-on-hip**,
+  authored via muscle curves. These are **starter poses** — recognizable and natural, but blind muscle-value
+  authoring converges slowly, so they are explicitly tunable later (the Animation window with live visual
+  feedback, or a licensed clip via the `pose` path/GUID arg). The framing correction (below) is what makes
+  any pose sit correctly; the specific stances are secondary.
 - Each bundled clip is asserted `isHumanMotion == true` in tests — the guard against a silently-generic
   save that would only pose identical-bone-path rigs.
 

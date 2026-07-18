@@ -56,22 +56,30 @@ namespace Ryan6Vrc.AvatarTools.Tests
             bool ok = RenderThumbnail.ResolvePose("nope", out AnimationClip clip, out string err);
 
             Assert.IsFalse(ok);
-            StringAssert.Contains("contrapposto", err);
+            StringAssert.Contains("clasped", err);
             StringAssert.Contains("path/GUID", err);
         }
 
         [Test]
-        public void Pose_BundledName_MatchesCaseInsensitive_ButClipNotYetAuthored()
+        public void Pose_BundledClips_LoadAndAreHumanoid()
         {
-            // "CONTRAPPOSTO" must match the bundled vocabulary case-insensitively — it should fail only
-            // because the .anim isn't authored until Task 3, never fall through to the "unknown pose"
-            // branch (that would mean the case-insensitive match silently didn't fire).
-            bool ok = RenderThumbnail.ResolvePose("CONTRAPPOSTO", out AnimationClip clip, out string err);
+            // Both bundled poses now exist under Editor/Poses/ — ResolvePose loads them and the
+            // isHumanMotion guard passes (single-keyframe humanoid muscle clips authored in Task 3).
+            Assert.IsTrue(RenderThumbnail.ResolvePose("clasped", out AnimationClip c1, out string e1), e1);
+            Assert.IsNotNull(c1);
+            Assert.IsTrue(c1.isHumanMotion, "clasped must be a humanoid muscle clip");
 
-            Assert.IsFalse(ok);
-            Assert.IsNull(clip);
-            StringAssert.DoesNotContain("unknown pose", err);
-            StringAssert.Contains("Task 3", err);
+            Assert.IsTrue(RenderThumbnail.ResolvePose("hand-on-hip", out AnimationClip c2, out string e2), e2);
+            Assert.IsNotNull(c2);
+            Assert.IsTrue(c2.isHumanMotion, "hand-on-hip must be a humanoid muscle clip");
+        }
+
+        [Test]
+        public void Pose_BundledName_MatchesCaseInsensitive()
+        {
+            // "CLASPED" resolves the same bundled clip as "clasped" — the match is case-insensitive.
+            Assert.IsTrue(RenderThumbnail.ResolvePose("CLASPED", out AnimationClip clip, out _));
+            Assert.IsNotNull(clip);
         }
     }
 }
