@@ -180,10 +180,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // touch a user's kept bake.
                 //
                 // The bake door is the SDK preprocess chain, NOT ManualProcessAvatar — see
-                // nondestructive.md §The bake door for why (NDMF-only skips d4rk/VRCFury/Limitex
-                // silently; on one real avatar it left the face mesh at 618 shapes where the SDK chain
-                // cut it to 118). Unlike ManualProcessAvatar (clone in, new object out), this mutates
-                // IN PLACE, so `mine` IS the baked avatar and there is no second object to destroy.
+                // nondestructive.md §The bake door. Unlike ManualProcessAvatar (clone in, new object
+                // out), this mutates IN PLACE, so `mine` IS the baked avatar with nothing else to destroy.
                 string stamp = Guid.NewGuid().ToString("N").Substring(0, 8);
                 var mine = UnityEngine.Object.Instantiate(root);
                 string mineName = root.name + "__rt_" + stamp;
@@ -739,9 +737,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// VRChat convention — worlds depend on gesture expressions living there, so authors and
         /// optimizers hold to it). <see cref="IsExpressionClip"/> gates membership, which drops the
         /// 0-binding <c>Dummy</c>/<c>Empty</c> idles.
-        /// <para><b>Call this on the BAKED avatar.</b> The bake rewrites the blendshape namespace (one
-        /// real face mesh went 618 shapes to 118), so a clip from the pre-bake asset can bind names the
-        /// baked avatar no longer has. The slot survives the bake; the clip's identity does not.</para>
+        /// <para><b>Call this on the BAKED avatar.</b> The bake renames and merges, so a clip from the
+        /// pre-bake asset can bind shapes the baked avatar no longer has. The slot survives the bake;
+        /// the clip's identity does not.</para>
         /// </summary>
         internal static List<ExpressionEntry> ExpressionCatalog(GameObject avatarRoot)
         {
