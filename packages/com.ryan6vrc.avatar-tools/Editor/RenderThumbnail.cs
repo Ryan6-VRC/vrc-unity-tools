@@ -36,15 +36,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // anime hair would cost the bust crop entirely.
         private const float ReferenceViewHeight = 1.6f;
         private const float BustSpan = 0.48f, BustAimDrop = 0.12f;
-        private const float HalfSpan = 0.96f, HalfAimDrop = 0.12f;
+        private const float HalfSpan = 0.85f, HalfAimDrop = 0.18f;
         private const float FullSpan = 2.00f, FullAimDrop = 0.37f;
 
         // Camera angles, degrees. The camera tracks the posed head ONE-FOR-ONE (no follow coefficient): at
         // any partial coefficient the face-to-lens angle becomes a function of the pose, sweeping frontal to
         // looking-away across one library; at 1:1 it is exactly DefaultOblique everywhere, which is the
-        // point. DefaultOblique then sets the shot's obliquity — measured, the bundled poses twist the torso
-        // <8 deg, so obliquity has to come from the camera. ObliqueDeadband resolves the near-frontal poses
-        // (9 of 23 turn the head <5 deg) to one consistent side instead of letting retarget noise pick.
+        // point. DefaultOblique then sets the shot's obliquity — measured, the bundled poses barely twist the
+        // torso, so obliquity has to come from the camera. ObliqueDeadband resolves the near-frontal poses
+        // (many turn the head only a few degrees) to one consistent side instead of letting retarget noise pick.
         private const float DefaultOblique = 13f;
         private const float ObliqueDeadband = 5f;
         private const float PitchFollow = 0.5f;
@@ -62,14 +62,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // seeing real output. For a directional light only rotation matters. The rig is CAMERA-relative:
         // the eulers below are authored for a camera on the avatar's +Z side, and the holder is yawed to
         // match the solved camera, so orbiting never lights a shot from behind. From that camera, screen-left
-        // = +X world and screen-right = -X world. Shadows off for a clean, artifact-free portrait.
-        // Total intensity is ~1.2: lilToon/Poiyomi are calibrated so a single directional near 1.0 is correct
-        // exposure, and allowHDR is off, so the old 2.7 total clipped faces to flat white.
-        private const float KeyIntensity = 0.70f;
+        // = +X world and screen-right = -X world. Shadows off, and MEASURED so, not assumed: lilToon/Poiyomi
+        // gate shadow-receiving behind material toggles vendors rarely enable, so a cast shadow is invisible
+        // on the toon shaders that dominate — enabling it only costs a shadow-map pass and risks artifacts for
+        // no visible gain (probed on lilToon + Poiyomi, key-only and full-rig, hand-near-face poses).
+        // Total intensity 1.4, validated against real lilToon + Poiyomi renders: neither clips at 1.4 with
+        // allowHDR off (the old 2.7 total clipped faces to flat white), and it reads a touch poppier than the
+        // 1.2 it replaced. The ratio key:fill:rim is held; the total is what was swept.
+        private const float KeyIntensity = 0.8167f;
         private static readonly Vector3 KeyEuler = new Vector3(40f, 220f, 0f);   // key : front-upper-left
-        private const float FillIntensity = 0.30f;
+        private const float FillIntensity = 0.35f;
         private static readonly Vector3 FillEuler = new Vector3(15f, 140f, 0f);  // fill: front-right, softer
-        private const float RimIntensity = 0.20f;
+        private const float RimIntensity = 0.2333f;
         private static readonly Vector3 RimEuler = new Vector3(30f, 340f, 0f);   // rim : behind + above
 
         // Empty-frame guard: a pixel counts as "drawn" when it differs from ITS OWN ROW's column-0 pixel by
@@ -405,8 +409,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 cam.renderingPath = RenderingPath.Forward;
 
                 // The camera tracks the head one-for-one, then adds the oblique. The deadband decides the
-                // oblique's side for the near-frontal poses (measured: 9 of 23 turn the head <5 deg) rather
-                // than letting retarget noise pick, which would swing the camera 2*DefaultOblique and shoot
+                // oblique's side for the near-frontal poses (many of the bundled clips turn the head only a
+                // few degrees) rather than letting retarget noise pick, which would swing the camera 2*DefaultOblique and shoot
                 // the same pose from opposite sides on two avatars.
                 float obliqueSign = headYaw < -ObliqueDeadband ? -1f : 1f;
                 // ONE shot offset drives both the orbit and the looking-room, so an explicit yaw cannot orbit
