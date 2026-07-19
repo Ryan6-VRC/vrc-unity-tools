@@ -28,13 +28,13 @@ namespace Ryan6Vrc.AvatarTools.Tests
             RenderThumbnail.FramingGeometry("full", out float fullSpan, out float fullDrop);
 
             Assert.AreEqual(0.48f, bustSpan, 0.001f, "bust covers a head-and-shoulders height");
-            Assert.AreEqual(0.96f, halfSpan, 0.001f);
+            Assert.AreEqual(0.85f, halfSpan, 0.001f, "half covers chest-up (U5 tightened it from 0.96)");
             Assert.AreEqual(2.00f, fullSpan, 0.001f, "full must cover a whole standing avatar");
 
             // The eyes sit near the TOP of the subject, so the aim has to drop further as the span grows —
             // a single coefficient cuts the feet off at full framing.
             Assert.AreEqual(0.12f, bustDrop, 0.001f);
-            Assert.AreEqual(0.12f, halfDrop, 0.001f, "bust and half share an aim drop");
+            Assert.AreEqual(0.18f, halfDrop, 0.001f, "half aims lower than bust (U5: 0.12 -> 0.18)");
             Assert.AreEqual(0.37f, fullDrop, 0.001f, "full must aim lower to seat the feet in frame — "
                 + "ordering alone would pass 0.001/0.001/10 and destroy the framing");
 
