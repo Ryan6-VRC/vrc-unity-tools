@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.Animations;
 using UnityEngine.Playables;
@@ -25,25 +26,32 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// single synchronous call can settle-then-capture.</para>
     ///
     /// <para><b>Lifecycle — the caller drives the play toggle around three tool calls:</b>
-    /// <c>Begin(target)</c> (edit mode: open/ready the venue, enable the emulator, isolate to one active
-    /// avatar) → caller enters play (the SDK build-on-play runs, spawning the runtimes) → <c>Shoot(…)</c>
-    /// (play mode: attaches to the built local avatar on first call, then poses/settles/composes/captures
-    /// ASYNCHRONOUSLY, returning a tag the caller polls; one Begin serves many Shoots) → caller exits play →
-    /// <c>End()</c> (edit mode: reopen the venue scene from disk). Play entry/exit is left to the caller
-    /// (<c>manage_editor play/stop</c>) because <c>EditorApplication.isPlaying</c> toggles only on the next
-    /// editor tick — a tool method cannot both flip it and observe the result.</para>
+    /// <c>Begin(target)</c> (edit mode: snapshot the scene setup, open/ready the venue, enable the emulator,
+    /// isolate to one active avatar) → caller enters play (the SDK build-on-play runs, spawning the runtimes)
+    /// → <c>Shoot(…)</c> (play mode: attaches to the built local avatar on first call, then
+    /// poses/settles/composes/captures ASYNCHRONOUSLY, returning a tag the caller polls; one Begin serves many
+    /// Shoots) → caller exits play → <c>End()</c> (restore the scene setup from disk). Play entry/exit is left
+    /// to the caller (<c>manage_editor play/stop</c>) because <c>EditorApplication.isPlaying</c> toggles only
+    /// on the next editor tick — a tool method cannot both flip it and observe the result.</para>
+    ///
+    /// <para><b>Playable-graph discipline.</b> A Shoot poses on the Base playable and composes the expression
+    /// into the FX playable by <em>swapping</em> mixer inputs. The emulator's ORIGINAL Base/FX playables are
+    /// cached at attach and never destroyed — a slot a shot does not override is reconnected to its original,
+    /// and only the tool's own inserted playables are destroyed. Without this, a second shot that drops a pose
+    /// or expression would render off a destroyed playable while the verdict claimed the prior state.</para>
     ///
     /// <para><b>Reproducibility is explicitly NOT a goal</b> (every thumbnail is a fresh avatar version).
     /// Settle is never asserted — the verdict NAMES any chain still moving at capture (refusal over silent
     /// cleverness). All emulator access is reflection into <c>LyumaAv3Runtime</c> privates (the emulator is an
-    /// optional dependency this package must not reference); <see cref="Begin"/> asserts every reflected member
-    /// is present and FAILS LOUD, named, on drift rather than silently rendering something wrong.</para>
+    /// optional dependency this package must not reference); <see cref="Begin"/> asserts every member the tool
+    /// actually reads is present and FAILS LOUD, named, on drift.</para>
     ///
     /// <para><b>Venue.</b> The avatar is rendered in a loaded scene (the active scene, or one opened via
     /// <c>scenePath</c>) — lit by THAT scene's lights (operator-customizable, unlike edit mode's fixed rig),
-    /// backdrop from the camera clear. On <see cref="End"/> the venue scene is reopened from disk, discarding
-    /// the emulator control, deactivations, pose, and play-mode edits (mandatory when Enter-Play-Mode scene
-    /// reload is disabled — see <see cref="Begin"/>).</para>
+    /// backdrop from the camera clear. On <see cref="End"/> the whole scene setup is restored from disk,
+    /// discarding the emulator control, deactivations, pose, and play-mode edits (mandatory when
+    /// Enter-Play-Mode scene reload is disabled). <see cref="Begin"/> refuses if any loaded scene has unsaved
+    /// edits, since that restore would lose them.</para>
     /// </summary>
     [AgentTool]
     public static class RenderThumbnailPlay
@@ -56,34 +64,57 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private const float MovingLeafDeltaM = 0.0003f;
         private const int CaptureW = 1200, CaptureH = 900;
 
+        /// <summary>One mixer slot: the emulator's ORIGINAL playable (cached, never destroyed) and its input
+        /// weight, plus whatever the tool has currently inserted there (destroyed when replaced).</summary>
+        private struct SlotState
+        {
+            public AnimatorControllerPlayable orig;
+            public float origWeight;
+            public AnimatorControllerPlayable inserted;
+            public bool hasInserted;
+        }
+
         // ===== Session state (survives across MCP calls: no domain reload occurs while we stay in play) =====
         private static bool _prepared;             // Begin ran (edit-mode prep done)
         private static bool _attached;             // isolated to the built local avatar (post-play-entry)
         private static string _targetName;
-        private static string _venueScenePath;     // reopened from disk on End
-        private static string _preBeginScenePath;  // restored on End if Begin opened a different venue
+        private static SceneSetup[] _sceneSetup;   // snapshot at Begin; restored from disk on End
         private static GameObject _root;           // the built LOCAL avatar
         private static int _localLayer;            // cull target — the local runtime's actual layer (name may not resolve)
         private static object _localRuntime;       // LyumaAv3Runtime (reflected)
-        private static RuntimeAnimatorController _origFxController; // always compose onto THIS, never a prior clone
+        private static RuntimeAnimatorController _origFxController; // clone source for the expression override (may be null)
+        private static int _fxIndex = -1;
+        private static SlotState _base, _fx;        // the two slots the tool swaps
 
-        // Per-Shoot disposables (destroyed before the next Shoot and on End — HideAndDontSave in-memory
+        // Neutral head baseline, captured ONCE at attach (pre-pose idle) — Core.HeadFacing takes the delta, so
+        // re-sampling per shot would measure the new pose against the prior shot's still-posed head.
+        private static Transform _headBone;
+        private static Quaternion _restHeadLocal;
+        private static Vector3 _viewInHead;
+        private static float _viewPositionY;
+
+        // Blendshape bindings any expression drove this session, keyed "path|blendShape.Name". A composed
+        // override with WriteDefaults off leaves its shapes stuck on the renderer after the override is
+        // removed, so a later shot must drive the now-unused ones back to neutral (0). Reset once, then
+        // dropped — a held-0 shape needs no further reset. Cleared per attach.
+        private static Dictionary<string, EditorCurveBinding> _touchedExpr = new Dictionary<string, EditorCurveBinding>();
+
+        // In-memory controllers the current shot inserted (destroyed before the next shot / on End — HideAndDontSave
         // objects survive play exit under DisableDomainReload, so teardown must destroy them explicitly).
         private static readonly List<UnityEngine.Object> _shootDisposables = new List<UnityEngine.Object>();
         private static EditorApplication.CallbackFunction _shootUpdate; // non-null while a Shoot is in flight
         private static string _lastShootResult = "(no shot yet)";
 
-        // ===== Reflected LyumaAv3Runtime members (resolved + drift-checked in Begin) =====
-        private static Type _runtimeType, _emulatorType, _boolParamType, _floatParamType;
-        private static FieldInfo _fIsLocal, _fBools, _fFloats, _fPlayableMixer, _fPlayables, _fAllControllers, _fFxIndex;
-        private static FieldInfo _fBoolName, _fBoolValue, _fFloatName, _fFloatValue, _fFloatExprValue;
+        // ===== Reflected LyumaAv3Runtime members — ONLY those the tool reads (asserted in Begin) =====
+        private static Type _runtimeType, _emulatorType;
+        private static FieldInfo _fIsLocal, _fPlayableMixer, _fPlayables, _fFxIndex;
 
         /// <summary>
-        /// EDIT-MODE prep for a play session: open the venue (if <paramref name="scenePath"/> given), resolve
-        /// <paramref name="target"/>, assert the Enter-Play-Mode options and the emulator's reflected members,
-        /// enable the emulator, and isolate to one active avatar (PlayGate's precondition). Does NOT enter play
-        /// — after this returns READY, the caller enters play (<c>manage_editor play</c>) so the SDK builds the
-        /// avatar, then calls <see cref="Shoot"/>.
+        /// EDIT-MODE prep for a play session: snapshot the scene setup, open the venue (if
+        /// <paramref name="scenePath"/> given), resolve <paramref name="target"/>, assert the Enter-Play-Mode
+        /// options and the emulator's reflected members, enable the emulator, and isolate to one active avatar
+        /// (PlayGate's precondition). Does NOT enter play — after this returns READY, the caller enters play
+        /// (<c>manage_editor play</c>) so the SDK builds the avatar, then calls <see cref="Shoot"/>.
         /// </summary>
         /// <param name="target">avatar root: hierarchy path, instance id, or name — resolved in the venue scene.</param>
         /// <param name="scenePath">optional venue scene to open (Single) first; null =&gt; use the active scene.</param>
@@ -93,39 +124,50 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (Application.isPlaying) return Fail("already in play mode — exit play (manage_editor stop) before Begin()");
 
             // Enter-Play-Mode options: the frame-driven Shoot state machine and this cross-call session state
-            // both depend on the domain NOT reloading on play entry, and the reopen-from-disk cleanup on
+            // both depend on the domain NOT reloading on play entry, and the restore-from-disk cleanup on
             // scene-reload being disabled. Assert both; name the fix rather than silently misbehave.
             if (!EditorSettings.enterPlayModeOptionsEnabled
                 || (EditorSettings.enterPlayModeOptions & EnterPlayModeOptions.DisableDomainReload) == 0
                 || (EditorSettings.enterPlayModeOptions & EnterPlayModeOptions.DisableSceneReload) == 0)
                 return Fail("Enter-Play-Mode Options must be enabled with BOTH 'Reload Domain' and 'Reload Scene' "
                     + "DISABLED (Project Settings > Editor > Enter Play Mode Settings) — the session survives across "
-                    + "calls and reopens the scene from disk only under those; current="
+                    + "calls and restores the scene setup from disk only under those; current="
                     + (EditorSettings.enterPlayModeOptionsEnabled ? EditorSettings.enterPlayModeOptions.ToString() : "disabled"));
 
             if (!ResolveEmulatorReflection(out string driftErr)) return Fail(driftErr);
 
+            // End restores the scene setup by reopening from disk — so any unsaved edit in a loaded scene would
+            // be lost. Refuse loud rather than discard the operator's work; also guarantees every scene in the
+            // snapshot has a disk path to restore.
+            var unsaved = new List<string>();
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                var s = SceneManager.GetSceneAt(i);
+                if (s.isDirty || string.IsNullOrEmpty(s.path))
+                    unsaved.Add(string.IsNullOrEmpty(s.name) ? "<untitled>" : s.name);
+            }
+            if (unsaved.Count > 0)
+                return Fail("unsaved/unsaved-to-disk scene(s) loaded: [" + string.Join(",", unsaved) + "] — save or "
+                    + "close them first; End() restores the scene setup from disk and would lose the edits");
+
+            _sceneSetup = EditorSceneManager.GetSceneManagerSetup();
+
             if (scenePath != null)
             {
-                if (!System.IO.File.Exists(scenePath))
-                    return Fail("scenePath '" + scenePath + "' does not exist");
-                _preBeginScenePath = SceneManager.GetActiveScene().path;
-                UnityEditor.SceneManagement.EditorSceneManager.OpenScene(scenePath,
-                    UnityEditor.SceneManagement.OpenSceneMode.Single);
+                if (!System.IO.File.Exists(scenePath)) { AbortBegin(); return Fail("scenePath '" + scenePath + "' does not exist"); }
+                EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
             }
-            else _preBeginScenePath = null;
 
             var venue = SceneManager.GetActiveScene();
-            if (string.IsNullOrEmpty(venue.path))
-                return Fail("the venue scene is unsaved (no disk path) — save it or pass a scenePath; End() reopens it from disk");
+            if (string.IsNullOrEmpty(venue.path)) { AbortBegin(); return Fail("the venue scene is unsaved (no disk path) — save it or pass a scenePath"); }
 
             var target0 = RenderThumbnailCore.Resolve(target);
-            if (target0 == null) return Fail("target '" + target + "' not found in the venue scene");
+            if (target0 == null) { AbortBegin(); return Fail("target '" + target + "' not found in the venue scene"); }
             var descriptor = target0.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
-            if (descriptor == null) return Fail("no VRCAvatarDescriptor on '" + target0.name + "'");
+            if (descriptor == null) { AbortBegin(); return Fail("no VRCAvatarDescriptor on '" + target0.name + "'"); }
 
             // PlayGate wants exactly one active avatar. Deactivate every OTHER active avatar in the loaded
-            // scenes (restored by the End reopen-from-disk). The target itself must be active to build.
+            // scenes (restored by the End setup-restore). The target itself must be active to build.
             var deactivated = new List<string>();
             foreach (var other in UnityEngine.Object.FindObjectsOfType<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>())
             {
@@ -134,22 +176,26 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             if (!target0.activeInHierarchy) target0.SetActive(true);
 
-            // The emulator does not auto-spawn; the venue needs an enabled control object. Create/enable it
-            // (per-scene; the End reopen discards it if the on-disk scene never had one).
             bool emuMade = EnsureEmulatorEnabled(venue);
 
-            _venueScenePath = venue.path;
             _targetName = target0.name;
             _prepared = true;
             _attached = false;
-            _shootDisposables.Clear();
             _shootUpdate = null;
             _lastShootResult = "(no shot yet)";
 
             return Ok("Begin " + _targetName + " => READY-TO-PLAY"
-                + (emuMade ? " emulator=created" : " emulator=present")
+                + (emuMade ? " emulator=created/enabled" : " emulator=present")
                 + (deactivated.Count > 0 ? " deactivated=[" + string.Join(",", deactivated) + "]" : "")
                 + " — enter play (manage_editor play), then Shoot(...)");
+        }
+
+        // Undo a Begin that fails after the scene setup was snapshotted (restore the operator's scenes).
+        private static void AbortBegin()
+        {
+            try { if (_sceneSetup != null && _sceneSetup.Length > 0) EditorSceneManager.RestoreSceneManagerSetup(_sceneSetup); }
+            catch { /* best-effort restore on an already-broken failure path */ }
+            _sceneSetup = null;
         }
 
         /// <summary>
@@ -174,7 +220,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!_prepared) return Fail("no prepared session — call Begin(target) first");
             if (!Application.isPlaying) return Fail("not in play mode — enter play (manage_editor play) after Begin(), then Shoot()");
             if (_shootUpdate != null) return Fail("a Shoot is already in flight — poll its tag / Status() until it completes (renders are serialized)");
-            if (!_attached && !Attach(out string attachErr)) return Fail(attachErr);
+            // Re-attach when the built avatar is gone (a prior play exit destroyed it while the session persisted).
+            if (!_attached || _root == null) { if (!Attach(out string attachErr)) return Fail(attachErr); }
 
             // Validate framing/bg/fov up front (mirrors edit mode's fail-fast).
             float span, aimDrop;
@@ -191,49 +238,55 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             if (!RenderThumbnailCore.ResolvePose(pose, out AnimationClip poseClip, out string poseErr))
                 return Fail(poseErr);
+
             AnimationClip exprClip = null;
             if (!string.IsNullOrEmpty(expression))
             {
                 exprClip = RenderThumbnailCore.FindExpressionClip(_root, expression, out string exprErr);
                 if (exprClip == null) return Fail(exprErr);
+                if (_origFxController == null)
+                    return Fail("no FX controller on the built avatar — cannot compose an expression; take an "
+                        + "expression-free play thumbnail, or use edit mode");
+                if (!(_origFxController is UnityEditor.Animations.AnimatorController))
+                    return Fail("the FX layer holds a " + _origFxController.GetType().Name + " (an override controller), "
+                        + "which the play-mode expression compositor cannot clone — take this expression in edit mode");
+                if (_fxIndex < 0)
+                    return Fail("no FX playable slot on the runtime — cannot compose the expression");
+                // Parity with edit mode's zero-binding guard: an expression that resolves no blendshape on this
+                // avatar renders an unchanged face under a verdict that claims it. Fail loud instead.
+                if (!ExpressionBindsAny(_root, exprClip))
+                    return Fail("expression '" + expression + "' (clip '" + exprClip.name + "') moves no blendshape on "
+                        + "the built avatar — it binds shapes this avatar lacks, or only meshes that are not drawn");
             }
             string poseName = string.IsNullOrEmpty(pose) ? "idle" : pose;
             string expressionName = string.IsNullOrEmpty(expression) ? "none" : expression;
 
-            // Destroy the prior Shoot's composed/pose controllers before building this one (compose always onto
-            // the ORIGINAL baked FX, never an accumulating clone).
-            DisposeShootObjects();
-
-            var animator = _root.GetComponent<Animator>();
             var descriptor = _root.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             Vector3 viewpoint = _root.transform.TransformPoint(descriptor.ViewPosition);
-            float viewPositionY = descriptor.ViewPosition.y;
 
-            // --- Rest head reference: read BEFORE injecting the pose (idle-neutral). Core.HeadFacing takes the
-            // delta, so the reference need not be the exact bind — idle faces forward, and the extraction is
-            // rig-orientation-invariant either way. ---
-            Transform headBone = animator != null && animator.isHuman ? animator.GetBoneTransform(HumanBodyBones.Head) : null;
-            Quaternion restHeadLocal = headBone != null
-                ? Quaternion.Inverse(_root.transform.rotation) * headBone.rotation : Quaternion.identity;
-            Vector3 viewInHead = headBone != null ? headBone.InverseTransformPoint(viewpoint) : Vector3.zero;
-
-            // --- Inject pose on the Base playable (input 1 = playables[0]); the graph wins over the runtime
-            // controller. A bare AnimationClipPlayable collapses the humanoid root, so wrap in a 1-state
-            // controller. Floor (no clip) leaves the emulator's own Base running. ---
+            // --- Build this shot's playables, then swap them in; the emulator originals are preserved. New
+            // controllers go to a LOCAL list, adopted only after the prior shot's playables are destroyed. ---
             var mixer = (AnimationLayerMixerPlayable)_fPlayableMixer.GetValue(_localRuntime);
             var graph = PlayableExtensions.GetGraph(mixer);
             var playables = (System.Collections.IList)_fPlayables.GetValue(_localRuntime);
-            if (poseClip != null)
-                SwapPlayable(graph, mixer, playables, 0, WrapClip(poseClip, "__rtp_pose"));
+            var newDisp = new List<UnityEngine.Object>();
 
-            // --- Compose the expression as a full-weight FX override onto a clone of the baked FX, swapped in
-            // as the FX playable (verified: the avatar's own toggles keep running because the clone's parameters
-            // are unchanged, so the runtime's per-index param caches stay valid). ---
-            if (exprClip != null)
-            {
-                int fxIndex = (int)_fFxIndex.GetValue(_localRuntime);
-                SwapPlayable(graph, mixer, playables, fxIndex, ComposeFxOverride(exprClip));
-            }
+            AnimatorControllerPlayable? posePlayable = poseClip != null
+                ? WrapClip(poseClip, "__rtp_pose", graph, newDisp) : (AnimatorControllerPlayable?)null;
+            // The FX override clip is this shot's expression PLUS reset-to-0 for any shape a prior shot drove
+            // that this one doesn't (null when there is no expression and nothing to clear — then the FX slot
+            // returns to the emulator original). Only reachable with a clonable FX after the expression checks.
+            AnimationClip fxClip = BuildExpressionClip(exprClip, newDisp);
+            AnimatorControllerPlayable? exprPlayable = (fxClip != null && _fxIndex >= 0 && _origFxController is UnityEditor.Animations.AnimatorController)
+                ? ComposeFxOverride(fxClip, graph, newDisp) : (AnimatorControllerPlayable?)null;
+
+            SetSlot(graph, mixer, playables, 0, ref _base, posePlayable);       // Base: pose, or restore original
+            if (_fxIndex >= 0 && (exprPlayable.HasValue || _fx.hasInserted))    // FX: compose, or restore original
+                SetSlot(graph, mixer, playables, _fxIndex, ref _fx, exprPlayable);
+
+            // Prior shot's inserted playables are now destroyed (by SetSlot); destroy its controllers, adopt this shot's.
+            DisposeShootObjects();
+            _shootDisposables.AddRange(newDisp);
 
             // --- Physbone chains to watch for the moving-chains verdict ---
             var chains = CollectChains(_root);
@@ -265,13 +318,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // ---- capture ----
                     float headYaw = 0f, headPitch = 0f;
                     Vector3 vp = viewpoint;
-                    if (headBone != null)
+                    if (_headBone != null)
                     {
-                        vp = headBone.TransformPoint(viewInHead); // follow the head through the pose
-                        RenderThumbnailCore.HeadFacing(_root.transform.rotation, headBone, restHeadLocal, out headYaw, out headPitch);
+                        vp = _headBone.TransformPoint(_viewInHead); // follow the head through the pose
+                        RenderThumbnailCore.HeadFacing(_root.transform.rotation, _headBone, _restHeadLocal, out headYaw, out headPitch);
                     }
                     var sol = RenderThumbnailCore.SolveCamera(framingToken, span, aimDrop, fov, yaw, headYaw, headPitch,
-                        vp, _root.transform.rotation, _root.transform.lossyScale.y, viewPositionY, _root.transform.eulerAngles.y);
+                        vp, _root.transform.rotation, _root.transform.lossyScale.y, _viewPositionY, _root.transform.eulerAngles.y);
 
                     var camGO = EditorUtility.CreateGameObjectWithHideFlags("__rtp_cam", HideFlags.DontSave, typeof(Camera));
                     SceneManager.MoveGameObjectToScene(camGO, _root.scene);
@@ -337,7 +390,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// EDIT-MODE teardown: reopen the venue scene from disk (discarding the emulator control,
+        /// EDIT-MODE teardown: restore the scene setup from disk (discarding the emulator control,
         /// deactivations, pose, and every play-mode edit) and destroy the session's in-memory controllers.
         /// Call AFTER exiting play (<c>manage_editor stop</c>).
         /// </summary>
@@ -348,30 +401,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (_shootUpdate != null) { EditorApplication.update -= _shootUpdate; _shootUpdate = null; }
             DisposeShootObjects();
 
-            string reopened = "";
+            string restored = "";
             try
             {
-                if (!string.IsNullOrEmpty(_venueScenePath) && System.IO.File.Exists(_venueScenePath))
+                if (_sceneSetup != null && _sceneSetup.Length > 0)
                 {
-                    UnityEditor.SceneManagement.EditorSceneManager.OpenScene(_venueScenePath,
-                        UnityEditor.SceneManagement.OpenSceneMode.Single);
-                    reopened = " reopened=" + _venueScenePath;
-                    // Restore the operator's pre-Begin scene if Begin opened a different venue.
-                    if (!string.IsNullOrEmpty(_preBeginScenePath) && _preBeginScenePath != _venueScenePath
-                        && System.IO.File.Exists(_preBeginScenePath))
-                    {
-                        UnityEditor.SceneManagement.EditorSceneManager.OpenScene(_preBeginScenePath,
-                            UnityEditor.SceneManagement.OpenSceneMode.Single);
-                        reopened += " restored=" + _preBeginScenePath;
-                    }
+                    EditorSceneManager.RestoreSceneManagerSetup(_sceneSetup);
+                    restored = " restored=" + string.Join(",", _sceneSetup.Where(s => s != null).Select(s => System.IO.Path.GetFileNameWithoutExtension(s.path)));
                 }
             }
             finally
             {
                 _prepared = false; _attached = false; _root = null; _localRuntime = null; _origFxController = null;
-                _venueScenePath = null; _preBeginScenePath = null; _targetName = null;
+                _sceneSetup = null; _targetName = null; _fxIndex = -1; _base = default; _fx = default;
             }
-            return Ok("End => OK — venue" + (reopened.Length > 0 ? reopened : " had no disk path to reopen"));
+            return Ok("End => OK — scene setup" + (restored.Length > 0 ? restored : " had nothing to restore"));
         }
 
         // ===== Attach: isolate to the built local avatar (first Shoot, in play) =====
@@ -379,6 +423,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static bool Attach(out string err)
         {
             err = null;
+            // A prior session's in-memory controllers survive play exit under DisableDomainReload; clear them.
+            DisposeShootObjects();
+            _base = default; _fx = default; _attached = false;
+            _touchedExpr.Clear();
+
             _localRuntime = FindLocalRuntime();
             if (_localRuntime == null)
             { err = "no local LyumaAv3Runtime — the emulator control may be disabled, or the build spawned no runtimes (read the console)"; return false; }
@@ -393,9 +442,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 { err = "local avatar shares layer " + _localLayer + " with a clone runtime — cannot cull cleanly; the emulator's layer separation drifted"; return false; }
             }
 
-            _origFxController = GetFxController(_localRuntime);
-            if (_origFxController == null)
-            { err = "no FX controller on the built avatar — expression composition has nothing to compose onto"; return false; }
+            // Cache the emulator's ORIGINAL Base/FX playables + weights (never destroyed). FX may be absent
+            // (a bare avatar) — expression shots fail loud in Shoot; pose/settle/capture need no FX.
+            var mixer = (AnimationLayerMixerPlayable)_fPlayableMixer.GetValue(_localRuntime);
+            var playables = (System.Collections.IList)_fPlayables.GetValue(_localRuntime);
+            _base = new SlotState { orig = (AnimatorControllerPlayable)playables[0], origWeight = PlayableExtensions.GetInputWeight(mixer, 1) };
+            _fxIndex = (int)_fFxIndex.GetValue(_localRuntime);
+            if (_fxIndex >= 0 && _fxIndex < playables.Count)
+                _fx = new SlotState { orig = (AnimatorControllerPlayable)playables[_fxIndex], origWeight = PlayableExtensions.GetInputWeight(mixer, _fxIndex + 1) };
+            _origFxController = GetFxController(_localRuntime); // may be null — only expression shots need it
+
+            // Neutral head baseline (pre-pose idle), captured ONCE.
+            var animator = _root.GetComponent<Animator>();
+            _headBone = animator != null && animator.isHuman ? animator.GetBoneTransform(HumanBodyBones.Head) : null;
+            var desc = _root.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
+            _viewPositionY = desc.ViewPosition.y;
+            Vector3 vp0 = _root.transform.TransformPoint(desc.ViewPosition);
+            _restHeadLocal = _headBone != null ? Quaternion.Inverse(_root.transform.rotation) * _headBone.rotation : Quaternion.identity;
+            _viewInHead = _headBone != null ? _headBone.InverseTransformPoint(vp0) : Vector3.zero;
 
             _attached = true;
             return true;
@@ -403,45 +467,45 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ===== Playable-graph surgery =====
 
-        /// <summary>Disconnect mixer input (index+1), connect <paramref name="newPlayable"/> at the prior
-        /// weight, update the runtime's <c>playables[index]</c> so its per-frame param push targets the new
-        /// playable, and destroy the replaced one. Base = index 0 (input 1); FX = fxIndex (input fxIndex+1).</summary>
-        private static void SwapPlayable(PlayableGraph graph, AnimationLayerMixerPlayable mixer,
-            System.Collections.IList playables, int index, AnimatorControllerPlayable newPlayable)
+        /// <summary>Point a mixer slot at <paramref name="ours"/> (the tool's inserted playable) or, when null,
+        /// back at the emulator's cached ORIGINAL. Destroys the slot's previously-inserted playable (never the
+        /// original) and updates <c>playables[index]</c> so the runtime's per-frame param push targets whatever
+        /// now occupies the slot.</summary>
+        private static void SetSlot(PlayableGraph graph, AnimationLayerMixerPlayable mixer,
+            System.Collections.IList playables, int index, ref SlotState slot, AnimatorControllerPlayable? ours)
         {
             int input = index + 1;
-            float weight = PlayableExtensions.GetInputWeight(mixer, input);
-            var old = (AnimatorControllerPlayable)playables[index];
             graph.Disconnect(mixer, input);
-            graph.Connect(newPlayable, 0, mixer, input);
-            PlayableExtensions.SetInputWeight(mixer, input, weight > 0f ? weight : 1f);
-            // The runtime drives params by iterating playables[i] against per-index caches; updating this slot
-            // is what keeps the composed clone's toggles driven. allControllers is NOT touched — it feeds only
-            // the emulator's debug/view-only features, and its parameter set is unchanged by an added layer.
-            playables[index] = newPlayable;
-            graph.DestroyPlayable(old);
+            if (slot.hasInserted && ((Playable)slot.inserted).IsValid()) graph.DestroyPlayable((Playable)slot.inserted);
+
+            var desired = ours ?? slot.orig;
+            graph.Connect(desired, 0, mixer, input);
+            PlayableExtensions.SetInputWeight(mixer, input, slot.origWeight); // honor the original weight (incl. 0)
+            playables[index] = desired;
+
+            slot.inserted = ours ?? default;
+            slot.hasInserted = ours.HasValue;
         }
 
-        /// <summary>Wrap a clip in a 1-state in-memory controller (tracked for disposal) and make a playable
-        /// of it. A bare clip playable collapses the humanoid root; the controller wrapper holds it.</summary>
-        private static AnimatorControllerPlayable WrapClip(AnimationClip clip, string name)
+        /// <summary>Wrap a clip in a 1-state in-memory controller (tracked in <paramref name="sink"/>) and make
+        /// a playable of it. A bare clip playable collapses the humanoid root; the controller wrapper holds it.</summary>
+        private static AnimatorControllerPlayable WrapClip(AnimationClip clip, string name, PlayableGraph graph, List<UnityEngine.Object> sink)
         {
             var ctrl = new UnityEditor.Animations.AnimatorController { name = name, hideFlags = HideFlags.HideAndDontSave };
             var sm = new UnityEditor.Animations.AnimatorStateMachine { name = name + "_sm", hideFlags = HideFlags.HideAndDontSave };
             var st = sm.AddState("s"); st.motion = clip; st.writeDefaultValues = false; sm.defaultState = st;
             ctrl.AddLayer(new UnityEditor.Animations.AnimatorControllerLayer { name = "base", defaultWeight = 1f, stateMachine = sm });
-            _shootDisposables.Add(sm); _shootDisposables.Add(ctrl);
-            var graph = PlayableExtensions.GetGraph((AnimationLayerMixerPlayable)_fPlayableMixer.GetValue(_localRuntime));
+            sink.Add(sm); sink.Add(ctrl);
             return AnimatorControllerPlayable.Create(graph, ctrl);
         }
 
         /// <summary>Clone the baked FX controller and append a full-weight OVERRIDE layer holding the
         /// expression clip — the composition proven to render while the avatar's own FX toggles keep running.
-        /// Composing onto <see cref="_origFxController"/> (never the prior clone) keeps parameters identical, so
-        /// the runtime's per-index param caches stay valid.</summary>
-        private static AnimatorControllerPlayable ComposeFxOverride(AnimationClip exprClip)
+        /// Composing onto <see cref="_origFxController"/> (never a prior clone) keeps parameters identical, so
+        /// the runtime's per-index param caches stay valid. Caller guarantees it is an AnimatorController.</summary>
+        private static AnimatorControllerPlayable ComposeFxOverride(AnimationClip exprClip, PlayableGraph graph, List<UnityEngine.Object> sink)
         {
-            var clone = UnityEngine.Object.Instantiate(_origFxController) as UnityEditor.Animations.AnimatorController;
+            var clone = UnityEngine.Object.Instantiate((UnityEditor.Animations.AnimatorController)_origFxController);
             clone.name = _origFxController.name + "_rtpcompose"; clone.hideFlags = HideFlags.HideAndDontSave;
             var sm = new UnityEditor.Animations.AnimatorStateMachine { name = "__rtp_expr", hideFlags = HideFlags.HideAndDontSave };
             var st = sm.AddState("expr"); st.motion = exprClip; st.writeDefaultValues = false; sm.defaultState = st;
@@ -450,9 +514,55 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 name = "__rtp_expr_override", defaultWeight = 1f, stateMachine = sm,
                 blendingMode = UnityEditor.Animations.AnimatorLayerBlendingMode.Override
             });
-            _shootDisposables.Add(sm); _shootDisposables.Add(clone);
-            var graph = PlayableExtensions.GetGraph((AnimationLayerMixerPlayable)_fPlayableMixer.GetValue(_localRuntime));
+            sink.Add(sm); sink.Add(clone);
             return AnimatorControllerPlayable.Create(graph, clone);
+        }
+
+        /// <summary>
+        /// The clip the FX override layer plays for this shot: <paramref name="src"/>'s blendShape curves,
+        /// PLUS a reset-to-0 for every shape a prior shot's expression drove that <paramref name="src"/> does
+        /// not (a WD-off override leaves its shapes stuck on the renderer, so an amortized re-shoot must drive
+        /// the now-unused ones back). Returns null when there is no expression AND nothing to clear — the FX
+        /// slot then returns to the emulator original. Reset target is 0, the neutral for expression shapes.
+        /// </summary>
+        private static AnimationClip BuildExpressionClip(AnimationClip src, List<UnityEngine.Object> sink)
+        {
+            var current = new Dictionary<string, EditorCurveBinding>();
+            if (src != null)
+                foreach (var b in AnimationUtility.GetCurveBindings(src))
+                    if (b.propertyName != null && b.propertyName.StartsWith("blendShape.", StringComparison.Ordinal))
+                        current[b.path + "|" + b.propertyName] = b;
+
+            var resets = _touchedExpr.Where(kv => !current.ContainsKey(kv.Key)).Select(kv => kv.Value).ToList();
+            _touchedExpr = current; // shapes driven now; the reset ones are held at 0 and need no further reset
+            if (current.Count == 0 && resets.Count == 0) return null;
+
+            var clip = new AnimationClip { name = "__rtp_exprclip", hideFlags = HideFlags.HideAndDontSave };
+            if (src != null)
+                foreach (var kv in current)
+                {
+                    var curve = AnimationUtility.GetEditorCurve(src, kv.Value);
+                    if (curve != null) AnimationUtility.SetEditorCurve(clip, kv.Value, curve);
+                }
+            foreach (var b in resets)
+                AnimationUtility.SetEditorCurve(clip, b, AnimationCurve.Constant(0f, 1f, 0f));
+            sink.Add(clip);
+            return clip;
+        }
+
+        /// <summary>Does <paramref name="clip"/> drive at least one blendshape that exists on a DRAWN renderer
+        /// of <paramref name="root"/>? Mirrors edit mode's zero-binding guard (blendShape curves only).</summary>
+        private static bool ExpressionBindsAny(GameObject root, AnimationClip clip)
+        {
+            foreach (var binding in AnimationUtility.GetCurveBindings(clip))
+            {
+                if (binding.propertyName == null || !binding.propertyName.StartsWith("blendShape.", StringComparison.Ordinal)) continue;
+                Transform t = string.IsNullOrEmpty(binding.path) ? root.transform : root.transform.Find(binding.path);
+                var smr = t != null ? t.GetComponent<SkinnedMeshRenderer>() : null;
+                if (smr == null || smr.sharedMesh == null || !smr.enabled || !smr.gameObject.activeInHierarchy) continue;
+                if (smr.sharedMesh.GetBlendShapeIndex(binding.propertyName.Substring("blendShape.".Length)) >= 0) return true;
+            }
+            return false;
         }
 
         // ===== Settle measurement =====
@@ -512,7 +622,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static bool ResolveEmulatorReflection(out string err)
         {
             err = null;
-            _runtimeType = _emulatorType = _boolParamType = _floatParamType = null;
+            _runtimeType = _emulatorType = null;
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
             {
                 Type[] types; try { types = asm.GetTypes(); } catch { continue; }
@@ -528,21 +638,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             const BindingFlags BF = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
             var missing = new List<string>();
             _fIsLocal = Req(_runtimeType, "IsLocal", BF, missing);
-            _fBools = Req(_runtimeType, "Bools", BF, missing);
-            _fFloats = Req(_runtimeType, "Floats", BF, missing);
             _fPlayableMixer = Req(_runtimeType, "playableMixer", BF, missing);
             _fPlayables = Req(_runtimeType, "playables", BF, missing);
-            _fAllControllers = Req(_runtimeType, "allControllers", BF, missing);
             _fFxIndex = Req(_runtimeType, "fxIndex", BF, missing);
-
-            // Parameter mirror element types (nested); resolve name/value accessors for FX drive.
-            _boolParamType = _runtimeType.GetNestedType("BoolParam", BF) ?? FindNested("BoolParam");
-            _floatParamType = _runtimeType.GetNestedType("FloatParam", BF) ?? FindNested("FloatParam");
-            if (_boolParamType != null) { _fBoolName = _boolParamType.GetField("name", BF); _fBoolValue = _boolParamType.GetField("value", BF); }
-            if (_floatParamType != null) { _fFloatName = _floatParamType.GetField("name", BF); _fFloatValue = _floatParamType.GetField("value", BF); _fFloatExprValue = _floatParamType.GetField("expressionValue", BF); }
-
             if (missing.Count > 0)
-                { err = "LyumaAv3Runtime drifted — missing member(s): " + string.Join(", ", missing) + " (the emulator version is not the one this render targets)"; return false; }
+                { err = "LyumaAv3Runtime drifted — missing member(s) the render reads: " + string.Join(", ", missing) + " (the emulator version is not the one this render targets)"; return false; }
             return true;
         }
 
@@ -551,16 +651,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var f = t.GetField(name, bf);
             if (f == null) missing.Add(name);
             return f;
-        }
-
-        private static Type FindNested(string simpleName)
-        {
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                Type[] types; try { types = asm.GetTypes(); } catch { continue; }
-                foreach (var t in types) if (t.Name == simpleName && t.FullName != null && t.FullName.StartsWith("Lyuma.")) return t;
-            }
-            return null;
         }
 
         private static object FindLocalRuntime()
@@ -579,13 +669,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
+        /// <summary>True if the tool created/enabled a control; false if an enabled one already existed. Scans
+        /// ALL loaded scenes so an emulator owned by an additively-loaded scene isn't duplicated.</summary>
         private static bool EnsureEmulatorEnabled(Scene venue)
         {
             foreach (var e in UnityEngine.Object.FindObjectsOfType(_emulatorType, true))
             {
                 var b = (UnityEngine.Behaviour)e;
+                if (b.enabled && b.gameObject.activeInHierarchy) return false; // an enabled control exists in some loaded scene
+            }
+            foreach (var e in UnityEngine.Object.FindObjectsOfType(_emulatorType, true))
+            {
+                var b = (UnityEngine.Behaviour)e;
                 if (b.gameObject.scene != venue) continue;
-                if (b.enabled && b.gameObject.activeInHierarchy) return false; // present + enabled
                 b.enabled = true; b.gameObject.SetActive(true);
                 return true;
             }
