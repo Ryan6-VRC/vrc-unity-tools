@@ -63,6 +63,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // named chains and decides. NOT a settle assertion — the shot is taken regardless.
         private const float MovingLeafDeltaM = 0.0003f;
         private const int CaptureW = 1200, CaptureH = 900;
+        // If Time.frameCount does not advance for this long, the player loop has stalled (a paused editor keeps
+        // firing EditorApplication.update but freezes frameCount) — fail the shot rather than spin forever with
+        // _shootUpdate stuck non-null (which would refuse every later Shoot/End).
+        private const double StallSeconds = 20.0;
 
         /// <summary>One mixer slot: the emulator's ORIGINAL playable (cached, never destroyed) and its input
         /// weight, plus whatever the tool has currently inserted there (destroyed when replaced).</summary>
@@ -152,42 +156,54 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             _sceneSetup = EditorSceneManager.GetSceneManagerSetup();
 
-            if (scenePath != null)
+            // Everything below mutates scene state; any throw (an OpenScene on a non-scene file, a bad target)
+            // must roll the operator's scenes back rather than escape raw and strand the un-restorable snapshot.
+            try
             {
-                if (!System.IO.File.Exists(scenePath)) { AbortBegin(); return Fail("scenePath '" + scenePath + "' does not exist"); }
-                EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
+                if (scenePath != null)
+                {
+                    if (!scenePath.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
+                        { AbortBegin(); return Fail("scenePath '" + scenePath + "' is not a .unity scene"); }
+                    if (!System.IO.File.Exists(scenePath)) { AbortBegin(); return Fail("scenePath '" + scenePath + "' does not exist"); }
+                    EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
+                }
+
+                var venue = SceneManager.GetActiveScene();
+                if (string.IsNullOrEmpty(venue.path)) { AbortBegin(); return Fail("the venue scene is unsaved (no disk path) — save it or pass a scenePath"); }
+
+                var target0 = RenderThumbnailCore.Resolve(target);
+                if (target0 == null) { AbortBegin(); return Fail("target '" + target + "' not found in the venue scene"); }
+                var descriptor = target0.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
+                if (descriptor == null) { AbortBegin(); return Fail("no VRCAvatarDescriptor on '" + target0.name + "'"); }
+
+                // PlayGate wants exactly one active avatar. Deactivate every OTHER active avatar in the loaded
+                // scenes (restored by the End setup-restore). The target itself must be active to build.
+                var deactivated = new List<string>();
+                foreach (var other in UnityEngine.Object.FindObjectsOfType<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>())
+                {
+                    if (other == descriptor) continue;
+                    if (other.gameObject.activeInHierarchy) { other.gameObject.SetActive(false); deactivated.Add(other.name); }
+                }
+                if (!target0.activeInHierarchy) target0.SetActive(true);
+
+                bool emuMade = EnsureEmulatorEnabled(venue);
+
+                _targetName = target0.name;
+                _prepared = true;
+                _attached = false;
+                _shootUpdate = null;
+                _lastShootResult = "(no shot yet)";
+
+                return Ok("Begin " + _targetName + " => READY-TO-PLAY"
+                    + (emuMade ? " emulator=created/enabled" : " emulator=present")
+                    + (deactivated.Count > 0 ? " deactivated=[" + string.Join(",", deactivated) + "]" : "")
+                    + " — enter play (manage_editor play), then Shoot(...)");
             }
-
-            var venue = SceneManager.GetActiveScene();
-            if (string.IsNullOrEmpty(venue.path)) { AbortBegin(); return Fail("the venue scene is unsaved (no disk path) — save it or pass a scenePath"); }
-
-            var target0 = RenderThumbnailCore.Resolve(target);
-            if (target0 == null) { AbortBegin(); return Fail("target '" + target + "' not found in the venue scene"); }
-            var descriptor = target0.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
-            if (descriptor == null) { AbortBegin(); return Fail("no VRCAvatarDescriptor on '" + target0.name + "'"); }
-
-            // PlayGate wants exactly one active avatar. Deactivate every OTHER active avatar in the loaded
-            // scenes (restored by the End setup-restore). The target itself must be active to build.
-            var deactivated = new List<string>();
-            foreach (var other in UnityEngine.Object.FindObjectsOfType<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>())
+            catch (Exception ex)
             {
-                if (other == descriptor) continue;
-                if (other.gameObject.activeInHierarchy) { other.gameObject.SetActive(false); deactivated.Add(other.name); }
+                AbortBegin();
+                return Fail("Begin failed (" + ex.GetType().Name + ": " + ex.Message + ")");
             }
-            if (!target0.activeInHierarchy) target0.SetActive(true);
-
-            bool emuMade = EnsureEmulatorEnabled(venue);
-
-            _targetName = target0.name;
-            _prepared = true;
-            _attached = false;
-            _shootUpdate = null;
-            _lastShootResult = "(no shot yet)";
-
-            return Ok("Begin " + _targetName + " => READY-TO-PLAY"
-                + (emuMade ? " emulator=created/enabled" : " emulator=present")
-                + (deactivated.Count > 0 ? " deactivated=[" + string.Join(",", deactivated) + "]" : "")
-                + " — enter play (manage_editor play), then Shoot(...)");
         }
 
         // Undo a Begin that fails after the scene setup was snapshotted (restore the operator's scenes).
@@ -235,6 +251,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return Fail("fov " + fov.ToString(CultureInfo.InvariantCulture) + " out of range 10–90");
             if (yaw.HasValue && (float.IsNaN(yaw.Value) || float.IsInfinity(yaw.Value)))
                 return Fail("yaw must be finite, or null for the automatic oblique");
+            if (settleFrames < 0 || settleFrames > 600)
+                return Fail("settleFrames " + settleFrames + " out of range 0–600 (negative would capture instantly while claiming settled)");
 
             if (!RenderThumbnailCore.ResolvePose(pose, out AnimationClip poseClip, out string poseErr))
                 return Fail(poseErr);
@@ -271,22 +289,40 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var playables = (System.Collections.IList)_fPlayables.GetValue(_localRuntime);
             var newDisp = new List<UnityEngine.Object>();
 
-            AnimatorControllerPlayable? posePlayable = poseClip != null
-                ? WrapClip(poseClip, "__rtp_pose", graph, newDisp) : (AnimatorControllerPlayable?)null;
-            // The FX override clip is this shot's expression PLUS reset-to-0 for any shape a prior shot drove
-            // that this one doesn't (null when there is no expression and nothing to clear — then the FX slot
-            // returns to the emulator original). Only reachable with a clonable FX after the expression checks.
-            AnimationClip fxClip = BuildExpressionClip(exprClip, newDisp);
-            AnimatorControllerPlayable? exprPlayable = (fxClip != null && _fxIndex >= 0 && _origFxController is UnityEditor.Animations.AnimatorController)
-                ? ComposeFxOverride(fxClip, graph, newDisp) : (AnimatorControllerPlayable?)null;
+            // Build this shot's playables and swap them in as one all-or-nothing unit: a throw here (a bad clip,
+            // an invalidated graph) must not leak the just-built HideAndDontSave objects (they survive play exit
+            // under DisableDomainReload), half-swap the graph, or escape raw. Nothing is committed until it all
+            // succeeds — the prior shot's objects and _touchedExpr stay owned until then.
+            Dictionary<string, EditorCurveBinding> newTouched = _touchedExpr;
+            try
+            {
+                AnimatorControllerPlayable? posePlayable = poseClip != null
+                    ? WrapClip(poseClip, "__rtp_pose", graph, newDisp) : (AnimatorControllerPlayable?)null;
+                // The FX override clip is this shot's expression PLUS reset-to-0 for any shape a prior shot drove
+                // that this one doesn't (null when there is no expression and nothing to clear — then the FX slot
+                // returns to the emulator original). Only reachable with a clonable FX after the expression checks.
+                AnimationClip fxClip = BuildExpressionClip(exprClip, newDisp, out newTouched);
+                AnimatorControllerPlayable? exprPlayable = (fxClip != null && _fxIndex >= 0 && _origFxController is UnityEditor.Animations.AnimatorController)
+                    ? ComposeFxOverride(fxClip, graph, newDisp) : (AnimatorControllerPlayable?)null;
 
-            SetSlot(graph, mixer, playables, 0, ref _base, posePlayable);       // Base: pose, or restore original
-            if (_fxIndex >= 0 && (exprPlayable.HasValue || _fx.hasInserted))    // FX: compose, or restore original
-                SetSlot(graph, mixer, playables, _fxIndex, ref _fx, exprPlayable);
+                SetSlot(graph, mixer, playables, 0, ref _base, posePlayable);       // Base: pose, or restore original
+                if (_fxIndex >= 0 && (exprPlayable.HasValue || _fx.hasInserted))    // FX: compose, or restore original
+                    SetSlot(graph, mixer, playables, _fxIndex, ref _fx, exprPlayable);
+            }
+            catch (Exception ex)
+            {
+                // Free this shot's just-built objects; force a clean re-Attach (a partial swap leaves the graph
+                // inconsistent — re-Attach re-caches the slots from the live graph on the next Shoot).
+                foreach (var o in newDisp) if (o != null) UnityEngine.Object.DestroyImmediate(o);
+                _attached = false;
+                return Fail("shot construction failed (" + ex.GetType().Name + ": " + ex.Message + ")");
+            }
 
-            // Prior shot's inserted playables are now destroyed (by SetSlot); destroy its controllers, adopt this shot's.
+            // Success: the prior shot's inserted playables are destroyed (by SetSlot) — destroy its controllers,
+            // adopt this shot's, and commit the touched-shape record for the next shot's reset.
             DisposeShootObjects();
             _shootDisposables.AddRange(newDisp);
+            _touchedExpr = newTouched;
 
             // --- Physbone chains to watch for the moving-chains verdict ---
             var chains = CollectChains(_root);
@@ -296,6 +332,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             int injectFrame = Time.frameCount;
             var prevLeaf = SampleLeaves(chains);
             var stillMoving = new List<string>();
+            int lastFrameSeen = injectFrame;
+            double lastProgress = EditorApplication.timeSinceStartup;
 
             EditorApplication.CallbackFunction step = null;
             step = () =>
@@ -304,6 +342,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     if (!Application.isPlaying) { FinishShoot(step, tag, "[RenderThumbnailPlay] " + tag + " Shoot => FAIL: play exited mid-settle"); return; }
                     int elapsed = Time.frameCount - injectFrame;
+
+                    // Stall guard: if frames stop advancing (a paused editor), fail rather than spin forever.
+                    if (Time.frameCount != lastFrameSeen) { lastFrameSeen = Time.frameCount; lastProgress = EditorApplication.timeSinceStartup; }
+                    else if (EditorApplication.timeSinceStartup - lastProgress > StallSeconds)
+                    { FinishShoot(step, tag, "[RenderThumbnailPlay] " + tag + " Shoot => FAIL: settle stalled — no frame progress for " + StallSeconds + "s (editor paused?)"); return; }
 
                     // Measure per-chain motion each tick; the "still moving" set is recomputed from the LAST
                     // interval, so it reflects convergence at capture, not accumulated history.
@@ -327,22 +370,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         vp, _root.transform.rotation, _root.transform.lossyScale.y, _viewPositionY, _root.transform.eulerAngles.y);
 
                     var camGO = EditorUtility.CreateGameObjectWithHideFlags("__rtp_cam", HideFlags.DontSave, typeof(Camera));
-                    SceneManager.MoveGameObjectToScene(camGO, _root.scene);
-                    var cam = camGO.GetComponent<Camera>();
-                    cam.enabled = false;
-                    cam.clearFlags = CameraClearFlags.SolidColor;
-                    cam.backgroundColor = bgTop;
-                    cam.nearClipPlane = 0.01f;
-                    cam.farClipPlane = 100f;
-                    cam.cullingMask = 1 << _localLayer; // ONLY the local avatar's layer — a co-located clone draws over it otherwise
-                    cam.allowHDR = false;
-                    cam.fieldOfView = fov;
-                    cam.renderingPath = RenderingPath.Forward;
-                    cam.transform.position = sol.Position;
-                    cam.transform.rotation = sol.Rotation;
-
                     RenderThumbnailCore.CaptureResult cap;
-                    try { cap = RenderThumbnailCore.Capture(cam, bgTop, bgBottom, vp, CaptureW, CaptureH); }
+                    try // from creation, so a throw during camera setup can't leak the DontSave GO
+                    {
+                        SceneManager.MoveGameObjectToScene(camGO, _root.scene);
+                        var cam = camGO.GetComponent<Camera>();
+                        cam.enabled = false;
+                        cam.clearFlags = CameraClearFlags.SolidColor;
+                        cam.backgroundColor = bgTop;
+                        cam.nearClipPlane = 0.01f;
+                        cam.farClipPlane = 100f;
+                        cam.cullingMask = 1 << _localLayer; // ONLY the local avatar's layer — a co-located clone draws over it otherwise
+                        cam.allowHDR = false;
+                        cam.fieldOfView = fov;
+                        cam.renderingPath = RenderingPath.Forward;
+                        cam.transform.position = sol.Position;
+                        cam.transform.rotation = sol.Rotation;
+                        cap = RenderThumbnailCore.Capture(cam, bgTop, bgBottom, vp, CaptureW, CaptureH);
+                    }
                     finally { UnityEngine.Object.DestroyImmediate(camGO); }
 
                     string movingToken = stillMoving.Count == 0 ? "none"
@@ -410,11 +455,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     restored = " restored=" + string.Join(",", _sceneSetup.Where(s => s != null).Select(s => System.IO.Path.GetFileNameWithoutExtension(s.path)));
                 }
             }
-            finally
+            catch (Exception ex)
             {
-                _prepared = false; _attached = false; _root = null; _localRuntime = null; _origFxController = null;
-                _sceneSetup = null; _targetName = null; _fxIndex = -1; _base = default; _fx = default;
+                // Keep the session (and _sceneSetup) so End can be retried — a snapshotted scene may have been
+                // moved/deleted; nulling state here would strand a half-restored editor with no recovery.
+                return Fail("scene restore failed (" + ex.GetType().Name + ": " + ex.Message + ") — fix the scene(s) and call End() again");
             }
+
+            // Cleared only after a successful restore.
+            _prepared = false; _attached = false; _root = null; _localRuntime = null; _origFxController = null;
+            _sceneSetup = null; _targetName = null; _fxIndex = -1; _base = default; _fx = default;
             return Ok("End => OK — scene setup" + (restored.Length > 0 ? restored : " had nothing to restore"));
         }
 
@@ -443,19 +493,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // Cache the emulator's ORIGINAL Base/FX playables + weights (never destroyed). FX may be absent
-            // (a bare avatar) — expression shots fail loud in Shoot; pose/settle/capture need no FX.
+            // (a bare avatar) — expression shots fail loud in Shoot; pose/settle/capture need no FX. The graph
+            // may not be built yet if Shoot races the emulator's Start — guard rather than throw raw.
             var mixer = (AnimationLayerMixerPlayable)_fPlayableMixer.GetValue(_localRuntime);
             var playables = (System.Collections.IList)_fPlayables.GetValue(_localRuntime);
+            if (!((Playable)mixer).IsValid() || playables == null || playables.Count == 0)
+            { err = "the runtime's playable graph is not built yet — the emulator may still be initializing; retry Shoot in a moment"; return false; }
             _base = new SlotState { orig = (AnimatorControllerPlayable)playables[0], origWeight = PlayableExtensions.GetInputWeight(mixer, 1) };
             _fxIndex = (int)_fFxIndex.GetValue(_localRuntime);
             if (_fxIndex >= 0 && _fxIndex < playables.Count)
                 _fx = new SlotState { orig = (AnimatorControllerPlayable)playables[_fxIndex], origWeight = PlayableExtensions.GetInputWeight(mixer, _fxIndex + 1) };
             _origFxController = GetFxController(_localRuntime); // may be null — only expression shots need it
 
+            var desc = _root.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
+            if (desc == null) { err = "the built avatar has no VRCAvatarDescriptor — the bake dropped it"; return false; }
+
             // Neutral head baseline (pre-pose idle), captured ONCE.
             var animator = _root.GetComponent<Animator>();
             _headBone = animator != null && animator.isHuman ? animator.GetBoneTransform(HumanBodyBones.Head) : null;
-            var desc = _root.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             _viewPositionY = desc.ViewPosition.y;
             Vector3 vp0 = _root.transform.TransformPoint(desc.ViewPosition);
             _restHeadLocal = _headBone != null ? Quaternion.Inverse(_root.transform.rotation) * _headBone.rotation : Quaternion.identity;
@@ -495,7 +550,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var sm = new UnityEditor.Animations.AnimatorStateMachine { name = name + "_sm", hideFlags = HideFlags.HideAndDontSave };
             var st = sm.AddState("s"); st.motion = clip; st.writeDefaultValues = false; sm.defaultState = st;
             ctrl.AddLayer(new UnityEditor.Animations.AnimatorControllerLayer { name = "base", defaultWeight = 1f, stateMachine = sm });
-            sink.Add(sm); sink.Add(ctrl);
+            sink.Add(st); sink.Add(sm); sink.Add(ctrl); // each tracked — DestroyImmediate does not cascade
             return AnimatorControllerPlayable.Create(graph, ctrl);
         }
 
@@ -514,7 +569,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 name = "__rtp_expr_override", defaultWeight = 1f, stateMachine = sm,
                 blendingMode = UnityEditor.Animations.AnimatorLayerBlendingMode.Override
             });
-            sink.Add(sm); sink.Add(clone);
+            // Track only what we ADDED: the override state/state-machine and the clone controller. Instantiate
+            // is shallow — the clone shares the baked FX's asset state machines, which must NOT be destroyed.
+            sink.Add(st); sink.Add(sm); sink.Add(clone);
             return AnimatorControllerPlayable.Create(graph, clone);
         }
 
@@ -525,7 +582,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// the now-unused ones back). Returns null when there is no expression AND nothing to clear — the FX
         /// slot then returns to the emulator original. Reset target is 0, the neutral for expression shapes.
         /// </summary>
-        private static AnimationClip BuildExpressionClip(AnimationClip src, List<UnityEngine.Object> sink)
+        private static AnimationClip BuildExpressionClip(AnimationClip src, List<UnityEngine.Object> sink,
+            out Dictionary<string, EditorCurveBinding> newTouched)
         {
             var current = new Dictionary<string, EditorCurveBinding>();
             if (src != null)
@@ -534,7 +592,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         current[b.path + "|" + b.propertyName] = b;
 
             var resets = _touchedExpr.Where(kv => !current.ContainsKey(kv.Key)).Select(kv => kv.Value).ToList();
-            _touchedExpr = current; // shapes driven now; the reset ones are held at 0 and need no further reset
+            newTouched = current; // shapes driven now (caller commits on success); the reset ones are held at 0
             if (current.Count == 0 && resets.Count == 0) return null;
 
             var clip = new AnimationClip { name = "__rtp_exprclip", hideFlags = HideFlags.HideAndDontSave };
@@ -610,6 +668,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (verdict.Contains("=> FAIL")) Debug.LogError(verdict); else Debug.Log(verdict);
         }
 
+        // Destroys exactly the in-memory objects a shot created (controller, its one state machine, its one
+        // state, the synthesized clip) — all tracked explicitly. DestroyImmediate does NOT cascade a controller
+        // to its state machine/state, so each is tracked. Instantiate is shallow (the FX clone SHARES the baked
+        // controller's asset state machines), so nothing here touches a shared original — only the override
+        // state machine/state this tool added.
         private static void DisposeShootObjects()
         {
             foreach (var o in _shootDisposables)
@@ -663,6 +726,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static RuntimeAnimatorController GetFxController(object runtime)
         {
             var desc = ((Component)runtime).GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
+            if (desc == null || desc.baseAnimationLayers == null) return null;
             foreach (var l in desc.baseAnimationLayers)
                 if (l.type == VRC.SDK3.Avatars.Components.VRCAvatarDescriptor.AnimLayerType.FX && l.animatorController != null)
                     return l.animatorController;
