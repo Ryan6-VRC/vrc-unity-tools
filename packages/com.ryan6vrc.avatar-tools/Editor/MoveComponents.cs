@@ -12,7 +12,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// type whose effective anchor (its table anchor field, else its host GameObject's transform)
     /// descends from <paramref name="targetRoot"/>, the component is re-created on a fresh holder
     /// GameObject under <c>destPath</c> with its anchor PINNED back to that original transform — so
-    /// behavior is unchanged — and the original is removed. The host bone it lived on is never moved
+    /// behavior is unchanged — and the original is removed. Inbound serialized references to a moved
+    /// component (a physbone's <c>colliders[]</c> entry to a relocated collider) are rewired to the
+    /// fresh copy before the original is destroyed, so relocation is behavior-neutral for referenced
+    /// types too, not just for anchors. The host bone it lived on is never moved
     /// (optimizers, not us, flatten the skeleton). No opinion about WHAT should move; the operator
     /// chooses via the (<c>targetRoot</c>, <c>typeNames</c>, <c>destPath</c>) calls they make.
     ///
@@ -114,6 +117,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             int moved = 0, alreadyPlaced = 0;
             var movedNames = new List<string>();
+            // original → fresh copy, for the deferred destroy + inbound-ref rewire below
+            // (whatIf maps to null — the set of would-move originals, no fresh copies exist).
+            var remap = new Dictionary<Component, Component>();
 
             try
             {
@@ -139,6 +145,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             { alreadyPlaced++; continue; }
                         moved++;
                         movedNames.Add(comp.gameObject.name);
+                        remap[comp] = null;
                         log.Note("would relocate " + comp.GetType().Name + " '" + comp.gameObject.name +
                                  "' (anchor '" + anchor.name + "') under '" + destPath + "'");
                         continue;
@@ -173,13 +180,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     nso.ApplyModifiedPropertiesWithoutUndo();
                     EditorUtility.SetDirty(newComp);
 
-                    Undo.DestroyObjectImmediate(comp);
+                    remap[comp] = newComp;               // destroy deferred until inbound refs are rewired
                     moved++;
                     movedNames.Add(holder.name);
                 }
 
+                // ── Inbound-ref rewire, then the deferred destroy ─────────────────────────────────────
+                // Re-creating a component orphans every serialized reference other components hold to the
+                // ORIGINAL instance — a physbone's colliders[] entry to a relocated collider would go null
+                // when the original is destroyed. Sweep the hierarchy and repoint such refs at the fresh
+                // copies BEFORE destroying the originals (destroyed objects don't match by value). This is
+                // what keeps the relocation behavior-neutral for referenced types, not just for anchors.
+                int inboundRefsRewired = remap.Count > 0 ? RewireInboundRefs(ownedRoot, remap, whatIf, log) : 0;
+                if (!whatIf)
+                    foreach (var pair in remap)
+                        if (pair.Key != null) Undo.DestroyObjectImmediate(pair.Key);
+
                 log.Count("moved", moved);
                 log.Count("alreadyPlaced", alreadyPlaced);
+                log.Count("inboundRefsRewired", inboundRefsRewired);
                 foreach (var n in movedNames) log.Note((whatIf ? "wouldMove: " : "moved: ") + n);
                 log.result = log.offenders.Count == 0 ? "PASS" : "FAIL";
             }
@@ -194,6 +213,44 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             return TransplantCore.Finish(log, label);
+        }
+
+        // ── Inbound-ref rewire ────────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Repoint every serialized ObjectReference under <paramref name="root"/> that targets a
+        /// relocated ORIGINAL at its fresh copy (<paramref name="remap"/> value); whatIf counts and
+        /// notes without writing. In a real run the originals themselves are skipped as owners (they
+        /// are about to be destroyed; their fresh copies — CopySerialized carries outbound refs — are
+        /// swept instead); in whatIf no fresh copies exist, so the originals stand in for them,
+        /// keeping the predicted count equal to the executed one when physbone and collider relocate
+        /// in the same call. Returns the (would-be) rewired ref count.
+        /// </summary>
+        static int RewireInboundRefs(GameObject root, Dictionary<Component, Component> remap,
+                                     bool whatIf, RunLog log)
+        {
+            int rewired = 0;
+            foreach (var owner in root.GetComponentsInChildren<Component>(true))
+            {
+                if (owner == null) continue;
+                if (!whatIf && remap.ContainsKey(owner)) continue;
+                var so = new SerializedObject(owner);
+                var it = so.GetIterator();
+                bool dirty = false;
+                while (it.Next(true))
+                {
+                    if (it.propertyType != SerializedPropertyType.ObjectReference) continue;
+                    var v = it.objectReferenceValue as Component;
+                    if (v == null || !remap.TryGetValue(v, out var fresh)) continue;
+                    if (!whatIf) { it.objectReferenceValue = fresh; dirty = true; }
+                    rewired++;
+                    log.Note((whatIf ? "wouldRewire: " : "rewired: ") + owner.GetType().Name + " '" +
+                             owner.gameObject.name + "'." + it.propertyPath + " → " + v.GetType().Name +
+                             " '" + v.gameObject.name + "'");
+                }
+                if (dirty) { so.ApplyModifiedProperties(); EditorUtility.SetDirty(owner); }
+            }
+            return rewired;
         }
 
         // ── Anchor probing — driven by the type's table anchorFieldPaths (first found wins) ──────────
