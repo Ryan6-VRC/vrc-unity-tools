@@ -23,9 +23,9 @@ namespace Ryan6Vrc.AvatarTools.Tests
         [Test]
         public void Framing_SpansAreSubjectHeights()
         {
-            RenderThumbnail.FramingGeometry("bust", out float bustSpan, out float bustDrop);
-            RenderThumbnail.FramingGeometry("half", out float halfSpan, out float halfDrop);
-            RenderThumbnail.FramingGeometry("full", out float fullSpan, out float fullDrop);
+            RenderThumbnailCore.FramingGeometry("bust", out float bustSpan, out float bustDrop);
+            RenderThumbnailCore.FramingGeometry("half", out float halfSpan, out float halfDrop);
+            RenderThumbnailCore.FramingGeometry("full", out float fullSpan, out float fullDrop);
 
             Assert.AreEqual(0.34f, bustSpan, 0.001f, "bust is a fixed face-sized height, decoupled from viewpoint");
             Assert.AreEqual(0.60f, halfSpan, 0.001f, "half is a fixed face/chest height, decoupled from viewpoint");
@@ -51,35 +51,35 @@ namespace Ryan6Vrc.AvatarTools.Tests
         public void Framing_Unknown_Throws()
         {
             var ex = Assert.Throws<System.ArgumentException>(
-                () => RenderThumbnail.FramingGeometry("zoom", out _, out _));
+                () => RenderThumbnailCore.FramingGeometry("zoom", out _, out _));
             StringAssert.Contains("bust", ex.Message);
         }
 
         [Test]
         public void Bg_SolidHexParses_GarbageFails()
         {
-            Assert.IsTrue(RenderThumbnail.TryParseBg("#204060", out Color top, out Color bottom));
+            Assert.IsTrue(RenderThumbnailCore.TryParseBg("#204060", out Color top, out Color bottom));
             Assert.AreEqual(0x20 / 255f, top.r, 0.01f);
             Assert.AreEqual(top, bottom, "a solid bg must yield an identical pair — that is what selects the "
                 + "solid-clear path over the gradient command buffer");
 
-            Assert.IsFalse(RenderThumbnail.TryParseBg("blue", out _, out _));
+            Assert.IsFalse(RenderThumbnailCore.TryParseBg("blue", out _, out _));
         }
 
         [Test]
         public void Bg_GradientPairParses()
         {
-            Assert.IsTrue(RenderThumbnail.TryParseBg("#204060:#8090A0", out Color top, out Color bottom));
+            Assert.IsTrue(RenderThumbnailCore.TryParseBg("#204060:#8090A0", out Color top, out Color bottom));
             Assert.AreEqual(0x20 / 255f, top.r, 0.01f, "the FIRST stop is the top of the frame");
             Assert.AreEqual(0x80 / 255f, bottom.r, 0.01f);
             Assert.AreNotEqual(top, bottom);
 
             // #RRGGBBAA must keep resolving as one solid colour — the ':' is what distinguishes the forms.
-            Assert.IsTrue(RenderThumbnail.TryParseBg("#204060FF", out Color solid, out Color solidB));
+            Assert.IsTrue(RenderThumbnailCore.TryParseBg("#204060FF", out Color solid, out Color solidB));
             Assert.AreEqual(solid, solidB);
 
-            Assert.IsFalse(RenderThumbnail.TryParseBg("#204060:", out _, out _));
-            Assert.IsFalse(RenderThumbnail.TryParseBg("#204060:8090A0", out _, out _), "both stops need '#'");
+            Assert.IsFalse(RenderThumbnailCore.TryParseBg("#204060:", out _, out _));
+            Assert.IsFalse(RenderThumbnailCore.TryParseBg("#204060:8090A0", out _, out _), "both stops need '#'");
         }
 
         // The camera solve's sign convention, which is invisible in code review and inverts the whole
@@ -88,17 +88,17 @@ namespace Ryan6Vrc.AvatarTools.Tests
         [Test]
         public void YawOf_IsSignedAboutY_PositiveTowardX()
         {
-            Assert.AreEqual(0f, RenderThumbnail.YawOf(Vector3.forward), 0.01f);
-            Assert.AreEqual(90f, RenderThumbnail.YawOf(Vector3.right), 0.01f);
-            Assert.AreEqual(-90f, RenderThumbnail.YawOf(Vector3.left), 0.01f);
+            Assert.AreEqual(0f, RenderThumbnailCore.YawOf(Vector3.forward), 0.01f);
+            Assert.AreEqual(90f, RenderThumbnailCore.YawOf(Vector3.right), 0.01f);
+            Assert.AreEqual(-90f, RenderThumbnailCore.YawOf(Vector3.left), 0.01f);
         }
 
         [Test]
         public void PitchOf_IsPositiveLookingUp()
         {
-            Assert.AreEqual(0f, RenderThumbnail.PitchOf(Vector3.forward), 0.01f);
-            Assert.Greater(RenderThumbnail.PitchOf(new Vector3(0f, 1f, 1f)), 0f, "chin raised reads positive");
-            Assert.Less(RenderThumbnail.PitchOf(new Vector3(0f, -1f, 1f)), 0f);
+            Assert.AreEqual(0f, RenderThumbnailCore.PitchOf(Vector3.forward), 0.01f);
+            Assert.Greater(RenderThumbnailCore.PitchOf(new Vector3(0f, 1f, 1f)), 0f, "chin raised reads positive");
+            Assert.Less(RenderThumbnailCore.PitchOf(new Vector3(0f, -1f, 1f)), 0f);
         }
 
         // The rig-portability property the whole head-tracking feature rests on, and the one the canonical
@@ -127,9 +127,9 @@ namespace Ryan6Vrc.AvatarTools.Tests
                 Vector3 yawFwd = (yawTurn * rest * Quaternion.Inverse(rest)) * Vector3.forward;
                 Vector3 pitchFwd = (chinUp * rest * Quaternion.Inverse(rest)) * Vector3.forward;
 
-                Assert.AreEqual(30f, RenderThumbnail.YawOf(yawFwd), 0.01f,
+                Assert.AreEqual(30f, RenderThumbnailCore.YawOf(yawFwd), 0.01f,
                     "a 30 deg head turn must read 30 deg whatever way the head bone happens to point");
-                Assert.AreEqual(20f, RenderThumbnail.PitchOf(pitchFwd), 0.01f,
+                Assert.AreEqual(20f, RenderThumbnailCore.PitchOf(pitchFwd), 0.01f,
                     "a chin raise must read positive whatever way the head bone happens to point");
             }
         }
@@ -139,8 +139,8 @@ namespace Ryan6Vrc.AvatarTools.Tests
         [Test]
         public void BundledPoses_IsNonEmpty()
         {
-            Assert.IsNotEmpty(RenderThumbnail.BundledPoses(),
-                "no RTPose_*.anim found in " + RenderThumbnail.PosesFolder
+            Assert.IsNotEmpty(RenderThumbnailCore.BundledPoses(),
+                "no RTPose_*.anim found in " + RenderThumbnailCore.PosesFolder
                 + " — the bundled pose vocabulary is sourced entirely from that folder");
         }
 
@@ -149,9 +149,9 @@ namespace Ryan6Vrc.AvatarTools.Tests
         {
             // Doubles as a content gate: any RTPose_* that is not a humanoid muscle clip would not
             // retarget across rigs, and ResolvePose rejects it pre-bake.
-            foreach (var entry in RenderThumbnail.BundledPoses())
+            foreach (var entry in RenderThumbnailCore.BundledPoses())
             {
-                Assert.IsTrue(RenderThumbnail.ResolvePose(entry.Key, out AnimationClip clip, out string err),
+                Assert.IsTrue(RenderThumbnailCore.ResolvePose(entry.Key, out AnimationClip clip, out string err),
                     entry.Key + " (" + entry.Value + ") failed to resolve: " + err);
                 // Assert WHICH clip came back, not merely that one did: with first-match-wins, a name
                 // collision resolves two entries to the same clip and the test would still pass green.
@@ -166,24 +166,24 @@ namespace Ryan6Vrc.AvatarTools.Tests
         {
             // Shared by pose names and FX state names: "Hand-On-Hip", "hand_on_hip" and "HandOnHip" are
             // one token, as are "Thumbs up" and "thumbsup".
-            Assert.AreEqual(RenderThumbnail.NormalizeToken("handonhip"), RenderThumbnail.NormalizeToken("Hand-On-Hip"));
-            Assert.AreEqual(RenderThumbnail.NormalizeToken("handonhip"), RenderThumbnail.NormalizeToken("hand_on_hip"));
-            Assert.AreEqual("thumbsup", RenderThumbnail.NormalizeToken("Thumbs up"));
+            Assert.AreEqual(RenderThumbnailCore.NormalizeToken("handonhip"), RenderThumbnailCore.NormalizeToken("Hand-On-Hip"));
+            Assert.AreEqual(RenderThumbnailCore.NormalizeToken("handonhip"), RenderThumbnailCore.NormalizeToken("hand_on_hip"));
+            Assert.AreEqual("thumbsup", RenderThumbnailCore.NormalizeToken("Thumbs up"));
         }
 
         [Test]
         public void Pose_NameMatchesCaseInsensitive()
         {
-            string first = RenderThumbnail.BundledPoses().Keys.First();
+            string first = RenderThumbnailCore.BundledPoses().Keys.First();
 
-            Assert.IsTrue(RenderThumbnail.ResolvePose(first.ToUpperInvariant(), out AnimationClip clip, out string err), err);
+            Assert.IsTrue(RenderThumbnailCore.ResolvePose(first.ToUpperInvariant(), out AnimationClip clip, out string err), err);
             Assert.IsNotNull(clip);
         }
 
         [Test]
         public void Pose_Null_IsFloor()
         {
-            bool ok = RenderThumbnail.ResolvePose(null, out AnimationClip clip, out string err);
+            bool ok = RenderThumbnailCore.ResolvePose(null, out AnimationClip clip, out string err);
 
             Assert.IsTrue(ok);
             Assert.IsNull(clip);
@@ -194,9 +194,9 @@ namespace Ryan6Vrc.AvatarTools.Tests
         public void Pose_Unknown_ErrEnumeratesTheFolder()
         {
             // The advertised vocabulary is derived from disk, so it cannot drift from what ships.
-            var bundled = RenderThumbnail.BundledPoses();
+            var bundled = RenderThumbnailCore.BundledPoses();
 
-            bool ok = RenderThumbnail.ResolvePose("nope", out AnimationClip clip, out string err);
+            bool ok = RenderThumbnailCore.ResolvePose("nope", out AnimationClip clip, out string err);
 
             Assert.IsFalse(ok);
             Assert.IsNull(clip);
@@ -204,7 +204,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
             {
                 StringAssert.Contains(name, err);
                 // What it advertises must be what it accepts.
-                Assert.IsTrue(RenderThumbnail.ResolvePose(name, out AnimationClip _, out string _),
+                Assert.IsTrue(RenderThumbnailCore.ResolvePose(name, out AnimationClip _, out string _),
                     "advertised pose '" + name + "' does not resolve");
             }
             StringAssert.Contains("path/GUID", err);
@@ -217,8 +217,8 @@ namespace Ryan6Vrc.AvatarTools.Tests
             // first-match-wins, so two files normalizing to one name would silently make one pose
             // unreachable. Build time is the right place to catch it — poses land by dropping files into
             // the folder, with nobody reviewing this tool.
-            var names = RenderThumbnail.BundledPoses().Keys
-                .Select(RenderThumbnail.NormalizeToken).ToList();
+            var names = RenderThumbnailCore.BundledPoses().Keys
+                .Select(RenderThumbnailCore.NormalizeToken).ToList();
 
             CollectionAssert.AllItemsAreUnique(names);
         }
