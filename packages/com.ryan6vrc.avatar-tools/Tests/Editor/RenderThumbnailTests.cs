@@ -27,9 +27,9 @@ namespace Ryan6Vrc.AvatarTools.Tests
             RenderThumbnail.FramingGeometry("half", out float halfSpan, out float halfDrop);
             RenderThumbnail.FramingGeometry("full", out float fullSpan, out float fullDrop);
 
-            Assert.AreEqual(0.48f, bustSpan, 0.001f, "bust covers a head-and-shoulders height");
-            Assert.AreEqual(0.85f, halfSpan, 0.001f, "half covers chest-up (U5 tightened it from 0.96)");
-            Assert.AreEqual(2.00f, fullSpan, 0.001f, "full must cover a whole standing avatar");
+            Assert.AreEqual(0.34f, bustSpan, 0.001f, "bust is a fixed face-sized height, decoupled from viewpoint");
+            Assert.AreEqual(0.60f, halfSpan, 0.001f, "half is a fixed face/chest height, decoupled from viewpoint");
+            Assert.AreEqual(2.00f, fullSpan, 0.001f, "full stays a whole-body span (still viewpoint-tracked)");
 
             // The eyes sit near the TOP of the subject, so the aim has to drop further as the span grows —
             // a single coefficient cuts the feet off at full framing.
