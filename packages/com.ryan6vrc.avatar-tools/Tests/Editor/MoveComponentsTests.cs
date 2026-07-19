@@ -1,8 +1,11 @@
+using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
+using VRC.Dynamics;
+using VRC.SDK3.Dynamics.PhysBone.Components;
 
 // A resolvable non-VRC Component whose VrcComponentTable.Lookup is null (no row) — used to exercise
 // the "resolved type, but no table anchor" refusal branch without any VRC SDK reference. TypeCache
@@ -53,6 +56,32 @@ public class MoveComponentsTests
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("RcNoAnchorProbe", summary);
         StringAssert.Contains("no relocatable anchor", summary);
+        Object.DestroyImmediate(inst);
+    }
+
+    // ── Inbound-ref rewire (whatIf side only: the execute side mutates live objects, the forbidden
+    //    NUnit venue per docs/verify.md — it is verified behaviorally via execute_code instead) ────
+
+    [Test]
+    public void Run_whatIf_predicts_inbound_ref_rewire_for_referenced_colliders()
+    {
+        // The regression this guards: relocation re-creates the component, so a physbone's
+        // colliders[] entry pointing at a relocated collider went null when the original was
+        // destroyed. Execute now rewires such refs; whatIf must predict the same count.
+        var inst = new GameObject("Inst");
+        var bone = new GameObject("Bone"); bone.transform.SetParent(inst.transform);
+        var col  = bone.AddComponent<VRCPhysBoneCollider>();
+        var pbGo = new GameObject("PB"); pbGo.transform.SetParent(inst.transform);
+        var pb   = pbGo.AddComponent<VRCPhysBone>();
+        pb.colliders = new List<VRCPhysBoneColliderBase> { col };
+
+        var summary = MoveComponents.Run(inst, inst.transform, new[] { "VRCPhysBoneCollider" },
+                                         "AvatarDynamics/PB_Colliders", whatIf: true);
+
+        StringAssert.Contains("=> PASS", summary);
+        StringAssert.Contains("moved=1", summary);
+        StringAssert.Contains("inboundRefsRewired=1", summary);
+        StringAssert.Contains("wouldRewire: VRCPhysBone 'PB'", summary);
         Object.DestroyImmediate(inst);
     }
 
