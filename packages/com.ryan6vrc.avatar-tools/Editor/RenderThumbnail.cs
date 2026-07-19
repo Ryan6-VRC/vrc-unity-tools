@@ -30,14 +30,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // below the view point as a fraction of that span: the anchor (the eyes) sits near the TOP of the
         // subject, not its center, so one coefficient cannot serve three spans.
         //
-        // Spans are operator-judged taste, nudged ~7% wider than the first pass, which cropped the crown
-        // tightly enough to read as an accident. Some crop is DESIRABLE — a thumbnail is displayed small,
-        // and a tight one reads as deliberate — so these do not chase full crown clearance, which on tall
-        // anime hair would cost the bust crop entirely.
+        // FACE framings (bust, half) are a FIXED subject height in metres — a face is ~one absolute size
+        // across stylized anime avatars regardless of how tall the viewpoint sits — scaled only by the
+        // avatar's ROOT scale, so a tall viewpoint no longer zooms the shot out and framing reads
+        // consistently across bodies. Some crown crop is DESIRABLE (a thumbnail reads small; a tight frame
+        // reads as deliberate) so these do not chase full crown clearance. FULL is different: it is a BODY
+        // frame, so it still tracks viewpoint height — a taller body needs a taller span to seat the feet —
+        // via the per-framing follow at the camera solve below.
         private const float ReferenceViewHeight = 1.6f;
-        private const float BustSpan = 0.48f, BustAimDrop = 0.12f;
-        private const float HalfSpan = 0.85f, HalfAimDrop = 0.18f;
+        private const float BustSpan = 0.34f, BustAimDrop = 0.12f;
+        private const float HalfSpan = 0.60f, HalfAimDrop = 0.18f;
         private const float FullSpan = 2.00f, FullAimDrop = 0.37f;
+        // How much FULL framing tracks viewpoint height (bust/half never track — face-sized and fixed).
+        // 1 = full spans proportionally to the viewpoint so the feet stay seated on a tall body. Measured
+        // across four bodies (viewpoints 1.04–1.36): the face framings hold size and full seats the feet.
+        // Left as a dial for an unusually proportioned body.
+        private const float ViewHeightFollow = 1f;
 
         // Camera angles, degrees. The camera tracks the posed head ONE-FOR-ONE (no follow coefficient): at
         // any partial coefficient the face-to-lens angle becomes a function of the pose, sweeping frontal to
@@ -432,7 +440,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Quaternion orbit = Quaternion.AngleAxis(camYaw, Vector3.up) * Quaternion.AngleAxis(camPitch, Vector3.right);
                 Vector3 screenRight = rootRot * (orbit * Vector3.left);   // left: the camera looks back along -forward
 
-                float scaledSpan = span * (viewHeight / ReferenceViewHeight);
+                // bust/half are fixed subject heights (root-scaled only); full is a body frame and tracks
+                // viewpoint so the feet stay seated. framingToken is already lowercased above.
+                float viewFollow = framingToken == "full" ? ViewHeightFollow : 0f;
+                float scaledSpan = span * baked.transform.lossyScale.y
+                    * Mathf.Lerp(1f, descriptorBaked.ViewPosition.y / ReferenceViewHeight, viewFollow);
                 float distance = (scaledSpan * 0.5f) / Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
 
                 // Aim below the view point (the eyes sit near the TOP of the subject, not its centre) and
@@ -703,8 +715,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ===== Pure helpers (unit-tested; do not touch the scene or the asset database beyond reads) ====
 
-        /// <summary>The subject height a named framing covers (meters, at <see cref="ReferenceViewHeight"/>)
-        /// and how far below the view point to aim, as a fraction of that span. Throws for anything else.
+        /// <summary>The subject height a named framing covers, in metres, and how far below the view point
+        /// to aim, as a fraction of that span. Throws for anything else. The face framings (bust/half) are
+        /// taken as absolute metres scaled only by the avatar's root scale; full additionally tracks the
+        /// avatar's viewpoint height (see the per-framing follow at the camera solve).
         /// <para>NOT a dolly distance — that was the v1 quantity, and it was calibrated to a fixed 60° FOV.
         /// A span is FOV-independent: the camera distance is solved from the two.</para></summary>
         internal static void FramingGeometry(string framing, out float span, out float aimDrop)
