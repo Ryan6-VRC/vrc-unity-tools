@@ -49,9 +49,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <para><b>Venue.</b> The avatar is rendered in a loaded scene (the active scene, or one opened via
     /// <c>scenePath</c>) — lit by THAT scene's lights (operator-customizable, unlike edit mode's fixed rig),
     /// backdrop from the camera clear. On <see cref="End"/> the whole scene setup is restored from disk,
-    /// discarding the emulator control, deactivations, pose, and play-mode edits (mandatory when
-    /// Enter-Play-Mode scene reload is disabled). <see cref="Begin"/> refuses if any loaded scene has unsaved
-    /// edits, since that restore would lose them.</para>
+    /// discarding the emulator control, deactivations, pose, and play-mode edits. This restore, and the
+    /// cross-call session state surviving play entry, both require Enter-Play-Mode Options with domain AND
+    /// scene reload disabled — <see cref="Begin"/> SETS them (saving the operator's originals) and
+    /// <see cref="End"/> restores them, rather than demand a manual project change. <see cref="Begin"/>
+    /// refuses if any loaded scene has unsaved edits, since the restore would lose them.</para>
     /// </summary>
     [AgentTool]
     public static class RenderThumbnailPlay
@@ -83,6 +85,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static bool _attached;             // isolated to the built local avatar (post-play-entry)
         private static string _targetName;
         private static SceneSetup[] _sceneSetup;   // snapshot at Begin; restored from disk on End
+        // Operator's Enter-Play-Mode Options, saved at Begin and restored at End/AbortBegin (see Begin).
+        private static bool _optionsOverridden;
+        private static bool _savedOptionsEnabled;
+        private static EnterPlayModeOptions _savedOptions;
         private static GameObject _root;           // the built LOCAL avatar
         private static int _localLayer;            // cull target — the local runtime's actual layer (name may not resolve)
         private static object _localRuntime;       // LyumaAv3Runtime (reflected)
@@ -114,10 +120,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static FieldInfo _fIsLocal, _fPlayableMixer, _fPlayables, _fFxIndex;
 
         /// <summary>
-        /// EDIT-MODE prep for a play session: snapshot the scene setup, open the venue (if
-        /// <paramref name="scenePath"/> given), resolve <paramref name="target"/>, assert the Enter-Play-Mode
-        /// options and the emulator's reflected members, enable the emulator, and isolate to one active avatar
-        /// (PlayGate's precondition). Does NOT enter play — after this returns READY, the caller enters play
+        /// EDIT-MODE prep for a play session: snapshot the scene setup, set the Enter-Play-Mode Options (saved
+        /// for <see cref="End"/> to restore), open the venue (if <paramref name="scenePath"/> given), resolve
+        /// <paramref name="target"/>, assert the emulator's reflected members, enable the emulator, and isolate
+        /// to one active avatar (PlayGate's precondition). Does NOT enter play — after this returns READY, the caller enters play
         /// (<c>manage_editor play</c>) so the SDK builds the avatar, then calls <see cref="Shoot"/>.
         /// </summary>
         /// <param name="target">avatar root: hierarchy path, instance id, or name — resolved in the venue scene.</param>
@@ -126,17 +132,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             if (_prepared) return Fail("a play session is already prepared — call End() first (renders are serialized)");
             if (Application.isPlaying) return Fail("already in play mode — exit play (manage_editor stop) before Begin()");
-
-            // Enter-Play-Mode options: the frame-driven Shoot state machine and this cross-call session state
-            // both depend on the domain NOT reloading on play entry, and the restore-from-disk cleanup on
-            // scene-reload being disabled. Assert both; name the fix rather than silently misbehave.
-            if (!EditorSettings.enterPlayModeOptionsEnabled
-                || (EditorSettings.enterPlayModeOptions & EnterPlayModeOptions.DisableDomainReload) == 0
-                || (EditorSettings.enterPlayModeOptions & EnterPlayModeOptions.DisableSceneReload) == 0)
-                return Fail("Enter-Play-Mode Options must be enabled with BOTH 'Reload Domain' and 'Reload Scene' "
-                    + "DISABLED (Project Settings > Editor > Enter Play Mode Settings) — the session survives across "
-                    + "calls and restores the scene setup from disk only under those; current="
-                    + (EditorSettings.enterPlayModeOptionsEnabled ? EditorSettings.enterPlayModeOptions.ToString() : "disabled"));
 
             if (!ResolveEmulatorReflection(out string driftErr)) return Fail(driftErr);
 
@@ -160,6 +155,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // must roll the operator's scenes back rather than escape raw and strand the un-restorable snapshot.
             try
             {
+                // This session REQUIRES both domain and scene reload disabled on play entry: the static
+                // session state must survive the Begin→play boundary (a domain reload would wipe it), and the
+                // edit-mode prep below must survive into the on-play SDK build (a scene reload would revert it).
+                // Set them here rather than demand a manual project change; End/AbortBegin restore the
+                // operator's originals. Set in edit mode, they apply to the caller's next play entry — and if a
+                // setting somehow didn't take, it surfaces loud downstream (the prep is lost, no runtime spawns,
+                // and the first Shoot's Attach fails "no local LyumaAv3Runtime"), never as a silent wrong shot.
+                OverrideEnterPlayModeOptions();
+
                 if (scenePath != null)
                 {
                     if (!scenePath.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
@@ -188,6 +192,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 bool emuMade = EnsureEmulatorEnabled(venue);
 
+                // Did we actually change the operator's options (vs. they were already both-reload-disabled)?
+                bool optsChanged = !(_savedOptionsEnabled
+                    && (_savedOptions & EnterPlayModeOptions.DisableDomainReload) != 0
+                    && (_savedOptions & EnterPlayModeOptions.DisableSceneReload) != 0);
+
                 _targetName = target0.name;
                 _prepared = true;
                 _attached = false;
@@ -196,6 +205,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 return Ok("Begin " + _targetName + " => READY-TO-PLAY"
                     + (emuMade ? " emulator=created/enabled" : " emulator=present")
+                    + (optsChanged ? " playmode-reload=disabled(restored on End)" : "")
                     + (deactivated.Count > 0 ? " deactivated=[" + string.Join(",", deactivated) + "]" : "")
                     + " — enter play (manage_editor play), then Shoot(...)");
             }
@@ -206,12 +216,34 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // Undo a Begin that fails after the scene setup was snapshotted (restore the operator's scenes).
+        // Undo a Begin that fails after it began mutating global/scene state (restore the operator's
+        // Enter-Play-Mode Options and scenes).
         private static void AbortBegin()
         {
+            RestoreEnterPlayModeOptions();
             try { if (_sceneSetup != null && _sceneSetup.Length > 0) EditorSceneManager.RestoreSceneManagerSetup(_sceneSetup); }
             catch { /* best-effort restore on an already-broken failure path */ }
             _sceneSetup = null;
+        }
+
+        // Force Enter-Play-Mode Options to both-reload-disabled for the session, saving the operator's
+        // originals for End/AbortBegin to put back. Called once per Begin, before End.
+        private static void OverrideEnterPlayModeOptions()
+        {
+            _savedOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;
+            _savedOptions = EditorSettings.enterPlayModeOptions;
+            _optionsOverridden = true;
+            EditorSettings.enterPlayModeOptionsEnabled = true;
+            EditorSettings.enterPlayModeOptions =
+                EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
+        }
+
+        private static void RestoreEnterPlayModeOptions()
+        {
+            if (!_optionsOverridden) return;
+            EditorSettings.enterPlayModeOptionsEnabled = _savedOptionsEnabled;
+            EditorSettings.enterPlayModeOptions = _savedOptions;
+            _optionsOverridden = false;
         }
 
         /// <summary>
@@ -462,7 +494,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return Fail("scene restore failed (" + ex.GetType().Name + ": " + ex.Message + ") — fix the scene(s) and call End() again");
             }
 
-            // Cleared only after a successful restore.
+            // Restore the operator's Enter-Play-Mode Options and clear session state — only after a successful
+            // scene restore (a failed restore above returns early, keeping the session AND its options for retry).
+            RestoreEnterPlayModeOptions();
             _prepared = false; _attached = false; _root = null; _localRuntime = null; _origFxController = null;
             _sceneSetup = null; _targetName = null; _fxIndex = -1; _base = default; _fx = default;
             return Ok("End => OK — scene setup" + (restored.Length > 0 ? restored : " had nothing to restore"));
