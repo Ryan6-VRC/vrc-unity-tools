@@ -33,6 +33,19 @@ public class SchemaValidationTests
         return false;
     }
 
+    // A layer with one state whose motion is the given blend tree; `declared` seeds the parameter table.
+    private static AnimDocument DocWithTree(BlendTreeSpec tree, params ParamSpec[] declared)
+    {
+        var doc = new AnimDocument { Schema = 1 };
+        foreach (var p in declared) doc.Parameters.Add(p);
+        var layer = new Layer { Name = "L" };
+        layer.Root.States.Add(new State { Name = "S", Motion = new MotionRef { Tree = tree } });
+        doc.Layers.Add(layer);
+        return doc;
+    }
+
+    private static ParamSpec P(string name, AnimParamType t) => new ParamSpec { Name = name, Type = t };
+
     [Test]
     public void Unknown_Schema_Version_Errors()
     {
@@ -151,5 +164,69 @@ parameters:
 ";
         var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, null));
         StringAssert.Contains("basis", ex.Message);
+    }
+
+    // ── blend-axis-type: a blend-tree axis must be a Float animator param ──────────────────────────
+    // Unity silently freezes a non-float axis at its first child (proven black-box), so a declared
+    // non-float axis is a fatal defect. Undeclared axes are skipped — the undeclared-param lint owns them.
+
+    [Test]
+    public void Int_1D_Blend_Axis_Errors()
+    {
+        var tree = new BlendTreeSpec { Kind = TreeKind.OneD, Param = "Axis" };
+        var errors = SchemaValidation.Validate(DocWithTree(tree, P("Axis", AnimParamType.Int)));
+        Assert.IsTrue(Any(errors, "blend-axis-type", "Axis"), "an int 1D blend axis must be flagged");
+    }
+
+    [Test]
+    public void Bool_1D_Blend_Axis_Errors()
+    {
+        var tree = new BlendTreeSpec { Kind = TreeKind.OneD, Param = "Axis" };
+        var errors = SchemaValidation.Validate(DocWithTree(tree, P("Axis", AnimParamType.Bool)));
+        Assert.IsTrue(Any(errors, "blend-axis-type", "Axis"), "a bool 1D blend axis must be flagged");
+    }
+
+    [Test]
+    public void Int_2D_Blend_AxisY_Errors()
+    {
+        var tree = new BlendTreeSpec { Kind = TreeKind.FreeformCartesian2D, Param = "X", ParamY = "Y" };
+        var errors = SchemaValidation.Validate(DocWithTree(tree,
+            P("X", AnimParamType.Float), P("Y", AnimParamType.Int)));
+        Assert.IsTrue(Any(errors, "blend-axis-type", "Y"), "an int 2D Y axis must be flagged");
+    }
+
+    [Test]
+    public void Int_Direct_Child_Weight_Errors()
+    {
+        var tree = new BlendTreeSpec { Kind = TreeKind.Direct };
+        tree.Children.Add(new TreeChild { DirectWeight = "W" });
+        var errors = SchemaValidation.Validate(DocWithTree(tree, P("W", AnimParamType.Int)));
+        Assert.IsTrue(Any(errors, "blend-axis-type", "W"), "an int Direct child weight must be flagged");
+    }
+
+    [Test]
+    public void Int_Axis_In_Nested_Tree_Errors()
+    {
+        var inner = new BlendTreeSpec { Kind = TreeKind.OneD, Param = "Inner" };
+        var outer = new BlendTreeSpec { Kind = TreeKind.OneD, Param = "Outer" };
+        outer.Children.Add(new TreeChild { Motion = new MotionRef { Tree = inner } });
+        var errors = SchemaValidation.Validate(DocWithTree(outer,
+            P("Outer", AnimParamType.Float), P("Inner", AnimParamType.Int)));
+        Assert.IsTrue(Any(errors, "blend-axis-type", "Inner"), "an int axis in a nested tree must be flagged");
+    }
+
+    [Test]
+    public void Float_Blend_Axis_No_Error()
+    {
+        var tree = new BlendTreeSpec { Kind = TreeKind.OneD, Param = "Axis" };
+        Assert.IsEmpty(SchemaValidation.Validate(DocWithTree(tree, P("Axis", AnimParamType.Float))));
+    }
+
+    [Test]
+    public void Undeclared_Blend_Axis_Is_Skipped()
+    {
+        // Axis not declared -> not this rule's concern (the undeclared-param lint owns it). No crash, no error.
+        var tree = new BlendTreeSpec { Kind = TreeKind.OneD, Param = "Ghost" };
+        Assert.IsEmpty(SchemaValidation.Validate(DocWithTree(tree)));
     }
 }
