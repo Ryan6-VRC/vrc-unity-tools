@@ -115,44 +115,51 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        // Copy an entry's prefabs (+ their .meta) into a scratch Assets/ dir as a UNIT so a prefab
-        // variant resolves against its committed base, import them, and assert none has a missing
-        // MonoBehaviour script. Prefabs live at an arbitrary --root path outside the project (the
-        // patterns package is not loaded here), so they must be brought into Assets/ to load — the
-        // same constraint ImportCommitted solves for controllers. Per-entry scratch isolation: an
-        // entry's committed GUIDs must not co-exist with another's.
+        // Copy ALL of an entry's prefabs — recursively, including assets/-resident payloads — plus
+        // their .meta into a scratch Assets/ dir as a UNIT, preserving each prefab's subpath so
+        // filenames can't collide and a variant's base always travels with it. Import them, then
+        // assert none has a missing MonoBehaviour script. Prefabs live at an arbitrary --root path
+        // outside the project (the patterns package is not loaded here), so they must be brought into
+        // Assets/ to load — the same constraint ImportCommitted solves for controllers. Per-entry
+        // scratch isolation: an entry's committed GUIDs must not co-exist with another's.
         static (bool ok, string msg) CheckPrefabIntegrity(string entryDir)
         {
             var scratch = "Assets/_prefab_" + Guid.NewGuid().ToString("N").Substring(0, 8);
             var full = Path.GetFullPath(scratch);
-            var prefabs = Directory.GetFiles(entryDir, "*.prefab");
+            var entryFull = Path.GetFullPath(entryDir);
+            var prefabs = Directory.GetFiles(entryDir, "*.prefab", SearchOption.AllDirectories);
             try
             {
                 Directory.CreateDirectory(full);
+                var items = new System.Collections.Generic.List<(string dest, string label)>();
                 foreach (var src in prefabs)
                 {
-                    File.Copy(src, Path.Combine(full, Path.GetFileName(src)), true);
-                    if (File.Exists(src + ".meta"))
-                        File.Copy(src + ".meta", Path.Combine(full, Path.GetFileName(src) + ".meta"), true);
+                    var rel = Path.GetFullPath(src).Substring(entryFull.Length).TrimStart('/', '\\');
+                    var dest = Path.Combine(full, rel);
+                    Directory.CreateDirectory(Path.GetDirectoryName(dest));
+                    File.Copy(src, dest, true);
+                    if (File.Exists(src + ".meta")) File.Copy(src + ".meta", dest + ".meta", true);
+                    items.Add((dest, rel.Replace('\\', '/')));
                 }
                 AssetDatabase.Refresh();
 
                 int totalMissing = 0;
                 var offenders = new System.Collections.Generic.List<string>();
-                foreach (var src in prefabs)
+                foreach (var (dest, label) in items)
                 {
-                    var assetPath = ToAssetsRelative(Path.Combine(full, Path.GetFileName(src)));
-                    var go = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
-                    if (go == null) { offenders.Add(Path.GetFileName(src) + " (failed to load)"); totalMissing++; continue; }
+                    var go = AssetDatabase.LoadAssetAtPath<GameObject>(ToAssetsRelative(dest));
+                    if (go == null) { offenders.Add(label + " (failed to load)"); totalMissing++; continue; }
                     int missing = 0;
                     foreach (var t in go.GetComponentsInChildren<Transform>(true))
                         missing += GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(t.gameObject);
-                    if (missing > 0) { offenders.Add($"{Path.GetFileName(src)} ({missing} missing script(s))"); totalMissing += missing; }
+                    if (missing > 0) { offenders.Add($"{label} ({missing} missing script(s))"); totalMissing += missing; }
                 }
                 return totalMissing == 0 ? (true, "OK") : (false, string.Join(", ", offenders));
             }
             catch (Exception e) { return (false, e.Message); }
-            finally { AssetDatabase.DeleteAsset(scratch); }
+            // DeleteAsset covers the tracked (post-Refresh) case; the filesystem delete guards an
+            // orphan Assets/_prefab_* if we threw before Refresh (scratch on disk, not yet tracked).
+            finally { AssetDatabase.DeleteAsset(scratch); if (Directory.Exists(full)) Directory.Delete(full, true); }
         }
 
         // -executeMethod entrypoint. Args after `--`: --root <dir>. An entry is a non-dot <dir>/* folder
@@ -236,7 +243,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // is the regression it catches. Script integrity only; behaviour still rests on the README.
             var prefabEntries = Directory.GetDirectories(root)
                 .Where(d => !Path.GetFileName(d).StartsWith("."))
-                .Where(d => Directory.GetFiles(d, "*.prefab").Length > 0)
+                .Where(d => Directory.GetFiles(d, "*.prefab", SearchOption.AllDirectories).Length > 0)
                 .OrderBy(d => d, StringComparer.Ordinal).ToList();
 
             int prefabFailed = 0;
