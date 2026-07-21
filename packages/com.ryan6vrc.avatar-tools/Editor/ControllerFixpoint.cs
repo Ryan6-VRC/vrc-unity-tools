@@ -14,6 +14,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     //
     // A committed built .controller lives at an arbitrary --root filesystem path, not under the
     // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
+    // A second RunGate pass loads each entry's prefab(s) the same way — copied into Assets/ to
+    // import — and fails any with a missing MonoBehaviour script; the coverage a Structural
+    // Module (a prefab, no controller.yaml) otherwise never gets.
     public static class ControllerFixpoint
     {
         static string Decode(AnimatorController c, out string refusal)
@@ -112,10 +115,52 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
+        // Copy an entry's prefabs (+ their .meta) into a scratch Assets/ dir as a UNIT so a prefab
+        // variant resolves against its committed base, import them, and assert none has a missing
+        // MonoBehaviour script. Prefabs live at an arbitrary --root path outside the project (the
+        // patterns package is not loaded here), so they must be brought into Assets/ to load — the
+        // same constraint ImportCommitted solves for controllers. Per-entry scratch isolation: an
+        // entry's committed GUIDs must not co-exist with another's.
+        static (bool ok, string msg) CheckPrefabIntegrity(string entryDir)
+        {
+            var scratch = "Assets/_prefab_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            var full = Path.GetFullPath(scratch);
+            var prefabs = Directory.GetFiles(entryDir, "*.prefab");
+            try
+            {
+                Directory.CreateDirectory(full);
+                foreach (var src in prefabs)
+                {
+                    File.Copy(src, Path.Combine(full, Path.GetFileName(src)), true);
+                    if (File.Exists(src + ".meta"))
+                        File.Copy(src + ".meta", Path.Combine(full, Path.GetFileName(src) + ".meta"), true);
+                }
+                AssetDatabase.Refresh();
+
+                int totalMissing = 0;
+                var offenders = new System.Collections.Generic.List<string>();
+                foreach (var src in prefabs)
+                {
+                    var assetPath = ToAssetsRelative(Path.Combine(full, Path.GetFileName(src)));
+                    var go = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+                    if (go == null) { offenders.Add(Path.GetFileName(src) + " (failed to load)"); totalMissing++; continue; }
+                    int missing = 0;
+                    foreach (var t in go.GetComponentsInChildren<Transform>(true))
+                        missing += GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(t.gameObject);
+                    if (missing > 0) { offenders.Add($"{Path.GetFileName(src)} ({missing} missing script(s))"); totalMissing += missing; }
+                }
+                return totalMissing == 0 ? (true, "OK") : (false, string.Join(", ", offenders));
+            }
+            catch (Exception e) { return (false, e.Message); }
+            finally { AssetDatabase.DeleteAsset(scratch); }
+        }
+
         // -executeMethod entrypoint. Args after `--`: --root <dir>. An entry is a non-dot <dir>/* folder
         // containing controller.yaml; EVERY top-level *.yaml in it with a `controller:` key is gated
         // (a multi-controller entry ships an FX + Gesture pair), each against built/<name>.controller.
         // A built controller no document claims is drift and fails the entry. Exits 0 iff all pass.
+        // A second pass enumerates every non-dot dir shipping a prefab (controller.yaml or not) and
+        // asserts each imports with zero missing MonoBehaviour scripts.
         public static void RunGate()
         {
             string root = null;
@@ -184,7 +229,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (entryFailed) failedEntries++;
             }
             Debug.Log($"[gate] {entries.Count - failedEntries}/{entries.Count} entries passed ({checkedDocs} documents)");
-            EditorApplication.Exit(failedEntries == 0 ? 0 : 1);
+
+            // Second pass: every non-dot dir shipping a prefab must import with zero missing scripts.
+            // Structural Modules (a prefab, no controller.yaml) are invisible to the loop above; this
+            // pass covers them and every other entry's prefab alike — a vanished VRCFury/MA script ref
+            // is the regression it catches. Script integrity only; behaviour still rests on the README.
+            var prefabEntries = Directory.GetDirectories(root)
+                .Where(d => !Path.GetFileName(d).StartsWith("."))
+                .Where(d => Directory.GetFiles(d, "*.prefab").Length > 0)
+                .OrderBy(d => d, StringComparer.Ordinal).ToList();
+
+            int prefabFailed = 0;
+            foreach (var dir in prefabEntries)
+            {
+                var (ok, msg) = CheckPrefabIntegrity(dir);
+                if (!ok) { Debug.Log($"[gate] prefab-integrity FAIL {Path.GetFileName(dir)}: {msg}"); prefabFailed++; }
+            }
+            Debug.Log($"[gate] prefab-integrity {prefabEntries.Count - prefabFailed}/{prefabEntries.Count} entries clean");
+
+            EditorApplication.Exit((failedEntries == 0 && prefabFailed == 0) ? 0 : 1);
         }
     }
 }
