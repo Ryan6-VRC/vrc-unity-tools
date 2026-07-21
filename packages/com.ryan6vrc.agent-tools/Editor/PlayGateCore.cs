@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -123,13 +124,25 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// detail an agent needs must live here, on line 1, not in the pretty block below it. Each offender
         /// renders <c>[tag] message (fix: fix)</c>; the <c> | </c> join and the parenthesized fix keep the
         /// two separators unambiguous. Pure + deterministic, the testable sibling of
-        /// <see cref="OverlaySummaryLine"/>.</summary>
+        /// <see cref="OverlaySummaryLine"/>.
+        ///
+        /// The no-newline invariant is enforced HERE, not assumed of callers: every field is flattened
+        /// (any whitespace run → one space) before it lands on the line. An offender's Message can carry a
+        /// multi-line value — the exception FAIL embeds a whole stack trace (<see cref="PlayGate"/>'s catch),
+        /// and read_console keeps only up to the first newline — so a raw join would put the newline back and
+        /// drop the fix + override path in exactly the case an agent is most stuck. Flattening also makes
+        /// that stack trace legible on the one line the agent sees.</summary>
         public static string ConsoleSummaryLine(List<Offender> offenders)
         {
             if (offenders == null || offenders.Count == 0) return "";
             return string.Join(" | ", offenders.Select(o =>
-                "[" + o.Tag + "] " + o.Message + " (fix: " + o.Fix + ")"));
+                "[" + OneLine(o.Tag) + "] " + OneLine(o.Message) + " (fix: " + OneLine(o.Fix) + ")"));
         }
+
+        // Collapse every run of whitespace (newlines, tabs, indentation) to a single space and trim — the
+        // guard that makes ConsoleSummaryLine's single-line promise hold for any field value.
+        private static string OneLine(string s) =>
+            string.IsNullOrEmpty(s) ? s : Regex.Replace(s, @"\s+", " ").Trim();
 
         // ----- Rule 2b: VRCFury carried but no Fix-Write-Defaults feature ------------------------------
 

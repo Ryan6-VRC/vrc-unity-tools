@@ -329,4 +329,22 @@ public class PlayGateCoreTests
             ("More than 1 avatar enabled", "active avatars: A, B", "deactivate all but one"),
             ("VRCFury", "no FWD", "add FWD"),
             ("Emulator config", "flags wrong", "set them"))).Contains("\n"));
+
+    // The exception FAIL feeds an offender whose Message embeds a multi-line stack trace (PlayGate's
+    // catch). The invariant must be enforced in ConsoleSummaryLine itself, not assumed of the caller:
+    // a raw join would reinstate the newline and drop the fix — line 1 must still be flat and carry the
+    // exception detail AND the fix.
+    [Test]
+    public void Console_summary_flattens_embedded_newlines_from_a_multiline_message()
+    {
+        var line = PlayGateCore.ConsoleSummaryLine(FullOffs(
+            ("PlayGate",
+             "play gate threw while evaluating:\nSystem.NullReferenceException: boom\r\n  at Foo.Bar()",
+             "fix the exception above\nor override via the menu")));
+        Assert.IsFalse(line.Contains("\n"), "line 1 must carry no newline");
+        Assert.IsFalse(line.Contains("\r"), "line 1 must carry no carriage return");
+        StringAssert.Contains("boom", line);          // exception detail survives on line 1
+        StringAssert.Contains("at Foo.Bar()", line);
+        StringAssert.Contains("(fix: fix the exception above or override via the menu)", line);
+    }
 }
