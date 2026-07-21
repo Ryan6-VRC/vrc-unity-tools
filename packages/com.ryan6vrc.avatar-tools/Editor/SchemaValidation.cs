@@ -76,6 +76,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (st == null) continue;
                 if (st.Motion != null) CheckMotionClips(st.Motion, layer, st.Name, clips, errors);
+                if (st.Motion != null) CheckBlendAxes(st.Motion, layer, st.Name, paramTypes, errors);
                 foreach (var t in st.Transitions)
                     CheckConditions(t, layer, $"state '{st.Name}'", paramTypes, errors);
             }
@@ -122,6 +123,45 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (m.Tree != null)
                 foreach (var child in m.Tree.Children)
                     if (child != null) CheckMotionClips(child.Motion, layer, state, clips, errors);
+        }
+
+        // Rule 7 — a blend-tree axis must be a Float animator param. Unity silently freezes a non-float axis
+        // at its first child (the value never reaches the float channel the tree reads — no error anywhere),
+        // so this is a fatal gate. 1D/2D read Tree.Param (+ ParamY when 2D); Direct reads each child's
+        // DirectWeight. Undeclared axes are skipped — the controller-level undeclared-param check owns those.
+        private static void CheckBlendAxes(MotionRef m, string layer, string state,
+            Dictionary<string, AnimParamType> paramTypes, List<string> errors)
+        {
+            if (m == null || m.Tree == null) return;
+            CheckTreeAxes(m.Tree, layer, state, paramTypes, errors);
+        }
+
+        private static void CheckTreeAxes(BlendTreeSpec t, string layer, string state,
+            Dictionary<string, AnimParamType> paramTypes, List<string> errors)
+        {
+            if (t == null) return;
+            if (t.Kind == TreeKind.Direct)
+            {
+                foreach (var ch in t.Children)
+                    if (ch != null) RequireFloatAxis(ch.DirectWeight, layer, state, paramTypes, errors);
+            }
+            else
+            {
+                RequireFloatAxis(t.Param, layer, state, paramTypes, errors);
+                if (t.Kind != TreeKind.OneD) RequireFloatAxis(t.ParamY, layer, state, paramTypes, errors);
+            }
+            foreach (var ch in t.Children)
+                if (ch != null && ch.Motion != null && ch.Motion.Tree != null)
+                    CheckTreeAxes(ch.Motion.Tree, layer, state, paramTypes, errors);
+        }
+
+        private static void RequireFloatAxis(string param, string layer, string state,
+            Dictionary<string, AnimParamType> paramTypes, List<string> errors)
+        {
+            if (string.IsNullOrEmpty(param)) return;                    // no axis param here
+            if (!paramTypes.TryGetValue(param, out var type)) return;   // undeclared -> other lint's concern
+            if (type != AnimParamType.Float)
+                errors.Add($"# blend-axis-type: param '{param}' ({TypeToken(type)}) is a blend-tree axis but must be float; declare it 'type: float' and sync int via 'vrc: {{ type: int }}' (at layer '{layer}' state '{state}')");
         }
 
         private static bool MachineHasMember(StateMachine sm, string name)
