@@ -298,4 +298,53 @@ public class PlayGateCoreTests
         Assert.AreEqual("(More than 1 avatar enabled) (VRCFury) +1 (see log)",
             PlayGateCore.OverlaySummaryLine(Offs("More than 1 avatar enabled", "VRCFury", "Gesture Manager")));
     }
+
+    // ── ConsoleSummaryLine (line 1 of the FAIL — the agent's whole channel, so it must be single-line) ──
+
+    private static List<PlayGateCore.Offender> FullOffs(params (string tag, string msg, string fix)[] os) =>
+        os.Select(o => new PlayGateCore.Offender { Tag = o.tag, Message = o.msg, Fix = o.fix }).ToList();
+
+    [Test]
+    public void Console_zero_offenders_is_empty() =>
+        Assert.AreEqual("", PlayGateCore.ConsoleSummaryLine(FullOffs()));
+
+    [Test]
+    public void Console_one_offender_names_message_and_fix() =>
+        Assert.AreEqual("[VRCFury] no Fix Write Defaults (fix: add a VRCFury Fix Write Defaults component (mode Disabled))",
+            PlayGateCore.ConsoleSummaryLine(FullOffs(
+                ("VRCFury", "no Fix Write Defaults", "add a VRCFury Fix Write Defaults component (mode Disabled)"))));
+
+    [Test]
+    public void Console_multi_offender_pipe_separated() =>
+        Assert.AreEqual("[More than 1 avatar enabled] active avatars: A, B (fix: deactivate all but one) | [Emulator config] flags wrong (fix: set them)",
+            PlayGateCore.ConsoleSummaryLine(FullOffs(
+                ("More than 1 avatar enabled", "active avatars: A, B", "deactivate all but one"),
+                ("Emulator config", "flags wrong", "set them"))));
+
+    // The load-bearing property: whatever the offenders, line 1 carries no newline — read_console keeps
+    // only the first line, so a newline here would be a silently-dropped fix (the exact bug this repairs).
+    [Test]
+    public void Console_summary_never_contains_a_newline() =>
+        Assert.IsFalse(PlayGateCore.ConsoleSummaryLine(FullOffs(
+            ("More than 1 avatar enabled", "active avatars: A, B", "deactivate all but one"),
+            ("VRCFury", "no FWD", "add FWD"),
+            ("Emulator config", "flags wrong", "set them"))).Contains("\n"));
+
+    // The exception FAIL feeds an offender whose Message embeds a multi-line stack trace (PlayGate's
+    // catch). The invariant must be enforced in ConsoleSummaryLine itself, not assumed of the caller:
+    // a raw join would reinstate the newline and drop the fix — line 1 must still be flat and carry the
+    // exception detail AND the fix.
+    [Test]
+    public void Console_summary_flattens_embedded_newlines_from_a_multiline_message()
+    {
+        var line = PlayGateCore.ConsoleSummaryLine(FullOffs(
+            ("PlayGate",
+             "play gate threw while evaluating:\nSystem.NullReferenceException: boom\r\n  at Foo.Bar()",
+             "fix the exception above\nor override via the menu")));
+        Assert.IsFalse(line.Contains("\n"), "line 1 must carry no newline");
+        Assert.IsFalse(line.Contains("\r"), "line 1 must carry no carriage return");
+        StringAssert.Contains("boom", line);          // exception detail survives on line 1
+        StringAssert.Contains("at Foo.Bar()", line);
+        StringAssert.Contains("(fix: fix the exception above or override via the menu)", line);
+    }
 }

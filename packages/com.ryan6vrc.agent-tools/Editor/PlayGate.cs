@@ -84,14 +84,21 @@ namespace Ryan6Vrc.AgentTools.Editor
         // The addressable-specifics surface the agent reads via read_console. Family grammar: prefix
         // [PlayGate], verdict token => FAIL (matching [ReportGimmick] … => OK). Tone model: the run_tests
         // deny reason — a refusal that names its own fix.
+        //
+        // read_console returns ONLY the first line of a log entry's message (a multi-line body is silently
+        // dropped — see PlayGateCore.ConsoleSummaryLine), so LINE 1 is the agent's whole channel and must be
+        // self-sufficient: every offender, its fix, and the override path, all on it. The pretty per-offender
+        // block below is the human's expanded Console view (Unity collapses the entry to line 1 anyway) — a
+        // second rendering of the same offender list, not a second source of truth.
         private static void EmitConsole(PlayGateCore.PlayGateResult result)
         {
             var sb = new StringBuilder();
-            sb.Append("[PlayGate] play entry blocked => FAIL");
+            sb.Append("[PlayGate] play entry blocked => FAIL — ")
+              .Append(PlayGateCore.ConsoleSummaryLine(result.Offenders))
+              .Append(" | override: menu ").Append(OverrideMenu);
             foreach (var o in result.Offenders)
                 sb.Append("\n  - [").Append(o.Tag).Append("] ").Append(o.Message)
                   .Append("\n      fix: ").Append(o.Fix);
-            sb.Append("\n\nOverride this one entry: menu ").Append(OverrideMenu);
             Debug.LogError(sb.ToString());
         }
 
