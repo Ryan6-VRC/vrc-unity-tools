@@ -116,6 +116,21 @@ namespace Ryan6Vrc.AgentTools.Editor
             return sb.ToString().TrimEnd();
         }
 
+        /// <summary>The FAIL's FIRST line: every offender and its fix on ONE line, <c> | </c>-separated.
+        /// This exists because the agent's console read (MCP-for-Unity <c>read_console</c>) returns only the
+        /// FIRST line of a log entry's message — a multi-line body is dropped, neither kept as message nor
+        /// recovered as stack trace (its human-readable lines match no stack-frame pattern). So the offender
+        /// detail an agent needs must live here, on line 1, not in the pretty block below it. Each offender
+        /// renders <c>[tag] message (fix: fix)</c>; the <c> | </c> join and the parenthesized fix keep the
+        /// two separators unambiguous. Pure + deterministic, the testable sibling of
+        /// <see cref="OverlaySummaryLine"/>.</summary>
+        public static string ConsoleSummaryLine(List<Offender> offenders)
+        {
+            if (offenders == null || offenders.Count == 0) return "";
+            return string.Join(" | ", offenders.Select(o =>
+                "[" + o.Tag + "] " + o.Message + " (fix: " + o.Fix + ")"));
+        }
+
         // ----- Rule 2b: VRCFury carried but no Fix-Write-Defaults feature ------------------------------
 
         // Conditional on the avatar actually carrying VRCFury (absent VRCFury → no FWD hazard → silent).
