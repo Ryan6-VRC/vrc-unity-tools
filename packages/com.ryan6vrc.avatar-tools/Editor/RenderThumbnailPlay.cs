@@ -556,6 +556,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ===== Playable-graph surgery =====
 
+        /// <summary>Copy every name-and-type-matching Float/Int/Bool parameter value from
+        /// <paramref name="source"/> onto <paramref name="dest"/> (triggers are transient and skipped).
+        /// A freshly created playable reports controller DEFAULTS, and the emulator's param sync is
+        /// change-gated both ways: it never re-pushes an unchanged menu value into a new playable, and its
+        /// read-back adopts the new playable's defaults as if the animator drove them — resetting the
+        /// operator's toggles runtime-wide. Seeding the incoming playable from the outgoing one closes both
+        /// halves; the state machines re-transition to the param-implied states during settle.</summary>
+        internal static void SeedParameters(AnimatorControllerPlayable source, AnimatorControllerPlayable dest)
+        {
+            if (!((Playable)source).IsValid() || !((Playable)dest).IsValid()) return;
+            var srcByName = new Dictionary<string, AnimatorControllerParameter>();
+            for (int i = 0; i < source.GetParameterCount(); i++)
+            {
+                var p = source.GetParameter(i);
+                srcByName[p.name] = p;
+            }
+            for (int i = 0; i < dest.GetParameterCount(); i++)
+            {
+                var d = dest.GetParameter(i);
+                if (d.type == AnimatorControllerParameterType.Trigger) continue;
+                if (!srcByName.TryGetValue(d.name, out var s) || s.type != d.type) continue;
+                switch (d.type)
+                {
+                    case AnimatorControllerParameterType.Float: dest.SetFloat(d.nameHash, source.GetFloat(s.nameHash)); break;
+                    case AnimatorControllerParameterType.Int: dest.SetInteger(d.nameHash, source.GetInteger(s.nameHash)); break;
+                    case AnimatorControllerParameterType.Bool: dest.SetBool(d.nameHash, source.GetBool(s.nameHash)); break;
+                }
+            }
+        }
+
         /// <summary>Point a mixer slot at <paramref name="ours"/> (the tool's inserted playable) or, when null,
         /// back at the emulator's cached ORIGINAL. Destroys the slot's previously-inserted playable (never the
         /// original) and updates <c>playables[index]</c> so the runtime's per-frame param push targets whatever
@@ -564,10 +594,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             System.Collections.IList playables, int index, ref SlotState slot, AnimatorControllerPlayable? ours)
         {
             int input = index + 1;
+            var desired = ours ?? slot.orig;
+            // Param continuity: seed the incoming playable from the one currently in the slot BEFORE it is
+            // destroyed, so the runtime's change-gated two-way param sync doesn't adopt the newcomer's
+            // controller defaults and reset the operator's toggles (see SeedParameters).
+            var occupant = slot.hasInserted && ((Playable)slot.inserted).IsValid() ? slot.inserted : slot.orig;
+            if (!desired.Equals(occupant)) SeedParameters(occupant, desired);
+
             graph.Disconnect(mixer, input);
             if (slot.hasInserted && ((Playable)slot.inserted).IsValid()) graph.DestroyPlayable((Playable)slot.inserted);
 
-            var desired = ours ?? slot.orig;
             graph.Connect(desired, 0, mixer, input);
             PlayableExtensions.SetInputWeight(mixer, input, slot.origWeight); // honor the original weight (incl. 0)
             playables[index] = desired;
