@@ -34,6 +34,38 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return abs.StartsWith(proj + "/", StringComparison.Ordinal) ? abs.Substring(proj.Length + 1) : abs;
         }
 
+        // Per-call scratch cleanup: pure filesystem delete of the folder + its .meta, no AssetDatabase
+        // call. Deliberately NO DeleteAsset and NO Refresh — Check holds loaded AnimatorControllers from
+        // this scratch as live locals through the finally, and any AssetDatabase reconcile fired while
+        // those refs pin an asset whose folder just vanished makes Unity re-materialize an empty husk
+        // renamed "<name> 1", which then accumulates. Removing the bytes and leaving the stale DB entry
+        // to be reconciled later (by then the refs are out of scope) avoids the resurrection; SweepScratch
+        // at end-of-run is the authoritative backstop for anything that slips through.
+        static void CleanupScratch(string scratchAssetsPath)
+        {
+            var full = Path.GetFullPath(scratchAssetsPath);
+            if (Directory.Exists(full)) Directory.Delete(full, true);
+            if (File.Exists(full + ".meta")) File.Delete(full + ".meta");
+        }
+
+        // Filesystem-only sweep of every scratch dir + .meta this tool creates, matching the "<name> 1"
+        // husk-rename variants via the glob. No AssetDatabase call — run it when no scratch asset is
+        // referenced (RunGate start, before any Check; and end, after every Check has returned) so no
+        // reconcile can resurrect a husk. Start-of-run self-heals scratch a crashed batchmode run (no
+        // finally) stranded; end-of-run clears the run's own residue. Serial venue — nothing live owns
+        // these prefixes.
+        static void SweepScratch()
+        {
+            var assetsRoot = Path.GetFullPath("Assets");
+            if (!Directory.Exists(assetsRoot)) return;
+            foreach (var stale in Directory.GetDirectories(assetsRoot, "_fixpoint_*")
+                     .Concat(Directory.GetDirectories(assetsRoot, "_prefab_*")))
+                try { Directory.Delete(stale, true); } catch { /* best-effort */ }
+            foreach (var staleMeta in Directory.GetFiles(assetsRoot, "_fixpoint_*.meta")
+                     .Concat(Directory.GetFiles(assetsRoot, "_prefab_*.meta")))
+                try { File.Delete(staleMeta); } catch { /* best-effort */ }
+        }
+
         // Compile a yaml at a filesystem path into a temp Assets/ folder and load the emitted controller.
         static AnimatorController CompileToTemp(string yamlPath, string tempAssetsDir)
         {
@@ -96,7 +128,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return (true, "OK");
             }
             catch (Exception e) { return (false, e.Message); }
-            finally { AssetDatabase.DeleteAsset(scratch); }
+            finally { CleanupScratch(scratch); }
         }
 
         // Reads the `controller:` name off a schema document without compiling it. Null when the file
@@ -115,39 +147,41 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        // Copy ALL of an entry's prefabs — recursively, including assets/-resident payloads — plus
-        // their .meta into a scratch Assets/ dir as a UNIT, preserving each prefab's subpath so
-        // filenames can't collide and a variant's base always travels with it. Import them, then
-        // assert none has a missing MonoBehaviour script. Prefabs live at an arbitrary --root path
-        // outside the project (the patterns package is not loaded here), so they must be brought into
-        // Assets/ to load — the same constraint ImportCommitted solves for controllers. Per-entry
-        // scratch isolation: an entry's committed GUIDs must not co-exist with another's.
+        // Copy an entry's WHOLE directory into a scratch Assets/ dir as a UNIT — every file, subpath
+        // preserved — then import it and assert none of its prefabs has a missing MonoBehaviour script
+        // or fails to load. Copying the entry entire (not just *.prefab) is what lets a prefab's hard
+        // load dependencies travel with it: a Prefab Variant's base is a hard dep, and a base that
+        // lives in assets/ as a non-prefab (an .fbx the *.prefab glob would miss) makes the variant
+        // load as null otherwise — the head-proxy false-negative this dissolves. Entry files live at an
+        // arbitrary --root path outside the project (the patterns package is not loaded here), so they
+        // must be brought into Assets/ to load — the same constraint ImportCommitted solves for
+        // controllers. Per-entry scratch isolation holds: each entry gets its own fresh scratch, so one
+        // entry's committed GUIDs never co-import with another's. Only prefabs are asserted on; built/
+        // controllers, yaml, and README ride along for GUID resolution but are never load-checked (a
+        // dangling controller ref does not fail a prefab load, so widening the copy set masks nothing).
         static (bool ok, string msg) CheckPrefabIntegrity(string entryDir)
         {
             var scratch = "Assets/_prefab_" + Guid.NewGuid().ToString("N").Substring(0, 8);
             var full = Path.GetFullPath(scratch);
             var entryFull = Path.GetFullPath(entryDir);
-            var prefabs = Directory.GetFiles(entryDir, "*.prefab", SearchOption.AllDirectories);
             try
             {
-                Directory.CreateDirectory(full);
-                var items = new System.Collections.Generic.List<(string dest, string label)>();
-                foreach (var src in prefabs)
+                foreach (var src in Directory.GetFiles(entryDir, "*", SearchOption.AllDirectories))
                 {
                     var rel = Path.GetFullPath(src).Substring(entryFull.Length).TrimStart('/', '\\');
                     var dest = Path.Combine(full, rel);
                     Directory.CreateDirectory(Path.GetDirectoryName(dest));
                     File.Copy(src, dest, true);
-                    if (File.Exists(src + ".meta")) File.Copy(src + ".meta", dest + ".meta", true);
-                    items.Add((dest, rel.Replace('\\', '/')));
                 }
                 AssetDatabase.Refresh();
 
                 int totalMissing = 0;
                 var offenders = new System.Collections.Generic.List<string>();
-                foreach (var (dest, label) in items)
+                foreach (var src in Directory.GetFiles(entryDir, "*.prefab", SearchOption.AllDirectories))
                 {
-                    var go = AssetDatabase.LoadAssetAtPath<GameObject>(ToAssetsRelative(dest));
+                    var rel = Path.GetFullPath(src).Substring(entryFull.Length).TrimStart('/', '\\');
+                    var label = rel.Replace('\\', '/');
+                    var go = AssetDatabase.LoadAssetAtPath<GameObject>(ToAssetsRelative(Path.Combine(full, rel)));
                     if (go == null) { offenders.Add(label + " (failed to load)"); totalMissing++; continue; }
                     int missing = 0;
                     foreach (var t in go.GetComponentsInChildren<Transform>(true))
@@ -157,9 +191,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return totalMissing == 0 ? (true, "OK") : (false, string.Join(", ", offenders));
             }
             catch (Exception e) { return (false, e.Message); }
-            // DeleteAsset covers the tracked (post-Refresh) case; the filesystem delete guards an
-            // orphan Assets/_prefab_* if we threw before Refresh (scratch on disk, not yet tracked).
-            finally { AssetDatabase.DeleteAsset(scratch); if (Directory.Exists(full)) Directory.Delete(full, true); }
+            finally { CleanupScratch(scratch); }
         }
 
         // -executeMethod entrypoint. Args after `--`: --root <dir>. An entry is a non-dot <dir>/* folder
@@ -175,6 +207,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             for (int i = 0; i < args.Length - 1; i++) if (args[i] == "--root") root = args[i + 1];
             if (root == null) { Debug.LogError("[gate] --root <dir> required"); EditorApplication.Exit(2); return; }
             if (!Directory.Exists(root)) { Debug.LogError("[gate] root not found: " + root); EditorApplication.Exit(2); return; }
+
+            SweepScratch(); // self-heal any scratch a crashed prior run stranded, before we start
 
             var entries = Directory.GetDirectories(root)
                 .Where(d => !Path.GetFileName(d).StartsWith("."))
@@ -253,6 +287,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (!ok) { Debug.Log($"[gate] prefab-integrity FAIL {Path.GetFileName(dir)}: {msg}"); prefabFailed++; }
             }
             Debug.Log($"[gate] prefab-integrity {prefabEntries.Count - prefabFailed}/{prefabEntries.Count} entries clean");
+
+            SweepScratch(); // authoritative cleanup: all Check refs are out of scope now, no Refresh follows
 
             EditorApplication.Exit((failedEntries == 0 && prefabFailed == 0) ? 0 : 1);
         }
