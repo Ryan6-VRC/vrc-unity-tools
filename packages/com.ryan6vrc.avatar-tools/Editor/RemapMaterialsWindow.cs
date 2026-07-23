@@ -11,7 +11,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private readonly List<Material> toMaterials = new List<Material>();
         private Vector2 scroll;
 
-        [MenuItem("Tools/Ryan6VRC/Remap Materials")]
+        [MenuItem("Tools/Atelier/Remap Materials")]
         private static void OpenWindow()
         {
             GetWindow<RemapMaterialsWindow>("Material Remap");

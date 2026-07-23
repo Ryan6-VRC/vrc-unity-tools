@@ -156,7 +156,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// (Decompile logs its own result).</summary>
     internal static class DecompileControllerMenu
     {
-        [MenuItem("Tools/Agent/Animator/Decompile Controller…")]
+        [MenuItem("Tools/Atelier/Animator/Decompile Controller…")]
         private static void Door()
         {
             string ctrlPath = null;

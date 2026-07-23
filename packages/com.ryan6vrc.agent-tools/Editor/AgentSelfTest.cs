@@ -16,7 +16,6 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// Assets/Agent/Snapshots/ for the agent to diff), then drives followAssets:true over a small
     /// ScriptableObject graph and asserts cycle-safety, the asset-hop depth cap, the walk-wide budget
     /// signal, and path+GUID naming. Exit code 0 = pass; any assertion failure throws -> Exit(1).
-    /// Also available in the GUI under Tools/Agent/Self Test (observe-modify-verify).
     /// </summary>
     public static class AgentSelfTest
     {
@@ -33,20 +32,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const string ScratchRoot = "Assets/Agent/Scratch";
         private const string FixtureFolder = ScratchRoot + "/AgentInspectorAssetTest";
 
-        [MenuItem("Tools/Agent/Self Test (observe-modify-verify)")]
-        public static void RunFromMenu() { Run(exitOnFinish: false); }
-
-        public static void RunHeadless() { Run(exitOnFinish: true); }
-
-        private static void Run(bool exitOnFinish)
+        public static void RunHeadless()
         {
             try
             {
-                // In interactive (GUI) mode, don't silently discard the user's open scene —
-                // NewScene(..., Single) would replace it. Headless runs have no scene to protect.
-                if (!exitOnFinish && !EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo())
-                    return;
-
                 EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
 
                 // --- create a test subject ---
@@ -76,12 +65,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                 RunAssetExpansionCases();
 
                 Debug.Log("[AgentSelfTest] PASS — observe/modify/verify + asset-expansion cases green");
-                if (exitOnFinish) EditorApplication.Exit(0);
+                EditorApplication.Exit(0);
             }
             catch (Exception e)
             {
                 Debug.LogError("[AgentSelfTest] FAIL — " + e);
-                if (exitOnFinish) EditorApplication.Exit(1);
+                EditorApplication.Exit(1);
             }
         }
 

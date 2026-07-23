@@ -15,7 +15,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private bool replaceExistingDrivenConstraints = false;
         private string duplicateSuffix = "_Copy";
 
-        [MenuItem("Tools/Ryan6VRC/Constrained Duplicate")]
+        [MenuItem("Tools/Atelier/Constrained Duplicate")]
         private static void ShowWindow()
         {
             GetWindow<ConstrainedDuplicateWindow>("Duplicate + VRC Constraints");
