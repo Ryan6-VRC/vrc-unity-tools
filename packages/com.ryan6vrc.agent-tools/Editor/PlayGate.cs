@@ -24,7 +24,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // for the next agent session — dodging the machine-global-EditorPref cross-project leak. Namespaced
         // to avoid cross-tool collision.
         private const string OverrideKey = "Ryan6Vrc.AgentTools.PlayGate.AllowNextEntry";
-        private const string OverrideMenu = "Tools/Agent/Play Gate/Allow Next Entry";
+        private const string OverrideMenu = "Tools/Atelier/Allow Next Play Entry";
 
         // Trivial ctor — does exactly one thing: subscribe. A throw here would silently disable the gate for
         // the whole domain with no cancel path; all reflection/evaluation happens lazily in the handler

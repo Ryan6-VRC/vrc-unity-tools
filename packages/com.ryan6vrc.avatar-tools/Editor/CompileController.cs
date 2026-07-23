@@ -537,7 +537,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// an output folder, then delegates. ZERO compile logic lives here (Compile logs its own result).</summary>
     internal static class CompileControllerMenu
     {
-        [MenuItem("Tools/Agent/Animator/Compile Controller…")]
+        [MenuItem("Tools/Atelier/Animator/Compile Controller…")]
         private static void Door()
         {
             string src = null;

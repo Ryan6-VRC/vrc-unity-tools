@@ -8,7 +8,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
     public class NormalizeExpressionClipsWindow : EditorWindow
     {
-        private const string MenuPath = "Tools/Ryan6VRC/Expression Clip Normalizer";
+        private const string MenuPath = "Tools/Atelier/Expression Clip Normalizer";
         private const float DefaultValueEpsilon = 0.001f;
 
         [SerializeField] private bool limitToBlendshapeCurves = true;
