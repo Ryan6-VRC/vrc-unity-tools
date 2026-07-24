@@ -11,7 +11,7 @@ using UnityEditor.SceneManagement;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 
-// CheckSeam proof obligations (spec 2026-07-11-checkseam-design.md, plan 2026-07-11-checkseam.md).
+// CheckSeam proof obligations.
 //
 // CheckSeam.Check resolves scene paths against the ACTIVE scene (its local Resolve/FindByHierarchyPath), so —
 // like CheckAvatarTests — fixtures live in a throwaway ADDITIVE scene set active in SetUp and torn down in
