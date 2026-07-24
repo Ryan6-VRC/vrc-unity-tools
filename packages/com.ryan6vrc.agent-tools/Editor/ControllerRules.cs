@@ -195,7 +195,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     {
                         Kind = "nonFloatBlendParam", Where = where,
                         Detail = "blend parameter `" + name + "` is declared " + t +
-                                 " — a blend tree evaluates only Float parameters, so this reads 0 and the tree never leaves its zero branch; declare it Float (or blend on a Float copy)"
+                                 " — a blend tree evaluates only Float parameters, so this input reads 0 and cannot respond to the parameter; declare it Float (or blend on a Float copy)"
                     });
                 });
             }

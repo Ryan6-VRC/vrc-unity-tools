@@ -76,8 +76,38 @@ public class CheckAnimatorRefactorTests
             "exactly one unresolved binding (Ghost) must survive; Resolvable must resolve under the basis root: " + result);
         StringAssert.Contains("=> FAIL", result,
             "explicit basis keeps broken-binding at error-tier, so one broken binding is a FAIL: " + result);
-        StringAssert.Contains("missingMotion=0 undeclaredParam=0 entryShadow=0", result,
+        StringAssert.Contains("missingMotion=0 undeclaredParam=0 nonFloatBlendParam=0 entryShadow=0", result,
             "no other rule should fire: " + result);
+    }
+
+    // Emit-summary regression: an error-tier rule that fires must show its own non-zero count in the
+    // one-line summary, not just in the offender body. nonFloatBlendParam was added to the verdict and
+    // the CompileController refusal but initially omitted from the summary format string, so a
+    // nonFloatBlendParam-only failure printed all-zero counts under a FAIL verdict (council-review #1).
+    [Test]
+    public void ExplicitBasis_nonFloatBlendParam_showsCountInSummary_andFails()
+    {
+        if (!AssetDatabase.IsValidFolder(TmpDir))
+            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+        var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
+        controller.AddParameter("IntSpeed", AnimatorControllerParameterType.Int);
+
+        // A blend tree keyed on the declared Int — the exact trap: the tree reads 0 and cannot respond.
+        var tree = new BlendTree { name = "BadTree", blendType = BlendTreeType.Simple1D, blendParameter = "IntSpeed" };
+        AssetDatabase.AddObjectToAsset(tree, controller);
+        controller.layers[0].stateMachine.AddState("S").motion = tree;
+        EditorUtility.SetDirty(controller);
+        AssetDatabase.SaveAssets();
+
+        LogAssert.ignoreFailingMessages = true;   // Emit logs the FAIL verdict via Debug.LogError.
+        // Null roots ⇒ the broken-binding rule is skipped (no basis root), isolating this rule.
+        var result = CheckAnimator.Lint(controller, "explicit", null, null, null);
+        _logPath = ExtractLogPath(result);
+
+        StringAssert.Contains("nonFloatBlendParam=1", result,
+            "the firing rule's count must be visible in the summary, not only in the offender body: " + result);
+        StringAssert.Contains("=> FAIL", result,
+            "a non-float blend parameter is an error-tier defect: " + result);
     }
 
     // basis=auto BUG-FIX (not merely visibility): under a VRCFury FullController with rewriteBindings,
