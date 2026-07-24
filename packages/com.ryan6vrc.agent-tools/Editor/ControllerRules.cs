@@ -18,8 +18,9 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// (summary line + RunLog markdown); ControllerRules owns only the defect detection.
     ///
     /// The two-tier discipline lives here: the schema-certain rules (missing motion, undeclared parameter,
-    /// deterministic entry shadow, and — when <paramref name="brokenBindingIsError"/> — a null-resolving clip
-    /// binding) populate <see cref="LintResult.Errors"/>; every heuristic populates <see cref="LintResult.Advisories"/>.
+    /// non-float blend parameter, deterministic entry shadow, a dead transition, and — when
+    /// <paramref name="brokenBindingIsError"/> — a null-resolving clip binding) populate
+    /// <see cref="LintResult.Errors"/>; every heuristic populates <see cref="LintResult.Advisories"/>.
     /// The verdict (error-tier fired ⇒ FAIL) is computed by the caller from these counts.
     ///
     /// The shared binding/frame helpers (<c>CollectUnresolvedBindings</c>, the <c>Try*Frame</c> detectors)
@@ -81,6 +82,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var dangling = RecoverDanglingMotionGuids(controller);
             RuleMissingMotion(states, dangling, rep);
             RuleUndeclaredParam(controller, states, machines, rep);
+            RuleNonFloatBlendParam(controller, states, rep);
             RuleEntryShadow(machines, rep);
             RuleDeadTransition(states, rep);
             RuleBrokenBinding(controller, roots, pathRewrite, rep);
@@ -169,6 +171,36 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
+        // ----- Rule 2b: nonFloatBlendParam (error, deterministic) -----------------------------------
+        // A blend tree evaluates only Float parameters: a name-matched Int/Bool never errors at runtime —
+        // the tree reads 0 and sits on its zero branch forever (measured on a live avatar). Declared
+        // params only: an undeclared name is Rule 2's offender, and a VRC reserved built-in carries no
+        // declared type on this controller to assert against.
+        private static void RuleNonFloatBlendParam(AnimatorController controller, List<StateCtx> states, LintResult rep)
+        {
+            var types = new Dictionary<string, AnimatorControllerParameterType>();
+            foreach (var p in controller.parameters) if (!types.ContainsKey(p.name)) types[p.name] = p.type;
+
+            var reported = new HashSet<string>(); // first referencing site per parameter, like Rule 2
+            foreach (var s in states)
+            {
+                if (s.State == null) continue;
+                BlendParams(s.State.motion, s.Path, (name, where) =>
+                {
+                    if (string.IsNullOrEmpty(name) || reported.Contains(name)) return;
+                    if (!types.TryGetValue(name, out var t) || t == AnimatorControllerParameterType.Float) return;
+                    reported.Add(name);
+                    rep.NonFloatBlendParam++;
+                    rep.Errors.Add(new LintOffender
+                    {
+                        Kind = "nonFloatBlendParam", Where = where,
+                        Detail = "blend parameter `" + name + "` is declared " + t +
+                                 " — a blend tree evaluates only Float parameters, so this reads 0 and the tree never leaves its zero branch; declare it Float (or blend on a Float copy)"
+                    });
+                });
+            }
+        }
+
         private static void BlendParams(Motion m, string where, Action<string, string> reff)
         {
             if (!(m is BlendTree bt)) return;
@@ -219,7 +251,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ONE precise shape (conservative by design — anything outside it is left alone): an outgoing
         // state→state transition with NO conditions AND hasExitTime==false that is NOT a to-Exit transition.
         // Unity needs a condition or an exit time to ever activate such a transition, so it is inert and
-        // silently stalls the machine. Surveyed across 144 real controllers (Plum-Remy corpus): ZERO hits,
+        // silently stalls the machine. Surveyed across 144 real controllers (a live personal-avatar corpus): ZERO hits,
         // so error-tier carries no false-positive risk — the pattern simply does not occur in working avatars.
         //
         // NOT flagged: an exit-time transition from a MOTIONLESS (motion==null) state. An earlier draft
@@ -530,7 +562,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// the broken-binding rule ran at, so the caller can fold it into the verdict.</summary>
     public sealed class LintResult
     {
-        public int MissingMotion, UndeclaredParam, EntryShadow, BrokenBinding, DeadTransition;
+        public int MissingMotion, UndeclaredParam, NonFloatBlendParam, EntryShadow, BrokenBinding, DeadTransition;
         public bool BrokenBindingIsError;
         public readonly List<LintOffender> Errors = new List<LintOffender>();
         public readonly List<LintOffender> Advisories = new List<LintOffender>();

@@ -83,7 +83,7 @@ public class CheckAnimatorRefactorTests
     // basis=auto BUG-FIX (not merely visibility): under a VRCFury FullController with rewriteBindings,
     // CheckAnimator must apply those rules before resolving, so the (demoted) broken-binding COUNT is
     // truthful. Without the fix, a path a declared rule relocates reads as unresolvable and inflates the
-    // count with false sample offenders — the RemyDoll_Fx ~66-false-positive case, at unit scale. Verdict
+    // count with false sample offenders — the carried-doll-FX ~66-false-positive case, at unit scale. Verdict
     // stays PASS (auto still demotes — the D1 error-tier decision is CheckAvatar's charter, not imported here).
     [Test]
     public void AutoBasis_vrcfRewriteBindings_countIsTruthful()

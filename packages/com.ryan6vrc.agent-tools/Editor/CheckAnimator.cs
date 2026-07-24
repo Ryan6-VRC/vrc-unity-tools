@@ -474,8 +474,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static string Emit(AnimatorController controller, LintResult rep, string detection, List<string> notes)
         {
-            bool errorTierFired = rep.MissingMotion > 0 || rep.UndeclaredParam > 0 || rep.EntryShadow > 0
-                                  || rep.DeadTransition > 0
+            bool errorTierFired = rep.MissingMotion > 0 || rep.UndeclaredParam > 0 || rep.NonFloatBlendParam > 0
+                                  || rep.EntryShadow > 0 || rep.DeadTransition > 0
                                   || (rep.BrokenBindingIsError && rep.BrokenBinding > 0);
             string result = errorTierFired ? "FAIL" : "PASS";
 

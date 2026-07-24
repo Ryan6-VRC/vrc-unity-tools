@@ -131,7 +131,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ── 5. Pre-emission graph lint (roots empty ⇒ broken-binding rule skipped: no scene) ─────
             var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
-            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
+            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
             {
                 CleanupAfterLint(whatIf, tempFolder, finalPath, paramsPath, controllerPreExisted, paramsPreExisted, newFolders);
                 string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
@@ -439,7 +439,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             catch (Exception e) { return "emit: " + e.GetType().Name + ": " + e.Message; }
 
             var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
-            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
+            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
                 return "post-emit graph lint (" + lint.Errors.Count + "): "
                      + string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
             return null;

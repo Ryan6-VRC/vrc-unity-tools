@@ -292,7 +292,7 @@ public class CheckAvatarTests
         Assert.IsFalse(log.Contains("path=`AvatarLevelThing`"), "D-A: an avatar-level object resolves upward and must not surface: " + log);
     }
 
-    // ── VRCF rewriteBindings (D-A step 1) — the RemyDoll downward-relocation case ──────────────────────
+    // ── VRCF rewriteBindings (D-A step 1) — the carried-doll downward-relocation case ──────────────────
 
     // A prop's clips address a bone by a base-rooted path (Armature/Bone) but the bone is mounted DOWNWARD
     // (Prop/Nested/Armature/Bone). The upward strip alone can't reach it; the FullController's own
