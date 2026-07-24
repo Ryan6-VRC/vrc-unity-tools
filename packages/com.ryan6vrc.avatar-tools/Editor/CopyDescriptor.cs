@@ -471,12 +471,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // ── RunLog output ─────────────────────────────────────────────────────────────────────
-        // The shared envelope replaces the old dual writers (execute-shaped + whatIf-shaped): counts
-        // are emitted only where added, so the whatIf log honestly omits the execute-only counters
-        // (remapped/nulled/leaks/lostRefs are unknowable without copying) with a single writer.
+        // One shared envelope writer serves both modes: counts are emitted only where added, so the
+        // whatIf log honestly omits the execute-only counters (remapped/nulled/leaks/lostRefs are
+        // unknowable without copying) rather than reporting zeros for them.
 
         /// <summary>Route an argument-guard failure through the shared envelope tail — never a bare
-        /// trailer-less line (the guards previously returned one, with no RunLog at all).</summary>
+        /// trailer-less line: every guard failure still writes a RunLog and carries its path.</summary>
         private static string ArgFail(string label, bool whatIf, GameObject ownedRoot, GameObject source, string msg)
         {
             var data = new RunData

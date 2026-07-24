@@ -584,7 +584,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>Route an argument-guard failure through the shared envelope tail — never a bare
-        /// trailer-less line (the guards previously returned one, with no RunLog at all).</summary>
+        /// trailer-less line: every guard failure still writes a RunLog and carries its path.</summary>
         private static string ArgFail(string label, bool whatIf, AnimatorController sourceFx, GameObject ownedRoot, string msg)
         {
             var data = new RunData
