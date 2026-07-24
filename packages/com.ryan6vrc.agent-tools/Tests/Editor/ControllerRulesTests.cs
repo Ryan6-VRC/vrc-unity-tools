@@ -58,6 +58,37 @@ public class ControllerRulesTests
     }
 
     [Test]
+    public void Run_Flags_NonFloat_BlendParameter_As_Error()
+    {
+        // The measured trap: a blend tree evaluates only Float parameters — a name-matched Int reads 0
+        // silently and the tree never leaves its zero branch. Declared-Int blend param must FAIL; a
+        // declared-Float one must not; an UNDECLARED one belongs to undeclaredParam, not this rule.
+        _controller = new AnimatorController();
+        _controller.AddParameter("IntSpeed", AnimatorControllerParameterType.Int);
+        _controller.AddParameter("FloatSpeed", AnimatorControllerParameterType.Float);
+        _controller.AddLayer("Base");
+        var sm = _controller.layers[0].stateMachine;
+
+        var bad = new BlendTree { blendType = BlendTreeType.Simple1D, blendParameter = "IntSpeed" };
+        var good = new BlendTree { blendType = BlendTreeType.Simple1D, blendParameter = "FloatSpeed" };
+        var undeclared = new BlendTree { blendType = BlendTreeType.Simple1D, blendParameter = "NoSuchParam" };
+        sm.AddState("Bad").motion = bad;
+        sm.AddState("Good").motion = good;
+        sm.AddState("Undeclared").motion = undeclared;
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: true, pathRewrite: null);
+
+        Assert.AreEqual(1, r.NonFloatBlendParam, "exactly the declared-Int blend parameter fires the rule");
+        Assert.IsTrue(r.Errors.Any(o => o.Kind == "nonFloatBlendParam" && o.Detail.Contains("IntSpeed") && o.Detail.Contains("Int")),
+            "the offender names the parameter and its declared type");
+        Assert.IsFalse(r.Errors.Any(o => o.Kind == "nonFloatBlendParam" && o.Detail.Contains("FloatSpeed")),
+            "a Float blend parameter is the correct shape — never an offender");
+        Assert.AreEqual(1, r.UndeclaredParam, "the undeclared blend parameter stays Rule 2's offender, not this rule's");
+
+        Object.DestroyImmediate(bad); Object.DestroyImmediate(good); Object.DestroyImmediate(undeclared);
+    }
+
+    [Test]
     public void Run_Flags_NoCondition_NoExit_Transition_As_Dead_Error()
     {
         _controller = new AnimatorController();
