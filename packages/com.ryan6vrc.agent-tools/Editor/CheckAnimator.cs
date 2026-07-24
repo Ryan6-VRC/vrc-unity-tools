@@ -172,8 +172,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         // mounts, plus how it was derived. The Try* helpers run on ANY subtree component (they self-check
         // type + controller reference), DISCOVER the referenced controller(s) so a caller can enumerate
         // mount sites, and set UnreflectedAnchor (naming a required frame field that failed to reflect) so
-        // a fail-loud caller can refuse. CheckAnimator's own Parse* wrappers keep the historical SILENT
-        // skip: "not our controller" / unreflected ⇒ the same null they returned before.
+        // a fail-loud caller can refuse. CheckAnimator's own Parse* wrappers instead skip SILENTLY:
+        // "not our controller" / unreflected ⇒ null.
 
         internal enum FrameKind { DescriptorLayer, MA, VRCF }
 
