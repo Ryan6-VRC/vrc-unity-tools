@@ -65,8 +65,8 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// re-grab. In-call waiting for the REBUILD remains impossible by construction — no editor tick runs
     /// while the synchronous call blocks the main thread. An editor whose foregrounding Windows keeps
     /// refusing stays FAILed by design — the message names the operator action (focus the editor), and the
-    /// tool never trades that cliff for a sheet it can't vouch for. Mechanism →
-    /// docs/superpowers/surveys/2026-07-07-ndmf-preview-refresh.md.
+    /// tool never trades that cliff for a sheet it can't vouch for. Mechanism and residuals →
+    /// Tests/Editor/RenderAvatarFreshnessGate.md.
     ///
     /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
     /// (target upright, facing world +Z, unrotated). A target rotated in the scene shows the scene's
@@ -116,7 +116,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // The asmdef has references:[], so NDMF internal types are found by assembly-scan on the qualified
         // name (never typeof). Every hop is null-conditional: a renamed/removed member leaves the field null
         // → the drift note at call time, never a class-load throw. Settled predicate + mechanism:
-        // docs/superpowers/surveys/2026-07-07-ndmf-preview-refresh.md.
+        // Tests/Editor/RenderAvatarFreshnessGate.md.
         private const string UnsettledNote = " | note=preview not settled (NDMF rebuild in flight) — re-grab in a separate call";
         private const string DriftNote = " | note=settle-state unknown (NDMF internals drifted)";
 
