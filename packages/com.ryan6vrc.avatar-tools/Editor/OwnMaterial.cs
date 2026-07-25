@@ -19,12 +19,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// which slots to fork; this tool executes the copy deterministically and reports a per-slot
     /// provenance table (<c>slots[]</c>) as the caller's verification gate.
     ///
-    /// Full behavioral spec: <c>docs/superpowers/specs/2026-07-11-own-material-lean-design.md</c>. This
-    /// file implements the full Flow: arg guards, slot-name validation, target-identity routing
-    /// (own / branch / augment) with a copy-to-new deep copy, the copy-to-new normalize step (a variant
-    /// source is flattened into a standalone material BEFORE the unlock seam — Thry's unlock selects
-    /// <c>GetRoot()</c>, so an un-flattened variant would unlock the vendor root instead of O — then a
-    /// locked O is unlocked via reflection into <c>Thry.ThryEditor.ShaderOptimizer.UnlockMaterials</c>,
+    /// This file is the behavioral spec. It implements the full Flow: arg guards, slot-name validation,
+    /// target-identity routing (own / branch / augment) with a copy-to-new deep copy, the copy-to-new
+    /// normalize step (a variant source is flattened into a standalone material BEFORE the unlock seam —
+    /// Thry's unlock selects <c>GetRoot()</c>, so an un-flattened variant would unlock the vendor root
+    /// instead of O — then a locked O is unlocked via reflection into
+    /// <c>Thry.ThryEditor.ShaderOptimizer.UnlockMaterials</c>,
     /// avatar-tools never referencing <c>com.poiyomi.toon</c>, gated by a dialog guard that refuses rather
     /// than risk Thry's blocking <c>DisplayDialog</c> when the original-shader tag can't resolve, and a
     /// still-locked backstop that force-reimports a locked vendor source after unlocking its copy and
