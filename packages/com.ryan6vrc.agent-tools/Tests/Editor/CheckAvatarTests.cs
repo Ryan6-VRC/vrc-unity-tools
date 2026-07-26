@@ -557,6 +557,118 @@ public class CheckAvatarTests
         StringAssert.Contains("mergeConflict=0", log);
     }
 
+    // A base bone carrying a per-range variant set reads as N components fighting unless each offender says
+    // whether it is running: the group a mergeable joins is then 1 real conflict + N intentional variants,
+    // and de-conflicting against a not-live member is silent. Both states are spelled, the note fires once
+    // and only for a mixed-live PHYSBONE group, and none of it touches the ≥2-with-a-mergeable predicate.
+    [Test]
+    public void MergeConflict_MixedLivePhysboneGroup_IsMarkedAndNoted()
+    {
+        var root = NewAvatar("MCLive");
+        var baseBone = NewChild(root, "BaseBone").transform;
+        var variantOff = NewChild(root, "VariantOff");
+        variantOff.SetActive(false);
+        var mergeBone = NewChild(root, "MergeBone").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeBone, baseBone) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (mergeBone, mergeBone, "physbone", ""),
+            (baseBone, baseBone, "physbone", ""),
+            (variantOff.transform, baseBone, "physbone", ""));
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=1", log);
+        StringAssert.Contains("[not-live] " + root.name + "/VariantOff", log);
+        StringAssert.Contains("[live] " + root.name + "/MergeBone", log);
+        StringAssert.Contains("[live] " + root.name + "/BaseBone", log);
+        StringAssert.Contains("per-range variant set", log);
+    }
+
+    // Both markers are always spelled, so an all-live report is distinguishable from one produced before
+    // liveness was evaluated at all.
+    [Test]
+    public void MergeConflict_AllHostsLive_MarkedLive_NoNote()
+    {
+        var root = NewAvatar("MCLive2");
+        var baseBone = NewChild(root, "BaseBone").transform;
+        var mergeBone = NewChild(root, "MergeBone").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeBone, baseBone) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (mergeBone, mergeBone, "physbone", ""), (baseBone, baseBone, "physbone", ""));
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("[live] " + root.name + "/BaseBone", log);
+        StringAssert.DoesNotContain("[not-live]", log);
+        StringAssert.DoesNotContain("per-range variant set", log);
+    }
+
+    // The note speaks about physbone variant sets, so an unrelated inactive collider must not summon it.
+    [Test]
+    public void MergeConflict_NotLiveCollider_MarkedButNotNoted()
+    {
+        var root = NewAvatar("MCLiveCol");
+        var baseCol = NewChild(root, "BaseCol").transform;
+        var mergeColOff = NewChild(root, "MergeColOff");
+        mergeColOff.SetActive(false);
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeColOff.transform, baseCol) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (mergeColOff.transform, mergeColOff.transform, "collider", ""),
+            (baseCol, baseCol, "collider", ""));
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=1", log);
+        StringAssert.Contains("[not-live] " + root.name + "/MergeColOff", log);
+        StringAssert.DoesNotContain("per-range variant set", log);
+    }
+
+    // A VRC constraint is a Behaviour but carries a SECOND enable flag, `IsActive`. Testing `enabled` alone
+    // reports an inert constraint as fighting — the category's enable surface is not the Behaviour's.
+    [Test]
+    public void MergeConflict_ConstraintIsActiveFalse_IsNotLive()
+    {
+        var root = NewAvatar("MCLiveCon");
+        var baseT = NewChild(root, "BaseT").transform;
+        var mergeGo = NewChild(root, "MergeT");
+        var con = mergeGo.AddComponent<VRC.SDK3.Dynamics.Constraint.Components.VRCParentConstraint>();
+        con.IsActive = false;   // Behaviour stays enabled, object stays active
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeGo.transform, baseT) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (con, mergeGo.transform, "constraint", ""), (baseT, baseT, "constraint", ""));
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=1", log);
+        StringAssert.Contains("[not-live] " + root.name + "/MergeT", log);
+    }
+
+    [Test]
+    public void MergeConflict_ConstraintIsActiveTrue_IsLive()
+    {
+        var root = NewAvatar("MCLiveCon2");
+        var baseT = NewChild(root, "BaseT").transform;
+        var mergeGo = NewChild(root, "MergeT");
+        var con = mergeGo.AddComponent<VRC.SDK3.Dynamics.Constraint.Components.VRCParentConstraint>();
+        con.IsActive = true;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeGo.transform, baseT) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (con, mergeGo.transform, "constraint", ""), (baseT, baseT, "constraint", ""));
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("[live] " + root.name + "/MergeT", log);
+        StringAssert.DoesNotContain("[not-live]", log);
+    }
+
+    // Liveness is relative to the avatar root: parking the avatar inactive must not flip every host to
+    // not-live and fire the note over a real conflict.
+    [Test]
+    public void MergeConflict_InactiveAvatarRoot_LivenessStaysRelative()
+    {
+        var root = NewAvatar("MCLiveRoot");
+        var baseBone = NewChild(root, "BaseBone").transform;
+        var mergeBone = NewChild(root, "MergeBone").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeBone, baseBone) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (mergeBone, mergeBone, "physbone", ""), (baseBone, baseBone, "physbone", ""));
+        root.SetActive(false);
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.DoesNotContain("[not-live]", log);
+        StringAssert.DoesNotContain("per-range variant set", log);
+        StringAssert.Contains("avatar root is not active", log);
+    }
+
     [Test]
     public void MergeConflict_CategoryIsolation_PhysboneAndColliderNotAConflict()
     {
