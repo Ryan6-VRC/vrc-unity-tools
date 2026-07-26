@@ -26,9 +26,10 @@ namespace Ryan6Vrc.AgentTools.Editor
     ///     transform via the MA/VRCFury merge map, ≥1 of them mergeable-sourced — i.e. a mergeable's bone
     ///     name-merges onto a base bone that already carries the same kind of component, so both bake onto
     ///     one transform and fight → the agent de-conflicts. A base↔base duplicate (none mergeable) is not a
-    ///     merge artifact and is dropped. Each offender carries its live state; a <c>[not-live]</c> host is
-    ///     not fighting at this instant, and a group of them on one base bone is usually a per-range variant
-    ///     set (docs/outfits.md) rather than N components to reconcile.
+    ///     merge artifact and is dropped. Each offender is marked <c>[live]</c>/<c>[not-live]</c> relative to
+    ///     the avatar root (per category: a constraint's <c>IsActive</c> counts alongside <c>enabled</c>), so
+    ///     a mixed-live physbone group reads as the per-range variant set it usually is (docs/outfits.md)
+    ///     rather than N components to reconcile.
     ///
     /// The first two resolve against the PLACED scene (the load-bearing model, spec D1): a to-be-merged bone
     /// is physically present pre-bake and resolves now; a base-rename break does not. So this predicts nothing
@@ -178,25 +179,59 @@ namespace Ryan6Vrc.AgentTools.Editor
             catch { return "shape=?"; }
         }
 
-        private struct ConflictHost { public string Path; public string Type; public string Bone; public bool Mergeable; public string Detail; public bool Live; }
+        // Live is nullable: null means "no host to ask", which prints as neither marker — the same
+        // absent-vs-false distinction the shape cell spells `—`.
+        private struct ConflictHost { public string Path; public string Type; public string Bone; public bool Mergeable; public string Detail; public bool? Live; }
         private struct MergeConflict { public string Category; public string FinalPath; public List<ConflictHost> Hosts; }
 
-        // Whether a dynamics component is running right now: both the component's own enable flag and its
-        // object's active state are required, and either can be the one an FX layer drives. A non-Behaviour
-        // host has no enable flag, so its object state decides. Reported per offender because a group whose
-        // members are a per-range variant set is otherwise indistinguishable from N components fighting.
-        private static bool IsLive(Component host)
+        // Whether a dynamics component is running, measured RELATIVE TO THE AVATAR ROOT. Absolute
+        // activeInHierarchy would be wrong here: this root can itself be deactivated (parking the avatars
+        // you are not editing is ordinary workflow, and Resolve reaches an inactive root), and a shared
+        // ancestor's state cannot discriminate between members of one group anyway — it would report every
+        // host not-live at once, which is the opposite of the signal. Ancestors ABOVE the root are the
+        // subject of the one caveat line instead.
+        //
+        // Each category has its own enable surface and they are not interchangeable: a VRC constraint is a
+        // Behaviour but carries a second flag, `IsActive` — measured by reflecting VRCConstraintBase on the
+        // loaded SDK (public bool field, alongside GlobalWeight), and set explicitly by our own
+        // avatar-tools ConstrainedDuplicate when it wants a constraint to run. Test `enabled` alone and an
+        // inert constraint reports as fighting.
+        private static bool? IsLive(Component host, string category, Transform root)
         {
-            if (host == null) return false;
+            if (host == null) return null;
             var beh = host as Behaviour;
-            return (beh == null || beh.enabled) && host.gameObject.activeInHierarchy;
+            if (beh != null && !beh.enabled) return false;
+            if (category == "constraint" && !ConstraintIsActive(host)) return false;
+            for (var t = host.transform; t != null && t != root; t = t.parent)
+                if (!t.gameObject.activeSelf) return false;
+            return true;
         }
 
-        private static bool AnyNotLive(List<MergeConflict> conflicts)
+        // Reflected, not typed: this file reaches every dynamics type by name (DynamicsCategories) so an
+        // absent SDK degrades to skip rather than a compile break. A field we cannot read is treated as
+        // active — fail toward reporting the conflict, never toward silently excusing one.
+        private static bool ConstraintIsActive(Component host)
+        {
+            var f = host.GetType().GetField("IsActive", BindingFlags.Public | BindingFlags.Instance);
+            if (f == null || f.FieldType != typeof(bool)) return true;
+            try { return (bool)f.GetValue(host); } catch { return true; }
+        }
+
+        // Scoped to what this change actually established: a PHYSBONE group carrying ≥2 hosts of mixed live
+        // state. An unrelated disabled collider must not summon a paragraph about physbone variant sets.
+        private static bool AnyMixedLivePhysboneGroup(List<MergeConflict> conflicts)
         {
             foreach (var mc in conflicts)
+            {
+                if (mc.Category != "physbone") continue;
+                int live = 0, notLive = 0;
                 foreach (var h in mc.Hosts)
-                    if (!h.Live) return true;
+                {
+                    if (h.Live == true) live++;
+                    else if (h.Live == false) notLive++;
+                }
+                if (live >= 1 && notLive >= 1 && live + notLive >= 2) return true;
+            }
             return false;
         }
 
@@ -532,7 +567,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         Type = host != null ? host.GetType().Name : "—",
                         Bone = target.name,
                         Mergeable = mergeable, Detail = detail ?? "",
-                        Live = IsLive(host),
+                        Live = IsLive(host, category, avatarGO.transform),
                     });
                 }
 
@@ -621,9 +656,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 sb.Append("- **merge-conflict** category=`").Append(mc.Category)
                   .Append("` final=`").Append(mc.FinalPath).Append("`\n");
+                // Both states are spelled, like [mergeable]/[base]: emitting only the negative would make
+                // an all-live report byte-identical to one from a build that never evaluated liveness.
                 foreach (var h in mc.Hosts)
                     sb.Append("  - ").Append(h.Mergeable ? "[mergeable] " : "[base] ")
-                      .Append(h.Live ? "" : "[not-live] ").Append(h.Path)
+                      .Append(h.Live == null ? "" : h.Live == true ? "[live] " : "[not-live] ").Append(h.Path)
                       .Append(" (").Append(h.Type).Append(", bone=`").Append(h.Bone).Append("`")
                       .Append(string.IsNullOrEmpty(h.Detail) ? "" : ", " + h.Detail).Append(")\n");
             }
@@ -637,11 +674,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append("- MA prunes exact-duplicate physbones at build (PruneDuplicatePhysBones), so a flagged MA " +
                     "physbone pair may already be resolved — verify against a build. VRCFury has no such pass; colliders, " +
                     "constraints, and non-exact/non-zip-merged MA physbone pairs are the residue this check exists for.\n");
-            if (AnyNotLive(rep.MergeConflicts))
-                sb.Append("- A `[not-live]` host is disabled or on an inactive object right now, so it is not fighting " +
-                    "anything at this instant — a group of them on one base bone is usually a per-range variant set an FX " +
-                    "layer switches between, and de-conflicting against the wrong member is silent (docs/outfits.md " +
-                    "§The FX controller is the authoritative map). Which member is live is the layer's call, not the scene's.\n");
+            if (AnyMixedLivePhysboneGroup(rep.MergeConflicts))
+                sb.Append("- Live state is measured relative to this avatar root. A `[not-live]` physbone on a base bone " +
+                    "is often one of a per-range variant set an FX layer switches between, and de-conflicting against the " +
+                    "wrong member is silent (docs/outfits.md §The FX controller is the authoritative map). Which member the " +
+                    "layer selects is a property of the graph, not of the scene's static state.\n");
+            if (!rep.Root.activeInHierarchy)
+                sb.Append("- This avatar root is not active in the scene, so nothing under it is running; the live markers " +
+                    "above are relative to the root and still discriminate between hosts.\n");
 
             var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "avatarlint_" + rep.Root.name, summary, sb.ToString(), ".md");
             if (result == "PASS") Debug.Log(res); else Debug.LogWarning(res);
