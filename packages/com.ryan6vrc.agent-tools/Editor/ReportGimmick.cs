@@ -19,8 +19,9 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// subtree and renders, as factual tables, its VRC contacts, physbones (+ colliders), constraints
     /// (as a constrained→source edge-list with weights, affected-axis mask, and TargetTransform
     /// indirection made explicit), and its VRCFury AUTHORING inventory — plus a short Observations index
-    /// naming only the five mechanically-certain structural idioms (world anchor, feedback loop,
-    /// TargetTransform indirection, hold, editor/runtime swap), each carrying a docs/ pointer. So an
+    /// naming only the six mechanically-certain structural idioms (world anchor, feedback loop,
+    /// TargetTransform indirection, hold, editor/runtime swap, dynamics variant stack), each carrying a
+    /// docs/ pointer. So an
     /// agent can hold a gimmick subtree in a few thousand tokens — the digest scales with component
     /// count (the tier-2 census names renderers/animators too), so a whole-avatar subtree is a
     /// proportionally large, honest digest, not a compact one; scope the root to the gimmick.
@@ -98,7 +99,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             AppendPhysBones(body, physbones, colliders);
             AppendConstraints(body, constraintRows);
             var applyDuringUploadHosts = AppendVrcFury(body, fury);
-            int obsCount = AppendObservations(body, constraintRows, applyDuringUploadHosts);
+            int obsCount = AppendObservations(body, constraintRows, applyDuringUploadHosts, physbones);
             int other = AppendOther(body, root, tier1);
 
             // Header carries the count line, which needs `other` — known only after AppendOther walked the
@@ -164,6 +165,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 sb.Append("| transform | rootTransform | parameter prefix | grab/pose | forces | immobile | flags |\n");
                 sb.Append("|---|---|---|---|---|---|---|\n");
+                // The walk is includeInactive, so the table lists components that are not running. `enabled`
+                // (component) and `active` (gameObject.activeInHierarchy) are both required to run, and they
+                // are the whole discriminator when several physbones share one target bone — without them a
+                // variant stack reads as N components fighting over one chain.
                 foreach (var b in bones)
                     sb.Append("| `").Append(Cell(GetHierarchyPath(b.transform))).Append("` | ")
                       .Append(RootIndirection(b.rootTransform, b.transform)).Append(" | ")
@@ -171,7 +176,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                       .Append("grab=").Append(b.allowGrabbing).Append(" pose=").Append(b.allowPosing).Append(" grabMove=").Append(F(b.grabMovement)).Append(" | ")
                       .Append("pull=").Append(F(b.pull)).Append(" spring=").Append(F(b.spring)).Append(" stiffness=").Append(F(b.stiffness)).Append(" | ")
                       .Append(F(b.immobile)).Append(" (").Append(b.immobileType).Append(") | ")
-                      .Append("isAnimated=").Append(b.isAnimated ? "1" : "0").Append(" resetWhenDisabled=").Append(b.resetWhenDisabled ? "1" : "0").Append(" |\n");
+                      .Append("enabled=").Append(b.enabled ? "1" : "0")
+                      .Append(" active=").Append(b.gameObject.activeInHierarchy ? "1" : "0")
+                      .Append(" isAnimated=").Append(b.isAnimated ? "1" : "0").Append(" resetWhenDisabled=").Append(b.resetWhenDisabled ? "1" : "0").Append(" |\n");
             }
 
             // Colliders are ingredients, not behaviour — a minimal companion table.
@@ -520,9 +527,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        // ----- Observations (§6) — five mechanically-certain idioms, each a fact + docs pointer -------
+        // ----- Observations (§6) — six mechanically-certain idioms, each a fact + docs pointer --------
 
-        private static int AppendObservations(StringBuilder sb, ConstraintRow[] rows, List<Transform> applyHosts)
+        private static int AppendObservations(StringBuilder sb, ConstraintRow[] rows, List<Transform> applyHosts,
+                                              VRCPhysBone[] physbones)
         {
             var lines = new List<string>();
             foreach (var row in rows)
@@ -564,6 +572,26 @@ namespace Ryan6Vrc.AgentTools.Editor
             // e. Editor/runtime swap (VRCFury ApplyDuringUpload host).
             foreach (var h in applyHosts)
                 lines.Add("**editor/runtime swap** — `" + Cell(GetHierarchyPath(h)) + "` — docs/gimmicks.md §Constraint patterns · Editor/runtime swap");
+
+            // f. Dynamics variant stack: several physbones targeting ONE bone, not all live — per-range
+            //    tuning variants a body-morph slider switches between, which read as duplicates without
+            //    the live-state the §5.2 table now carries. Mixed live-state is the whole predicate: an
+            //    all-live pair on one bone is a different thing (a chain plus its limiter) and is not
+            //    claimed here. State the fact and route; which variant BELONGS live is the slider's call,
+            //    not a fact in the subtree.
+            foreach (var g in GroupPhysBonesByTarget(physbones))
+            {
+                if (g.Value.Count < 2) continue;
+                var live = new List<string>();
+                foreach (var b in g.Value)
+                    if (b.enabled && b.gameObject.activeInHierarchy)
+                        live.Add("`" + Cell(GetHierarchyPath(b.transform)) + "`");
+                if (live.Count == g.Value.Count) continue;
+                lines.Add("**dynamics variant stack** — `" + Cell(GetHierarchyPath(g.Key)) + "` ← "
+                          + g.Value.Count + " physbones, live: "
+                          + (live.Count == 0 ? "none" : string.Join(", ", live.ToArray()))
+                          + " — docs/outfits.md §The FX controller is the authoritative map");
+            }
 
             sb.Append("\n## Observations\n\n");
             if (lines.Count == 0) sb.Append("_(none)_\n");
@@ -688,6 +716,35 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             if (tags == null || tags.Count == 0) return "—";
             return string.Join(",", tags.ToArray());
+        }
+
+        // The transform a physbone's chain actually acts on: its rootTransform when set, else its own —
+        // the same resolution RootIndirection renders, and the only key under which two physbones can be
+        // said to target the same bone. A self-rooted pair sharing one GameObject groups here too, which a
+        // rootTransform-only census misses.
+        private static Transform EffectiveTarget(VRCPhysBone b)
+            => b.rootTransform != null ? b.rootTransform : b.transform;
+
+        // Grouped in first-seen order (the walk's hierarchy order, so rows match the §5.2 table) — a
+        // Dictionary's iteration order is unspecified and this feeds a RunLog that must be byte-stable.
+        private static List<KeyValuePair<Transform, List<VRCPhysBone>>> GroupPhysBonesByTarget(VRCPhysBone[] bones)
+        {
+            var order = new List<KeyValuePair<Transform, List<VRCPhysBone>>>();
+            var index = new Dictionary<Transform, int>();
+            foreach (var b in bones)
+            {
+                var t = EffectiveTarget(b);
+                if (t == null) continue;
+                int i;
+                if (!index.TryGetValue(t, out i))
+                {
+                    i = order.Count;
+                    index[t] = i;
+                    order.Add(new KeyValuePair<Transform, List<VRCPhysBone>>(t, new List<VRCPhysBone>()));
+                }
+                order[i].Value.Add(b);
+            }
+            return order;
         }
 
         // A rootTransform that is non-null (fake-null) and != the host means the shape/chain acts at that

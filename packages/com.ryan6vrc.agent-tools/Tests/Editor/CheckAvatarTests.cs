@@ -557,6 +557,47 @@ public class CheckAvatarTests
         StringAssert.Contains("mergeConflict=0", log);
     }
 
+    // A base bone carrying a per-range variant set reads as N components fighting unless each offender says
+    // whether it is running: the group a mergeable joins is then 1 real conflict + N intentional variants,
+    // and de-conflicting against a not-live member is silent. The marker is per offender, the note fires
+    // once, and neither touches the ≥2-with-a-mergeable predicate.
+    [Test]
+    public void MergeConflict_NotLiveHost_IsMarkedAndNoted()
+    {
+        var root = NewAvatar("MCLive");
+        var baseBone = NewChild(root, "BaseBone").transform;
+        var variantOff = NewChild(root, "VariantOff");
+        variantOff.SetActive(false);
+        var mergeBone = NewChild(root, "MergeBone").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeBone, baseBone) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (mergeBone, mergeBone, "physbone", ""),
+            (baseBone, baseBone, "physbone", ""),
+            (variantOff.transform, baseBone, "physbone", ""));
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=1", log);
+        StringAssert.Contains("[not-live] " + root.name + "/VariantOff", log);
+        // The live members carry no marker — absence is the signal, so it must not leak onto them.
+        StringAssert.DoesNotContain("[not-live] " + root.name + "/MergeBone", log);
+        StringAssert.DoesNotContain("[not-live] " + root.name + "/BaseBone", log);
+        StringAssert.Contains("per-range variant set", log);
+    }
+
+    [Test]
+    public void MergeConflict_AllHostsLive_NoNotLiveNote()
+    {
+        var root = NewAvatar("MCLive2");
+        var baseBone = NewChild(root, "BaseBone").transform;
+        var mergeBone = NewChild(root, "MergeBone").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeBone, baseBone) });
+        CheckAvatar.CollectDynamicsTargets = Targets(
+            (mergeBone, mergeBone, "physbone", ""), (baseBone, baseBone, "physbone", ""));
+        var log = ReadLog(Inspect(root.name));
+        StringAssert.Contains("mergeConflict=1", log);
+        StringAssert.DoesNotContain("[not-live]", log);
+        StringAssert.DoesNotContain("per-range variant set", log);
+    }
+
     [Test]
     public void MergeConflict_CategoryIsolation_PhysboneAndColliderNotAConflict()
     {
