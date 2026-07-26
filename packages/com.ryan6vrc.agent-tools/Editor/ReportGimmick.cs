@@ -71,7 +71,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // MonoBehaviour), so a per-type list would let an unlisted Unity constraint slip through. VRC
             // constraints do NOT implement UnityEngine's IConstraint, so the two families never overlap.
             var unityConstraints = root.GetComponentsInChildren<IConstraint>(true);
-            var constraintRows = BuildConstraintRows(constraints, unityConstraints);
+            var constraintRows = BuildConstraintRows(constraints, unityConstraints, root.transform);
             int constraintCount = constraints.Length + unityConstraints.Length;
 
             // VRCFury is read untyped (no asmdef ref): match the component by full type name, decode via
@@ -210,22 +210,25 @@ namespace Ryan6Vrc.AgentTools.Editor
             public Transform DrivenTransform;            // for the feedback-loop observation
             public Transform[] SourceTransforms;         // for the feedback-loop observation
             public VRCConstraintBase Vrc;                // family discriminator; null for Unity constraints
+            public string NotLive;                       // null when running; else which flag is down
         }
 
-        // Normalize both constraint families into one row list. Order is VRC-first, then Unity — VRC output
-        // stays byte-for-byte what it was (VRC rows render through the same reads as before).
-        private static ConstraintRow[] BuildConstraintRows(VRCConstraintBase[] vrc, IConstraint[] unity)
+        // Normalize both constraint families into one row list. Order is VRC-first, then Unity. Every row
+        // carries a live cell, because each family has a second enable flag beyond the Behaviour's own
+        // (VRC `IsActive`, Unity `constraintActive`) and an inert constraint would otherwise render
+        // identically to a running one — the same blindness the physbone table had.
+        private static ConstraintRow[] BuildConstraintRows(VRCConstraintBase[] vrc, IConstraint[] unity, Transform root)
         {
             var rows = new List<ConstraintRow>(vrc.Length + unity.Length);
-            foreach (var c in vrc) rows.Add(FromVrc(c));
-            foreach (var c in unity) rows.Add(FromUnity(c));
+            foreach (var c in vrc) rows.Add(FromVrc(c, root));
+            foreach (var c in unity) rows.Add(FromUnity(c, root));
             return rows.ToArray();
         }
 
         // VRC extractor — reuses the EXISTING VRC reads (TargetTransform-or-host driven, Sources with
         // (none) for unwired slots, AxisMask, ConstraintNote) unchanged, so VRC rows are identical to
         // the pre-widening output.
-        private static ConstraintRow FromVrc(VRCConstraintBase c)
+        private static ConstraintRow FromVrc(VRCConstraintBase c, Transform root)
         {
             var host = c.transform;
             // Unity fake-null test, never ?? — ?? bypasses UnityEngine.Object's overloaded == and would
@@ -255,13 +258,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 DrivenTransform = driven,
                 SourceTransforms = srcTransforms.ToArray(),
                 Vrc = c,
+                NotLive = NotLiveReason(c, root) ?? (c.IsActive ? null : "IsActive"),
             };
         }
 
         // Unity IConstraint extractor. Unity constraints always drive their own host (no TargetTransform),
         // have no FreezeToWorld/hold, and read axes from per-type Axis flags — so Note stays "" and AxisMiss
         // stays false. Only the geometric feedback-loop observation (source ⊂ driven) transfers.
-        private static ConstraintRow FromUnity(IConstraint c)
+        private static ConstraintRow FromUnity(IConstraint c, Transform root)
         {
             var comp = (Component)c;
             var host = comp.transform;
@@ -286,6 +290,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 DrivenTransform = host,
                 SourceTransforms = srcTransforms.ToArray(),
                 Vrc = null,
+                NotLive = NotLiveReason(comp, root) ?? (c.constraintActive ? null : "constraintActive"),
             };
         }
 
@@ -316,8 +321,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (rows.Length == 0) { sb.Append("_(none)_\n"); return; }
             sb.Append("_source weights normalize by SUM (docs/runtime.md §Constraints) — a weight is not a clamped 0..1 absolute._\n");
             sb.Append("_affected-axes form differs by family (the `type` column disambiguates): VRC omits an off group and writes `pos*`/`posXY`; Unity writes per-group `pos:*`/`pos:XZ`/`pos:off`._\n\n");
-            sb.Append("| type | constrained transform | source transform | weight | affected axes | note |\n");
-            sb.Append("|---|---|---|---|---|---|\n");
+            sb.Append("| type | constrained transform | source transform | weight | live | affected axes | note |\n");
+            sb.Append("|---|---|---|---|---|---|---|\n");
 
             var axisMissTypes = new HashSet<string>(); // fail-loud: types whose axis mask couldn't be read
             foreach (var row in rows)
@@ -327,7 +332,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (row.Sources.Length == 0)
                 {
                     // Never invisible: a source-less constraint still gets a row (its note carries hold/anchor).
-                    Row(sb, row.Type, row.Driven, "(none)", "w=— g=" + F(row.GlobalWeight), row.Axes, row.Note);
+                    Row(sb, row.Type, row.Driven, "(none)", "w=— g=" + F(row.GlobalWeight), LiveCell(row.NotLive), row.Axes, row.Note);
                     continue;
                 }
                 for (int i = 0; i < row.Sources.Length; i++)
@@ -335,7 +340,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var s = row.Sources[i];
                     string weight = "w=" + F(s.weight) + " g=" + F(row.GlobalWeight);
                     // Constraint-level note on the first row only (avoid N-fold repetition across sources).
-                    Row(sb, row.Type, row.Driven, s.src, weight, row.Axes, i == 0 ? row.Note : "");
+                    Row(sb, row.Type, row.Driven, s.src, weight, LiveCell(row.NotLive), row.Axes, i == 0 ? row.Note : "");
                 }
             }
             foreach (var tn in axisMissTypes)
@@ -343,12 +348,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                   .Append("` (Affects* members not resolvable by name) — the `—` in its axes column is a READ MISS, not all-axes-off\n");
         }
 
-        private static void Row(StringBuilder sb, string type, string driven, string src, string weight, string axes, string note)
+        private static void Row(StringBuilder sb, string type, string driven, string src, string weight, string live, string axes, string note)
         {
             sb.Append("| ").Append(type)
               .Append(" | `").Append(Cell(driven)).Append("` | ")
               .Append(src == "(none)" ? "(none)" : "`" + Cell(src) + "`").Append(" | ")
-              .Append(Cell(weight)).Append(" | ").Append(Cell(axes)).Append(" | ")
+              .Append(Cell(weight)).Append(" | ").Append(Cell(live)).Append(" | ").Append(Cell(axes)).Append(" | ")
               .Append(string.IsNullOrEmpty(note) ? "" : Cell(note)).Append(" |\n");
         }
 
@@ -729,17 +734,27 @@ namespace Ryan6Vrc.AgentTools.Editor
             return t != null ? t : b.transform;
         }
 
-        // Running, measured RELATIVE TO THE REPORT ROOT. Absolute activeInHierarchy would invert the signal
-        // on an inactive root — parking the avatars you are not editing is ordinary workflow, and this walk
-        // is deliberately inactive-inclusive — and an ancestor above the root cannot discriminate between
-        // members of one group anyway. The table still prints absolute `active` as the raw substrate fact.
-        private static bool LiveUnder(VRCPhysBone b, Transform root)
+        // Why a component is not running, or null when it is — measured RELATIVE TO THE REPORT ROOT.
+        // Absolute activeInHierarchy would invert the signal on an inactive root (parking the avatars you
+        // are not editing is ordinary workflow, and this walk is deliberately inactive-inclusive), and an
+        // ancestor above the root cannot discriminate between siblings anyway. The §5.2 table still prints
+        // absolute `active` as the raw substrate fact.
+        //
+        // The REASON is returned, not a bare bool, because each family has its own second flag and knowing
+        // which one is down is what the reader acts on. This covers the two every Component shares; a
+        // caller adds its family's own (VRCConstraintBase.IsActive, IConstraint.constraintActive).
+        private static string NotLiveReason(Component c, Transform root)
         {
-            if (!b.enabled) return false;
-            for (var t = b.transform; t != null && t != root; t = t.parent)
-                if (!t.gameObject.activeSelf) return false;
-            return true;
+            var beh = c as Behaviour;
+            if (beh != null && !beh.enabled) return "enabled";
+            for (var t = c.transform; t != null && t != root; t = t.parent)
+                if (!t.gameObject.activeSelf) return "object";
+            return null;
         }
+
+        private static bool LiveUnder(VRCPhysBone b, Transform root) => NotLiveReason(b, root) == null;
+
+        private static string LiveCell(string reason) => reason == null ? "1" : "0 (" + reason + ")";
 
         // A transform path is ambiguous exactly when the group holds two physbones on one GameObject — the
         // case the reader most needs disambiguated, since naming the live member is the point. Falls back
