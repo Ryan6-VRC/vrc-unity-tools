@@ -43,6 +43,33 @@ public class RenderAvatarCanaryTests
         Assert.IsTrue(RenderAvatar.CanaryAlive(11124), "a real nudge measures O(10^4)");
     }
 
+    // The unit chain the council flagged (PR #73 finding 4): worldDelta is already lossy-scaled by the
+    // caller; the swing realizes ≥ half of it; worldPerSourcePx comes from the LIVE canary camera
+    // (2·ortho / camH); side→tileRes is the compared tiles' downscale. Pin representative arithmetic
+    // so a future "simplification" back to sv.size units red-fails.
+    [Test]
+    public void CanaryExpectedTilePx_UnitChain()
+    {
+        // 90mm shape, camera ortho 0.67 over 1447 source px → wpp ≈ 9.26e-4 m/px; side 900 → tile 1024.
+        float wpp = 2f * 0.67f / 1447f;
+        float px = RenderAvatar.CanaryExpectedTilePx(0.090f, wpp, 900, 1024);
+        Assert.Greater(px, 40f, "a 90mm shape at body framing must predict well above the 16-px eligibility bar");
+        // Same shape at whole-avatar framing (ortho 1.9): smaller but still eligible.
+        float pxFar = RenderAvatar.CanaryExpectedTilePx(0.090f, 2f * 1.9f / 1447f, 900, 1024);
+        Assert.Greater(pxFar, 16f, "avatar-root framing must not silently lose all blendshape eligibility");
+        Assert.Less(pxFar, px, "zooming out reduces predicted amplitude");
+        // Degenerate inputs never divide by zero or go negative.
+        Assert.AreEqual(0f, RenderAvatar.CanaryExpectedTilePx(0.1f, 0f, 900, 1024));
+        Assert.AreEqual(0f, RenderAvatar.CanaryExpectedTilePx(0.1f, wpp, 0, 1024));
+    }
+
+    [Test]
+    public void CanaryUnavailableNote_DeclaresTheGap()
+    {
+        StringAssert.Contains("canary unavailable", RenderAvatar.CanaryUnavailableNote);
+        StringAssert.Contains("cannot be ruled out", RenderAvatar.CanaryUnavailableNote);
+    }
+
     // The FAIL text is doctrine the next agent executes — pin the load-bearing parts: the remedy is
     // INTERACTIVE focus (~10 s of programmatic kick-focus measurably does NOT wake the parked
     // scheduler; a human clicking in does), the kick outcome, and the named nudge so an operator can
@@ -65,6 +92,10 @@ public class RenderAvatarCanaryTests
         // The escalation cure: a focused play round-trip cured the specimen the click could not.
         StringAssert.Contains("enter and exit play mode once with the editor focused", refused);
         StringAssert.Contains("enter and exit play mode once with the editor focused", kicked);
+        // The occlusion self-doubt (council finding 6): the message carries its own false-FAIL caveat,
+        // because the message — not the gate doc — is what the next agent acts on.
+        StringAssert.Contains("occluded", kicked);
+        StringAssert.Contains("different angle", kicked);
     }
 
     [Test]
