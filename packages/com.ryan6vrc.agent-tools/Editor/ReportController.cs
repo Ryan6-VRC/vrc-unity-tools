@@ -203,6 +203,24 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (def != null)
                 sb.Append("- ").Append(prefix).Append("Entry → `").Append(prefix).Append(def.name).Append("` (default)\n");
 
+            // A child sub-machine's OUTGOING edges, fired when it reaches its own Exit. They hang off THIS
+            // machine, so they render at this level beside the ladders — the same reason the schema carries
+            // them on the parent. They are the ONLY way out of a sub-machine, so omitting them shows the
+            // reader a machine with no exit and no sign that control flow was left out. AnimatorTransitions
+            // (conditions + target, no timing), so they share the entry ladder's renderer.
+            foreach (var child in sm.stateMachines)
+            {
+                if (child.stateMachine == null) continue;
+                var outgoing = sm.GetStateMachineTransitions(child.stateMachine);
+                if (outgoing == null) continue;
+                foreach (var t in outgoing)
+                {
+                    if (t == null) continue;
+                    sb.Append("- ").Append(prefix).Append('`').Append(child.stateMachine.name)
+                      .Append("` (state machine) onExit ").Append(RenderEntryTransition(t)).Append('\n');
+                }
+            }
+
             foreach (var cs in sm.states)
             {
                 var st = cs.state;
