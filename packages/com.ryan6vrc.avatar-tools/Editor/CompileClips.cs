@@ -38,7 +38,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <c>.anim</c> we never emitted). Any divergence REFUSES the whole run writing nothing (batch-atomic),
     /// naming each offender — unless <paramref name="force"/>, which overwrites + re-stamps and notes each
     /// clobber. This compares disk-to-stamp, NOT to the YAML: recompiling our own untouched output (identical
-    /// OR changed source) rehashes to the stamp and is never diverged, so only a human edit trips the guard.</para>
+    /// OR changed source) rehashes to the stamp and is never diverged, so only a human edit trips the guard.
+    /// Because the guard trusts the stamp, a clip that gets WRITTEN but cannot be stamped FAILs this run naming
+    /// it, instead of passing green and reading as hand-edited on the next one.</para>
     /// </summary>
     [AgentTool]
     public static class CompileClips
@@ -229,31 +231,48 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     //    subtly across the in-memory→.anim round-trip, so stamping the disk hash guarantees the
                     //    stamp equals what the divergence guard recomputes from the .anim; an unmodified
                     //    clip can never read as diverged. Nothing to stamp under whatIf (nothing was written). ──
-                    // TWO passes on purpose. Every stamp ends in SaveAndReimport, and un-batched that is one
-                    // full import per emitted clip (measured ~0.06s each on a ~0.11s floor — the dominant cost
-                    // of a compile), so the writes go inside ONE asset-editing batch and coalesce. The hashing
-                    // stays OUTSIDE it: LoadAssetAtPath is unreliable while asset editing is paused, and a
-                    // single fused loop would risk hashing null and silently skipping the stamp. Deferring the
-                    // imports is safe because the stamp is only ever READ on a later call (ReadContentStamp,
-                    // for the divergence guard above) — never within this run.
-                    var stamps = new List<(string path, string hash)>();
+                    // TWO passes, split exactly where OwnMaterial's streaming-mipmap batch splits (same problem,
+                    // same shape). Every stamp ends in SaveAndReimport, and un-batched that is one full import
+                    // per emitted clip (measured ~0.06s each on a ~0.11s floor — the dominant cost of a
+                    // compile), so the imports go inside ONE asset-editing batch and coalesce. Everything that
+                    // READS the AssetDatabase stays OUTSIDE it — the clip load, the hash, and the importer
+                    // lookup alike: resolution is unreliable while importing is paused, so a GetAtPath in there
+                    // can hand back null and drop that clip's stamp. Deferring the imports is safe because the
+                    // stamp is only ever READ on a later call (ReadContentStamp, for the divergence guard
+                    // above) — never within this run.
+                    int unstamped = 0;
+                    var toPersist = new List<AssetImporter>();
                     foreach (var spec in doc.Clips)
                     {
                         string path = outClean + "/" + TransplantCore.Sanitize(spec.Name) + ".anim";
                         var onDisk = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
-                        if (onDisk != null) stamps.Add((path, HashClipContent(onDisk)));
+                        var imp = onDisk != null ? StageContentStamp(path, HashClipContent(onDisk)) : null;
+                        if (imp != null) { toPersist.Add(imp); continue; }
+                        unstamped++;
+                        log.Offender("clip '" + spec.Name + "' was written to " + path + " but could not be stamped (" +
+                            (onDisk == null ? "the written .anim did not load back" : "no importer at that path") + ")");
                     }
                     // StopAssetEditing belongs in a finally: an exception thrown inside the batch would
                     // otherwise leave the AssetDatabase with imports paused for the rest of the Editor session.
-                    AssetDatabase.StartAssetEditing();
-                    try
+                    if (toPersist.Count > 0)
                     {
-                        foreach (var st in stamps) StampContent(st.path, st.hash);
+                        AssetDatabase.StartAssetEditing();
+                        try
+                        {
+                            foreach (var imp in toPersist) imp.SaveAndReimport();
+                        }
+                        finally
+                        {
+                            AssetDatabase.StopAssetEditing();
+                        }
                     }
-                    finally
-                    {
-                        AssetDatabase.StopAssetEditing();
-                    }
+                    // A lost stamp is a FAIL, not a shrug — and reported here, where the cause is: the clip is
+                    // on disk unstamped, so the NEXT compile's divergence guard reads it as hand-edited and
+                    // refuses the whole run over a clip nobody touched. Raised after the healthy stamps are
+                    // persisted so one bad path costs only its own stamp.
+                    if (unstamped > 0)
+                        return Fail(log, label, "wrote " + doc.Clips.Count + " clip(s) but " + unstamped +
+                            " could not be stamped — those will read as diverged on the next compile");
                 }
 
                 log.Count("emitted", doc.Clips.Count);
@@ -392,16 +411,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 : "iid:" + o.GetInstanceID().ToString(CultureInfo.InvariantCulture);
         }
 
-        /// <summary>Stamp <paramref name="hash"/> into the <c>.anim</c>'s importer userData (the same channel as
-        /// the controller srchash). Reimports so the stamp persists — which is why a caller stamping a whole
-        /// clip set wraps the calls in <c>StartAssetEditing</c>/<c>StopAssetEditing</c> (one import, not N).
-        /// No-op on a null importer.</summary>
-        public static void StampContent(string animPath, string hash)
+        /// <summary>STAGE the content stamp for <paramref name="animPath"/>: write <paramref name="hash"/> into
+        /// the <c>.anim</c>'s importer userData (the same channel as the controller srchash) and hand that
+        /// importer back WITHOUT persisting it. The caller persists — <c>SaveAndReimport</c> on the returned
+        /// importer, batched inside <c>StartAssetEditing</c>/<c>StopAssetEditing</c>, since one full import per
+        /// clip otherwise dominates a compile. Call this OUTSIDE any such batch: the importer lookup is an
+        /// AssetDatabase read, and those are unreliable while importing is paused.
+        /// <para>Null return = no importer at that path, i.e. no stamp. A caller that ignores it ships an
+        /// UNSTAMPED clip, which the divergence guard reads as hand-edited on the next compile and refuses — so
+        /// the caller must fail loud, naming the clip.</para></summary>
+        public static AssetImporter StageContentStamp(string animPath, string hash)
         {
             var imp = AssetImporter.GetAtPath(animPath);
-            if (imp == null) return;
+            if (imp == null) return null;
             imp.userData = "clipcontent:" + hash;
-            imp.SaveAndReimport();
+            return imp;
         }
 
         /// <summary>Read back the content stamp from the <c>.anim</c>'s importer userData; null when absent

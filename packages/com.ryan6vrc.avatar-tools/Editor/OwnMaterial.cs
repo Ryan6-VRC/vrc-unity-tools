@@ -486,15 +486,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // the block needs a resolvable import artifact: the importer reads come first (outside), and
                 // O's own save/reimport/reload is after StopAssetEditing. StopAssetEditing MUST run — an
                 // escaped exception would otherwise leave the whole Editor with importing disabled.
-                int mipsEnabled = 0;
                 var mipsToImport = new List<string>();
                 foreach (var texPath in newlyWrittenTex)
                 {
                     var ti = AssetImporter.GetAtPath(texPath) as TextureImporter;
                     if (ti == null || !ti.mipmapEnabled || ti.streamingMipmaps) continue;
                     ti.streamingMipmaps = true;
-                    AssetDatabase.WriteImportSettingsIfDirty(texPath);
-                    mipsToImport.Add(texPath);
+                    // Gate on the .meta write, don't just fire it: a false means the flag never reached disk, so
+                    // importing that texture would apply nothing. Counting attempts instead would report "enabled
+                    // on 25" to the operator when a partial write landed it on fewer — a number they cannot check
+                    // without opening every importer.
+                    if (AssetDatabase.WriteImportSettingsIfDirty(texPath)) mipsToImport.Add(texPath);
+                    else data.Warning("streaming mip maps not persisted for " + texPath +
+                        " (import settings write reported nothing written) — enable it by hand before upload");
                 }
                 if (mipsToImport.Count > 0)
                 {
@@ -505,8 +509,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             AssetDatabase.ImportAsset(texPath, ImportAssetOptions.ForceUpdate);
                     }
                     finally { AssetDatabase.StopAssetEditing(); }
-                    mipsEnabled = mipsToImport.Count;
                 }
+                int mipsEnabled = mipsToImport.Count;
                 // The note is deferred to the PASS point below: the save/reload and post-condition gates ahead
                 // can still rollback() (deleting these very textures), so a note here would outlive its subject.
 

@@ -244,16 +244,19 @@ public class ReportGimmickTests
     // The census is verdict-free, and the legend is what keeps a reader from building the verdict anyway: a
     // zero is not evidence, a nonzero is an upper bound.
     //
-    // This once pinned four exact phrases carved out of that one governed-prose sentence, so any prose pass
-    // over it reddened the test for no behaviour change. What survives is the invariant the CODE decides: a
-    // census table is accompanied by its legend (the emit is one branch, `bones.Length > 0`, shared with the
-    // table — the companion no-physbones test pins the other side).
+    // The emit is one branch (`bones.Length > 0`) shared with the table itself, so the companion no-physbones
+    // test pins the other side of it.
     //
-    // The legend is asserted WHOLE against its canon constant rather than by an anchor token: presence plus an
-    // anchor still passes when a prose pass drops the "nonzero is an upper bound" clause, and a reader who
-    // takes a nonzero as a claim about which bones MOVE subtracts nothing for declared `ignoreTransforms` and
-    // deletes a live chain. Pinning the constant costs nothing on a reword (the constant IS the text, so it
-    // moves with the prose) while leaving no clause unguarded.
+    // Two assertions, because they catch different failures and NEITHER subsumes the other:
+    //
+    // (a) The emitted line equals the canon constant. This proves the legend reaches the report intact and
+    //     untruncated — but it is deliberately blind to the constant's CONTENT: both sides are the same string,
+    //     so deleting a clause from the constant keeps this green. It is a delivery check, not a content check.
+    // (b) Each load-bearing clause is present in the CONSTANT. This is what survives a reword (the wording may
+    //     change freely) while failing a deletion, which (a) cannot do. `ReportGimmick`'s own docstring states
+    //     both polarities are load-bearing: drop "all-zero is not a dead chain" and a reader deletes a
+    //     name-merged bone reading `skinned=0`; drop "upper bound" and they read the count as which bones MOVE,
+    //     with declared `ignoreTransforms` never subtracted.
     [Test]
     public void ChainSubtree_CensusRowIsAccompaniedByItsLegend()
     {
@@ -261,6 +264,9 @@ public class ReportGimmickTests
         Child(root, "Bone").AddComponent<VRCPhysBone>();
 
         Assert.AreEqual(ReportGimmick.ChainSubtreeLegend.TrimEnd('\n'), LegendLine(ReadReport("Rig")));
+
+        StringAssert.Contains("All-zero is NOT a dead chain", ReportGimmick.ChainSubtreeLegend);
+        StringAssert.Contains("nonzero is an upper bound", ReportGimmick.ChainSubtreeLegend);
     }
 
     // The legend paragraph, isolated so the comparison is against the legend and nothing else: its tokens

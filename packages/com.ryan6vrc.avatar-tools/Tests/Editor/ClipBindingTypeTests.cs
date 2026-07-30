@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
 using Ryan6Vrc.AvatarTools.Editor;
@@ -47,11 +48,7 @@ public class ClipBindingTypeTests
     };
 
     [Test]
-    public void Resolves_vrc_dynamics_types()
-    {
-        foreach (var c in VrcDynamicsVocabulary)
-            Assert.AreEqual(c.Type, ControllerEmit.ResolveComponentType(c.Name), c.Name);
-    }
+    public void Resolves_vrc_dynamics_types() => AssertWholeVocabularyResolves(VrcDynamicsVocabulary);
 
     // ---- resolver: UnityEngine.Animations constraints (the sub-namespace gap) -----------------
 
@@ -68,10 +65,32 @@ public class ClipBindingTypeTests
     };
 
     [Test]
-    public void Resolves_unityengine_animations_types()
+    public void Resolves_unityengine_animations_types() => AssertWholeVocabularyResolves(UnityConstraintVocabulary);
+
+    // Walk the WHOLE table before failing. ResolveComponentType THROWS on a name it cannot resolve (it never
+    // returns null — see Refuses_non_component_type), so an Assert per iteration escapes the loop at the first
+    // offender and its c.Name label never renders: the canary names ONE entry and hides its siblings, so a
+    // single upstream move (a namespace reshuffle, an allowlist narrowed) costs one diagnose-fix cycle per
+    // affected type. Collect every offender — refusal AND wrong-type resolution — and fail once naming all.
+    private static void AssertWholeVocabularyResolves((string Name, System.Type Type)[] vocabulary)
     {
-        foreach (var c in UnityConstraintVocabulary)
-            Assert.AreEqual(c.Type, ControllerEmit.ResolveComponentType(c.Name), c.Name);
+        var bad = new List<string>();
+        foreach (var c in vocabulary)
+        {
+            try
+            {
+                var got = ControllerEmit.ResolveComponentType(c.Name);
+                if (got != c.Type)
+                    bad.Add(c.Name + " resolved to " + (got == null ? "null" : got.FullName)
+                            + ", expected " + c.Type.FullName);
+            }
+            catch (ControllerEmit.EmitException ex)
+            {
+                bad.Add(c.Name + " refused: " + ex.Message);
+            }
+        }
+        Assert.IsEmpty(bad, "binding vocabulary no longer resolves (widen ControllerEmit.BindingNamespaces and "
+            + "the schema §clips vocabulary together, never one alone): " + string.Join(" | ", bad));
     }
 
     // ---- resolver: the pre-widening surface is unchanged ---------------------------------------

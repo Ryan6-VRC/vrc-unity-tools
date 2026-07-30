@@ -179,16 +179,24 @@ public class RenderAvatarFreshnessTests
     }
 
     // Every reflection-drift/unsettled state FAILs before the OK return, so the summary gate token is exactly
-    // armed|exempt — never a "drift" value the docs don't enumerate. Three cases, one per term of the
-    // one-line conjunction: both true, the reactive term false, the settle term false.
+    // armed|exempt — never a "drift" value the docs don't enumerate.
+    //
+    // Swept over the WHOLE Settle enum rather than sampled. `settle` is 4-valued (Exempt/Settled/Unsettled/
+    // Drift), so hand-picking Settled and Drift models it as a boolean term and leaves Unsettled and Exempt
+    // unasserted: widening production to `settle != Settle.Drift` keeps every sampled case green while
+    // returning "armed" mid-rebuild and with previews globally off — a render certified freshness-gated when
+    // it is not, which is the one thing this gate exists to prevent. Enumerating also means a NEW Settle
+    // member cannot silently widen the gate; it arrives already asserted exempt.
     [Test]
-    public void GateToken_IsOnlyArmedOrExempt()
+    public void GateToken_IsArmedOnlyForAReactiveSettledTarget()
     {
-        Assert.AreEqual("armed", RenderAvatar.GateToken(true, RenderAvatar.Settle.Settled));
-        Assert.AreEqual("exempt", RenderAvatar.GateToken(false, RenderAvatar.Settle.Settled),
-            "non-reactive target → exempt");
-        Assert.AreEqual("exempt", RenderAvatar.GateToken(true, RenderAvatar.Settle.Drift),
-            "never 'armed' on a non-settled state (these FAIL upstream anyway)");
+        foreach (RenderAvatar.Settle settle in System.Enum.GetValues(typeof(RenderAvatar.Settle)))
+            foreach (bool reactive in new[] { true, false })
+            {
+                bool shouldArm = reactive && settle == RenderAvatar.Settle.Settled;
+                Assert.AreEqual(shouldArm ? "armed" : "exempt", RenderAvatar.GateToken(reactive, settle),
+                    "reactive=" + reactive + " settle=" + settle);
+            }
     }
 
     // ── Outcome-canary layer: the end-to-end nudge canary and the pending-reload guard ───────────────
@@ -245,7 +253,7 @@ public class RenderAvatarFreshnessTests
     // scheduler; a human clicking in does), the kick outcome, and the named nudge so an operator can
     // judge a suspected false-FAIL.
     [Test]
-    public void CanaryFailReason_CarriesTheMeasuredRemedy()
+    public void CanaryDiagnostics_CarryTheRemedy_AndDeclareTheGap()
     {
         var kicked = RenderAvatar.BuildCanaryFailReason("blendshape 'X' on 'Body'", 0, true, "editor foregrounded");
         StringAssert.Contains("blendshape 'X' on 'Body'", kicked);
@@ -266,6 +274,14 @@ public class RenderAvatarFreshnessTests
         // because the message — not the gate doc — is what the next agent acts on.
         StringAssert.Contains("occluded", kicked);
         StringAssert.Contains("different angle", kicked);
+
+        // The other half of the same disclosure: when no shape is probe-worthy the summary carries a NOTE
+        // instead of a verdict, and both phrases are the payload — "canary unavailable" is what an operator
+        // greps for, "cannot be ruled out" is the admission that this sheet is not freshness-certified.
+        // Asserted here rather than as its own case because no code path DECIDES on this constant; only its
+        // wording is load-bearing, so a rewrite that softened it to a shrug would otherwise stay green.
+        StringAssert.Contains("canary unavailable", RenderAvatar.CanaryUnavailableNote);
+        StringAssert.Contains("cannot be ruled out", RenderAvatar.CanaryUnavailableNote);
     }
 
     [Test]

@@ -24,7 +24,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// Body-agnostic artifact writer the family's non-transplant emitters converge on. Writes
         /// <paramref name="body"/> verbatim (the caller's full artifact text, markdown or JSON) to
         /// <paramref name="dir"/> under a <see cref="Sanitize"/>d-<paramref name="label"/> + timestamp +
-        /// <paramref name="ext"/> filename; refreshes the AssetDatabase;
+        /// <paramref name="ext"/> filename; publishes just that file (<see cref="PublishArtifact"/>);
         /// and on success returns <paramref name="summary"/> with the in-band trailer appended
         /// (<c>summary + " | log=" + path</c>). Filename convention: <paramref name="label"/> starts
         /// with the artifact's <c>kind</c> (e.g. <c>check-package_&lt;target&gt;</c>), so anything
