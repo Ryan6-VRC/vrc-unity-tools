@@ -82,7 +82,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             foreach (var sub in sm.Machines)
-                if (sub != null && sub.Machine != null) WalkMachine(sub.Machine, layer, paramTypes, clips, errors);
+            {
+                if (sub == null) continue;
+                // onExit conditions are authored on the PARENT (this machine), so they are validated here
+                // rather than inside the recursion — same undeclared-param / type rules as any other ladder.
+                foreach (var t in sub.OnExit) CheckConditions(t, layer, $"onExit of '{sub.Name}'", paramTypes, errors);
+                if (sub.Machine != null) WalkMachine(sub.Machine, layer, paramTypes, clips, errors);
+            }
 
             if (sm.Layout != null)
                 foreach (var key in sm.Layout.Nodes.Keys)

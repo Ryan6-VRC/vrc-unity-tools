@@ -113,7 +113,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public List<Behaviour> Behaviours = new List<Behaviour>();
         public MachineLayout Layout;
     }
-    public sealed class SubMachine { public string Name; public StateMachine Machine = new StateMachine(); }
+    // OnExit == the sub-machine's OUTGOING transitions, fired when it reaches its own Exit. Unity models these
+    // as AnimatorTransition (the entry-rung type), so they carry conditions + target and NO timing surface at
+    // all — which is why they are a list of Transition with the same fields the entry ladder honors, and no more.
+    // They live on the PARENT's model because that is the machine whose scope their targets resolve in.
+    public sealed class SubMachine
+    {
+        public string Name;
+        public StateMachine Machine = new StateMachine();
+        public List<Transition> OnExit = new List<Transition>();
+    }
 
     // Per-machine node layout (Unity graph positions). Null unless authored or captured. Nodes keyed by the
     // EscapeSegment form of the state/sub-machine name (names may contain '/'); coords are [x, y] (z is
@@ -172,6 +181,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public bool CanTransitionToSelf;        // AnyState ladder only
         public string Name;                     // null ⇒ Unity's empty default; state/AnyState only (refused on entry)
         public bool Mute; public bool Solo;     // AnimatorStateTransition editor flags (state + AnyState ladders)
+        // Normalized time in the DESTINATION state's motion where playback begins (Unity m_TransitionOffset).
+        // null == Unity's 0 (play from the start). Load-bearing, not cosmetic: a layer whose states share one
+        // clip at speed 0 and differ only by their incoming offset is a POSE PICKER — one clip sampled at
+        // several points — so zeroing it collapses every pose onto frame 0. State + AnyState only; an entry
+        // rung is an AnimatorTransition and has no timing surface to put it on.
+        public float? Offset;
         // null == inherit Defaults:
         public float? Duration; public float? ExitTime; public bool? FixedDuration;
         public TransitionInterruption? Interruption; public bool? OrderedInterruption;

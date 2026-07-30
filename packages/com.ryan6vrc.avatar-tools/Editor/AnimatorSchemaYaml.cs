@@ -704,18 +704,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var body = ToMap(kv.Value, $"machine '{name}'");
                 var sub = new SubMachine { Name = name };
                 foreach (var bk in body)
+                {
+                    // onExit belongs to the SUB-MACHINE, not to its body: it is the parent's outgoing edge set,
+                    // fired when this machine reaches Exit. Keeping it off BindMachineKey is what makes it
+                    // structurally impossible to author on a layer ROOT, which has no parent to exit to.
+                    if (bk.Key == "onExit")
+                    {
+                        BindTransitions(sub.OnExit, ToList(bk.Value, $"machine '{name}'.onExit"),
+                                        allowSelf: false, stateTransitionFields: false);
+                        continue;
+                    }
                     if (!BindMachineKey(sub.Machine, bk.Key, bk.Value, $"machine '{name}'"))
                         throw new SchemaException($"machine '{name}': unknown field '{bk.Key}'");
+                }
                 parent.Machines.Add(sub);
             }
         }
 
-        // Entry / AnyState ladders are ordered transition lists. Only the AnyState ladder carries the fields of
-        // a real state transition (canTransitionToSelf, mute, solo, name) — an entry transition honors none of
-        // them, so all are refused on the entry ladder (fail loud, mirroring the canTransitionToSelf precedent).
+        // Entry / AnyState ladders are ordered transition lists. Only the AnyState ladder is backed by a real
+        // AnimatorStateTransition, so only it carries that type's fields (canTransitionToSelf, mute, solo, name,
+        // offset); an entry rung is an AnimatorTransition and honors none of them, so all are refused there
+        // (fail loud, mirroring the canTransitionToSelf precedent).
         private static void BindLadder(List<Transition> into, List<object> list, bool anyLadder)
         {
-            BindTransitions(into, list, allowSelf: anyLadder, allowMuteSolo: anyLadder);
+            BindTransitions(into, list, allowSelf: anyLadder, stateTransitionFields: anyLadder);
         }
 
         private static LayerBlend ParseBlend(string v)
@@ -775,10 +787,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // allowSelf defaults FALSE so a state-transition list (which calls this without the flag) refuses
         // canTransitionToSelf — a field only the AnyState ladder honors. The AnyState caller passes true.
-        // allowMuteSolo defaults TRUE: state and AnyState transitions honor mute/solo/name; only the entry
-        // ladder (which passes false) refuses them (the entry-emit path never reads them, so they'd silently
-        // drop).
-        private static void BindTransitions(List<Transition> into, List<object> list, bool allowSelf = false, bool allowMuteSolo = true)
+        //
+        // stateTransitionFields defaults TRUE and names the real distinction: a state or AnyState rung is backed
+        // by an AnimatorStateTransition, which carries the editor flags AND the whole timing surface; an entry
+        // rung and a sub-machine onExit rung are backed by AnimatorTransition, which has neither. Those callers
+        // pass false, and every field the plain type cannot hold is refused there rather than silently dropped
+        // on emit. One gate for one type distinction, so a field added to Transition later cannot be honored on
+        // a rung that has nowhere to put it just because nobody remembered to list it.
+        private static void BindTransitions(List<Transition> into, List<object> list, bool allowSelf = false, bool stateTransitionFields = true)
         {
             foreach (var item in list)
             {
@@ -794,17 +810,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             else t.To = to;
                             break;
                         case "when": BindConditions(t.When, ToList(kv.Value, "transition.when")); break;
-                        case "exitTime": t.ExitTime = ToNumber(kv.Value, "transition.exitTime"); break;
-                        case "duration": t.Duration = ToNumber(kv.Value, "transition.duration"); break;
-                        case "fixedDuration": t.FixedDuration = ToBool(kv.Value, "transition.fixedDuration"); break;
-                        case "interruption": t.Interruption = ParseInterruption(ToStr(kv.Value, "transition.interruption")); break;
-                        case "ordered": t.OrderedInterruption = ToBool(kv.Value, "transition.ordered"); break;
+                        case "exitTime": RequireStateTransition(stateTransitionFields, "exitTime"); t.ExitTime = ToNumber(kv.Value, "transition.exitTime"); break;
+                        case "duration": RequireStateTransition(stateTransitionFields, "duration"); t.Duration = ToNumber(kv.Value, "transition.duration"); break;
+                        case "fixedDuration": RequireStateTransition(stateTransitionFields, "fixedDuration"); t.FixedDuration = ToBool(kv.Value, "transition.fixedDuration"); break;
+                        case "interruption": RequireStateTransition(stateTransitionFields, "interruption"); t.Interruption = ParseInterruption(ToStr(kv.Value, "transition.interruption")); break;
+                        case "ordered": RequireStateTransition(stateTransitionFields, "ordered"); t.OrderedInterruption = ToBool(kv.Value, "transition.ordered"); break;
+                        case "offset": RequireStateTransition(stateTransitionFields, "offset"); t.Offset = ToNumber(kv.Value, "transition.offset"); break;
                         case "mute":
-                            if (!allowMuteSolo) throw new SchemaException("transition: 'mute' is not valid on an entry ladder");
+                            RequireStateTransition(stateTransitionFields, "mute");
                             t.Mute = ToBool(kv.Value, "transition.mute");
                             break;
                         case "solo":
-                            if (!allowMuteSolo) throw new SchemaException("transition: 'solo' is not valid on an entry ladder");
+                            RequireStateTransition(stateTransitionFields, "solo");
                             t.Solo = ToBool(kv.Value, "transition.solo");
                             break;
                         case "canTransitionToSelf":
@@ -812,7 +829,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             t.CanTransitionToSelf = ToBool(kv.Value, "transition.canTransitionToSelf");
                             break;
                         case "name":
-                            if (!allowMuteSolo) throw new SchemaException("transition: 'name' is not valid on an entry ladder");
+                            RequireStateTransition(stateTransitionFields, "name");
                             { var n = ToStr(kv.Value, "transition.name"); t.Name = string.IsNullOrEmpty(n) ? null : n; }
                             break;
                         default: throw new SchemaException($"transition: unknown field '{kv.Key}'");
@@ -820,6 +837,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 into.Add(t);
             }
+        }
+
+        // Fields only a state/AnyState rung honors. Both rungs that refuse them are backed by AnimatorTransition,
+        // but for TWO different reasons, and collapsing them into one sentence made the message false: the timing
+        // surface genuinely does not exist on that type, whereas mute/solo/name DO exist on it (they are declared
+        // one level up, on AnimatorTransitionBase) and are refused because this schema's entry/onExit emit path
+        // does not carry them. Saying "the type has no such field" of mute/solo/name would send an author looking
+        // for a Unity limitation that isn't there.
+        private static readonly HashSet<string> TimingFields = new HashSet<string>
+        {
+            "duration", "exitTime", "fixedDuration", "interruption", "ordered", "offset",
+        };
+
+        private static void RequireStateTransition(bool allowed, string field)
+        {
+            if (allowed) return;
+            throw new SchemaException($"transition: '{field}' is not valid on an entry ladder or a sub-machine onExit list — "
+                + (TimingFields.Contains(field)
+                    ? "both are backed by AnimatorTransition, which has no timing surface to hold it; put it on the "
+                      + "state transition that owns the timing"
+                    : "Unity's AnimatorTransition does hold this field, but the entry/onExit emit path does not "
+                      + "carry it, so accepting it here would drop it silently"));
         }
 
         private static void BindConditions(List<Condition> into, List<object> list)

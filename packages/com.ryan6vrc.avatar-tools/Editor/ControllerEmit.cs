@@ -609,6 +609,26 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (!defaultIsState && defaultName != null)
                     target.AddEntryTransition(scope.Subs[defaultName].Target);
 
+                // Sub-machine onExit ladders. These hang off THIS machine (the parent) and fire when the child
+                // reaches its Exit, so their targets resolve in this machine's scope exactly as the entry ladder's
+                // do. They are AnimatorTransitions — conditions and a target, no timing — and `to: Exit` is legal
+                // here (unlike the entry ladder), meaning "pass the exit straight up to this machine's own Exit".
+                foreach (var sub in model.Machines)
+                {
+                    var childTarget = scope.Subs[sub.Name].Target;
+                    foreach (var t in sub.OnExit)
+                    {
+                        AnimatorTransition str;
+                        if (t.ToExit) str = target.AddStateMachineExitTransition(childTarget);
+                        else if (string.IsNullOrEmpty(t.To))
+                            throw new EmitException($"onExit transition on sub-machine '{sub.Name}' has neither a target nor 'to: Exit'");
+                        else str = ResolveName(t.To, scope, root, target.name, out var toState, out var toSm)
+                            ? target.AddStateMachineTransition(childTarget, toState)
+                            : target.AddStateMachineTransition(childTarget, toSm);
+                        foreach (var c in t.When) str.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param);
+                    }
+                }
+
                 foreach (var sub in model.Machines)
                     WireMachine(layer, sub.Machine, scope.Subs[sub.Name], root);
             }
@@ -675,6 +695,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (t.ExitTime.HasValue) { tr.hasExitTime = true; tr.exitTime = t.ExitTime.Value; }
                 else tr.hasExitTime = _doc.Defaults.TransitionHasExitTime;
                 tr.duration = t.Duration ?? _doc.Defaults.TransitionDuration;
+                tr.offset = t.Offset ?? 0f;   // Unity's default; no doc-level default (a pose picker is per-edge)
                 tr.hasFixedDuration = t.FixedDuration ?? true;
                 tr.interruptionSource = MapInterruption(t.Interruption ?? _doc.Defaults.Interruption);
                 tr.orderedInterruption = t.OrderedInterruption ?? true;

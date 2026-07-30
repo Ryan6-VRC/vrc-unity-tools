@@ -192,9 +192,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 L(sb, Sp(f) + "machines:");
                 foreach (var sub in sm.Machines)
                 {
-                    if (IsMachineEmpty(sub.Machine)) { L(sb, Sp(f + 2) + Key(sub.Name) + ": {}"); continue; }
+                    // onExit sits beside the body keys but is not one of them — it belongs to the sub-machine
+                    // wrapper, so an empty machine that still carries onExit cannot use the `{}` short form.
+                    if (IsMachineEmpty(sub.Machine) && sub.OnExit.Count == 0) { L(sb, Sp(f + 2) + Key(sub.Name) + ": {}"); continue; }
                     L(sb, Sp(f + 2) + Key(sub.Name) + ":");
                     EmitMachineBody(sb, sub.Machine, f + 4);
+                    if (sub.OnExit.Count > 0)
+                    {
+                        L(sb, Sp(f + 4) + "onExit:");
+                        foreach (var t in sub.OnExit) L(sb, Sp(f + 6) + "- " + FlowTransition(t, anyLadder: false));
+                    }
                 }
             }
             if (sm.EntryLadder.Count > 0)
@@ -372,6 +379,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!string.IsNullOrEmpty(t.Name)) parts.Add("name: " + ScalarStr(t.Name));
             parts.Add("when: " + WhenList(t.When));
             if (t.ExitTime.HasValue) parts.Add("exitTime: " + Num(t.ExitTime.Value));
+            if (t.Offset.HasValue) parts.Add("offset: " + Num(t.Offset.Value));
             if (t.Duration.HasValue) parts.Add("duration: " + Num(t.Duration.Value));
             if (t.FixedDuration.HasValue) parts.Add("fixedDuration: " + Bool(t.FixedDuration.Value));
             if (t.Interruption.HasValue) parts.Add("interruption: " + InterruptionToken(t.Interruption.Value));

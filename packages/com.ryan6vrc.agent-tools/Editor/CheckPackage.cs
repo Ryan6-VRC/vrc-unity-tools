@@ -24,6 +24,12 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// costume routinely has hundreds of intentionally-empty submesh slots. This counts only the
     /// broken ones, so PASS/FAIL is meaningful.
     ///
+    /// A MISSING count alone says how many references broke, not how many things broke: one vendor-side
+    /// mistake can dangle a thousand slots at two targets. So each MISSING offender names the target its
+    /// reference still points at, and the summary counts the distinct targets behind them — keyed on
+    /// serialized identity (guid + fileID), which is what the file records, spanning material slots and
+    /// meshes alike.
+    ///
     /// The remap-stale check catches what the empty-vs-MISSING rule deliberately ignores: an FBX
     /// using external materials (materialLocation: External) is remapped to .mat assets only at
     /// import time. Import it before those materials exist (e.g. costume package before a separate
@@ -139,7 +145,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 else if (el.objectReferenceInstanceIDValue != 0)
                 {
                     r.MatMissing++;
-                    r.Offenders.Add(new Offender { Location = location, ObjectPath = goPath, Kind = "material-missing", Detail = "material slot " + i });
+                    r.Offenders.Add(new Offender { Location = location, ObjectPath = goPath, Kind = "material-missing", Detail = "material slot " + i + " holds a dangling reference: " + DanglingTarget(el.objectReferenceInstanceIDValue, r) });
                 }
                 else r.MatEmpty++; // intentional empty submesh slot
             }
@@ -151,7 +157,49 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (p == null || p.objectReferenceValue != null) return;     // no slot, or mesh present
             if (p.objectReferenceInstanceIDValue == 0) return;           // intentionally no mesh
             r.MeshesMissing++;
-            r.Offenders.Add(new Offender { Location = location, ObjectPath = goPath, Kind = "mesh-missing", Detail = compName + " mesh reference" });
+            r.Offenders.Add(new Offender { Location = location, ObjectPath = goPath, Kind = "mesh-missing", Detail = compName + " mesh holds a dangling reference: " + DanglingTarget(p.objectReferenceInstanceIDValue, r) });
+        }
+
+        // Names what a broken reference still points at, which decides the remedy: a guid that resolves
+        // to a real file means the reference aims at a sub-object that file does not contain (an FBX set
+        // to external materials never creates the material sub-objects its prefab variants override, so
+        // the fix is at the referencing end), while an absent guid means the asset was never imported.
+        //
+        // Also tallies the target, so the run can report how many things broke rather than only how many
+        // slots did. Memoized per instance id: the case this exists for — a thousand slots aiming at two
+        // targets — would otherwise pay a thousand AssetDatabase round-trips to build two strings.
+        private static string DanglingTarget(int instanceId, Report r)
+        {
+            if (!r.TargetCache.TryGetValue(instanceId, out var t))
+            {
+                // Only the long-localId overload is usable; the int one throws unconditionally.
+                bool mapped = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(instanceId, out string guid, out long fileId);
+                t = new TargetInfo
+                {
+                    Mapped = mapped,
+                    // Serialized identity, not the in-memory handle: counting distinct targets is only
+                    // meaningful against what the file records. An unmapped id has nothing else to key on.
+                    Key = mapped ? guid + "/" + fileId : "instanceID:" + instanceId,
+                    Detail = DescribeTarget(instanceId, mapped, guid, fileId, mapped ? AssetDatabase.GUIDToAssetPath(guid) : null)
+                };
+                r.TargetCache[instanceId] = t;
+            }
+            r.DanglingTargets.Add(t.Key);
+            if (!t.Mapped) r.UnidentifiedTargets.Add(t.Key);
+            return t.Detail;
+        }
+
+        /// <summary>Pure wording for the three shapes the answer takes, so each is assertable without
+        /// having to provoke a real dangling reference. A guid mapping does survive for an instance id
+        /// whose object fails to load, so the unmapped branch is rare residue rather than the normal
+        /// path — and it is the only one whose target key can over-count, having nothing but the
+        /// in-memory handle to key on.</summary>
+        internal static string DescribeTarget(int instanceId, bool mapped, string guid, long fileId, string assetPath)
+        {
+            if (!mapped) return "instanceID " + instanceId + " has no guid mapping";
+            return string.IsNullOrEmpty(assetPath)
+                ? "guid " + guid + " is absent from this project"
+                : "guid " + guid + " resolves to " + assetPath + ", which holds no object with fileID " + fileId;
         }
 
         // An FBX using external materials is remapped to .mat assets only at import time. If the
@@ -194,9 +242,18 @@ namespace Ryan6Vrc.AgentTools.Editor
             r.Result = pass ? "PASS" : "FAIL";
             string logPath = WriteRunLog(r, label);
 
+            // The refs-to-targets ratio is the verdict's character: a thousand slots at two targets is one
+            // vendor-side mistake, not a thousand. Both numbers ride together so the ratio needs no
+            // arithmetic, and it covers both dangling classes (material slots and meshes), so it sits
+            // after them rather than beside either one.
+            int danglingRefs = r.MatMissing + r.MeshesMissing;
+            string dangling = danglingRefs == 0 ? "" :
+                " | dangling: " + danglingRefs + " ref(s) at " + r.DanglingTargets.Count + " distinct target(s)"
+                + (r.UnidentifiedTargets.Count > 0 ? ", " + r.UnidentifiedTargets.Count + " identified by instance id only (may over-count)" : "");
+
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CheckPackage] {0} ({1}, {2} scanned): materials resolved={3} empty={4} MISSING={5} | meshMISSING={6} | scriptMISSING={7} | remapSTALE={8}{9} => {10} | log={11}",
-                label, r.Mode, r.Scanned, r.MatResolved, r.MatEmpty, r.MatMissing, r.MeshesMissing, r.ScriptsMissing, r.RemapStale,
+                "[CheckPackage] {0} ({1}, {2} scanned): materials resolved={3} empty={4} MISSING={5} | meshMISSING={6} | scriptMISSING={7} | remapSTALE={8}{9}{10} => {11} | log={12}",
+                label, r.Mode, r.Scanned, r.MatResolved, r.MatEmpty, r.MatMissing, r.MeshesMissing, r.ScriptsMissing, r.RemapStale, dangling,
                 r.LoadErrors > 0 ? " | loadErrors=" + r.LoadErrors : "", r.Result, logPath);
 
             if (pass) Debug.Log(summary); else Debug.LogError(summary);
@@ -218,6 +275,9 @@ namespace Ryan6Vrc.AgentTools.Editor
               .Append(", \"empty\": ").Append(r.MatEmpty)
               .Append(", \"missing\": ").Append(r.MatMissing).Append(" },\n");
             sb.Append("  \"meshesMissing\": ").Append(r.MeshesMissing).Append(",\n");
+            // Spans material slots and meshes both, so it sits outside "materials".
+            sb.Append("  \"danglingDistinctTargets\": ").Append(r.DanglingTargets.Count).Append(",\n");
+            sb.Append("  \"danglingUnidentifiedTargets\": ").Append(r.UnidentifiedTargets.Count).Append(",\n");
             sb.Append("  \"scriptsMissing\": ").Append(r.ScriptsMissing).Append(",\n");
             sb.Append("  \"remapStale\": ").Append(r.RemapStale).Append(",\n");
             sb.Append("  \"loadErrors\": ").Append(r.LoadErrors).Append(",\n");
@@ -266,12 +326,24 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Mode;
             public int Scanned;
             public int MatResolved, MatEmpty, MatMissing;
+            // Serialized identities behind every dangling reference found, material or mesh. The
+            // unidentified subset is tracked apart because its key is an in-memory handle, not identity.
+            public readonly HashSet<string> DanglingTargets = new HashSet<string>();
+            public readonly HashSet<string> UnidentifiedTargets = new HashSet<string>();
+            public readonly Dictionary<int, TargetInfo> TargetCache = new Dictionary<int, TargetInfo>();
             public int MeshesMissing;
             public int ScriptsMissing;
             public int RemapStale;
             public int LoadErrors;
             public string Result;
             public readonly List<Offender> Offenders = new List<Offender>();
+        }
+
+        private struct TargetInfo
+        {
+            public string Key;      // serialized identity, or the instance id when none is available
+            public string Detail;
+            public bool Mapped;
         }
 
         private struct Offender
