@@ -68,13 +68,34 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// tool never trades that cliff for a sheet it can't vouch for. Mechanism and residuals →
     /// Tests/Editor/RenderAvatarFreshnessGate.md.
     ///
+    /// <b>Freshness — the outcome layer.</b> The gates above certify MECHANISMS (pipeline settled,
+    /// changes swept, skin re-bake forced), and measured editor states defeat all of them at once:
+    /// a pending script reload, a play-mode round-trip exited into an unfocused editor, an unfocused
+    /// domain reload (all 2026-07-29; the play exit also stops proxy content sync). So the grab also
+    /// certifies the OUTCOME: a cheap guard FAILs when a script reload is pending, and on every
+    /// edit-mode grab that drew a skinned mesh a post-tiles freshness canary swings a drawn original's
+    /// blendshape (largest predicted pixel amplitude; up to three tried against occlusion), re-grabs
+    /// angle 0 against a dedicated same-draw-state baseline, and demands pixels move — a dead chain
+    /// FAILs transiently and nothing is served (focus kick sent, but the measured cure is INTERACTIVE:
+    /// click in ~10 s, else one focused play round-trip — programmatic foregrounding alone does not
+    /// wake the parked scheduler). One live probe certifies the whole grab because the parking is
+    /// editor-wide, never per-renderer — the model behind the single <c>canary=live</c> token. A grab
+    /// whose drawn meshes offer no visible blendshape probe says so in-band
+    /// (<c>note=freshness canary unavailable…</c>) and never guesses. Only play mode (live player
+    /// loop) and SMR-less grabs skip it — focused editors do NOT: a kicked-but-not-interacted editor
+    /// reads focused while still parked (measured), so a focus skip would certify stale one call after
+    /// the canary's own kick.
+    ///
     /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
     /// (target upright, facing world +Z, unrotated). A target rotated in the scene shows the scene's
     /// front — a documented limitation; the upside is it also works on a child or a non-avatar object.
     ///
-    /// INSPECTION-class: mutates only transient Scene-View state (view transform, display toggles,
-    /// selection, and SceneVisibilityManager hides) and restores it in a finally, leaving the scene
-    /// un-dirtied. Visibility restore is COARSE: each subtree this grab hid returns to its own self-state,
+    /// INSPECTION-class, with one declared exception: the freshness canary WRITES scene data — a
+    /// blendshape weight swing on one drawn renderer — and restores the exact prior value in the same
+    /// call; if the swing dirtied a previously-clean scene the flag is cleared best-effort (internal
+    /// API), and an in-band note says so when it could not be. Everything else mutates only transient
+    /// Scene-View state (view transform, display toggles, selection, and SceneVisibilityManager
+    /// hides) and restores it in a finally. Visibility restore is COARSE: each subtree this grab hid returns to its own self-state,
     /// so a nested eye-hide the operator set *under* a subtree the grab hid is not preserved (the same
     /// bound whole-scene isolation has always carried). The target subtree's own eye-hides are never
     /// touched — they render exactly as the operator left them. To see a hidden part, un-hide it before
@@ -215,6 +236,136 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static readonly MethodInfo MiFindAvatarInParents = SafeGetMethod(RuntimeUtilType,
             "FindAvatarInParents", BindingFlags.Static | BindingFlags.Public);
 
+        // ----- Pending-script-reload guard (reflection on pinned-Unity internals) -----------------
+        // A compiled-but-unloaded script reload parks GPU skin re-baking editor-wide while the editor
+        // is unfocused: proxy CONTENT keeps syncing, but every render serves the parked deform and the
+        // forcedRebake flag does nothing — measured 2026-07-29 (LockReloadAssemblies + import; a 90mm
+        // trip diffed byte-stale, gate=armed). isCompiling reads FALSE once the compile finishes, so
+        // the reload-request state is the only diagnostic. Only a REQUESTED reload arms the guard —
+        // CanReloadAssemblies=false alone is a benign lock with no pending work; it feeds the message.
+        // Unity is VRChat-pinned so these handles cannot drift in practice; the EditMode canary
+        // red-fails if they ever do, and the freshness canary below still catches the state
+        // end-to-end if this guard is unavailable — which is why a null handle here skips the guard
+        // rather than FAILing (the one drift the outcome layer covers).
+        private static readonly MethodInfo MiIsScriptReloadRequested = SafeGetMethodNoArgs(
+            typeof(UnityEditorInternal.InternalEditorUtility), "IsScriptReloadRequested",
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly MethodInfo MiCanReloadAssemblies = SafeGetMethodNoArgs(
+            typeof(EditorApplication), "CanReloadAssemblies",
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        internal static bool ReloadGuardHandlesResolved =>
+            MiIsScriptReloadRequested != null && MiCanReloadAssemblies != null;
+
+        private static bool IsScriptReloadPending(out bool reloadLocked)
+        {
+            reloadLocked = false;
+            bool pending;
+            try
+            {
+                pending = MiIsScriptReloadRequested != null && (bool)MiIsScriptReloadRequested.Invoke(null, null);
+            }
+            catch { return false; } // primary probe unavailable — the freshness canary still covers the state
+            if (!pending) return false;
+            // Secondary, message-only probe in its own try: its failure must not defeat the detection above.
+            try { reloadLocked = MiCanReloadAssemblies != null && !(bool)MiCanReloadAssemblies.Invoke(null, null); }
+            catch { /* lock state unknown — the FAIL just omits the lock hint */ }
+            return true;
+        }
+
+        // ----- End-to-end freshness canary ---------------------------------------------------------
+        // The forcedRebake flag defeats the multi-hour-idle freeze (2026-07-16, re-verified live
+        // 2026-07-29), but two editor states defeat the FLAG itself: the pending script reload above,
+        // and a play-mode round-trip exited into an unfocused editor (both measured 2026-07-29; the
+        // second also stops proxy content sync). Mechanisms keep multiplying, so this layer certifies
+        // the OUTCOME: after the tiles are grabbed, nudge one drawn ORIGINAL (largest-amplitude
+        // blendshape — exercising the original→proxy sync leg — else translate the target root, which
+        // moves every bone), re-grab angle 0 pinned, and demand pixels move. A dead chain FAILs
+        // transiently with a focus kick; the measured cure is ~10 s of INTERACTIVE focus (programmatic
+        // kick-focus does not wake the parked scheduler), so the message asks the human to click in.
+        // Runs on every edit-mode grab that drew an SMR — deliberately including focused editors: a
+        // kicked-but-not-interacted editor reads focused while still parked (see ShouldRunCanary).
+        private const int CanaryFloor = 8;          // px at TILE res; measured no-op floors 0–4, real nudges O(10^4)
+        private const int CanaryMinExpectedPx = 16; // px at TILE res a candidate shape must predict, else it is skipped
+        private const int CanaryMaxTries = 3;       // occlusion insurance: distinct shapes tried before FAILing
+        private const string CanaryLiveToken = " canary=live";
+        internal const string CanaryUnavailableNote =
+            " | note=freshness canary unavailable (no visible blendshape probe on the drawn meshes) — "
+            + "parked-deform states cannot be ruled out for this grab";
+        private const string CanaryDirtyNote =
+            " | note=canary nudge left the scene dirty (ClearSceneDirtiness drifted) — save or revert manually";
+
+        // Top-CanaryMaxTries blendshapes of a mesh by max vertex delta, cached per mesh — the delta scan
+        // is O(shapes × verts) and capture-hot. Normals/tangents are not read, so null is passed for
+        // both (same call shape as ReportShapeOverlap). Non-readable and shape-less meshes cache empty.
+        // The Dictionary holds strong Mesh keys: bounded by the meshes seen this domain, never evicted.
+        private struct CanaryShape { public int index; public float delta; }
+        private static readonly Dictionary<Mesh, CanaryShape[]> CanaryShapeCache = new Dictionary<Mesh, CanaryShape[]>();
+        private static CanaryShape[] CanaryShapeCandidates(Mesh mesh)
+        {
+            if (CanaryShapeCache.TryGetValue(mesh, out var cached)) return cached;
+            var found = new List<CanaryShape>();
+            try
+            {
+                if (mesh != null && mesh.isReadable && mesh.blendShapeCount > 0)
+                {
+                    var dv = new Vector3[mesh.vertexCount];
+                    for (int i = 0; i < mesh.blendShapeCount; i++)
+                    {
+                        mesh.GetBlendShapeFrameVertices(i, mesh.GetBlendShapeFrameCount(i) - 1, dv, null, null);
+                        float mx = 0f;
+                        for (int v = 0; v < dv.Length; v++) { float m = dv[v].sqrMagnitude; if (m > mx) mx = m; }
+                        found.Add(new CanaryShape { index = i, delta = Mathf.Sqrt(mx) });
+                    }
+                    found.Sort((a, b) => b.delta.CompareTo(a.delta));
+                    if (found.Count > CanaryMaxTries) found.RemoveRange(CanaryMaxTries, found.Count - CanaryMaxTries);
+                }
+            }
+            catch { found.Clear(); } // a throwing mesh is a mesh with no probe, never a capture-killer
+            var arr = found.ToArray();
+            CanaryShapeCache[mesh] = arr;
+            return arr;
+        }
+
+        // Pure gate pieces, extracted for the headless truth-table tests. No focus condition: a
+        // kicked-but-not-interacted editor reads FOCUSED while still parked (measured 2026-07-29 — a
+        // post-kick grab skipped the canary and certified a stale sheet), so "focused ⇒ healthy" is
+        // false exactly one call after the canary's own kick. The canary runs on every edit-mode grab
+        // that drew a skinned mesh; the extra grabs are the price of a token that can be trusted.
+        internal static bool ShouldRunCanary(bool isPlaying, bool anySmrDrawn)
+            => !isPlaying && anySmrDrawn;
+        internal static bool CanaryAlive(int changedPixels) => changedPixels > CanaryFloor;
+        // Predicted TILE-resolution pixel amplitude of a nudge: worldDelta is the shape's max vertex
+        // delta × the renderer's largest lossyScale axis (mesh deltas are mesh-local); the swing
+        // (w>50 ? 0 : 100) realizes at least half of it; worldPerSourcePx comes from the live canary
+        // camera (2·ortho / camH — sv.size is NOT camera ortho, the k-correction exists for a reason);
+        // side→tileRes is the downscale the compared tiles actually undergo.
+        internal static float CanaryExpectedTilePx(float worldDelta, float worldPerSourcePx, int side, int tileRes)
+            => worldPerSourcePx <= 0f || side <= 0
+                ? 0f
+                : (0.5f * worldDelta / worldPerSourcePx) * ((float)tileRes / side);
+        internal static string BuildCanaryFailReason(string nudgeDesc, int changed, bool kicked, string kickDetail)
+            => "freshness canary dead — nudging " + nudgeDesc + " moved " + changed + " px (floor " + CanaryFloor
+               + "), so the editor is serving parked skin deform (the post-play/backgrounded freeze, 2026-07-29) "
+               + "and any sheet would certify stale geometry. "
+               + (kicked
+                   ? "focus kick sent (" + kickDetail + ") — but programmatic focus alone does not wake the parked "
+                     + "scheduler (measured): CLICK INTO the Unity Editor, stay ~10 s, then re-grab; if it still "
+                     + "FAILs, enter and exit play mode once with the editor focused (measured cure)"
+                   : "focus kick failed (" + kickDetail + ") — click into the Unity Editor window, stay ~10 s, then "
+                     + "re-grab; if it still FAILs, enter and exit play mode once with the editor focused (measured cure)")
+               + ". If every named shape could be occluded at this angle, re-grab with a different angle first "
+               + "before treating this as a freeze";
+        // A root-move nudge can dirty a scene the operator had clean (weight writes measured not to);
+        // restored best-effort via the internal API — a null handle just leaves the flag, never throws.
+        private static readonly MethodInfo MiClearSceneDirtiness = SafeGetMethod(
+            typeof(EditorSceneManager), "ClearSceneDirtiness", BindingFlags.Static | BindingFlags.NonPublic);
+
+        internal static string BuildReloadPendingFailReason(bool reloadLocked)
+            => "a script reload is pending (compiled assemblies waiting to load) — in this state the editor "
+               + "serves parked skin deform and would certify stale geometry as fresh (measured 2026-07-29); "
+               + "let the reload land (an idle editor tick, or focus the editor), then re-grab."
+               + (reloadLocked ? " A tool holds LockReloadAssemblies — unlock it first" : "");
+
         /// <summary>
         /// Render the GameObject subtree at <paramref name="target"/> in isolation from
         /// <paramref name="angles"/>, silhouette-frame each, and write a single contact-sheet PNG to
@@ -243,10 +394,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 ? " proxies=kept:" + r.proxiesKept + ",hidden:" + r.proxiesHidden : "";
             // cam=ok signals a diffable camera manifest was written beside the png — CaptureDiff's `against`.
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[RenderAvatar] Capture {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7}{8} => OK gate={9} cam=ok{10}{11}{12} | png={13}",
+                "[RenderAvatar] Capture {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7}{8} => OK gate={9}{10} cam=ok{11} | png={12}",
                 r.label, string.Join(",", r.manifest.angles), r.manifest.views.Length, r.manifest.tileRes,
                 r.manifest.margin.ToString("0.##", CultureInfo.InvariantCulture), showGizmos ? "on" : "off",
-                r.hiddenCount, r.excludedCount, proxyInfo, r.gate, r.proxyNote, r.horizonNote, r.settleNote, png);
+                r.hiddenCount, r.excludedCount, proxyInfo, r.gate, r.canaryToken,
+                r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote, png);
             Debug.Log(summary);
             return summary;
         }
@@ -273,7 +425,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public Color32[] sheet; public int sheetW, sheetH;
             public CamManifest manifest; public string label;
             public int hiddenCount, excludedCount, proxiesKept, proxiesHidden;
-            public string proxyNote = "", horizonNote = "", settleNote = "", gate = "";
+            public string proxyNote = "", horizonNote = "", settleNote = "", gate = "", canaryToken = "", canaryNote = "";
         }
         private static CoreResult Failed(string msg) => new CoreResult { ok = false, fail = msg };
         private static CoreResult CoreFail(string label, string reason) => Failed(Fail(label, reason));
@@ -311,6 +463,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                     return CoreFail(label, "unknown angle '" + angles[i] + "' — valid: " + string.Join(",", Vocabulary));
                 resolvedAngles[i] = a;
             }
+
+            // ----- Pending-reload guard (edit mode; see the handles block for the measured state) --
+            if (!Application.isPlaying && IsScriptReloadPending(out bool reloadLocked))
+                return CoreFailT(label, BuildReloadPendingFailReason(reloadLocked));
 
             // ----- Settle gate (reactive targets only) ----------------------------------------
             // An unsettled NDMF preview means the frame about to be grabbed shows a stale or
@@ -509,7 +665,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // 2026-07-16 (proxy weight synced=100, deform frozen, three settled `=> OK` captures
                 // byte-identical around a BakeMesh-verified move). On a reactive target the drawn renderers ARE
                 // the proxies (originals suppressed), so the force flag must land on the kept proxies, not just
-                // `drawable`. Restored in finally via the same dict.
+                // `drawable`. Restored in finally via the same dict. The flag defeats the multi-hour-idle
+                // freeze only (re-verified live 2026-07-29); the reload-pending and post-play parkings defeat
+                // the flag itself — the reload guard and the freshness canary own those.
                 foreach (var rend in drawable)
                     if (rend is SkinnedMeshRenderer smr && !forcedRebake.ContainsKey(smr))
                     {
@@ -634,6 +792,89 @@ namespace Ryan6Vrc.AgentTools.Editor
                     views[ai] = new CamView { angle = angle, pivot = pivotF, rot = rot, orthoSize = sizeF, cropX = cropX, cropY = cropY, side = side };
                 }
 
+                // ----- End-to-end freshness canary (model + measured states: the canary block above) --
+                // Post-tiles so the served frames are never polluted; a FAIL discards everything. The
+                // compare pair is a dedicated unnudged baseline + the nudged grab, both taken with the
+                // IDENTICAL draw state (gizmos off, selection cleared) — never tiles[0], whose gizmos/
+                // selection under showGizmos:true would diff against a gizmo-less canary frame and
+                // certify canary=live on a stone-dead chain (council review, PR #73). Only blendshape
+                // nudges are sound probes: a transform translate moves an SMR's bones only when they
+                // happen to live under the target, and can move pixels by re-drawing a parked skin
+                // buffer under a new object matrix — so with no eligible shape the canary declares
+                // itself UNAVAILABLE in-band rather than guessing (note below), and never FAILs.
+                string canaryToken = "", canaryNote = "";
+                if (ShouldRunCanary(Application.isPlaying, forcedRebake.Count > 0))
+                {
+                    var cands = new List<(SkinnedMeshRenderer smr, int idx, float worldDelta)>();
+                    foreach (var rend in drawable)
+                        if (rend is SkinnedMeshRenderer dsmr && dsmr.sharedMesh != null)
+                        {
+                            var ls = dsmr.transform.lossyScale;
+                            float axis = Mathf.Max(Mathf.Abs(ls.x), Mathf.Max(Mathf.Abs(ls.y), Mathf.Abs(ls.z)));
+                            foreach (var c in CanaryShapeCandidates(dsmr.sharedMesh))
+                                cands.Add((dsmr, c.index, c.delta * axis));
+                        }
+                    cands.Sort((a, b) => b.worldDelta.CompareTo(a.worldDelta));
+
+                    if (cands.Count == 0)
+                        canaryNote = CanaryUnavailableNote;
+                    else
+                    {
+                        var v0 = views[0];
+                        sv.drawGizmos = false;
+                        Selection.objects = Array.Empty<UnityEngine.Object>();
+                        sv.LookAt(v0.pivot, v0.rot, v0.orthoSize, true, true);
+                        var baseF = cap.Grab(2, rts);
+                        // Exact source-px scale from the live canary camera — v0.orthoSize is sv.size
+                        // units, not camera ortho (the k-correction in the framing pass exists for a
+                        // reason), so read the camera the baseline actually rendered through.
+                        float wpp = baseF.camH > 0 ? 2f * baseF.cam.orthographicSize / baseF.camH : 0f;
+                        var baseTile = Downscale(baseF.px, baseF.w, v0.cropX, v0.cropY, v0.side, tileRes);
+
+                        var nudgeScene = root.scene;
+                        bool wasDirty = nudgeScene.isDirty;
+                        var tried = new List<string>();
+                        bool live = false; int lastChanged = 0;
+                        foreach (var cand in cands)
+                        {
+                            if (tried.Count >= CanaryMaxTries) break;
+                            if (CanaryExpectedTilePx(cand.worldDelta, wpp, v0.side, tileRes) < CanaryMinExpectedPx)
+                                continue; // too small to clear the floor at this framing even when healthy
+                            float priorW = cand.smr.GetBlendShapeWeight(cand.idx);
+                            Frame nf;
+                            try
+                            {
+                                cand.smr.SetBlendShapeWeight(cand.idx, priorW > 50f ? 0f : 100f);
+                                sv.LookAt(v0.pivot, v0.rot, v0.orthoSize, true, true);
+                                nf = cap.Grab(2, rts);
+                            }
+                            finally { cand.smr.SetBlendShapeWeight(cand.idx, priorW); }
+                            tried.Add("blendshape '" + cand.smr.sharedMesh.GetBlendShapeName(cand.idx)
+                                + "' on '" + cand.smr.name + "'");
+                            var nudgeTile = Downscale(nf.px, nf.w, v0.cropX, v0.cropY, v0.side, tileRes);
+                            RenderDiff.Compare(baseTile, nudgeTile, tileRes, tileRes, out lastChanged, out _);
+                            if (CanaryAlive(lastChanged)) { live = true; break; }
+                        }
+                        if (!wasDirty && nudgeScene.isDirty)
+                        {
+                            bool cleared = false;
+                            if (MiClearSceneDirtiness != null)
+                                try { MiClearSceneDirtiness.Invoke(null, new object[] { nudgeScene }); cleared = !nudgeScene.isDirty; }
+                                catch { }
+                            if (!cleared) canaryNote += CanaryDirtyNote;
+                        }
+                        if (tried.Count == 0)
+                            canaryNote = CanaryUnavailableNote + canaryNote; // shapes exist but none visible at this framing
+                        else if (live)
+                            canaryToken = CanaryLiveToken;
+                        else
+                        {
+                            bool kicked = TryFocusKick(out string kick);
+                            return CoreFailT(label, BuildCanaryFailReason(string.Join("; ", tried), lastChanged, kicked, kick));
+                        }
+                    }
+                }
+
                 // ----- Contact sheet + manifest ----------------------------------------------
                 var sheet = Compose(tiles, tileRes, cols, rows, out int sheetW, out int sheetH);
                 var manifest = new CamManifest
@@ -649,7 +890,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     hiddenCount = hiddenCount, excludedCount = excludedCount,
                     proxiesKept = proxiesKept, proxiesHidden = proxiesHidden,
                     proxyNote = proxyNote, horizonNote = horizonNote, settleNote = SettleNote(reactive),
-                    gate = GateToken(reactive, settle),
+                    gate = GateToken(reactive, settle), canaryToken = canaryToken, canaryNote = canaryNote,
                 };
             }
             catch (Exception e)
@@ -810,8 +1051,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Carry B's freshness/settle notes — an unsettled or horizon-incomplete B undercuts the whole
             // "empty diff ⇒ immaterial GIVEN freshness" premise, so the caveat must ride the diff summary too.
             string summary = "[RenderAvatar] CaptureDiff " + label + " against=" + Path.GetFileName(against)
-                + " angles=" + string.Join(",", r.manifest.angles) + " => OK gate=" + r.gate + " diff=[" + string.Join("; ", parts) + "] identical="
-                + identical + "/" + r.manifest.views.Length + r.proxyNote + r.horizonNote + r.settleNote + versionNote + " | png=" + pngB;
+                + " angles=" + string.Join(",", r.manifest.angles) + " => OK gate=" + r.gate + r.canaryToken + " diff=[" + string.Join("; ", parts) + "] identical="
+                + identical + "/" + r.manifest.views.Length + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + versionNote + " | png=" + pngB;
             Debug.Log(summary);
             return summary;
         }
