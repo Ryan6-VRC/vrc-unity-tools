@@ -936,7 +936,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // preventRepeats is the SDK's fourth Random field and the one the schema used to have no word for.
             // The SDK Inspector draws it for exactly one shape — Random onto an INT destination, alongside min
             // and max (VRCAvatarParameterDriverEditor.DrawRandom); a Bool/Trigger destination draws chance
-            // instead and a Float destination draws neither. The field is serialized on every Parameter
+            // instead, and a Float destination draws min/max but not preventRepeats. The field is serialized
+            // on every Parameter
             // regardless, so it is accepted here for any Random entry rather than gated on a destination type
             // this layer does not resolve. Left out, it defaults false — which is why omitting it from the
             // decode side silently turned a vendor's no-repeat roll into a plain one on recompile.

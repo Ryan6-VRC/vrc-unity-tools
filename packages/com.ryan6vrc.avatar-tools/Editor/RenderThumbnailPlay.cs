@@ -196,6 +196,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 bool optsChanged = !(_savedOptionsEnabled
                     && (_savedOptions & EnterPlayModeOptions.DisableDomainReload) != 0
                     && (_savedOptions & EnterPlayModeOptions.DisableSceneReload) != 0);
+                // …and if they were already forced, is that the operator's own setting or an earlier session's
+                // residue? SessionState covers a domain reload but dies with the EDITOR, so a Begin followed by
+                // a close or a crash leaves the forced pair on disk (a project setting) with no record beside
+                // it. The next Begin then reads our own values as the originals and End "restores" them —
+                // cementing the very state this machinery exists to prevent. Nothing here can tell the two
+                // apart, so say so rather than adopt silently: refusing would be wrong (running both-reload-
+                // disabled is a legitimate project setting) but so is a reassuring silence.
+                bool adoptedForced = !optsChanged && !_recordWasPresent;
 
                 _targetName = target0.name;
                 _prepared = true;
@@ -206,6 +214,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return Ok("Begin " + _targetName + " => READY-TO-PLAY"
                     + (emuMade ? " emulator=created/enabled" : " emulator=present")
                     + (optsChanged ? " playmode-reload=disabled(restored on End)" : "")
+                    + (adoptedForced ? " playmode-reload=already-forced(no saved record — cannot tell your setting"
+                                       + " from an interrupted session's residue; End will leave it as found)" : "")
                     + (deactivated.Count > 0 ? " deactivated=[" + string.Join(",", deactivated) + "]" : "")
                     + " — enter play (manage_editor play), then Shoot(...)");
             }
@@ -240,6 +250,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // exactly a play session's lifetime; EditorPrefs would outlive the editor too and let a record from
         // a crashed session clobber a later one's genuine settings.
         private const string OptionsKey = "Ryan6Vrc.RenderThumbnailPlay.savedEnterPlayModeOptions";
+        // Whether THIS Begin found a surviving record. Distinguishes "the operator runs both-reload-disabled"
+        // from "an earlier session forced it and died before End" — indistinguishable from the settings alone.
+        private static bool _recordWasPresent;
 
         // Force Enter-Play-Mode Options to both-reload-disabled for the session, saving the operator's
         // originals for End/AbortBegin to put back. Called once per Begin, before End.
@@ -248,6 +261,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Adopt a surviving record rather than overwrite it. Reached when a domain reload cleared the
             // statics while an override was still in force: the values readable now are OUR forced ones, and
             // saving those is what turns a recoverable reload into a permanent settings change.
+            _recordWasPresent = _optionsOverridden || !string.IsNullOrEmpty(SessionState.GetString(OptionsKey, ""));
             if (!_optionsOverridden && LoadSavedOptions()) { ApplyForcedOptions(); return; }
 
             _savedOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;

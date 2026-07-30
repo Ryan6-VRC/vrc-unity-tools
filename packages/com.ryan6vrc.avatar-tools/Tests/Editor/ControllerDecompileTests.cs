@@ -1151,9 +1151,41 @@ public class ControllerDecompileTests
             EditorUtility.SetDirty(drv);
         }
 
+        // Cover BOTH location vocabularies, since they are built by different helpers. The state-scoped
+        // completeness sweep stayed unqualified when this test first shipped — it asserted only
+        // Contains("Alpha") and passed straight over the gap.
+        foreach (var layer in emitted.Controller.layers)
+        {
+            var st = layer.stateMachine.states[0].state;
+            st.mirrorParameterActive = true;
+            st.mirrorParameter = "Mirror";     // named, so the refusal is not the empty-value shape
+            EditorUtility.SetDirty(st);
+
+            // …and a MACHINE-scoped refusal, from a behaviour on the state machine itself.
+            var smDrv = (VRC.SDKBase.VRC_AvatarParameterDriver)
+                layer.stateMachine.AddStateMachineBehaviour(
+                    typeof(VRC.SDK3.Avatars.Components.VRCAvatarParameterDriver));
+            smDrv.parameters = new List<VRC.SDKBase.VRC_AvatarParameterDriver.Parameter>
+            {
+                new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter {
+                    type = (VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType)99, name = "Y", value = 1f },
+            };
+            EditorUtility.SetDirty(smDrv);
+        }
+
         var w = ControllerDecompile.Walk(emitted.Controller);
-        Assert.IsTrue(w.Refusals.Any(r => r.Contains("Alpha")), "a refusal names layer Alpha: " + string.Join(" | ", w.Refusals));
-        Assert.IsTrue(w.Refusals.Any(r => r.Contains("Beta")), "a refusal names layer Beta: " + string.Join(" | ", w.Refusals));
+        foreach (var expected in new[] { "Alpha", "Beta" })
+        {
+            Assert.IsTrue(w.Refusals.Any(r => r.Contains(expected) && r.Contains("state 'S'")),
+                "a STATE-scoped refusal names layer " + expected + ": " + string.Join(" | ", w.Refusals));
+            Assert.IsTrue(w.Refusals.Any(r => r.Contains(expected) && r.Contains("machine '(root)'")),
+                "a MACHINE-scoped refusal names layer " + expected + ": " + string.Join(" | ", w.Refusals));
+        }
+        // Both labels carry their own quotes, so a caller adding a second pair renders the layer name as
+        // though it were the entity's name — "machine 'layer 'Alpha' (root)'". Pin the shape, not just the
+        // presence of the word.
+        Assert.IsFalse(w.Refusals.Any(r => r.Contains("'layer ")),
+            "a location nested the layer inside another entity's quotes: " + string.Join(" | ", w.Refusals));
     }
 
     private static void EnsureScratch()

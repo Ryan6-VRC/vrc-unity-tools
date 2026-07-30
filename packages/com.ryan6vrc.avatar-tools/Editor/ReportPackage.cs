@@ -441,7 +441,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var entry in data.FbxEntries) rendererCount += entry.Renderers.Count;
 
             string fxPath;
-            AnimatorController fx = FindFxController(vendorFolder, prefabPaths, data, out fxPath);
+            AnimatorController fx = FindFxController(vendorFolder, prefabPaths, data, out fxPath, out bool byNameConvention);
             data.FxControllerPath = fxPath;
 
             int matched = 0;
@@ -481,9 +481,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             data.ToggleStatus = "clip-m_IsActive; matched=" + matchRatio + " renderer entries across all FBXes; "
                               + (fx != null
-                                  ? "source=" + fxPath + " (first FX controller found among " + data.PrefabCount
-                                    + " prefabs in path order; controllers on other prefabs, and controllers a "
-                                    + "framework merge component mounts, are not read)"
+                                  ? "source=" + fxPath + (byNameConvention
+                                      ? " (matched by the *_FX name convention in " + vendorFolder
+                                        + ", path order; no descriptor FX slot on any of " + data.PrefabCount + " prefabs)"
+                                      : " (descriptor FX slot on the first of " + data.PrefabCount
+                                        + " prefabs in path order; controllers on other prefabs are not read)")
+                                    + " — a controller a framework merge component mounts is not read, unless its "
+                                    + "own asset path happens to carry _FX and this scan reached it"
                                   // The not-found branch has to name the merge-mount blind spot too, and this is
                                   // where naming it matters most: a package whose FX arrives entirely through MA
                                   // MergeAnimator or VRCFury FullController has no descriptor slot and no
@@ -545,9 +549,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// 2. Scan t:AnimatorController under vendorFolder for one whose name contains "_FX".
         /// Returns null (and sets fxPath to null) if neither succeeds — caller degrades gracefully.
         /// </summary>
-        private static AnimatorController FindFxController(string vendorFolder, List<string> prefabPaths, GraphData data, out string fxPath)
+        private static AnimatorController FindFxController(string vendorFolder, List<string> prefabPaths, GraphData data,
+                                                           out string fxPath, out bool byNameConvention)
         {
             fxPath = null;
+            byNameConvention = false;
 
             // Strategy 1: VRCAvatarDescriptor playable layers
             foreach (var path in prefabPaths)
@@ -600,15 +606,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (found != null) { fxPath = foundPath; return found; }
             }
 
-            // Strategy 2: scan by name convention (_FX in the filename)
+            // Strategy 2: scan by name convention (_FX in the filename). Sorted for the same reason the
+            // prefab list is: FindAssets' order is unspecified, and this also takes the first hit, so a
+            // package with two *_FX controllers would otherwise report a machine-dependent pick.
+            var byName = new List<string>();
             foreach (var guid in AssetDatabase.FindAssets("t:AnimatorController", new[] { vendorFolder }))
             {
                 var ap = AssetDatabase.GUIDToAssetPath(guid);
-                if (ap.IndexOf("_FX", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(ap);
-                    if (ctrl != null) { fxPath = ap; return ctrl; }
-                }
+                if (ap.IndexOf("_FX", StringComparison.OrdinalIgnoreCase) >= 0) byName.Add(ap);
+            }
+            byName.Sort(StringComparer.Ordinal);
+            foreach (var ap in byName)
+            {
+                var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(ap);
+                if (ctrl != null) { fxPath = ap; byNameConvention = true; return ctrl; }
             }
 
             return null;

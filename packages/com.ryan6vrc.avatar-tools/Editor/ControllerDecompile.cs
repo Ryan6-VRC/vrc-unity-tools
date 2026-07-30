@@ -76,9 +76,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private Dictionary<AnimatorState, string> _statePath;
             private Dictionary<AnimatorStateMachine, string> _smPath;
             private Dictionary<AnimatorStateMachine, AnimatorStateMachine> _smParent;
-            // The layer currently being decoded, so PathLabel can prefix it. Set once per layer rather than
-            // threaded through every decode call, because the walk is strictly one layer at a time.
+            // The layer currently being decoded, so the location labels can prefix it. Set once per layer
+            // rather than threaded through every decode call, because the walk is strictly one layer at a
+            // time. The index is the loop variable over _controller.layers, so it keeps matching the
+            // controller's own numbering even where a refused layer is never decoded.
             private string _currentLayer;
+            private int _layerIndex;
 
             // Dangling motion GUIDs recovered from the controller YAML (assets that no longer resolve),
             // keyed by the OWNING serialized object's local fileID so each null motion slot recovers its OWN
@@ -117,8 +120,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _doc.ControllerName = _controller.name;
 
                 DecodeParameters();
-                foreach (var layer in _controller.layers)
+                for (_layerIndex = 0; _layerIndex < _controller.layers.Length; _layerIndex++)
                 {
+                    var layer = _controller.layers[_layerIndex];
                     if (layer.syncedLayerIndex >= 0)
                     {
                         // A synced layer re-skins another layer's states with override motions/behaviours — a
@@ -164,7 +168,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private Layer DecodeLayer(AnimatorControllerLayer layer)
             {
-                _currentLayer = layer.name;
+                // Indexed, because Unity does not enforce unique layer names — two same-named layers
+                // each carrying a same-named state would otherwise still produce identical locations.
+                _currentLayer = "[" + _layerIndex + "] '" + layer.name + "'";
                 var model = new Layer
                 {
                     Name = layer.name,
@@ -305,20 +311,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 for (int i = 0; i < entries.Length; i++)
                 {
-                    if (i == subDefaultIdx) continue;
+                    if (i == subDefaultIdx)
+                    {
+                        // This rung folds into the machine's `default:` and never reaches
+                        // DecodeEntryTransition, so it needs its own copy of that method's dropped-name Note —
+                        // otherwise the one entry rung most likely to exist in a vendor FX controller is the
+                        // one whose name still vanishes silently.
+                        if (!string.IsNullOrEmpty(entries[i].name))
+                            _result.Notes.Add($"Entry in {MachineLabel(sm)}: the default sub-machine rung's cosmetic "
+                                + $"name '{entries[i].name}' is not carried by the schema and will not survive a recompile");
+                        continue;
+                    }
                     model.EntryLadder.Add(DecodeEntryTransition(entries[i], sm));
                 }
 
                 foreach (var t in sm.anyStateTransitions)
                 {
-                    var tr = DecodeStateTransition(t, sm, "AnyState in '" + PathLabel(sm) + "'");
+                    var tr = DecodeStateTransition(t, sm, "AnyState in " + MachineLabel(sm));
                     tr.CanTransitionToSelf = t.canTransitionToSelf;
                     model.AnyLadder.Add(tr);
                 }
 
                 if (sm.behaviours != null)
                     foreach (var b in sm.behaviours)
-                        DecodeBehaviourInto(model.Behaviours, b, "state-machine '" + PathLabel(sm) + "'");
+                        DecodeBehaviourInto(model.Behaviours, b, MachineLabel(sm));
 
                 model.Layout = _stripLayout ? null : CaptureLayout(sm, isRoot);
                 return model;
@@ -400,7 +416,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var child in sm.stateMachines)
                     if (child.stateMachine != null && stateNames.Contains(child.stateMachine.name))
                         _result.Refusals.Add(
-                            $"state-machine '{PathLabel(sm)}': a direct state and a direct sub-machine are both named " +
+                            $"{MachineLabel(sm)}: a direct state and a direct sub-machine are both named " +
                             $"'{child.stateMachine.name}' — a bare target or default can't disambiguate them (states resolve first)");
             }
 
@@ -413,7 +429,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var n in list) // iterate the list (not the dict) so refusal order is deterministic
                     if (counts[n] > 1 && reported.Add(n))
                         _result.Refusals.Add(
-                            $"state-machine '{PathLabel(sm)}': {counts[n]} sibling {kind}s are named '{n}' — " +
+                            $"{MachineLabel(sm)}: {counts[n]} sibling {kind}s are named '{n}' — " +
                             "identical sibling names serialize as duplicate keys and cannot round-trip");
             }
 
@@ -434,7 +450,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     string key = cs.state.name.Trim();
                     if (byTrim.TryGetValue(key, out var list) && list.Count > 1 && list[0] == cs.state.name)
                         _result.Refusals.Add(
-                            $"state-machine '{PathLabel(sm)}': sibling states {string.Join(", ", list.Select(n => "'" + n + "'"))} " +
+                            $"{MachineLabel(sm)}: sibling states {string.Join(", ", list.Select(n => "'" + n + "'"))} " +
                             $"collide on trimmed name '{key}' — they differ only by surrounding whitespace");
                 }
             }
@@ -481,7 +497,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var t in ast.transitions)
                     st.Transitions.Add(DecodeStateTransition(t, owner, StateLabel(ast)));
 
-                CompletenessSweep(ast, StateAware, "state", "'" + ast.name + "'");
+                CompletenessSweep(ast, StateAware, "", StateLabel(ast));
                 return st;
             }
 
@@ -604,7 +620,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             // dropped)", which describes the counterfactual this census exists to prevent and
                             // lands for a beat as a report that the loss already happened. Nothing was dropped —
                             // the run refuses and writes no yaml.
-                            _result.Refusals.Add($"{kind} {loc}: field '{Strip(n)}'{shown} is set, and no schema "
+                            // An empty `kind` means `loc` already names what it is (StateLabel's
+                            // "layer L state 'S'"), so prefixing a noun would double it.
+                            _result.Refusals.Add($"{(kind.Length == 0 ? loc : kind + " " + loc)}: field "
+                                + $"'{Strip(n)}'{shown} is set, and no schema "
                                 + "field binds it — a decompile would lose it, so this run refuses instead");
                     }
                 }
@@ -677,7 +696,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private Transition DecodeEntryTransition(AnimatorTransition t, AnimatorStateMachine srcSm)
             {
                 var tr = new Transition();
-                string loc = "Entry in '" + PathLabel(srcSm) + "'";
+                string loc = "Entry in " + MachineLabel(srcSm);
                 // The entry ladder cannot express mute/solo (the parser refuses them there, and the emit path
                 // never reads them) — an entry transition carrying either would be a silent drop. Refuse it,
                 // the read-side mirror of the parser's entry mute/solo refusal. NOT decoded here: m_Name — a
@@ -704,7 +723,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                                               AnimatorStateMachine childSm)
             {
                 var tr = new Transition();
-                string loc = "onExit of sub-machine '" + childSm.name + "' in '" + PathLabel(parentSm) + "'";
+                string loc = "onExit of sub-machine '" + childSm.name + "' in " + MachineLabel(parentSm);
                 if (t.mute || t.solo)
                     _result.Refusals.Add($"transition from {loc}: carries mute/solo, which an onExit list cannot express");
                 // The entry ladder TOLERATES a cosmetic name (ignored via EntryTransitionAware). onExit refuses
@@ -1441,16 +1460,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ordinary case rather than a corner one — every SDK template ships an "Idle".
             private string StateLabel(AnimatorState st)
             {
-                string layer = _currentLayer == null ? "" : "layer '" + _currentLayer + "' ";
+                string layer = _currentLayer == null ? "" : "layer " + _currentLayer + " ";
                 return layer + "state '" + (st != null ? st.name : "(null)") + "'";
             }
 
-            private string PathLabel(AnimatorStateMachine sm)
+            private string MachineLabel(AnimatorStateMachine sm)
             {
-                string layer = _currentLayer == null ? "" : "layer '" + _currentLayer + "' ";
+                string layer = _currentLayer == null ? "" : "layer " + _currentLayer + " ";
                 if (_smPath != null && _smPath.TryGetValue(sm, out var p))
-                    return p.Length == 0 ? layer + "(root)" : layer + p;
-                return sm != null ? layer + sm.name : layer + "(null)";
+                    return layer + "machine '" + (p.Length == 0 ? "(root)" : p) + "'";
+                return layer + "machine '" + (sm != null ? sm.name : "(null)") + "'";
             }
 
             // TOTAL enum→token lookup: an SDK value with no schema token (a member added to the SDK but not to
