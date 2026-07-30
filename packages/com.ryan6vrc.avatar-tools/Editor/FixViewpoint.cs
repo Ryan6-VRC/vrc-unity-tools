@@ -41,8 +41,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // axis is undefined. It is a definedness floor, NOT an accuracy one — frame sensitivity goes as
         // δ/|perp|, so a rig sitting just above the floor is still noise-prone, and no achievable value fixes
         // that (a real rig measures ~1.5–1.8, some 30× above it). The guard against a WRONG frame on a
-        // well-defined rig is the landmark-shape residual Recompute reports, not this constant.
+        // well-defined rig is Recompute's rotationMm VERIFY note, not this constant.
         const float FrameEps = 0.05f;
+        // VERIFY floor: millimetres of viewpoint movement attributable to the applied frame rotation, above
+        // which Recompute asks the caller to confirm. 1 mm sits between the two populations rather than
+        // splitting either — a convention-identical owned/vendor pair reads 0.0000° of frame rotation, while
+        // a joint-relocation artifact reads ~13 mm. It gates a NOTE on a PASS, never the write: the
+        // arithmetic is not in doubt, only whether the caller wants a rotation nothing can attribute.
+        const float VerifyMm = 1f;
 
         // ── Pure math (VRC-free; the NUnit-tested core) ─────────────────────────────────────────────
 
@@ -63,18 +69,26 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// cross product. Three non-collinear points determine a rotation, so this is not one heuristic among
         /// several — it is the frame those landmarks have.</para>
         ///
-        /// <para>THE RESIDUAL LIMIT, and why <paramref name="rise"/> exists: three landmarks pin the frame of a
-        /// TRIANGLE, so the frame delta is zero when the two landmark triangles are SIMILAR — not, as is
-        /// tempting to assume, exactly when the two heads are oriented alike. Moving the head JOINT within the
-        /// sagittal plane (a rest-pose bake or a reproportion can) is indistinguishable from a real pitch and
-        /// produces a frame delta of the same kind. <paramref name="rise"/> is the one scale-free invariant that
-        /// separates them: a rigid rotation about the head origin preserves it exactly, while a joint relocation
-        /// changes it. <see cref="Recompute"/> reports the reference-vs-owned difference so the caller can tell a
-        /// tracked rotation from a corrupted frame; this is a far smaller error than the bone-basis bug it
-        /// replaces, but it would otherwise be a silent one.</para>
+        /// <para>THE RESIDUAL LIMIT: three landmarks pin the frame of a TRIANGLE, so the frame delta is zero
+        /// when the two landmark triangles are SIMILAR — not, as is tempting to assume, exactly when the two
+        /// heads are oriented alike. Moving the head JOINT within the sagittal plane (a rest-pose bake or a
+        /// reproportion can) is indistinguishable from a real pitch and produces a frame delta of the same
+        /// kind. This is a far smaller error than the bone-basis bug it replaces — and unlike that one it is
+        /// reported: <see cref="Recompute"/> raises a VERIFY note whenever the applied rotation moves the
+        /// viewpoint at all materially, because a joint relocation is exactly what it cannot rule out.</para>
+        ///
+        /// <para>WHAT <paramref name="rise"/> SETTLES, AND WHAT IT CANNOT. The implication runs ONE WAY: a
+        /// rigid rotation about the head origin preserves it exactly, so a changed rise proves a joint moved.
+        /// The converse does not hold — slide the joint along the arc of constant perpendicular distance from
+        /// the eye midpoint and the triangle's proportions survive while the frame turns freely. On realistic
+        /// landmarks (62 mm interocular, eyes 90 mm up / 60 mm forward of the joint) a 37.6 mm slide turns the
+        /// frame 20° with rise identical to six decimals, displacing a 38.6 mm nudge by 13.4 mm. So rise is a
+        /// discriminator for the pure cases and never a clearance, which is why the VERIFY gate keys on
+        /// millimetres moved instead.</para>
         /// </summary>
         /// <param name="rise">Perpendicular head-origin→eye-midpoint distance in units of interocular distance —
-        /// the landmark triangle's shape, invariant to uniform scale and to lateral drift along the eye axis.</param>
+        /// the landmark triangle's proportion, invariant to uniform scale, to lateral drift along the eye axis,
+        /// and (see above) to a joint slide along its own constant-distance arc.</param>
         public static bool HeadFrame(Vector3 leftEye, Vector3 rightEye, Vector3 headOrigin,
                                     out Quaternion frame, out float rise)
         {
@@ -126,6 +140,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public float frameRotDeg;        // landmark head-frame delta actually applied to the nudge
             public float headBasisDeltaDeg;  // head BONE-basis delta — reported only, never applied
             public float riseDelta;          // landmark-SHAPE change; see HeadFrame's residual-limit note
+            public float rotationMm;         // mm the applied frame rotation moves the viewpoint — the VERIFY gate
             public string failReason;   // set (ok == false) on any named FAIL condition
             public string note;         // human-readable state line for the host log (success/unchanged)
         }
@@ -238,16 +253,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // headBasisDeltaDeg rides both wordings: on an unchanged viewpoint a large value is precisely the
             // case that used to move it wrongly, so a caller comparing runs can see the difference is known and
-            // deliberately not applied. riseDelta is the honesty channel for the frame that IS applied — it is
-            // ~0 for a rotation the frame tracks correctly, so a material value alongside a non-trivial
-            // headFrameDeg means the head JOINT moved and the rotation is partly an artifact of that. The
-            // caller's move then is the vendor value, which is what a FAIL already yields.
+            // deliberately not applied.
+            //
+            // The VERIFY gate keys on rotationMm — the millimetres the applied rotation moves the viewpoint —
+            // and never on riseDelta, which cannot carry that weight: a joint slide along its own
+            // constant-distance arc turns the frame freely with riseDelta at 0, so a riseDelta conjunct gates
+            // the warning OFF in one of the exact cases it exists for (HeadFrame's docs carry the geometry and
+            // the measurement). rise stays reported, as a discriminator for the pure cases. Keying on the
+            // consequence is also scale-free and bounds the harm directly: a rotation too small to move the
+            // viewpoint earns no warning however many degrees it reads.
+            Vector3 nudge = vendorVP - eyeMidRef;
+            r.rotationMm = r.interocularRatio
+                         * (((frameOwned * Quaternion.Inverse(frameRef)) * nudge) - nudge).magnitude * 1000f;
             string basis = string.Format(CultureInfo.InvariantCulture,
-                " headFrameDeg={0:F2} headBoneBasisDeg={1:F2} (bone basis reported, not applied) riseDelta={2:F4}",
-                r.frameRotDeg, r.headBasisDeltaDeg, r.riseDelta);
-            if (r.riseDelta > 0.02f && r.frameRotDeg > 1f)
-                basis += " — VERIFY: the landmark triangle changed shape, so headFrameDeg is not purely a head"
-                       + " rotation (a moved head joint reads the same); confirm the viewpoint or keep the reference value";
+                " headFrameDeg={0:F2} headBoneBasisDeg={1:F2} (bone basis reported, not applied) riseDelta={2:F4} rotationMm={3:F2}",
+                r.frameRotDeg, r.headBasisDeltaDeg, r.riseDelta, r.rotationMm);
+            if (r.rotationMm > VerifyMm)
+                basis += string.Format(CultureInfo.InvariantCulture,
+                    " — VERIFY: the head frame rotated the nudge by {0:F2} mm. Three landmarks pin the frame of a"
+                    + " TRIANGLE, so a relocated head JOINT reads exactly like a real head rotation and riseDelta"
+                    + " does not separate them (a joint slide that preserves the triangle's proportions leaves"
+                    + " riseDelta at 0). Confirm the viewpoint in play mode, or keep the reference value",
+                    r.rotationMm);
             r.note = (wouldWrite
                 ? string.Format(CultureInfo.InvariantCulture,
                     "viewpoint recomputed: {0} → {1} (deltaMm={2:F2}, s={3:F4})",

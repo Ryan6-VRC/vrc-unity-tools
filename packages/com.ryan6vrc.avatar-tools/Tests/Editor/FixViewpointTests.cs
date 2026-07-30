@@ -125,8 +125,9 @@ public class FixViewpointTests
         Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameRef, out float riseRef));
         Assert.IsTrue(FixViewpoint.HeadFrame(Rot(EyeL), Rot(EyeR), HeadO, out var frameOwned, out float riseOwned));
         Assert.That(Quaternion.Angle(frameRef, frameOwned), Is.EqualTo(20f).Within(0.01f));
-        // rise is what separates this legitimate case from the joint-relocation one below: a rigid rotation
-        // about the head origin leaves the landmark triangle's shape untouched.
+        // A rigid rotation about the head origin leaves the landmark triangle's proportions untouched. This is
+        // the one direction of the rise implication that holds; see the joint-slide test below for why the
+        // converse does not, and why the VERIFY gate cannot be built on it.
         Assert.That(riseOwned, Is.EqualTo(riseRef).Within(1e-4f), "a real rotation does not change rise");
 
         var eyeMidOwn = (Rot(EyeL) + Rot(EyeR)) * 0.5f;
@@ -136,11 +137,9 @@ public class FixViewpointTests
 
     // The residual limit, made visible. Three landmarks pin the frame of a TRIANGLE, so moving the head JOINT
     // within the sagittal plane produces a frame delta indistinguishable in kind from a real pitch — and a
-    // rest-pose bake or a reproportion can do exactly that. `rise` is the one scale-free invariant that tells
-    // the two apart, which is why Recompute reports it: without it the error is silent, and it is the caller's
-    // only cue to keep the reference viewpoint.
+    // rest-pose bake or a reproportion can do exactly that.
     [Test]
-    public void Moved_head_joint_is_reported_by_rise_where_the_frame_alone_cannot_tell()
+    public void Moved_head_joint_rotates_the_frame_exactly_like_a_head_rotation()
     {
         // Same eyes; the head joint slides 30 mm back along the sagittal axis — no rotation anywhere.
         var movedHead = HeadO - new Vector3(0f, 0f, 0.030f);
@@ -149,8 +148,38 @@ public class FixViewpointTests
 
         Assert.That(Quaternion.Angle(frameRef, frameMoved), Is.GreaterThan(5f),
             "the frame moves, and reads exactly like a head rotation — this is the limit, not a bug");
-        Assert.That(Mathf.Abs(riseMoved - riseRef), Is.GreaterThan(0.02f),
-            "rise is what makes it distinguishable, and drives Recompute's VERIFY note");
+        // This particular slide DOES change rise, which is what made rise look like a discriminator. The next
+        // test is the one showing it cannot serve as a clearance.
+        Assert.That(Mathf.Abs(riseMoved - riseRef), Is.GreaterThan(0.02f));
+    }
+
+    // THE COUNTEREXAMPLE that killed the old `riseDelta > 0.02 && frameRotDeg > 1` gate. rise is the landmark
+    // triangle's PROPORTION, so it is preserved exactly by a joint slide along the arc of constant
+    // perpendicular distance from the eye midpoint: the frame turns a full 20° with riseDelta == 0. A gate
+    // carrying a riseDelta conjunct therefore stayed SILENT on a 13 mm viewpoint error, in one of the exact
+    // cases the note exists for. This is why the gate now keys on millimetres moved.
+    [Test]
+    public void A_joint_slide_can_turn_the_frame_20_degrees_while_rise_is_unchanged()
+    {
+        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameRef, out float riseRef));
+
+        // Rotate the (eyeMid → headOrigin) vector 20° about the eye axis, preserving its LENGTH. Nothing
+        // rotates; only the joint's position changes.
+        var toHead = HeadO - EyeMid;
+        var slidHead = EyeMid + Quaternion.AngleAxis(20f, Vector3.right) * toHead;
+        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, slidHead, out var frameSlid, out float riseSlid));
+
+        Assert.That((slidHead - HeadO).magnitude * 1000f, Is.GreaterThan(30f),
+            "fixture must be a joint move of realistic magnitude — a rest-pose bake does this");
+        Assert.That(Mathf.Abs(riseSlid - riseRef), Is.LessThan(1e-5f),
+            "rise is INVARIANT here, so the old gate's riseDelta conjunct could never fire");
+        Assert.That(Quaternion.Angle(frameRef, frameSlid), Is.EqualTo(20f).Within(0.01f),
+            "yet the frame turns a full 20°, and the nudge turns with it");
+
+        // …and the consequence the new gate measures: a real viewpoint error, invisible to rise.
+        var newVP = FixViewpoint.ComputeViewpoint(VendorVP, EyeMid, frameRef, EyeMid, frameSlid, 1f);
+        Assert.That((newVP - VendorVP).magnitude * 1000f, Is.GreaterThan(10f),
+            "the frame rotation displaces the viewpoint materially while riseDelta reads 0");
     }
 
     // The frame is scale-free, so a uniform resize rides the interocular ratio alone and can never leak in
