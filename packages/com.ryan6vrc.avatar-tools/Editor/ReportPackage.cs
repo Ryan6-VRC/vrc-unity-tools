@@ -229,25 +229,54 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── Prefab scan: constraints + the non-SDK component census ───────────────────────────
 
         /// <summary>
-        /// Namespace roots that are Unity or VRChat-SDK infrastructure rather than a third-party
-        /// framework. Cysharp/DG/System are here because the SDK's own packages vendor libraries under
-        /// them; VRCSDK2 is the legacy SDK.
+        /// Namespace roots that are Unity or VRChat-SDK infrastructure. A cheap first filter only —
+        /// <see cref="IsFromSdkAssembly"/> is the authority, because a namespace root is neither necessary
+        /// (the SDK ships global-namespace components, which no namespace rule can reach) nor sufficient
+        /// (a vendor is free to author under any root it likes). VRCSDK2 is the legacy SDK.
         /// </summary>
         private static readonly HashSet<string> SdkNamespaceRoots = new HashSet<string>(StringComparer.Ordinal)
         {
-            "UnityEngine", "UnityEditor", "Unity", "TMPro", "VRC", "VRCSDK2", "Cysharp", "DG", "System",
+            "UnityEngine", "UnityEditor", "Unity", "TMPro", "VRC", "VRCSDK2",
         };
 
+        /// <summary>
+        /// Assembly-name prefixes for the engine, the .NET base library, and the VRChat SDK — including the
+        /// plugin assemblies the SDK vendors (UniTask under <c>Cysharp.*</c>, DOTween under <c>DG.*</c>),
+        /// which are SDK infrastructure rather than anything a vendor composed. The assembly is what
+        /// actually settles "ships inside the SDK": the SDK's Oculus spatializer component is a
+        /// global-namespace type compiled into the SDK's own runtime assembly, so no namespace rule could
+        /// exclude it — while excluding the <c>DG</c>/<c>Cysharp</c>/<c>System</c> namespace roots outright
+        /// would have hidden a project's own types that merely share those roots.
+        /// </summary>
+        private static readonly string[] SdkAssemblyPrefixes =
+        {
+            "UnityEngine", "UnityEditor", "Unity.", "mscorlib", "netstandard", "System",
+            "VRC", "SDKBase", "UniTask", "DOTween",
+        };
+
+        /// <summary>True when <paramref name="t"/>'s assembly is engine, base-library, or VRChat-SDK code.</summary>
+        internal static bool IsFromSdkAssembly(Type t)
+        {
+            if (t == null) return false;
+            var asmName = t.Assembly.GetName().Name ?? "";
+            foreach (var prefix in SdkAssemblyPrefixes)
+                if (asmName.StartsWith(prefix, StringComparison.Ordinal)) return true;
+            return false;
+        }
+
         private const string NonSdkNote =
-            "Verbatim Type.Namespace of every component outside Unity and the VRChat SDK, most-present first. "
-          + "These are namespaces, not framework names, and this tool recognizes no framework by name — an entry means "
-          + "\"a non-SDK framework is on this prefab, go read it\", never \"supported\". Global-namespace components key on "
-          + "their type name instead. ONSPAudioSource ships inside the SDK with no namespace, so it appears here too.";
+            "Verbatim Type.Namespace of every component whose assembly is not the engine, the .NET base library, or the "
+          + "VRChat SDK, most-present first. The assembly is what settles \"ships inside the SDK\", because the SDK ships "
+          + "global-namespace components that no namespace rule could exclude. These are namespaces, not framework names, "
+          + "and this tool recognizes no framework by name — an entry means \"a non-SDK framework is on this prefab, go "
+          + "read it\", never \"supported\". Global-namespace components key on their type name instead. Read "
+          + "unresolvedScripts before treating this list as complete.";
 
         private const string UnresolvedScriptsNote =
             "Components whose script did not resolve, counted rather than skipped: an unresolvable component is by "
-          + "definition a framework this census cannot name. Any nonzero count means nonSdkNamespaces is incomplete — "
-          + "install the missing package (CheckPackage names the offenders) and re-run before trusting the census.";
+          + "definition a framework this census cannot name. Any nonzero count means nonSdkNamespaces is incomplete and "
+          + "framework presence is unknown rather than absent — install the missing package (CheckPackage names the "
+          + "offenders) and re-run before trusting this census or togglesCaveat.";
 
         /// <summary>
         /// The census key <paramref name="t"/> contributes, or null when it is Unity/VRChat-SDK
@@ -262,9 +291,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             if (t == null) return null;
             var ns = t.Namespace;
-            if (ns == null) return t.Name;
-            int dot = ns.IndexOf('.');
-            return SdkNamespaceRoots.Contains(dot < 0 ? ns : ns.Substring(0, dot)) ? null : ns;
+            int dot = ns == null ? -1 : ns.IndexOf('.');
+            // Namespace root first because it settles the overwhelming majority (Transform, the renderers)
+            // without touching reflection; the assembly check is the authority for everything it leaves.
+            if (ns != null && SdkNamespaceRoots.Contains(dot < 0 ? ns : ns.Substring(0, dot))) return null;
+            if (IsFromSdkAssembly(t)) return null;
+            return ns ?? t.Name;
         }
 
         /// <summary>Census entries, most components first then name — one deterministic order for summary and RunLog.</summary>
@@ -396,7 +428,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             string matchRatio = matched.ToString(CultureInfo.InvariantCulture) + "/"
                               + rendererCount.ToString(CultureInfo.InvariantCulture);
-            bool frameworks = data.NonSdk.Count > 0;
+
+            // Unresolved scripts are framework presence we cannot name, so they caveat the reading exactly as
+            // a named framework does. Gating on the census alone would print "no frameworks found" at the one
+            // moment that claim is least safe — a project missing a package.
+            bool frameworks = data.NonSdk.Count > 0 || data.UnresolvedScripts > 0;
 
             data.ToggleSummary = (fx != null ? matchRatio : "fx-controller-not-found")
                                + (frameworks ? "(clip-m_IsActive, caveated)" : "(clip-m_IsActive)");
@@ -409,24 +445,48 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                   : "source=none (no FX controller resolved from " + data.PrefabCount
                                     + " prefabs — neither a descriptor FX slot nor a *_FX-named asset)");
 
+            data.ToggleCaveat = ComposeToggleCaveat(data.NonSdk.Count, data.UnresolvedScripts, matched);
+        }
+
+        /// <summary>
+        /// The <c>togglesCaveat</c> text. Three states, because "no framework named" and "no framework
+        /// present" are different claims: unresolved scripts make presence unknown, and reporting it as
+        /// absent is the same false-absence the fixed detection list produced.
+        /// The named-framework branch triggers on ANY non-SDK framework rather than an unfamiliar one —
+        /// Modular Avatar's own reactive object toggles compile to m_IsActive at build too, so gating on
+        /// unfamiliarity would stay silent on the framework we are most likely to meet.
+        /// </summary>
+        internal static string ComposeToggleCaveat(int namedNamespaces, int unresolvedScripts, int matched)
+        {
             const string ReadsOnly =
                 "hasToggle is set only from clip m_IsActive curves in the FX controller named by `toggles` — false means "
               + "that detector found nothing, not that the mesh is not removable. ";
 
-            // Trigger on ANY non-SDK framework, not just an unrecognized one: Modular Avatar's own reactive
-            // object toggles compile to m_IsActive at build too, so gating on unfamiliarity would stay silent
-            // on the framework we are most likely to meet.
-            data.ToggleCaveat = frameworks
-                ? ReadsOnly
-                  + "This tool parses no framework, and frameworks routinely compile toggles from their own components to "
-                  + "m_IsActive at build (Modular Avatar's reactive object toggles included), so with "
-                  + data.NonSdk.Count.ToString(CultureInfo.InvariantCulture)
-                  + " non-SDK namespaces present matched=" + matched.ToString(CultureInfo.InvariantCulture)
-                  + " carries no removability information: read the vendor's own toggle/menu components on the prefab "
-                  + "before fixing a keep-set."
-                : ReadsOnly
-                  + "No non-SDK framework components were found on these prefabs, so nothing here compiles toggles at "
-                  + "build; the reach limit stated in `toggles` still applies.";
+            string incomplete = unresolvedScripts > 0
+                ? " On top of that, " + unresolvedScripts.ToString(CultureInfo.InvariantCulture)
+                  + " components have unresolved scripts, so the namespace list is incomplete and there may be further "
+                  + "frameworks it does not name."
+                : "";
+
+            if (namedNamespaces > 0)
+                return ReadsOnly
+                     + "This tool parses no framework, and frameworks routinely compile toggles from their own components "
+                     + "to m_IsActive at build (Modular Avatar's reactive object toggles included), so with "
+                     + namedNamespaces.ToString(CultureInfo.InvariantCulture) + " non-SDK namespaces present matched="
+                     + matched.ToString(CultureInfo.InvariantCulture) + " carries no removability information: read the "
+                     + "vendor's own toggle/menu components on the prefab before fixing a keep-set." + incomplete;
+
+            if (unresolvedScripts > 0)
+                return ReadsOnly
+                     + "Whether anything here compiles toggles at build is UNKNOWN, not absent: no non-SDK namespace was "
+                     + "named, but " + unresolvedScripts.ToString(CultureInfo.InvariantCulture)
+                     + " components have unresolved scripts and an unresolved component cannot be classified. Install the "
+                     + "missing package (CheckPackage names the offenders) and re-run before reading matched="
+                     + matched.ToString(CultureInfo.InvariantCulture) + " as evidence of anything.";
+
+            return ReadsOnly
+                 + "No non-SDK framework components were found on these prefabs and every component's script resolved, so "
+                 + "nothing here compiles toggles at build; the reach limit stated in `toggles` still applies.";
         }
 
         /// <summary>

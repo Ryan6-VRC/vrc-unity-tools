@@ -237,29 +237,37 @@ namespace Ryan6Vrc.AvatarTools.Tests
         // full — so it is tolerated with a Note rather than refused. Add is NOT: two Adds move a parameter
         // twice, and a name-keyed bucket can only hold one. That asymmetry is the whole of the widen.
         [Test]
-        public void Widen_DriverRepeatedSet_is_tolerated_and_repeated_Add_still_refuses()
+        public void Repeated_driver_Set_refuses_even_though_the_later_write_supersedes()
         {
-            var back = SeedAndRoundTrip("driverset", rc =>
+            AssertRefuses("driverset", rc =>
             {
                 rc.AddParameter("p", AnimatorControllerParameterType.Float);
                 var s = rc.layers[0].stateMachine.AddState("S");
                 var d = s.AddStateMachineBehaviour<VRC.SDK3.Avatars.Components.VRCAvatarParameterDriver>();
                 d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "p", value = 1f });
                 d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "p", value = 2f });
-            }, out string yaml);
+            }, "repeats operation");
+        }
 
-            StringAssert.Contains("p: 2", yaml, "the surviving write is the LAST one");
-            Assert.IsNotNull(back);
-
-            AssertRefuses("driveradd", rc =>
+        // The counterexample that killed the tolerance, kept as a fixture because it is why the refusal is
+        // unconditional. Every Copy sits in ONE bucket, so a read-after-write between two writes to the same
+        // parameter can never trip the interleave check — and the name-keyed bucket hoists the second write
+        // ahead of the read (a Dictionary overwrite keeps the original insertion slot), so C would come back
+        // holding D's value instead of B's. Single-change-type, so nothing about the list looks disordered.
+        [Test]
+        public void Repeated_driver_Copy_refuses_though_a_single_bucket_never_interleaves()
+        {
+            AssertRefuses("drivercopy", rc =>
             {
-                rc.AddParameter("p", AnimatorControllerParameterType.Float);
+                foreach (var n in new[] { "A", "B", "C", "D" })
+                    rc.AddParameter(n, AnimatorControllerParameterType.Float);
                 var s = rc.layers[0].stateMachine.AddState("S");
                 var d = s.AddStateMachineBehaviour<VRC.SDK3.Avatars.Components.VRCAvatarParameterDriver>();
-                var add = VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Add;
-                d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "p", value = 1f, type = add });
-                d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "p", value = 1f, type = add });
-            }, "Add");
+                var copy = VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Copy;
+                d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "A", source = "B", type = copy });
+                d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "C", source = "A", type = copy });
+                d.parameters.Add(new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "A", source = "D", type = copy });
+            }, "repeats operation");
         }
 
         // NOTE: "unsupported SMB type" is NOT witnessable here. AddStateMachineBehaviour<T> needs T's MonoScript

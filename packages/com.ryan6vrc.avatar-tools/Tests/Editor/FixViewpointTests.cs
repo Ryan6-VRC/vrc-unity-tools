@@ -106,8 +106,8 @@ public class FixViewpointTests
     [Test]
     public void Landmark_frames_coincide_across_a_pure_convention_difference()
     {
-        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameRef));
-        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameOwned));
+        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameRef, out float riseRef));
+        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameOwned, out _));
         Assert.That(Quaternion.Angle(frameRef, frameOwned), Is.LessThan(1e-3f));
 
         var newVP = FixViewpoint.ComputeViewpoint(VendorVP, EyeMid, frameRef, EyeMid, frameOwned, 1f);
@@ -122,13 +122,35 @@ public class FixViewpointTests
         var pitch = Quaternion.Euler(20f, 0f, 0f);
         Vector3 Rot(Vector3 p) => HeadO + pitch * (p - HeadO);
 
-        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameRef));
-        Assert.IsTrue(FixViewpoint.HeadFrame(Rot(EyeL), Rot(EyeR), HeadO, out var frameOwned));
+        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameRef, out float riseRef));
+        Assert.IsTrue(FixViewpoint.HeadFrame(Rot(EyeL), Rot(EyeR), HeadO, out var frameOwned, out float riseOwned));
         Assert.That(Quaternion.Angle(frameRef, frameOwned), Is.EqualTo(20f).Within(0.01f));
+        // rise is what separates this legitimate case from the joint-relocation one below: a rigid rotation
+        // about the head origin leaves the landmark triangle's shape untouched.
+        Assert.That(riseOwned, Is.EqualTo(riseRef).Within(1e-4f), "a real rotation does not change rise");
 
         var eyeMidOwn = (Rot(EyeL) + Rot(EyeR)) * 0.5f;
         var newVP = FixViewpoint.ComputeViewpoint(VendorVP, EyeMid, frameRef, eyeMidOwn, frameOwned, 1f);
         Assert.That(Vector3.Distance(newVP, eyeMidOwn + pitch * (VendorVP - EyeMid)), Is.LessThan(Tol));
+    }
+
+    // The residual limit, made visible. Three landmarks pin the frame of a TRIANGLE, so moving the head JOINT
+    // within the sagittal plane produces a frame delta indistinguishable in kind from a real pitch — and a
+    // rest-pose bake or a reproportion can do exactly that. `rise` is the one scale-free invariant that tells
+    // the two apart, which is why Recompute reports it: without it the error is silent, and it is the caller's
+    // only cue to keep the reference viewpoint.
+    [Test]
+    public void Moved_head_joint_is_reported_by_rise_where_the_frame_alone_cannot_tell()
+    {
+        // Same eyes; the head joint slides 30 mm back along the sagittal axis — no rotation anywhere.
+        var movedHead = HeadO - new Vector3(0f, 0f, 0.030f);
+        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameRef, out float riseRef));
+        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, movedHead, out var frameMoved, out float riseMoved));
+
+        Assert.That(Quaternion.Angle(frameRef, frameMoved), Is.GreaterThan(5f),
+            "the frame moves, and reads exactly like a head rotation — this is the limit, not a bug");
+        Assert.That(Mathf.Abs(riseMoved - riseRef), Is.GreaterThan(0.02f),
+            "rise is what makes it distinguishable, and drives Recompute's VERIFY note");
     }
 
     // The frame is scale-free, so a uniform resize rides the interocular ratio alone and can never leak in
@@ -136,9 +158,12 @@ public class FixViewpointTests
     [Test]
     public void Landmark_frame_is_invariant_under_uniform_scale()
     {
-        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameRef));
-        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL * 2f, EyeR * 2f, HeadO * 2f, out var frameScaled));
+        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameRef, out float riseRef));
+        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL * 2f, EyeR * 2f, HeadO * 2f, out var frameScaled, out float riseScaled));
         Assert.That(Quaternion.Angle(frameRef, frameScaled), Is.LessThan(1e-3f));
+        // rise must be scale-free too, or a resized owned rig would trip the shape-residual note on a
+        // legitimate uniform resize — the case the interocular ratio already handles.
+        Assert.That(riseScaled, Is.EqualTo(riseRef).Within(1e-4f));
     }
 
     // Degenerate landmarks refuse rather than returning a noise-amplified frame — the caller turns a false
@@ -146,10 +171,10 @@ public class FixViewpointTests
     [Test]
     public void Degenerate_landmarks_refuse()
     {
-        Assert.IsFalse(FixViewpoint.HeadFrame(EyeL, EyeR, EyeMid, out _), "head origin AT the eye midpoint");
-        Assert.IsFalse(FixViewpoint.HeadFrame(EyeL, EyeR, EyeMid + new Vector3(0.5f, 0f, 0f), out _),
+        Assert.IsFalse(FixViewpoint.HeadFrame(EyeL, EyeR, EyeMid, out _, out _), "head origin AT the eye midpoint");
+        Assert.IsFalse(FixViewpoint.HeadFrame(EyeL, EyeR, EyeMid + new Vector3(0.5f, 0f, 0f), out _, out _),
             "head origin ON the eye-to-eye line");
-        Assert.IsFalse(FixViewpoint.HeadFrame(EyeL, EyeL, HeadO, out _), "coincident eyes");
+        Assert.IsFalse(FixViewpoint.HeadFrame(EyeL, EyeL, HeadO, out _, out _), "coincident eyes");
     }
 
     // Head/body translate: shifting the owned eye mid shifts newVP by the same delta (offset preserved).

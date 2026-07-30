@@ -96,12 +96,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Header count line is emitted AFTER the tier-1 tables/observations run, because `other` is only
             // known once AppendOther has walked the subtree — so build the digest body first, then prepend.
             AppendContacts(body, senders, receivers);
-            // Skinned-mesh sweep for the chain-subtree census is scoped SCENE-ROOT-ABSOLUTE, not to the
-            // report root: a chain's bones are routinely skinned by a mesh outside the reported subtree (aim
-            // at an outfit's armature and its meshes are siblings), so scoping to `root` would manufacture
-            // zeros in exactly the census cell a reader leans on. Widening costs nothing and cannot
-            // contaminate — a Transform is per-object, so no other avatar's mesh can skin THESE transforms.
-            AppendPhysBones(body, physbones, colliders, root.transform.root);
+            AppendPhysBones(body, physbones, colliders, WeightScope(root));
             AppendConstraints(body, constraintRows);
             var applyDuringUploadHosts = AppendVrcFury(body, fury);
             int obsCount = AppendObservations(body, constraintRows, applyDuringUploadHosts, physbones, root);
@@ -188,7 +183,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                       .Append(" isAnimated=").Append(b.isAnimated ? "1" : "0").Append(" resetWhenDisabled=").Append(b.resetWhenDisabled ? "1" : "0").Append(" | ")
                       .Append(ChainSubtreeCell(b, skinned)).Append(" |\n");
 
-                sb.Append("\n_`chain subtree` = the row's `rootTransform` (else its own transform) and every descendant: `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept from the report root's outermost ancestor, so a mesh outside the reported subtree still counts), `hosting` how many carry a component besides Transform and this row's own physbone. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside its subtree (a constraint reading it as a source) reads all-zero while load-bearing. A nonzero is an upper bound — exclusions the component declares (`ignoreTransforms`) are not subtracted, so the set is the chain's hierarchy reach, not a claim about which bones it moves._\n");
+                sb.Append("\n_`chain subtree` = the row's `rootTransform` (else its own transform) and every descendant: `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept over the enclosing avatar, so a mesh outside the reported subtree still counts), `hosting` how many carry a component besides Transform and this row's own physbone. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside its subtree (a constraint reading it as a source) reads all-zero while load-bearing. A nonzero is an upper bound — exclusions the component declares (`ignoreTransforms`) are not subtracted, so the set is the chain's hierarchy reach, not a claim about which bones it moves._\n");
             }
 
             // Colliders are ingredients, not behaviour — a minimal companion table.
@@ -731,6 +726,25 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             if (tags == null || tags.Count == 0) return "—";
             return string.Join(",", tags.ToArray());
+        }
+
+        // Where the chain-subtree census sweeps for skinned meshes: the AVATAR the reported subtree belongs to.
+        //
+        // Both neighbouring scopes are wrong. The report root is too narrow — a chain's bones are routinely
+        // skinned by a mesh outside the reported subtree (aim the digest at an armature and the meshes that
+        // skin it are siblings), so it would print `skinned=0` for a fully skinned chain, the false zero this
+        // cell exists to prevent. The outermost ancestor is too wide: it buys nothing and costs real work,
+        // because a staging container full of avatars makes every co-hosted avatar's whole weight array part
+        // of the sweep, and a Transform is per-object, so those meshes can never skin THESE bones.
+        //
+        // includeInactive is load-bearing: parking the avatars you are not editing is ordinary workflow, and
+        // the default overload skips inactive objects — it would silently fall back to the container for
+        // exactly the avatars most likely to be sharing one. No descriptor at all ⇒ a bare rig or prop, whose
+        // outermost ancestor is the only scope available.
+        private static Transform WeightScope(GameObject root)
+        {
+            var descriptor = root.GetComponentInParent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>(true);
+            return descriptor != null ? descriptor.transform : root.transform.root;
         }
 
         // Every transform some SkinnedMeshRenderer under `scope` skins at nonzero weight. Walks the flat

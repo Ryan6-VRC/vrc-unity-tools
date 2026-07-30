@@ -88,13 +88,11 @@ public class CheckPackageTests
     }
 
     [Test]
-    public void VerifyFolder_twoSlotsOneDeadTarget_reportsTwoMissingButOneDistinctTarget()
+    public void VerifyFolder_twoSlotsOneDeadTarget_reportsTwoRefsAtOneDistinctTarget()
     {
-        var matPath = TmpDir + "/doomed.mat";
-        var mat = new Material(Shader.Find("Standard"));
-        AssetDatabase.CreateAsset(mat, matPath);
+        var mat = SaveMaterial("doomed");
         SavePrefab("dangling", new[] { mat, mat }); // two slots, same target
-        AssetDatabase.DeleteAsset(matPath);
+        AssetDatabase.DeleteAsset(TmpDir + "/doomed.mat");
         AssetDatabase.Refresh();
 
         LogAssert.Expect(LogType.Error, ErrRe); // FAIL logs at Error
@@ -103,24 +101,74 @@ public class CheckPackageTests
         // If this precondition fails the synthesis is suspect, not the feature: deleting the material is
         // what is meant to leave the prefab's two serialized references non-zero and unresolvable.
         StringAssert.Contains("MISSING=2", summary);
-        StringAssert.Contains("1 distinct dangling target", summary);
-        Assert.IsFalse(summary.Contains("2 distinct"), "two slots at one target must collapse to one: " + summary);
+        StringAssert.Contains("dangling: 2 ref(s) at 1 distinct target(s)", summary);
         StringAssert.Contains("=> FAIL", summary);
+        // No residue rider: that clause appears only when the count fell back to in-memory handles,
+        // which is the one case it can over-count.
+        Assert.IsFalse(summary.Contains("instance id only"), "targets should key on guid+fileID here: " + summary);
     }
 
     [Test]
-    public void RunLog_carriesDistinctTargetCountAlongsideTheSlotCount()
+    public void VerifyFolder_twoDeadTargets_doesNotCollapseUnrelatedTargets()
+    {
+        var a = SaveMaterial("doomedA");
+        var b = SaveMaterial("doomedB");
+        SavePrefab("dangling", new[] { a, b });
+        AssetDatabase.DeleteAsset(TmpDir + "/doomedA.mat");
+        AssetDatabase.DeleteAsset(TmpDir + "/doomedB.mat");
+        AssetDatabase.Refresh();
+
+        LogAssert.Expect(LogType.Error, ErrRe);
+        var summary = CheckPackage.VerifyFolder(TmpDir);
+
+        StringAssert.Contains("dangling: 2 ref(s) at 2 distinct target(s)", summary);
+    }
+
+    [Test]
+    public void VerifyFolder_deadMesh_contributesADistinctTargetToo()
+    {
+        var meshPath = TmpDir + "/doomed.asset";
+        AssetDatabase.CreateAsset(new Mesh(), meshPath);
+        var go = new GameObject("deadmesh");
+        try
+        {
+            go.AddComponent<MeshFilter>().sharedMesh = AssetDatabase.LoadAssetAtPath<Mesh>(meshPath);
+            go.AddComponent<MeshRenderer>().sharedMaterials = new Material[0];
+            PrefabUtility.SaveAsPrefabAsset(go, TmpDir + "/deadmesh.prefab");
+        }
+        finally { UnityEngine.Object.DestroyImmediate(go); }
+        AssetDatabase.DeleteAsset(meshPath);
+        AssetDatabase.Refresh();
+
+        LogAssert.Expect(LogType.Error, ErrRe);
+        var summary = CheckPackage.VerifyFolder(TmpDir);
+
+        // The tally spans both dangling classes, so a mesh-only break must still report a target.
+        StringAssert.Contains("meshMISSING=1", summary);
+        StringAssert.Contains("dangling: 1 ref(s) at 1 distinct target(s)", summary);
+    }
+
+    [Test]
+    public void RunLog_carriesDistinctTargetCountsOutsideTheMaterialsObject()
     {
         SavePrefab("empty", new Material[1]);
 
         var logPath = CheckPackage.VerifyFolder(TmpDir).Split(new[] { "log=" }, 2, System.StringSplitOptions.None)[1];
 
         var json = File.ReadAllText(logPath);
-        StringAssert.Contains("\"missing\": 0", json);
-        StringAssert.Contains("\"missingDistinctTargets\": 0", json);
+        StringAssert.Contains("\"missing\": 0 }", json); // the materials object closes after missing
+        StringAssert.Contains("\"danglingDistinctTargets\": 0", json);
+        StringAssert.Contains("\"danglingUnidentifiedTargets\": 0", json);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────────────────────────────
+
+    private static Material SaveMaterial(string name)
+    {
+        var mat = new Material(Shader.Find("Standard"));
+        AssetDatabase.CreateAsset(mat, TmpDir + "/" + name + ".mat");
+        return mat;
+    }
 
     private static void SavePrefab(string name, Material[] slots)
     {

@@ -3,6 +3,7 @@ using NUnit.Framework;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using Ryan6Vrc.AgentTools.Editor;
+using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Dynamics.PhysBone.Components;
 
 // A partial take (keeping some of a mergeable's pieces, dropping the rest) leaves chains whose bones no
@@ -138,10 +139,10 @@ public class ReportGimmickChainSubtreeTests
         StringAssert.Contains("bones=1 skinned=0 hosting=1", report);
     }
 
-    // The scope decision, and the least derivable thing here: the skinned-mesh sweep is scene-root-absolute,
-    // not report-root-scoped. Aim the digest at an armature and its meshes are siblings — scoping to the
-    // report root would print `skinned=0` for a fully skinned chain, the exact false zero the cell exists to
-    // avoid.
+    // The scope decision, lower bound: the sweep reaches past the report root. Aim the digest at an armature
+    // and its meshes are siblings — report-root scoping would print `skinned=0` for a fully skinned chain,
+    // the exact false zero the cell exists to avoid. This rig carries no descriptor, so it also pins the
+    // outermost-ancestor fallback.
     [Test]
     public void ChainSubtree_MeshOutsideTheReportRoot_StillCountsAsSkinned()
     {
@@ -153,6 +154,30 @@ public class ReportGimmickChainSubtreeTests
 
         string report = ReadReport("Avatar/Armature");
         StringAssert.Contains("bones=2 skinned=2", report);
+    }
+
+    // The scope decision, upper bound: the sweep stops at the enclosing avatar. A neighbour avatar's renderer
+    // still bound to THIS avatar's bones is what duplicating an avatar and leaving a renderer pointed at the
+    // source rig produces — under container scope it would inflate the count, and every co-hosted avatar's
+    // whole weight array would be walked to get there. One number covers both directions: the local mesh's
+    // bone is counted, the neighbour's is not.
+    [Test]
+    public void ChainSubtree_SecondAvatarUnderASharedContainer_DoesNotContribute()
+    {
+        var staging = new GameObject("Staging");
+
+        var avatarA = Child(staging, "AvatarA");
+        avatarA.AddComponent<VRCAvatarDescriptor>();
+        var chain = Chain(avatarA, "Hair", 2);
+        PhysBone(Child(avatarA, "PB_hair"), chain);
+        Skin(Child(avatarA, "BodyA"), chain);                 // in scope   → Hair counts
+
+        var avatarB = Child(staging, "AvatarB");
+        avatarB.AddComponent<VRCAvatarDescriptor>();
+        Skin(Child(avatarB, "BodyB"), chain.GetChild(0));     // out of scope → Hair_1 must not
+
+        string report = ReadReport("Staging/AvatarA");
+        StringAssert.Contains("bones=2 skinned=1 hosting=0", report);
     }
 
     // rootTransform indirection: the set starts at the target, so the host carrying the component is not in

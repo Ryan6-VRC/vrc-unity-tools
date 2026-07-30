@@ -36,9 +36,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         const float WriteEps = 1e-4f;
         // Interocular magnitude floor: below this the eyes are coincident and the scale ratio is undefined.
         const float MagEps = 1e-5f;
-        // Head-frame non-degeneracy floor, as a FRACTION of interocular distance (scale-free, so it holds on a
-        // centimetre rig and a metre rig alike): the head origin must sit this far OFF the eye-to-eye line for
-        // its direction to define an up axis rather than amplify noise into a large spurious rotation.
+        // Head-frame degeneracy floor, as a FRACTION of interocular distance (scale-free, so it holds on a
+        // centimetre rig and a metre rig alike): below this the head origin is on the eye-to-eye line and the up
+        // axis is undefined. It is a definedness floor, NOT an accuracy one — frame sensitivity goes as
+        // δ/|perp|, so a rig sitting just above the floor is still noise-prone, and no achievable value fixes
+        // that (a real rig measures ~1.5–1.8, some 30× above it). The guard against a WRONG frame on a
+        // well-defined rig is the landmark-shape residual Recompute reports, not this constant.
         const float FrameEps = 0.05f;
 
         // ── Pure math (VRC-free; the NUnit-tested core) ─────────────────────────────────────────────
@@ -53,17 +56,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// 90° while leaving joint positions identical — so a rotation delta read off two rigs' head bones is
         /// that convention PLUS any real difference, with no way to separate them, and the tool then applies the
         /// convention as if it were geometry (measured: a 38 mm forward viewpoint nudge came back 38 mm UP).
-        /// Landmark positions carry no convention, so the frame delta they define is zero exactly when the two
-        /// heads really are oriented alike. A genuinely rotated head still moves its eyes — they are its
+        /// Landmark positions carry no convention. A genuinely rotated head still moves its eyes — they are its
         /// children — so a real rest-pose rotation is recovered in full.</para>
         ///
         /// <para>Basis: X across the eyes, Y the component of (eyeMid − headOrigin) perpendicular to it, Z their
         /// cross product. Three non-collinear points determine a rotation, so this is not one heuristic among
         /// several — it is the frame those landmarks have.</para>
+        ///
+        /// <para>THE RESIDUAL LIMIT, and why <paramref name="rise"/> exists: three landmarks pin the frame of a
+        /// TRIANGLE, so the frame delta is zero when the two landmark triangles are SIMILAR — not, as is
+        /// tempting to assume, exactly when the two heads are oriented alike. Moving the head JOINT within the
+        /// sagittal plane (a rest-pose bake or a reproportion can) is indistinguishable from a real pitch and
+        /// produces a frame delta of the same kind. <paramref name="rise"/> is the one scale-free invariant that
+        /// separates them: a rigid rotation about the head origin preserves it exactly, while a joint relocation
+        /// changes it. <see cref="Recompute"/> reports the reference-vs-owned difference so the caller can tell a
+        /// tracked rotation from a corrupted frame; this is a far smaller error than the bone-basis bug it
+        /// replaces, but it would otherwise be a silent one.</para>
         /// </summary>
-        public static bool HeadFrame(Vector3 leftEye, Vector3 rightEye, Vector3 headOrigin, out Quaternion frame)
+        /// <param name="rise">Perpendicular head-origin→eye-midpoint distance in units of interocular distance —
+        /// the landmark triangle's shape, invariant to uniform scale and to lateral drift along the eye axis.</param>
+        public static bool HeadFrame(Vector3 leftEye, Vector3 rightEye, Vector3 headOrigin,
+                                    out Quaternion frame, out float rise)
         {
             frame = Quaternion.identity;
+            rise = 0f;
             Vector3 across = rightEye - leftEye;
             float interocular = across.magnitude;
             if (interocular < MagEps) return false;                    // coincident eyes — no X axis
@@ -71,6 +87,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Vector3 up = (leftEye + rightEye) * 0.5f - headOrigin;
             Vector3 perp = up - Vector3.Dot(up, x) * x;
             if (perp.magnitude < FrameEps * interocular) return false; // head origin on the eye line — no Y axis
+            rise = perp.magnitude / interocular;
             Vector3 y = perp.normalized;
             frame = Quaternion.LookRotation(Vector3.Cross(x, y), y);
             return true;
@@ -108,6 +125,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public bool wrote;
             public float frameRotDeg;        // landmark head-frame delta actually applied to the nudge
             public float headBasisDeltaDeg;  // head BONE-basis delta — reported only, never applied
+            public float riseDelta;          // landmark-SHAPE change; see HeadFrame's residual-limit note
             public string failReason;   // set (ok == false) on any named FAIL condition
             public string note;         // human-readable state line for the host log (success/unchanged)
         }
@@ -180,10 +198,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Landmark head frames. A degenerate one is a named FAIL rather than a silent no-rotation fallback:
             // the caller (CopyDescriptor) folds a FAIL into "ViewPosition left at copied vendor value", which is
             // the right answer on a rig whose head origin sits on its own eye line.
-            if (!HeadFrame(refL, refR, refH, out Quaternion frameRef))
+            if (!HeadFrame(refL, refR, refH, out Quaternion frameRef, out float riseRef))
             { r.failReason = "reference head origin lies on the eye-to-eye line — cannot derive a head frame from landmarks"; return r; }
-            if (!HeadFrame(owL, owR, owH, out Quaternion frameOwned))
+            if (!HeadFrame(owL, owR, owH, out Quaternion frameOwned, out float riseOwned))
             { r.failReason = "owned head origin lies on the eye-to-eye line — cannot derive a head frame from landmarks"; return r; }
+            r.riseDelta = Mathf.Abs(riseRef - riseOwned);
 
             r.interocularRatio = ownedInteroc / refInteroc;
             Vector3 eyeMidRef   = (refL + refR) * 0.5f;
@@ -219,10 +238,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // headBasisDeltaDeg rides both wordings: on an unchanged viewpoint a large value is precisely the
             // case that used to move it wrongly, so a caller comparing runs can see the difference is known and
-            // deliberately not applied.
+            // deliberately not applied. riseDelta is the honesty channel for the frame that IS applied — it is
+            // ~0 for a rotation the frame tracks correctly, so a material value alongside a non-trivial
+            // headFrameDeg means the head JOINT moved and the rotation is partly an artifact of that. The
+            // caller's move then is the vendor value, which is what a FAIL already yields.
             string basis = string.Format(CultureInfo.InvariantCulture,
-                " headFrameDeg={0:F2} headBoneBasisDeg={1:F2} (bone basis reported, not applied)",
-                r.frameRotDeg, r.headBasisDeltaDeg);
+                " headFrameDeg={0:F2} headBoneBasisDeg={1:F2} (bone basis reported, not applied) riseDelta={2:F4}",
+                r.frameRotDeg, r.headBasisDeltaDeg, r.riseDelta);
+            if (r.riseDelta > 0.02f && r.frameRotDeg > 1f)
+                basis += " — VERIFY: the landmark triangle changed shape, so headFrameDeg is not purely a head"
+                       + " rotation (a moved head joint reads the same); confirm the viewpoint or keep the reference value";
             r.note = (wouldWrite
                 ? string.Format(CultureInfo.InvariantCulture,
                     "viewpoint recomputed: {0} → {1} (deltaMm={2:F2}, s={3:F4})",

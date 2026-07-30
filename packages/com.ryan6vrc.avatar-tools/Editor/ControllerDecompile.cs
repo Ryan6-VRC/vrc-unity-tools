@@ -682,6 +682,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string loc = "onExit of sub-machine '" + childSm.name + "' in '" + PathLabel(parentSm) + "'";
                 if (t.mute || t.solo)
                     _result.Refusals.Add($"transition from {loc}: carries mute/solo, which an onExit list cannot express");
+                // The entry ladder TOLERATES a cosmetic name (ignored via EntryTransitionAware). onExit refuses
+                // one instead, because that tolerance rests on vendor entry rungs being unnamed and this
+                // construct has no such evidence behind it — a silent drop here would be new loss, not
+                // inherited. Widen to a decoded `name:` if a real controller turns out to carry one.
+                if (!string.IsNullOrEmpty(t.name))
+                    _result.Refusals.Add($"transition from {loc}: carries the name '{t.name}', which an onExit list does not yet bind");
                 SetTarget(tr, t, parentSm, loc);
                 tr.When = DecodeConditions(t.conditions, loc);
                 CompletenessSweep(t, EntryTransitionAware, "transition from", loc);
@@ -1177,56 +1183,42 @@ namespace Ryan6Vrc.AvatarTools.Editor
             //     hoists all Sets ahead of the Copy, changing what the Copy reads.
             //   - DUPLICATE: the same (type, name) appears twice. The name-keyed bucket keeps only the last.
             //
-            // A duplicate is only a LOSS for the types where the earlier write still shows through:
-            //   Set and Copy are plain writes to the destination, so a later one supersedes the earlier
-            //     completely and the bucket's last-write-wins IS the source list's outcome. Tolerated with a
-            //     Note naming the dropped write, so the recompile is behaviour-preserving but not byte-identical.
-            //   Add accumulates — two Adds of 1 move the parameter by 2, the bucket by 1. Random re-rolls, and
-            //     for a bool destination carries its own `chance`, so which roll survives is not "the last one".
-            //     Both stay Refusals: a name-keyed bucket genuinely cannot hold them.
-            // The tolerance is gated on the driver NOT being interleaved. With interleaving, an intervening op
-            // can READ the destination between the two writes (Set A, Copy B←A, Set A), so the earlier write is
-            // observable and superseding it is wrong. An interleaved driver already refuses on that ground, so
-            // the gate makes this function's reasoning stand on its own rather than lean on the other refusal.
+            // A repeat is refused for EVERY type, including one whose later write plainly supersedes the earlier.
+            // That is deliberate, and narrower than it first looks: the schema can represent such a driver (one
+            // entry, same runtime effect), so the refusal is not about representability — it is about refusing to
+            // NORMALIZE. A recompile that silently emits a different driver than the vendor authored erodes the
+            // property that makes this substrate safe for taking ownership of someone else's controller.
+            //
+            // Two attempts at tolerating the redundant case are recorded here because both looked sound:
+            //   Gating on !interleaved does NOT bound it. `interleaved` fires only when DriverBucket DECREASES,
+            //     i.e. across change types — but Copy is the one op that READS a parameter, and every Copy sits
+            //     in the same bucket. `Copy A←B; Copy C←A; Copy A←D` is single-bucket, so nothing fires, yet the
+            //     bucket hoists the later A write ahead of the read (a Dictionary overwrite keeps the original
+            //     insertion slot) and C ends up holding D's value instead of B's.
+            //   Restricting it to Set alone survives that, since Set reads nothing. It still normalizes, and the
+            //     one corpus instance was a duplicated write in a driver that omitted a parameter its siblings
+            //     all set — so a reassuring Note would have papered over a vendor bug.
             private void DetectDriverOrderLoss(VRC_AvatarParameterDriver drv, string loc)
             {
                 if (drv.parameters == null || drv.parameters.Count == 0) return;
                 int prev = -1;
                 bool interleaved = false;
                 var seen = new HashSet<(Driver.ChangeType, string)>();
-                var superseded = new List<Driver.Parameter>();
                 foreach (var p in drv.parameters)
                 {
                     int bucket = DriverBucket(p.type);
                     if (bucket < prev) interleaved = true;
                     prev = bucket;
-                    if (seen.Add((p.type, p.name))) continue;
-                    if (p.type == Driver.ChangeType.Add || p.type == Driver.ChangeType.Random)
+                    if (!seen.Add((p.type, p.name)))
                         _result.Refusals.Add(
-                            $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' — {p.type} does not " +
-                            "reduce to its last write (Add accumulates, Random re-rolls), and the schema's " +
-                            "name-keyed buckets can hold only one entry per parameter");
-                    else superseded.Add(p);
+                            $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' — the schema holds " +
+                            "one entry per parameter, so a recompile would not reproduce this driver as authored. " +
+                            "A repeated write is commonly a mistyped parameter name; check it against the drivers " +
+                            "on sibling states before resolving it");
                 }
                 if (interleaved)
-                {
                     _result.Refusals.Add(
                         $"behaviour on {loc}: driver operations interleave change-types (Set/Add/Copy/Random) — the schema re-applies them grouped by type, which would change their apply order");
-                    // A Set/Copy duplicate is only redundant because nothing reads the destination between the
-                    // two writes. Interleaving is exactly the case where something can, so these lose their
-                    // tolerance here and are refused with the reason named — never dropped in silence because
-                    // the interleaving refusal happens to be failing the run anyway.
-                    foreach (var p in superseded)
-                        _result.Refusals.Add(
-                            $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' in an INTERLEAVED " +
-                            "list — an operation between the two writes can read the destination, so the earlier " +
-                            "write is observable and the schema's last-write-wins bucket would change behaviour");
-                }
-                else
-                    foreach (var p in superseded)
-                        _result.Notes.Add(
-                            $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' — kept the last " +
-                            "write and dropped the earlier one, which the later write already superseded in full");
             }
 
             private static int DriverBucket(Driver.ChangeType t)

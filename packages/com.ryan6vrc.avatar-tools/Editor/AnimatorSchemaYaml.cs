@@ -839,15 +839,26 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // An entry rung and a sub-machine onExit rung are AnimatorTransitions: conditions and a target, nothing
-        // else. Naming the field and both rungs keeps the refusal actionable — the author's next move is to move
-        // the field onto the state transition that actually owns the timing.
+        // Fields only a state/AnyState rung honors. Both rungs that refuse them are backed by AnimatorTransition,
+        // but for TWO different reasons, and collapsing them into one sentence made the message false: the timing
+        // surface genuinely does not exist on that type, whereas mute/solo/name DO exist on it (they are declared
+        // one level up, on AnimatorTransitionBase) and are refused because this schema's entry/onExit emit path
+        // does not carry them. Saying "the type has no such field" of mute/solo/name would send an author looking
+        // for a Unity limitation that isn't there.
+        private static readonly HashSet<string> TimingFields = new HashSet<string>
+        {
+            "duration", "exitTime", "fixedDuration", "interruption", "ordered", "offset",
+        };
+
         private static void RequireStateTransition(bool allowed, string field)
         {
-            if (!allowed)
-                throw new SchemaException($"transition: '{field}' is not valid on an entry ladder or a sub-machine "
-                    + "onExit list — both are plain transitions (conditions + target only), with no timing or "
-                    + "editor-flag fields to hold it");
+            if (allowed) return;
+            throw new SchemaException($"transition: '{field}' is not valid on an entry ladder or a sub-machine onExit list — "
+                + (TimingFields.Contains(field)
+                    ? "both are backed by AnimatorTransition, which has no timing surface to hold it; put it on the "
+                      + "state transition that owns the timing"
+                    : "Unity's AnimatorTransition does hold this field, but the entry/onExit emit path does not "
+                      + "carry it, so accepting it here would drop it silently"));
         }
 
         private static void BindConditions(List<Condition> into, List<object> list)

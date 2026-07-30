@@ -71,6 +71,73 @@ public class ReportPackageTests
         Assert.IsNull(ReportPackage.NonSdkKey(null));
     }
 
+    // ── The assembly authority (a namespace root cannot carry these) ───────────────────────────
+
+    [Test]
+    public void NonSdkKey_excludes_base_library_types_the_root_list_no_longer_names()
+    {
+        // "System" was dropped from the namespace roots so a project's own System.* types stay visible.
+        // Only the assembly check can still exclude the real base library, so these isolate that path.
+        Assert.IsNull(ReportPackage.NonSdkKey(typeof(int)));
+        Assert.IsNull(ReportPackage.NonSdkKey(typeof(List<int>)));
+    }
+
+    [Test]
+    public void IsFromSdkAssembly_recognizes_engine_base_library_and_sdk_assemblies()
+    {
+        Assert.IsTrue(ReportPackage.IsFromSdkAssembly(typeof(Transform)));
+        Assert.IsTrue(ReportPackage.IsFromSdkAssembly(typeof(int)));
+        Assert.IsTrue(ReportPackage.IsFromSdkAssembly(typeof(VRCAvatarDescriptor)));
+        Assert.IsTrue(ReportPackage.IsFromSdkAssembly(typeof(VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone)));
+    }
+
+    [Test]
+    public void IsFromSdkAssembly_rejects_our_own_and_test_assemblies()
+    {
+        // A global-namespace type in a non-SDK assembly must survive to the census, or the assembly check
+        // would swallow exactly the optimizers that ship with no namespace.
+        Assert.IsFalse(ReportPackage.IsFromSdkAssembly(typeof(ReportPackageTests_GlobalProbe)));
+        Assert.IsFalse(ReportPackage.IsFromSdkAssembly(typeof(ReportPackage)));
+        Assert.IsFalse(ReportPackage.IsFromSdkAssembly(null));
+    }
+
+    // ── ComposeToggleCaveat: named vs unknown vs absent ────────────────────────────────────────
+
+    [Test]
+    public void ComposeToggleCaveat_reports_unknown_not_absent_when_only_scripts_are_unresolved()
+    {
+        var caveat = ReportPackage.ComposeToggleCaveat(0, 5, 0);
+        StringAssert.Contains("UNKNOWN, not absent", caveat);
+        StringAssert.Contains("5 components have unresolved scripts", caveat);
+        Assert.IsFalse(caveat.Contains("No non-SDK framework components were found"),
+            "a package with unresolved scripts must never be reported as framework-free");
+    }
+
+    [Test]
+    public void ComposeToggleCaveat_claims_absence_only_when_the_census_is_empty_and_complete()
+    {
+        var caveat = ReportPackage.ComposeToggleCaveat(0, 0, 0);
+        StringAssert.Contains("No non-SDK framework components were found", caveat);
+        StringAssert.Contains("every component's script resolved", caveat);
+    }
+
+    [Test]
+    public void ComposeToggleCaveat_routes_a_named_framework_to_the_vendor_components()
+    {
+        var caveat = ReportPackage.ComposeToggleCaveat(3, 0, 0);
+        StringAssert.Contains("3 non-SDK namespaces present", caveat);
+        StringAssert.Contains("read the vendor's own toggle/menu components", caveat);
+        Assert.IsFalse(caveat.Contains("unresolved scripts"), "nothing was unresolved in this case");
+    }
+
+    [Test]
+    public void ComposeToggleCaveat_flags_incompleteness_alongside_a_named_framework()
+    {
+        var caveat = ReportPackage.ComposeToggleCaveat(3, 5, 0);
+        StringAssert.Contains("3 non-SDK namespaces present", caveat);
+        StringAssert.Contains("the namespace list is incomplete", caveat);
+    }
+
     // ── RankNonSdk / NonSdkSummary ────────────────────────────────────────────────────────────
 
     private static Dictionary<string, int> Census(params KeyValuePair<string, int>[] entries)
