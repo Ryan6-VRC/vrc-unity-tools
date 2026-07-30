@@ -240,16 +240,4 @@ public class OwnControllerClipsTests
         string all = OwnControllerClips.Run(ctrl, Out, OwnControllerClips.Scope.All, whatIf: true);
         Assert.AreEqual(2, AnimatorTestHelpers.Count(all, "clipsInScope"), "vendor + own");
     }
-
-    // Spike (2026-07-08) verdict: controller=WRITE LANDED — SaveAssets bypasses the OS read-only attribute,
-    // so a silent no-op on an immutable .controller is NOT fabricable in EditMode on this Unity/OS combo.
-    // The residual scan's clean path is covered by the happy-path/recursive tests; the FAIL branch is
-    // exercised in production against Packages/ immutables. Gap kept loud + on the record per plan.
-    [Test]
-    public void Residual_failbranch_not_fabricable()
-    {
-        Assert.Ignore("Spike controller=WRITE LANDED: silent no-op on an immutable controller not fabricable in " +
-                      "EditMode (SaveAssets bypasses the OS read-only attribute). Residual clean path covered by " +
-                      "the happy-path/recursive tests; FAIL branch exercised in production.");
-    }
 }

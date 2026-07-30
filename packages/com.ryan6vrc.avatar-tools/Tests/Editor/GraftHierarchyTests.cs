@@ -87,8 +87,12 @@ public class GraftHierarchyTests
     }
 
     // (d) idempotency: count-parity skip + reuse-by-path — re-run duplicates nothing.
-    [Test]
-    public void Graft_is_idempotent_no_duplicate_gos_or_components()
+    // preSeedMenu=true is the same property reached from the other side: the destination already carries the
+    // subtree ROOT before the first run, so run 1 must reuse it and scaffold only the remainder, exactly as
+    // run 2 reuses everything. Both cases must land on one Menu, one Tail, one probe.
+    [TestCase(false)]
+    [TestCase(true)]
+    public void Graft_is_idempotent_no_duplicate_gos_or_components(bool preSeedMenu)
     {
         var vendor = new GameObject("V");
         var menu = Child(vendor, "Menu");
@@ -96,6 +100,7 @@ public class GraftHierarchyTests
         tail.AddComponent<GraftHierarchyTests_Ns.GhProbe>();
 
         var ours = new GameObject("V");
+        if (preSeedMenu) Child(ours, "Menu");
 
         GraftHierarchy.Run(ours, vendor, new[] { "Menu" }, whatIf: false);
         var summary2 = GraftHierarchy.Run(ours, vendor, new[] { "Menu" }, whatIf: false);
@@ -113,6 +118,7 @@ public class GraftHierarchyTests
             if (dMenu.GetChild(i).name == "Tail") tailCount++;
         Assert.AreEqual(1, tailCount, "Tail not duplicated");
 
+        Assert.IsNotNull(ours.transform.Find("Menu/Tail"), "Tail scaffolded under the (possibly reused) Menu");
         var probes = ours.transform.Find("Menu/Tail").GetComponents<GraftHierarchyTests_Ns.GhProbe>();
         Assert.AreEqual(1, probes.Length, "probe not duplicated (count parity)");
 
@@ -232,30 +238,6 @@ public class GraftHierarchyTests
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("non-injective", summary);
         Assert.IsNull(ours.transform.Find("Menu"), "nothing grafted on a non-injective-map FAIL");
-
-        Object.DestroyImmediate(vendor);
-        Object.DestroyImmediate(ours);
-    }
-
-    // Existing-host reuse: graft onto a destination that already has the parent GO reuses it (no duplicate).
-    [Test]
-    public void Graft_reuses_existing_parent_host_then_scaffolds_remainder()
-    {
-        var vendor = new GameObject("V");
-        var menu = Child(vendor, "Menu");
-        Child(menu, "Tail");
-
-        var ours = new GameObject("V");
-        Child(ours, "Menu");   // Menu already present on dest → reused, only Tail minted
-
-        var summary = GraftHierarchy.Run(ours, vendor, new[] { "Menu" }, whatIf: false);
-        StringAssert.Contains("=> PASS", summary);
-
-        int menuCount = 0;
-        for (int i = 0; i < ours.transform.childCount; i++)
-            if (ours.transform.GetChild(i).name == "Menu") menuCount++;
-        Assert.AreEqual(1, menuCount, "existing Menu reused, not duplicated");
-        Assert.IsNotNull(ours.transform.Find("Menu/Tail"), "Tail scaffolded under reused Menu");
 
         Object.DestroyImmediate(vendor);
         Object.DestroyImmediate(ours);

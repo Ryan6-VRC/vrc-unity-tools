@@ -2,7 +2,7 @@
 
 Counter naming: the *protocol* in this doc is V4 (successor to the V3 detector); the *code's freshness layer* (canary + reload guard) is V5 in commit titles. They advance independently.
 
-Re-run this whenever RenderAvatar's freshness code changes (`forcedRebake`, the settle gate, the change-horizon sweep, proxy isolation, the reload guard, the freshness canary). It is the live half of the headless canaries in `RenderAvatarProxyRebakeTests.cs` / `RenderAvatarCanaryTests.cs`; batchmode has no SceneView, preview scene, or play mode, so this gate runs against a live, MA-composed avatar over `execute_code`.
+Re-run this whenever RenderAvatar's freshness code changes (`forcedRebake`, the settle gate, the change-horizon sweep, proxy isolation, the reload guard, the freshness canary). It is the live half of the headless canaries in `RenderAvatarFreshnessTests.cs`; batchmode has no SceneView, preview scene, or play mode, so this gate runs against a live, MA-composed avatar over `execute_code`.
 
 ## The two-depth model (all measured 2026-07-29, AvatarProject)
 

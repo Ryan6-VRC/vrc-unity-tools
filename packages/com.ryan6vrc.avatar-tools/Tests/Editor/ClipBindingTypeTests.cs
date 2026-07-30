@@ -28,47 +28,60 @@ public class ClipBindingTypeTests
 
     // ---- resolver: VRC dynamics types ---------------------------------------------------------
 
-    private static readonly TestCaseData[] VrcDynamicsCases =
+    // Kept as a full typeof() table, not TestCases: the table IS the SDK-rename canary (a renamed VRC type
+    // breaks COMPILATION here, loudly, instead of quietly narrowing the resolver at runtime), and one test
+    // looping it costs one NUnit case instead of nine. Resolution is per-NAMESPACE
+    // (ControllerEmit.BindingNamespaces), so the three namespaces below are the distinct behavior; the extra
+    // types in each re-probe one allowlist entry — they are here for the canary, not for coverage.
+    private static readonly (string Name, System.Type Type)[] VrcDynamicsVocabulary =
     {
-        new TestCaseData("VRCPositionConstraint", typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCPositionConstraint)),
-        new TestCaseData("VRCRotationConstraint", typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCRotationConstraint)),
-        new TestCaseData("VRCScaleConstraint",    typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCScaleConstraint)),
-        new TestCaseData("VRCParentConstraint",   typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCParentConstraint)),
-        new TestCaseData("VRCAimConstraint",      typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCAimConstraint)),
-        new TestCaseData("VRCLookAtConstraint",   typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCLookAtConstraint)),
-        new TestCaseData("VRCContactReceiver",    typeof(VRC.SDK3.Dynamics.Contact.Components.VRCContactReceiver)),
-        new TestCaseData("VRCContactSender",      typeof(VRC.SDK3.Dynamics.Contact.Components.VRCContactSender)),
-        new TestCaseData("VRCPhysBone",           typeof(VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone)),
+        ("VRCPositionConstraint", typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCPositionConstraint)),
+        ("VRCRotationConstraint", typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCRotationConstraint)),
+        ("VRCScaleConstraint",    typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCScaleConstraint)),
+        ("VRCParentConstraint",   typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCParentConstraint)),
+        ("VRCAimConstraint",      typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCAimConstraint)),
+        ("VRCLookAtConstraint",   typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCLookAtConstraint)),
+        ("VRCContactReceiver",    typeof(VRC.SDK3.Dynamics.Contact.Components.VRCContactReceiver)),
+        ("VRCContactSender",      typeof(VRC.SDK3.Dynamics.Contact.Components.VRCContactSender)),
+        ("VRCPhysBone",           typeof(VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone)),
     };
 
-    [TestCaseSource(nameof(VrcDynamicsCases))]
-    public void Resolves_vrc_dynamics_types(string simpleName, System.Type expected)
-        => Assert.AreEqual(expected, ControllerEmit.ResolveComponentType(simpleName));
+    [Test]
+    public void Resolves_vrc_dynamics_types()
+    {
+        foreach (var c in VrcDynamicsVocabulary)
+            Assert.AreEqual(c.Type, ControllerEmit.ResolveComponentType(c.Name), c.Name);
+    }
 
     // ---- resolver: UnityEngine.Animations constraints (the sub-namespace gap) -----------------
 
-    private static readonly TestCaseData[] UnityConstraintCases =
+    // All six share ONE allowlist entry ("UnityEngine.Animations"), so this is one behavior — the table is
+    // again the rename canary, walked by a single case.
+    private static readonly (string Name, System.Type Type)[] UnityConstraintVocabulary =
     {
-        new TestCaseData("PositionConstraint", typeof(UnityEngine.Animations.PositionConstraint)),
-        new TestCaseData("RotationConstraint", typeof(UnityEngine.Animations.RotationConstraint)),
-        new TestCaseData("ScaleConstraint",    typeof(UnityEngine.Animations.ScaleConstraint)),
-        new TestCaseData("ParentConstraint",   typeof(UnityEngine.Animations.ParentConstraint)),
-        new TestCaseData("AimConstraint",      typeof(UnityEngine.Animations.AimConstraint)),
-        new TestCaseData("LookAtConstraint",   typeof(UnityEngine.Animations.LookAtConstraint)),
+        ("PositionConstraint", typeof(UnityEngine.Animations.PositionConstraint)),
+        ("RotationConstraint", typeof(UnityEngine.Animations.RotationConstraint)),
+        ("ScaleConstraint",    typeof(UnityEngine.Animations.ScaleConstraint)),
+        ("ParentConstraint",   typeof(UnityEngine.Animations.ParentConstraint)),
+        ("AimConstraint",      typeof(UnityEngine.Animations.AimConstraint)),
+        ("LookAtConstraint",   typeof(UnityEngine.Animations.LookAtConstraint)),
     };
 
-    [TestCaseSource(nameof(UnityConstraintCases))]
-    public void Resolves_unityengine_animations_types(string simpleName, System.Type expected)
-        => Assert.AreEqual(expected, ControllerEmit.ResolveComponentType(simpleName));
+    [Test]
+    public void Resolves_unityengine_animations_types()
+    {
+        foreach (var c in UnityConstraintVocabulary)
+            Assert.AreEqual(c.Type, ControllerEmit.ResolveComponentType(c.Name), c.Name);
+    }
 
     // ---- resolver: the pre-widening surface is unchanged ---------------------------------------
 
+    // Two cases, two distinct code paths: GameObject is a special-cased early return (animatable but NOT a
+    // Component), SkinnedMeshRenderer goes through the "UnityEngine" allowlist entry. Adding Transform /
+    // Renderer / Light / AudioSource back would re-probe that same entry — and no Unity core type is a
+    // plausible rename, so they carry no canary value either.
     [TestCase("GameObject")]
-    [TestCase("Transform")]
-    [TestCase("Renderer")]
     [TestCase("SkinnedMeshRenderer")]
-    [TestCase("Light")]
-    [TestCase("AudioSource")]
     public void Still_resolves_core_types(string simpleName)
         => Assert.IsNotNull(ControllerEmit.ResolveComponentType(simpleName));
 

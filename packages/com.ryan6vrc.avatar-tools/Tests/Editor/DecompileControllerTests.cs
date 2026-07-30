@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
 using NUnit.Framework;
@@ -12,24 +13,49 @@ using UnityEngine.TestTools;
 // ControllerDecompile.Walk + AnimatorSchemaEmit.Serialize together. These touch the filesystem (the emitted
 // .yaml) and the AssetDatabase (the emitted/loaded .controller). Run headless via tools/run-editmode-tests.ps1
 // (or the Test Runner window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
-// TearDown removes the whole test tree each run.
+// TearDown removes the whole test tree each run; the artifacts the doors write OUTSIDE it are handled below.
 public class DecompileControllerTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/dc_tests";
 
+    // Every door call here writes an artifact outside TestRoot — Decompile a Snapshot markdown (success AND
+    // refusal), Compile/Lint a RunLog — and docs/unity-tools.md declares the Snapshot dir DURABLE: the operator's
+    // own pile, pruned by nothing. Record the path each call named in its `| log=` trailer and delete exactly
+    // those; a glob over `decompilecontroller_*.md` would also sweep snapshots the operator took by hand. Track is
+    // the fixture's only artifact owner, so a refusal test asserts its artifact is on disk and leaves it there.
+    private static readonly List<string> Artifacts = new List<string>();
+
+    [OneTimeTearDown]
+    public void DeleteWrittenArtifacts()
+    {
+        if (Artifacts.Count > 0) AssetDatabase.DeleteAssets(Artifacts.ToArray(), new List<string>());
+        Artifacts.Clear();
+    }
+
+    // Every door call in this fixture goes through here, including the ones that only assert on the returned
+    // summary — a summary-only call wrote its artifact too.
+    private static string Track(string summary)
+    {
+        int i = summary.IndexOf("log=", System.StringComparison.Ordinal);
+        if (i >= 0) Artifacts.Add(summary.Substring(i + 4).Trim());
+        return summary;
+    }
+
     [SetUp]
     public void SetUp()
     {
-        Directory.CreateDirectory(TestRoot);
-        AssetDatabase.Refresh(); // register TestRoot as a valid asset folder so emit can nest under it
+        // EnsureFolder (AssetDatabase.CreateFolder) registers TestRoot as a valid asset folder as it creates
+        // it — what the old Directory.CreateDirectory + project-wide Refresh() pair was really buying.
+        AnimatorTestHelpers.EnsureFolder(TestRoot);
     }
 
     [TearDown]
     public void TearDown()
     {
+        // No trailing Refresh(): DeleteAsset already tells the AssetDatabase the folder is gone, and the raw
+        // Directory.Delete is only a fallback for a folder the AssetDatabase never adopted.
         if (AssetDatabase.IsValidFolder(TestRoot)) AssetDatabase.DeleteAsset(TestRoot);
         if (Directory.Exists(TestRoot)) Directory.Delete(TestRoot, true);
-        AssetDatabase.Refresh();
     }
 
     // A controller emitted from the debounce doc, decompiled to yaml, re-compiled, must lint PASS end-to-end.
@@ -41,7 +67,7 @@ public class DecompileControllerTests
         string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
 
         string yamlOut = TestRoot + "/roundtrip.yaml";
-        string dec = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
+        string dec = Track(DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false));
         StringAssert.Contains("=> OK", dec);
         Assert.IsTrue(File.Exists(yamlOut), "the .yaml is written");
 
@@ -53,12 +79,12 @@ public class DecompileControllerTests
         string logPath = dec.Substring(i + marker.Length).Trim();
         Assert.IsTrue(File.Exists(logPath), "the Snapshot RunLog exists at " + logPath);
 
-        string rec = CompileController.Compile(Path.GetFullPath(yamlOut), TestRoot + "/out_rt", whatIf: false);
+        string rec = Track(CompileController.Compile(Path.GetFullPath(yamlOut), TestRoot + "/out_rt", whatIf: false));
         StringAssert.Contains("=> OK", rec);
 
         var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(TestRoot + "/out_rt/Debounce_Fx.controller");
         Assert.IsNotNull(ctrl, "recompiled controller loads");
-        StringAssert.Contains("=> PASS", CheckAnimator.Lint(ctrl, "explicit", null, null, null));
+        StringAssert.Contains("=> PASS", Track(CheckAnimator.Lint(ctrl, "explicit", null, null, null)));
     }
 
     // whatIf computes everything, writes NO .yaml, and appends " (whatIf)".
@@ -70,7 +96,7 @@ public class DecompileControllerTests
         string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
 
         string yamlOut = TestRoot + "/whatif.yaml";
-        string dec = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: true);
+        string dec = Track(DecompileController.Decompile(ctrlPath, yamlOut, whatIf: true));
         StringAssert.Contains("=> OK (whatIf)", dec);
         Assert.IsFalse(File.Exists(yamlOut), "whatIf leaves no .yaml on disk");
     }
@@ -84,7 +110,7 @@ public class DecompileControllerTests
         string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
 
         string yamlOut = TestRoot + "/notes.yaml";
-        DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
+        Track(DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false));
         Assert.IsTrue(File.Exists(yamlOut));
 
         string yaml = File.ReadAllText(yamlOut);
@@ -94,7 +120,7 @@ public class DecompileControllerTests
         StringAssert.Contains("tolerances", yaml, "notes carry the tolerances list");
 
         // The notes block re-parses inertly (parser skips _-prefixed top-level keys) — the yaml still compiles.
-        string rec = CompileController.Compile(Path.GetFullPath(yamlOut), TestRoot + "/out_notes", whatIf: false);
+        string rec = Track(CompileController.Compile(Path.GetFullPath(yamlOut), TestRoot + "/out_notes", whatIf: false));
         StringAssert.Contains("=> OK", rec);
     }
 
@@ -110,19 +136,21 @@ public class DecompileControllerTests
 
         LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
         string yamlOut = TestRoot + "/refuse.yaml";
-        string res = DecompileController.Decompile(refusingCtrlPath, yamlOut, whatIf: false);
+        string res = Track(DecompileController.Decompile(refusingCtrlPath, yamlOut, whatIf: false));
 
         StringAssert.Contains("FAIL", res);
         StringAssert.Contains("Trigger", res, "the refusal names the offending construct");
         Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
         StringAssert.Contains("| log=", res, "a refusal carries the in-band artifact trailer (R4)");
         string artifact = res.Substring(res.IndexOf("log=") + 4);
+        // On-disk assertion, not cleanup: Track owns the delete, which runs after every test in the fixture.
         Assert.IsTrue(File.Exists(artifact), "the refusal artifact is on disk: " + artifact);
-        AssetDatabase.DeleteAsset(artifact);
     }
 
     // stripLayout: true decompiles an ARRANGED controller (a node dragged off-grid) to a .yaml with no
-    // layout block — the door-level mirror of the Walk-level suppression.
+    // layout block. Both directions are asserted on ONE staged arrangement: the default decompile DOES carry
+    // the dragged coordinate, stripLayout does not — without that contrast, a decompiler that captured no
+    // layout at all would pass the flag's test.
     [Test]
     public void StripLayout_Writes_Yaml_Without_Layout()
     {
@@ -136,41 +164,42 @@ public class DecompileControllerTests
         AssetDatabase.SaveAssets();
         string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
 
+        // Contrast first: the DEFAULT decompile of this same arranged controller carries the drag.
+        string defaultOut = TestRoot + "/arranged.yaml";
+        StringAssert.Contains("=> OK", Track(DecompileController.Decompile(ctrlPath, defaultOut, whatIf: false)));
+        string arrangedYaml = File.ReadAllText(defaultOut);
+        StringAssert.Contains("layout:", arrangedYaml, "an arranged controller decompiles WITH a layout block");
+        StringAssert.Contains("[777, 888]", arrangedYaml, "and the block carries the dragged coordinate");
+
         string yamlOut = TestRoot + "/stripped.yaml";
-        string dec = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false, stripLayout: true);
+        string dec = Track(DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false, stripLayout: true));
         StringAssert.Contains("=> OK", dec);
         Assert.IsTrue(File.Exists(yamlOut), "the .yaml is written");
         Assert.IsFalse(File.ReadAllText(yamlOut).Contains("layout:"), "stripLayout writes no layout block");
     }
 
-    [Test]
-    public void Empty_ControllerPath_Fails()
+    // Arg guards, one case per refusal REASON. Asserting only "FAIL" would pass for any refusal whatsoever —
+    // including one thrown for the wrong reason, or a door that refuses everything — so each case names the
+    // reason token the guard emits (DecompileController.cs). The outPath case needs a REAL controller: with a
+    // bogus path the not-found guard would fire first and the case would prove nothing about outPath.
+    [TestCase("", "/x.yaml", "controllerPath is empty")]
+    [TestCase("REAL", "", "outPath is empty")]
+    [TestCase("/nope.controller", "/x.yaml", "controller not found")]
+    public void Arg_Guard_Failures_Name_Their_Reason(string ctrlSpec, string outSpec, string reason)
     {
-        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
-        string res = DecompileController.Decompile("", TestRoot + "/x.yaml", whatIf: false);
-        StringAssert.Contains("FAIL", res);
-        AnimatorTestHelpers.DeleteRefusalArtifact(res);
-    }
-
-    [Test]
-    public void Empty_OutPath_Fails()
-    {
-        var src = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
-        ControllerEmit.Build(src, TestRoot + "/emit", "src", out var emitted);
-        string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
+        string ctrlPath;
+        if (ctrlSpec == "REAL")
+        {
+            var src = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
+            ControllerEmit.Build(src, TestRoot + "/emit", "src", out var emitted);
+            ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
+        }
+        else ctrlPath = ctrlSpec.Length == 0 ? "" : TestRoot + ctrlSpec;
 
         LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
-        string res = DecompileController.Decompile(ctrlPath, "", whatIf: false);
-        StringAssert.Contains("FAIL", res);
-        AnimatorTestHelpers.DeleteRefusalArtifact(res);
-    }
+        string res = Track(DecompileController.Decompile(ctrlPath, outSpec.Length == 0 ? "" : TestRoot + outSpec, whatIf: false));
 
-    [Test]
-    public void Nonexistent_Controller_Fails()
-    {
-        LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
-        string res = DecompileController.Decompile(TestRoot + "/nope.controller", TestRoot + "/x.yaml", whatIf: false);
         StringAssert.Contains("FAIL", res);
-        AnimatorTestHelpers.DeleteRefusalArtifact(res);
+        StringAssert.Contains(reason, res, "the refusal names its own reason, not just FAIL");
     }
 }

@@ -19,16 +19,18 @@ public class CompileControllerRobustnessTests
     [SetUp]
     public void SetUp()
     {
-        Directory.CreateDirectory(TestRoot);
-        AssetDatabase.Refresh(); // register TestRoot so EnsureFolder can nest under it
+        // EnsureFolder (AssetDatabase.CreateFolder) registers TestRoot as a valid asset folder as it creates
+        // it — what the old Directory.CreateDirectory + project-wide Refresh() pair was really buying.
+        AnimatorTestHelpers.EnsureFolder(TestRoot);
     }
 
     [TearDown]
     public void TearDown()
     {
+        // No trailing Refresh(): DeleteAsset already tells the AssetDatabase the folder is gone, and the raw
+        // Directory.Delete is only a fallback for a folder the AssetDatabase never adopted.
         if (AssetDatabase.IsValidFolder(TestRoot)) AssetDatabase.DeleteAsset(TestRoot);
         if (Directory.Exists(TestRoot)) Directory.Delete(TestRoot, true);
-        AssetDatabase.Refresh();
     }
 
     // Read the RunLog body a successful compile writes in-band (`… | log=<path>`).
@@ -75,8 +77,7 @@ public class CompileControllerRobustnessTests
     public void Recompile_Over_HandAuthored_Controller_Warns()
     {
         string outDir = TestRoot + "/out_handauth";
-        Directory.CreateDirectory(outDir);
-        AssetDatabase.Refresh();
+        AnimatorTestHelpers.EnsureFolder(outDir); // CreateAsset below needs a REGISTERED asset folder
 
         // A hand-authored controller sitting at the exact target path — created directly, so it carries
         // NO `compiled-from:` provenance userData.

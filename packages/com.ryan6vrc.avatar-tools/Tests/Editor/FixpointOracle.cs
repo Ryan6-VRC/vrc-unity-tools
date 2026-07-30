@@ -19,15 +19,19 @@ namespace Ryan6Vrc.AvatarTools.Tests
             return AnimatorSchemaEmit.Serialize(w.Doc);
         }
 
-        // Write yaml to a temp file under testRoot, compile into a fresh sub-folder, return the loaded controller.
+        // Write yaml to an OS temp file, compile into a fresh asset sub-folder under testRoot, return the loaded
+        // controller. The yaml deliberately does NOT live under Assets/: CompileController.Compile takes a
+        // filesystem path, reads it with File.ReadAllText and otherwise only uses it for error labels, so an
+        // Assets/ path buys nothing and costs one asset import per compile — ~45 of them across the fixpoint
+        // suites. Only outDir must be an Assets/-relative asset folder, and EnsureFolder registers it via
+        // AssetDatabase.CreateFolder (which writes the .meta too) instead of a project-wide Refresh().
         internal static AnimatorController CompileTo(string testRoot, string yaml, string name, string tag)
         {
-            string y = testRoot + "/" + name + "_" + tag + ".yaml";
+            string y = Path.Combine(Path.GetTempPath(), name + "_" + tag + ".yaml");
             File.WriteAllText(y, yaml);
             string outDir = testRoot + "/out_" + name + "_" + tag;
-            Directory.CreateDirectory(outDir);
-            AssetDatabase.Refresh();
-            string res = CompileController.Compile(Path.GetFullPath(y), outDir, whatIf: false);
+            AnimatorTestHelpers.EnsureFolder(outDir);
+            string res = CompileController.Compile(y, outDir, whatIf: false);
             StringAssert.Contains("=> OK", res, "compile (" + tag + ") is clean");
             var c = AssetDatabase.LoadAssetAtPath<AnimatorController>(outDir + "/" + name + ".controller");
             Assert.IsNotNull(c, "compiled controller (" + tag + ") loads");

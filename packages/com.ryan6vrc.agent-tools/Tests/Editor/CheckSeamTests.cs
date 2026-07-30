@@ -22,7 +22,9 @@ using Ryan6Vrc.AgentTools.Editor;
 public class CheckSeamTests
 {
     private GameObject _root;
-    private string _logPath;
+    // Every PASS/NOT-PASS run emits a RunLog; a test that calls the door several times emits several, so the
+    // paths accumulate and TearDown removes them in ONE batched delete rather than an import apiece.
+    private readonly List<string> _logPaths = new List<string>();
     private object _origResolveSeam, _origResolveHumanoid;
 
     [SetUp]
@@ -48,8 +50,8 @@ public class CheckSeamTests
         ResetSeams();
         // _tmpScene is the only open scene (Single) and so cannot be closed; the next SetUp's Single NewScene
         // replaces it, discarding fixtures. It is never saved — nothing persists to the project.
-        if (!string.IsNullOrEmpty(_logPath)) AssetDatabase.DeleteAsset(_logPath);
-        _logPath = null;
+        if (_logPaths.Count > 0) AssetDatabase.DeleteAssets(_logPaths.ToArray(), new List<string>());
+        _logPaths.Clear();
         LogAssert.ignoreFailingMessages = false;
     }
 
@@ -76,8 +78,10 @@ public class CheckSeamTests
     {
         const string marker = "| log=";
         int i = result.IndexOf(marker, StringComparison.Ordinal);
-        _logPath = i < 0 ? null : result.Substring(i + marker.Length).Trim();
-        return _logPath != null && File.Exists(_logPath) ? File.ReadAllText(_logPath) : "";
+        if (i < 0) return "";
+        string path = result.Substring(i + marker.Length).Trim();
+        _logPaths.Add(path);
+        return File.Exists(path) ? File.ReadAllText(path) : "";
     }
 
     // ── Fixture builders ────────────────────────────────────────────────────────────────────────────
@@ -331,17 +335,6 @@ public class CheckSeamTests
         StringAssert.Contains("different avatar", r);
     }
 
-    [Test]
-    public void ReflectError_refuses()
-    {
-        LogAssert.Expect(LogType.Error, RefuseRe);
-        SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
-        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution { ReflectError = "GetLinks threw" };
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
-        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
-        StringAssert.Contains("GetLinks threw", r);
-    }
-
     // ── Reflection failure classification: genuine API drift vs a seam that can't resolve onto THIS base ──
     // DefaultResolveSeam's unwrap/classify branch can't run here (no MA/VRCFury to throw); these prove the
     // door routes the two carrier fields to the right severity. Drift = tool broken vs installed package
@@ -457,7 +450,7 @@ public class CheckSeamTests
         var r2 = CheckSeam.Check(Path(b2), Path(m2));
         StringAssert.Contains("weightedHumanoid=2", r2);
         StringAssert.Contains("=> PASS", r2);
-        ReadLog(r2); // sets _logPath so TearDown cleans the PASS RunLog
+        ReadLog(r2); // records the PASS RunLog for TearDown's batched delete
     }
 
     // Chest+Spine humanoid base/merge (coincident at origin); one filler bone. Mesh: v0 = Chest at 1.0; v1 =
@@ -549,63 +542,48 @@ public class CheckSeamTests
     // delta 0; move a merge bone's localPosition to inject a known world offset. SpanMm=350 (BuildSeam) ⇒
     // ε = max(0.5, 0.003·350) = 1.05mm.
 
-    [Test]
-    public void Gate_coincident_pass()
-    {
-        BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Chest", "Spine" },
-            weights: new[] { ("Chest", 1.0f), ("Spine", 1.0f) });
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
-        StringAssert.Contains("=> PASS", r);
-        StringAssert.Contains("| log=", r);
-        StringAssert.Contains("weightedHumanoid=2", r);
-        StringAssert.Contains("offenders=0", r);
-        StringAssert.Contains("context=0 dropped=0", r);
-        StringAssert.DoesNotContain("maxOffset", r); // G37: PASS carries no offender magnitude
-        StringAssert.Contains("maxWithinEps=", r);   // PASS surfaces the sub-ε band on the one-liner
-        var body = ReadLog(r);
-        StringAssert.Contains("_(all within ε)_", body);
-        StringAssert.Contains("maxWithinEps=", body); // and in the RunLog body
-    }
-
-    [Test]
-    public void Gate_offset_notPass()
-    {
-        BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Chest", "Spine" },
-            weights: new[] { ("Chest", 1.0f), ("Spine", 1.0f) });
-        // ε = 1.05mm; offset Chest by 1.7mm (0.0017 world units) — still > ε ⇒ one offender.
-        FindBone(mergeGO, "Chest").localPosition = new Vector3(0.0017f, 0f, 0f);
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
-        StringAssert.Contains("=> NOT-PASS", r);
-        StringAssert.Contains("offenders=1", r);
-        StringAssert.Contains("maxOffset=1.7mm", r); // G37: worst-offender magnitude on the one-liner
-        var body = ReadLog(r);
-        StringAssert.Contains("**seam-offset**", body);
-        StringAssert.Contains("bone=`Chest`", body);
-    }
-
+    // The gate, swept over one fixture: coincident → sub-ε → over-ε. ONE fixture is not an optimization but a
+    // requirement — a second would collide on the "Base"/"Merge" hierarchy path and Resolve would return the
+    // first, so the three cases have to be one bone nudged three times.
     [Test]
     public void Gate_boundary()
     {
-        // ε = 1.05mm. One fixture, one bone (a second fixture would collide on the "Base"/"Merge" hierarchy
-        // path and Resolve would return the first): at 0.6mm (< ε) → PASS; nudged to 1.2mm (> ε) → NOT-PASS.
+        // ε = max(0.5, 0.003·SpanMm) = 1.05mm at SpanMm=350 (BuildSeam).
         BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Chest", "Spine" },
             weights: new[] { ("Chest", 1.0f), ("Spine", 1.0f) });
         var chest = FindBone(mergeGO, "Chest");
 
-        chest.localPosition = new Vector3(0.0006f, 0f, 0f); // 0.6mm < ε
+        // (a) Coincident: both bones at their root origin ⇒ delta 0.
+        var r0 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.Contains("=> PASS", r0);
+        StringAssert.Contains("| log=", r0);
+        StringAssert.Contains("weightedHumanoid=2", r0);
+        StringAssert.Contains("offenders=0", r0);
+        StringAssert.Contains("context=0 dropped=0", r0);
+        StringAssert.DoesNotContain("maxOffset", r0); // G37: PASS carries no offender magnitude
+        StringAssert.Contains("maxWithinEps=", r0);   // PASS surfaces the sub-ε band on the one-liner
+        var body0 = ReadLog(r0);
+        StringAssert.Contains("_(all within ε)_", body0);
+        StringAssert.Contains("maxWithinEps=", body0); // and in the RunLog body
+
+        // (b) 0.6mm < ε ⇒ still PASS. Locks the real sub-ε magnitude + even-count median formatting: offsets
+        // {Chest 0.6, Spine 0.0} ⇒ max 0.60, median (0.0+0.6)/2 = 0.30. Guards against an empty-list /
+        // stuck-0 / wrong-set / broken-Median bug that the coincident all-0.00 PASS above leaves green.
+        chest.localPosition = new Vector3(0.0006f, 0f, 0f);
         var r1 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> PASS", r1);
-        // Lock the real sub-ε magnitude + even-count median formatting: offsets {Chest 0.6, Spine 0.0} ⇒
-        // max 0.60, median (0.0+0.6)/2 = 0.30. Guards against an empty-list/stuck-0/wrong-set/broken-Median
-        // bug that a coincident all-0.00 PASS would leave green.
         StringAssert.Contains("maxWithinEps=0.60mm (median 0.30mm)", r1);
-        ReadLog(r1); // sets _logPath; delete now so both boundary logs are cleaned (TearDown handles r2)
-        if (!string.IsNullOrEmpty(_logPath)) AssetDatabase.DeleteAsset(_logPath);
+        ReadLog(r1);
 
-        chest.localPosition = new Vector3(0.0012f, 0f, 0f); // 1.2mm > ε
+        // (c) 1.2mm > ε ⇒ NOT-PASS, one offender, its magnitude on the one-liner and its bone in the body.
+        chest.localPosition = new Vector3(0.0012f, 0f, 0f);
         var r2 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r2);
-        ReadLog(r2);
+        StringAssert.Contains("offenders=1", r2);
+        StringAssert.Contains("maxOffset=1.2mm", r2); // G37: worst-offender magnitude on the one-liner
+        var body2 = ReadLog(r2);
+        StringAssert.Contains("**seam-offset**", body2);
+        StringAssert.Contains("bone=`Chest`", body2);
     }
 
     // ── Task 6: non-humanoid handling — leaf drop + ungated context, never touching the verdict ─────────

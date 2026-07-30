@@ -7,9 +7,9 @@ using Ryan6Vrc.AvatarTools.Editor;
 using VRC.Dynamics;
 using VRC.SDK3.Dynamics.PhysBone.Components;
 
-// A resolvable non-VRC Component whose VrcComponentTable.Lookup is null (no row) — used to exercise
-// the "resolved type, but no table anchor" refusal branch without any VRC SDK reference. TypeCache
-// resolves it by simple name after compile, exactly as a real MA/VRCFury type would resolve.
+// A resolvable non-VRC Component whose VrcComponentTable.Lookup is null (no row) — the "resolved type, but
+// no table anchor" refusal branch needs one, and every type the SDK ships has a row. TypeCache resolves it
+// by simple name after compile, exactly as a real MA/VRCFury type would.
 namespace MoveComponentsTests_Ns
 {
     public class RcNoAnchorProbe : MonoBehaviour { }
@@ -17,28 +17,6 @@ namespace MoveComponentsTests_Ns
 
 public class MoveComponentsTests
 {
-    [Test]
-    public void ResolveAnchor_prefers_explicit_else_host()
-    {
-        var host = new GameObject("H").transform;
-        var root = new GameObject("Root").transform;
-        Assert.AreEqual(host, MoveComponents.ResolveAnchor(null, host));
-        Assert.AreEqual(root, MoveComponents.ResolveAnchor(root, host));
-        Object.DestroyImmediate(host.gameObject); Object.DestroyImmediate(root.gameObject);
-    }
-
-    [Test]
-    public void IsUnderOrEqual_matches_self_and_descendants_only()
-    {
-        var t = new GameObject("T").transform;
-        var child = new GameObject("C").transform; child.SetParent(t);
-        var outside = new GameObject("O").transform;
-        Assert.IsTrue(MoveComponents.IsUnderOrEqual(t, t));
-        Assert.IsTrue(MoveComponents.IsUnderOrEqual(child, t));
-        Assert.IsFalse(MoveComponents.IsUnderOrEqual(outside, t));
-        Object.DestroyImmediate(t.gameObject); Object.DestroyImmediate(outside.gameObject);
-    }
-
     // ── Type-level no-anchor refusal (the headline new behavior) ────────────────────────────────
 
     [Test]

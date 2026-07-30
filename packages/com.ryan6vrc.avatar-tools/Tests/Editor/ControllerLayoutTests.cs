@@ -80,13 +80,8 @@ layers:
             "unknown layout node flagged: " + string.Join(" | ", errors));
     }
 
-    [Test]
-    public void Validate_Accepts_Resolving_Layout_Nodes()
-    {
-        var doc = AnimatorSchemaYaml.Parse(LayoutDoc, "test");
-        var errors = SchemaValidation.Validate(doc);
-        Assert.IsFalse(errors.Exists(e => e.Contains("dangling-layout")), string.Join(" | ", errors));
-    }
+    // The accept side (layout keys that DO resolve → no dangling-layout error) is asserted by
+    // Escaped_Node_Name_Roundtrips below, on the harder escaped-name doc.
 
     [Test]
     public void Validate_Rejects_NonCanonical_Layout_Key()
@@ -155,51 +150,10 @@ layers:
         AssetDatabase.SaveAssets();
     }
 
-    [Test]
-    public void Decompile_Emits_Layout_For_Arranged_Controller()
-    {
-        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
-        ControllerEmit.Build(doc, out var res);
-        var sm = res.Controller.layers[0].stateMachine;
-        MoveState(sm, sm.states[0].state.name, new Vector3(777, 888, 0));
-
-        var w = ControllerDecompile.Walk(res.Controller);
-        var layout = w.Doc.Layers[0].Root.Layout;
-        Assert.IsNotNull(layout, "arranged controller emits a layout block");
-        Assert.AreEqual(new[] { 777f, 888f }, layout.Nodes[AddressPath.EscapeSegment(sm.states[0].state.name)]);
-    }
-
-    // The opt-in stripLayout flag suppresses ALL layout capture (own-a-vendor-controller path, where the
-    // vendor's node arrangement is just noise you're about to rewrite). Same arranged controller: default
-    // Walk DOES capture; Walk(stripLayout:true) captures nothing and serializes with no layout block.
-    [Test]
-    public void Decompile_StripLayout_Emits_No_Blocks()
-    {
-        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
-        ControllerEmit.Build(doc, out var res);
-        var sm = res.Controller.layers[0].stateMachine;
-        MoveState(sm, sm.states[0].state.name, new Vector3(777, 888, 0));
-
-        // Contrast — the default path still captures the arrangement (the flag's effect is unambiguous).
-        var captured = ControllerDecompile.Walk(res.Controller);
-        Assert.IsNotNull(captured.Doc.Layers[0].Root.Layout, "default Walk captures the arrangement");
-        StringAssert.Contains("layout:", AnimatorSchemaEmit.Serialize(captured.Doc), "default emits a layout block");
-
-        // stripLayout: no machine gets a Layout, and the serialized yaml carries no layout block.
-        var stripped = ControllerDecompile.Walk(res.Controller, stripLayout: true);
-        Assert.IsNull(stripped.Doc.Layers[0].Root.Layout, "stripLayout suppresses capture");
-        Assert.IsFalse(AnimatorSchemaEmit.Serialize(stripped.Doc).Contains("layout:"),
-            "stripLayout emits no layout block");
-    }
-
-    [Test]
-    public void Decompile_Omits_Layout_For_Grid_Controller()
-    {
-        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "test");
-        ControllerEmit.Build(doc, out var res);
-        var w = ControllerDecompile.Walk(res.Controller);
-        Assert.IsNull(w.Doc.Layers[0].Root.Layout, "never-arranged controller stays layout-free");
-    }
+    // Capture of an arranged controller is asserted where it matters end-to-end:
+    // Layout_Roundtrip_Fixpoint_Nested_And_NonInteger (below) drags every node kind and proves the
+    // coordinates come back, and DecompileControllerTests.StripLayout_Writes_Yaml_Without_Layout holds the
+    // captured-vs-stripped contrast at the door.
 
     // An otherwise-empty sub-machine whose special node was dragged off-constant carries a captured Layout.
     // The emitter must not treat it as empty ({}) and drop that layout — its exitPosition must survive the
@@ -232,7 +186,8 @@ layers:
 
     // A never-arranged nested controller (a sub-machine with a state, nothing dragged) emits NO layout block
     // anywhere: the root machine and the nested machine both decode to a null Layout. Exercises the
-    // isRoot:false + parent==SpecialParent omit path.
+    // isRoot:false + parent==SpecialParent omit path — and, via its first assertion, the flat never-arranged
+    // case too (no separate grid-controller test needed).
     [Test]
     public void Decompile_Omits_Layout_For_Nested_Grid_Controller()
     {
@@ -288,8 +243,11 @@ layers:
         Assert.AreEqual(new Vector3(123, 456, 0), cs.position, "escaped-name node placed");
     }
 
+    // Renamed off "…_And_RFormat": every coordinate in LayoutDoc is an integer, so this test never touched
+    // float formatting. R-format preservation is proven by Layout_Roundtrip_Fixpoint_Nested_And_NonInteger's
+    // 287.34f drag surviving the round-trip exactly.
     [Test]
-    public void Serialize_Renders_Layout_Flow_And_RFormat()
+    public void Serialize_Renders_Layout_In_Flow_Form()
     {
         var doc = AnimatorSchemaYaml.Parse(LayoutDoc, "test");
         var yaml = AnimatorSchemaEmit.Serialize(doc);
