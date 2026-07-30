@@ -57,7 +57,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // 1. FBX mesh inventory (SkinnedMeshRenderer + MeshFilter/MeshRenderer)
                 CollectFbxData(vendorFolder, data);
 
-                // 2. Prefab scan: constraint count + MA/VRCF/NDMF detection
+                // 2. Prefab scan: constraint count + the non-SDK component census
                 var prefabPaths = FindPrefabs(vendorFolder);
                 data.PrefabCount = prefabPaths.Count;
                 ScanPrefabs(prefabPaths, data);
@@ -86,10 +86,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // returned above). Otherwise the summary is a verdict-free descriptive digest.
             bool errored = data.Error != null;
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[ReportPackage] {0}: fbx={1} prefab={2} constraints={3} thirdParty={4} headGuess={5} bodyGuess={6} superset={7}{8}{9} => {10} | log={11}",
+                "[ReportPackage] {0}: fbx={1} prefab={2} constraints={3} nonSdkNs={4} toggles={5} headGuess={6} bodyGuess={7} superset={8}{9}{10}{11} => {12} | log={13}",
                 label, data.FbxEntries.Count, data.PrefabCount, data.Constraints,
-                data.ThirdPartyComponents, data.HeadMesh ?? "?", data.BodyMesh ?? "?",
+                NonSdkSummary(data.NonSdk), data.ToggleSummary ?? "?",
+                data.HeadMesh ?? "?", data.BodyMesh ?? "?",
                 data.SupersetFbx ?? "none",
+                data.UnresolvedScripts > 0 ? " unresolvedScripts=" + data.UnresolvedScripts : "",
                 data.LoadErrors > 0 ? " loadErrors=" + data.LoadErrors : "",
                 errored ? " error=" + data.Error : "",
                 errored ? "ERROR" : "OK", logPath);
@@ -224,7 +226,71 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
         }
 
-        // ── Prefab scan: constraints + third-party components ─────────────────────────────────
+        // ── Prefab scan: constraints + the non-SDK component census ───────────────────────────
+
+        /// <summary>
+        /// Namespace roots that are Unity or VRChat-SDK infrastructure rather than a third-party
+        /// framework. Cysharp/DG/System are here because the SDK's own packages vendor libraries under
+        /// them; VRCSDK2 is the legacy SDK.
+        /// </summary>
+        private static readonly HashSet<string> SdkNamespaceRoots = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "UnityEngine", "UnityEditor", "Unity", "TMPro", "VRC", "VRCSDK2", "Cysharp", "DG", "System",
+        };
+
+        private const string NonSdkNote =
+            "Verbatim Type.Namespace of every component outside Unity and the VRChat SDK, most-present first. "
+          + "These are namespaces, not framework names, and this tool recognizes no framework by name — an entry means "
+          + "\"a non-SDK framework is on this prefab, go read it\", never \"supported\". Global-namespace components key on "
+          + "their type name instead. ONSPAudioSource ships inside the SDK with no namespace, so it appears here too.";
+
+        private const string UnresolvedScriptsNote =
+            "Components whose script did not resolve, counted rather than skipped: an unresolvable component is by "
+          + "definition a framework this census cannot name. Any nonzero count means nonSdkNamespaces is incomplete — "
+          + "install the missing package (CheckPackage names the offenders) and re-run before trusting the census.";
+
+        /// <summary>
+        /// The census key <paramref name="t"/> contributes, or null when it is Unity/VRChat-SDK
+        /// infrastructure. Generic by construction: <see cref="Type.Namespace"/> verbatim, no framework
+        /// recognized by name. The predecessor matched a fixed three-framework list and so reported
+        /// "ModularAvatar" on an avatar carrying two more; per-framework support has no end.
+        /// Namespaces are not collapsed to a shared prefix — no segment count suits all of them (three
+        /// folds NDMF's eight component namespaces correctly and splits VRCFury's). Global-namespace
+        /// types key on their type name, theirs carrying nothing to report.
+        /// </summary>
+        internal static string NonSdkKey(Type t)
+        {
+            if (t == null) return null;
+            var ns = t.Namespace;
+            if (ns == null) return t.Name;
+            int dot = ns.IndexOf('.');
+            return SdkNamespaceRoots.Contains(dot < 0 ? ns : ns.Substring(0, dot)) ? null : ns;
+        }
+
+        /// <summary>Census entries, most components first then name — one deterministic order for summary and RunLog.</summary>
+        internal static List<KeyValuePair<string, int>> RankNonSdk(IDictionary<string, int> census)
+        {
+            var ranked = new List<KeyValuePair<string, int>>(census);
+            ranked.Sort((a, b) => b.Value != a.Value
+                ? b.Value.CompareTo(a.Value)
+                : string.Compare(a.Key, b.Key, StringComparison.Ordinal));
+            return ranked;
+        }
+
+        /// <summary>
+        /// The <c>nonSdkNs=</c> field: census size, then the three most-present namespaces so the one-liner
+        /// names offenders without unbounding — a composed avatar routinely carries ten. Full list in the RunLog.
+        /// </summary>
+        internal static string NonSdkSummary(IDictionary<string, int> census)
+        {
+            var ranked = RankNonSdk(census);
+            if (ranked.Count == 0) return "0";
+            var sb = new StringBuilder(ranked.Count.ToString(CultureInfo.InvariantCulture)).Append('(');
+            for (int i = 0; i < ranked.Count && i < 3; i++)
+                sb.Append(i > 0 ? ", " : "").Append(ranked[i].Key);
+            if (ranked.Count > 3) sb.Append(", +").Append(ranked.Count - 3).Append(" more");
+            return sb.Append(')').ToString();
+        }
 
         private static List<string> FindPrefabs(string vendorFolder)
         {
@@ -240,8 +306,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static void ScanPrefabs(List<string> prefabPaths, GraphData data)
         {
-            var thirdParty = new HashSet<string>();
-
             foreach (var path in prefabPaths)
             {
                 GameObject root;
@@ -256,22 +320,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     foreach (var comp in root.GetComponentsInChildren<Component>(true))
                     {
-                        if (comp == null) continue; // missing script slot
-                        var fullName  = comp.GetType().FullName ?? "";
-                        var shortName = comp.GetType().Name;
+                        // A missing script slot is counted, not skipped: it is exactly the case where a
+                        // framework is present and unnameable. Skipped, a package with unresolved scripts
+                        // reads identically to the same package fully resolved.
+                        if (comp == null) { data.UnresolvedScripts++; continue; }
 
-                        // Third-party detection: match by namespace / type name
-                        if (fullName.Contains("nadena.dev.modular_avatar") ||
-                            shortName.IndexOf("ModularAvatar", StringComparison.OrdinalIgnoreCase) >= 0)
-                            thirdParty.Add("ModularAvatar");
+                        var type      = comp.GetType();
+                        var fullName  = type.FullName ?? "";
+                        var shortName = type.Name;
 
-                        if (fullName.StartsWith("VF.", StringComparison.Ordinal) ||
-                            fullName.Contains(".VRCFury") ||
-                            shortName.IndexOf("VRCFury", StringComparison.OrdinalIgnoreCase) >= 0)
-                            thirdParty.Add("VRCFury");
-
-                        if (fullName.Contains("nadena.dev.ndmf"))
-                            thirdParty.Add("NDMF");
+                        var key = NonSdkKey(type);
+                        if (key != null)
+                        {
+                            int seen;
+                            data.NonSdk.TryGetValue(key, out seen);
+                            data.NonSdk[key] = seen + 1;
+                        }
 
                         // Constraint detection: Unity built-in + VRChat constraints share "Constraint" in the name
                         if (shortName.Contains("Constraint") || fullName.Contains("Constraint"))
@@ -285,44 +349,84 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 finally { PrefabUtility.UnloadPrefabContents(root); }
             }
-
-            data.ThirdPartyComponents = thirdParty.Count == 0
-                ? "none"
-                : string.Join(", ", thirdParty);
         }
 
         // ── FX controller + toggle detection ─────────────────────────────────────────────────
 
+        /// <summary>
+        /// Sets per-renderer <c>HasToggle</c> and the three toggle fields. The status field names its own
+        /// detector, its yield, and its reach in every case: a bare "ok" beside all-false readings is
+        /// indistinguishable from "this package has no toggles", and a keep-set decided on that reading is
+        /// decided on nothing. The reach limits it states are deliberately not fixed here — unioning every
+        /// descriptor's FX, and resolving controllers a framework merge component mounts, is a wider tool
+        /// than this digest. Naming what was not read is the honest floor.
+        /// </summary>
         private static void BuildToggles(string vendorFolder, List<string> prefabPaths, GraphData data)
         {
+            int rendererCount = 0;
+            foreach (var entry in data.FbxEntries) rendererCount += entry.Renderers.Count;
+
             string fxPath;
             AnimatorController fx = FindFxController(vendorFolder, prefabPaths, data, out fxPath);
             data.FxControllerPath = fxPath;
 
-            if (fx == null)
+            int matched = 0;
+            if (fx != null)
             {
-                data.ToggleStatus = "fx-controller-not-found";
-                return;
-            }
-
-            // Collect all transform paths that have an m_IsActive (GameObject active) binding
-            var togglePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var clip in fx.animationClips)
-            {
-                if (clip == null) continue;
-                foreach (var binding in AnimationUtility.GetCurveBindings(clip))
+                // Collect all transform paths that have an m_IsActive (GameObject active) binding
+                var togglePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var clip in fx.animationClips)
                 {
-                    if (binding.propertyName == "m_IsActive")
-                        togglePaths.Add(binding.path);
+                    if (clip == null) continue;
+                    foreach (var binding in AnimationUtility.GetCurveBindings(clip))
+                    {
+                        if (binding.propertyName == "m_IsActive")
+                            togglePaths.Add(binding.path);
+                    }
                 }
+
+                // Match paths to renderer names (path is hierarchy from avatar root, e.g. "Body" or "Armature/Body")
+                foreach (var entry in data.FbxEntries)
+                    foreach (var ri in entry.Renderers)
+                    {
+                        ri.HasToggle = MatchesTogglePath(togglePaths, ri.Name);
+                        if (ri.HasToggle) matched++;
+                    }
             }
 
-            // Match paths to renderer names (path is hierarchy from avatar root, e.g. "Body" or "Armature/Body")
-            foreach (var entry in data.FbxEntries)
-                foreach (var ri in entry.Renderers)
-                    ri.HasToggle = MatchesTogglePath(togglePaths, ri.Name);
+            string matchRatio = matched.ToString(CultureInfo.InvariantCulture) + "/"
+                              + rendererCount.ToString(CultureInfo.InvariantCulture);
+            bool frameworks = data.NonSdk.Count > 0;
 
-            data.ToggleStatus = "ok";
+            data.ToggleSummary = (fx != null ? matchRatio : "fx-controller-not-found")
+                               + (frameworks ? "(clip-m_IsActive, caveated)" : "(clip-m_IsActive)");
+
+            data.ToggleStatus = "clip-m_IsActive; matched=" + matchRatio + " renderer entries across all FBXes; "
+                              + (fx != null
+                                  ? "source=" + fxPath + " (first FX controller found among " + data.PrefabCount
+                                    + " prefabs; controllers on other prefabs, and controllers a framework merge "
+                                    + "component mounts, are not read)"
+                                  : "source=none (no FX controller resolved from " + data.PrefabCount
+                                    + " prefabs — neither a descriptor FX slot nor a *_FX-named asset)");
+
+            const string ReadsOnly =
+                "hasToggle is set only from clip m_IsActive curves in the FX controller named by `toggles` — false means "
+              + "that detector found nothing, not that the mesh is not removable. ";
+
+            // Trigger on ANY non-SDK framework, not just an unrecognized one: Modular Avatar's own reactive
+            // object toggles compile to m_IsActive at build too, so gating on unfamiliarity would stay silent
+            // on the framework we are most likely to meet.
+            data.ToggleCaveat = frameworks
+                ? ReadsOnly
+                  + "This tool parses no framework, and frameworks routinely compile toggles from their own components to "
+                  + "m_IsActive at build (Modular Avatar's reactive object toggles included), so with "
+                  + data.NonSdk.Count.ToString(CultureInfo.InvariantCulture)
+                  + " non-SDK namespaces present matched=" + matched.ToString(CultureInfo.InvariantCulture)
+                  + " carries no removability information: read the vendor's own toggle/menu components on the prefab "
+                  + "before fixing a keep-set."
+                : ReadsOnly
+                  + "No non-SDK framework components were found on these prefabs, so nothing here compiles toggles at "
+                  + "build; the reach limit stated in `toggles` still applies.";
         }
 
         /// <summary>
@@ -439,8 +543,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
               .Append(",\n");
             sb.Append("  \"fxController\": ").Append(TransplantCore.Q(data.FxControllerPath)).Append(",\n");
             sb.Append("  \"toggles\": ").Append(TransplantCore.Q(data.ToggleStatus)).Append(",\n");
+            sb.Append("  \"togglesCaveat\": ").Append(TransplantCore.Q(data.ToggleCaveat)).Append(",\n");
             sb.Append("  \"constraints\": ").Append(data.Constraints).Append(",\n");
-            sb.Append("  \"thirdPartyComponents\": ").Append(TransplantCore.Q(data.ThirdPartyComponents)).Append(",\n");
+            sb.Append("  \"nonSdkNamespaces\": [");
+            var census = RankNonSdk(data.NonSdk);
+            for (int i = 0; i < census.Count; i++)
+            {
+                sb.Append(i == 0 ? "\n" : ",\n");
+                sb.Append("    { \"namespace\": ").Append(TransplantCore.Q(census[i].Key))
+                  .Append(", \"components\": ").Append(census[i].Value).Append(" }");
+            }
+            sb.Append(census.Count > 0 ? "\n  ],\n" : "],\n");
+            sb.Append("  \"nonSdkNamespacesNote\": ").Append(TransplantCore.Q(NonSdkNote)).Append(",\n");
+            sb.Append("  \"unresolvedScripts\": ").Append(data.UnresolvedScripts).Append(",\n");
+            sb.Append("  \"unresolvedScriptsNote\": ").Append(TransplantCore.Q(UnresolvedScriptsNote)).Append(",\n");
             sb.Append("  \"fbxes\": [");
 
             for (int fi = 0; fi < data.FbxEntries.Count; fi++)
@@ -495,9 +611,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public int    LoadErrors;
             public int    PrefabCount;
             public int    Constraints;
-            public string ThirdPartyComponents = "none";
+            public int    UnresolvedScripts;
+            public readonly Dictionary<string, int> NonSdk = new Dictionary<string, int>(StringComparer.Ordinal);
             public string FxControllerPath;
             public string ToggleStatus;
+            public string ToggleSummary;
+            public string ToggleCaveat;
             public string SupersetFbx;
             public string HeadMesh;
             public string BodyMesh;

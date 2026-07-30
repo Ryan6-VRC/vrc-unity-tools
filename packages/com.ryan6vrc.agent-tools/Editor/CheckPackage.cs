@@ -24,6 +24,10 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// costume routinely has hundreds of intentionally-empty submesh slots. This counts only the
     /// broken ones, so PASS/FAIL is meaningful.
     ///
+    /// A MISSING count alone says how many slots broke, not how many things broke: one vendor-side
+    /// mistake can dangle a thousand slots at two targets. So each MISSING offender names the target
+    /// its reference still points at, and the summary counts the distinct targets behind the slots.
+    ///
     /// The remap-stale check catches what the empty-vs-MISSING rule deliberately ignores: an FBX
     /// using external materials (materialLocation: External) is remapped to .mat assets only at
     /// import time. Import it before those materials exist (e.g. costume package before a separate
@@ -138,8 +142,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (el.objectReferenceValue != null) r.MatResolved++;
                 else if (el.objectReferenceInstanceIDValue != 0)
                 {
+                    int id = el.objectReferenceInstanceIDValue;
                     r.MatMissing++;
-                    r.Offenders.Add(new Offender { Location = location, ObjectPath = goPath, Kind = "material-missing", Detail = "material slot " + i });
+                    r.MissingTargets.Add(id);
+                    r.Offenders.Add(new Offender { Location = location, ObjectPath = goPath, Kind = "material-missing", Detail = "material slot " + i + " holds a dangling reference: " + DanglingTarget(id) });
                 }
                 else r.MatEmpty++; // intentional empty submesh slot
             }
@@ -151,7 +157,30 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (p == null || p.objectReferenceValue != null) return;     // no slot, or mesh present
             if (p.objectReferenceInstanceIDValue == 0) return;           // intentionally no mesh
             r.MeshesMissing++;
-            r.Offenders.Add(new Offender { Location = location, ObjectPath = goPath, Kind = "mesh-missing", Detail = compName + " mesh reference" });
+            r.Offenders.Add(new Offender { Location = location, ObjectPath = goPath, Kind = "mesh-missing", Detail = compName + " mesh holds a dangling reference: " + DanglingTarget(p.objectReferenceInstanceIDValue) });
+        }
+
+        // Names what a broken reference still points at, which decides the remedy: a guid that resolves
+        // to a real file means the reference aims at a sub-object that file does not contain (an FBX set
+        // to external materials never creates the material sub-objects its prefab variants override, so
+        // the fix is at the referencing end), while an absent guid means the asset was never imported.
+        private static string DanglingTarget(int instanceId)
+        {
+            // Only the long-localId overload is usable; the int one throws unconditionally.
+            bool mapped = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(instanceId, out string guid, out long fileId);
+            return DescribeTarget(instanceId, mapped, guid, fileId, mapped ? AssetDatabase.GUIDToAssetPath(guid) : null);
+        }
+
+        /// <summary>Pure wording for the three shapes the answer takes, so each is assertable without
+        /// having to provoke a real dangling reference. The unmapped branch is a genuine unknown, not a
+        /// known-impossible one: whether the guid mapping survives for an instance id whose object failed
+        /// to load is unverified, so that branch stays a reported outcome rather than an assumption.</summary>
+        internal static string DescribeTarget(int instanceId, bool mapped, string guid, long fileId, string assetPath)
+        {
+            if (!mapped) return "instanceID " + instanceId + " has no guid mapping";
+            return string.IsNullOrEmpty(assetPath)
+                ? "guid " + guid + " is absent from this project"
+                : "guid " + guid + " resolves to " + assetPath + ", which holds no object with fileID " + fileId;
         }
 
         // An FBX using external materials is remapped to .mat assets only at import time. If the
@@ -194,9 +223,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             r.Result = pass ? "PASS" : "FAIL";
             string logPath = WriteRunLog(r, label);
 
+            // Distinct targets separate one systematic vendor break from N independent ones, so it rides
+            // next to the slot count it qualifies.
+            string targets = r.MatMissing == 0 ? "" :
+                " (" + r.MissingTargets.Count + " distinct dangling target" + (r.MissingTargets.Count == 1 ? "" : "s") + ")";
+
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CheckPackage] {0} ({1}, {2} scanned): materials resolved={3} empty={4} MISSING={5} | meshMISSING={6} | scriptMISSING={7} | remapSTALE={8}{9} => {10} | log={11}",
-                label, r.Mode, r.Scanned, r.MatResolved, r.MatEmpty, r.MatMissing, r.MeshesMissing, r.ScriptsMissing, r.RemapStale,
+                "[CheckPackage] {0} ({1}, {2} scanned): materials resolved={3} empty={4} MISSING={5}{6} | meshMISSING={7} | scriptMISSING={8} | remapSTALE={9}{10} => {11} | log={12}",
+                label, r.Mode, r.Scanned, r.MatResolved, r.MatEmpty, r.MatMissing, targets, r.MeshesMissing, r.ScriptsMissing, r.RemapStale,
                 r.LoadErrors > 0 ? " | loadErrors=" + r.LoadErrors : "", r.Result, logPath);
 
             if (pass) Debug.Log(summary); else Debug.LogError(summary);
@@ -216,7 +250,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("  \"scanned\": ").Append(r.Scanned).Append(",\n");
             sb.Append("  \"materials\": { \"resolved\": ").Append(r.MatResolved)
               .Append(", \"empty\": ").Append(r.MatEmpty)
-              .Append(", \"missing\": ").Append(r.MatMissing).Append(" },\n");
+              .Append(", \"missing\": ").Append(r.MatMissing)
+              .Append(", \"missingDistinctTargets\": ").Append(r.MissingTargets.Count).Append(" },\n");
             sb.Append("  \"meshesMissing\": ").Append(r.MeshesMissing).Append(",\n");
             sb.Append("  \"scriptsMissing\": ").Append(r.ScriptsMissing).Append(",\n");
             sb.Append("  \"remapStale\": ").Append(r.RemapStale).Append(",\n");
@@ -266,6 +301,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Mode;
             public int Scanned;
             public int MatResolved, MatEmpty, MatMissing;
+            public readonly HashSet<int> MissingTargets = new HashSet<int>(); // instance ids behind MatMissing
             public int MeshesMissing;
             public int ScriptsMissing;
             public int RemapStale;

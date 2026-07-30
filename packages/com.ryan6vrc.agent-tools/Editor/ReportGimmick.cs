@@ -96,7 +96,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Header count line is emitted AFTER the tier-1 tables/observations run, because `other` is only
             // known once AppendOther has walked the subtree — so build the digest body first, then prepend.
             AppendContacts(body, senders, receivers);
-            AppendPhysBones(body, physbones, colliders);
+            // Skinned-mesh sweep for the chain-subtree census is scoped SCENE-ROOT-ABSOLUTE, not to the
+            // report root: a chain's bones are routinely skinned by a mesh outside the reported subtree (aim
+            // at an outfit's armature and its meshes are siblings), so scoping to `root` would manufacture
+            // zeros in exactly the census cell a reader leans on. Widening costs nothing and cannot
+            // contaminate — a Transform is per-object, so no other avatar's mesh can skin THESE transforms.
+            AppendPhysBones(body, physbones, colliders, root.transform.root);
             AppendConstraints(body, constraintRows);
             var applyDuringUploadHosts = AppendVrcFury(body, fury);
             int obsCount = AppendObservations(body, constraintRows, applyDuringUploadHosts, physbones, root);
@@ -157,14 +162,16 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- PhysBones + collider companion (§5.2) ----------------------------------------------
 
-        private static void AppendPhysBones(StringBuilder sb, VRCPhysBone[] bones, VRCPhysBoneCollider[] colliders)
+        private static void AppendPhysBones(StringBuilder sb, VRCPhysBone[] bones, VRCPhysBoneCollider[] colliders,
+                                            Transform weightScope)
         {
             sb.Append("\n## PhysBones\n\n");
             if (bones.Length == 0) sb.Append("_(none)_\n");
             else
             {
-                sb.Append("| transform | rootTransform | parameter prefix | grab/pose | forces | immobile | flags |\n");
-                sb.Append("|---|---|---|---|---|---|---|\n");
+                var skinned = SkinnedBones(weightScope); // swept once for the whole table, not per row
+                sb.Append("| transform | rootTransform | parameter prefix | grab/pose | forces | immobile | flags | chain subtree |\n");
+                sb.Append("|---|---|---|---|---|---|---|---|\n");
                 // The walk is includeInactive, so the table lists components that are not running. `enabled`
                 // (component) and `active` (gameObject.activeInHierarchy) are both required to run, and they
                 // are the whole discriminator when several physbones share one target bone — without them a
@@ -178,7 +185,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                       .Append(F(b.immobile)).Append(" (").Append(b.immobileType).Append(") | ")
                       .Append("enabled=").Append(b.enabled ? "1" : "0")
                       .Append(" active=").Append(b.gameObject.activeInHierarchy ? "1" : "0")
-                      .Append(" isAnimated=").Append(b.isAnimated ? "1" : "0").Append(" resetWhenDisabled=").Append(b.resetWhenDisabled ? "1" : "0").Append(" |\n");
+                      .Append(" isAnimated=").Append(b.isAnimated ? "1" : "0").Append(" resetWhenDisabled=").Append(b.resetWhenDisabled ? "1" : "0").Append(" | ")
+                      .Append(ChainSubtreeCell(b, skinned)).Append(" |\n");
+
+                sb.Append("\n_`chain subtree` = the row's `rootTransform` (else its own transform) and every descendant: `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept from the report root's outermost ancestor, so a mesh outside the reported subtree still counts), `hosting` how many carry a component besides Transform and this row's own physbone. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside its subtree (a constraint reading it as a source) reads all-zero while load-bearing. A nonzero is an upper bound — exclusions the component declares (`ignoreTransforms`) are not subtracted, so the set is the chain's hierarchy reach, not a claim about which bones it moves._\n");
             }
 
             // Colliders are ingredients, not behaviour — a minimal companion table.
@@ -721,6 +731,83 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             if (tags == null || tags.Count == 0) return "—";
             return string.Join(",", tags.ToArray());
+        }
+
+        // Every transform some SkinnedMeshRenderer under `scope` skins at nonzero weight. Walks the flat
+        // GetAllBoneWeights() array by the per-vertex GetBonesPerVertex() counts (not the legacy top-4
+        // mesh.boneWeights view, which would drop a real influence outside a vertex's top four); reads
+        // sharedMesh, null-checks bones[] entries. ANY nonzero weight counts — no epsilon, because the census
+        // must not manufacture a zero, and a threshold would be a number with nothing pinning it.
+        // Deliberately a local copy of the same walk CheckSeam performs: that one returns per-bone MAX weights
+        // for seam coincidence, this one a membership set, and folding them would couple a gimmick digest to
+        // a fit gate for two shared loop lines.
+        private static HashSet<Transform> SkinnedBones(Transform scope)
+        {
+            var skinned = new HashSet<Transform>();
+            if (scope == null) return skinned;
+            foreach (var smr in scope.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                if (smr == null) continue;
+                var mesh = smr.sharedMesh; if (mesh == null) continue;
+                var bones = smr.bones;
+                var bonesPerVertex = mesh.GetBonesPerVertex(); // one count per vertex
+                var weights = mesh.GetAllBoneWeights();        // flat, grouped by vertex
+                int ptr = 0;
+                for (int v = 0; v < bonesPerVertex.Length; v++)
+                {
+                    int count = bonesPerVertex[v];
+                    for (int j = 0; j < count; j++)
+                    {
+                        var w = weights[ptr + j];
+                        if (w.weight <= 0f) continue;
+                        int idx = w.boneIndex;
+                        if (idx < 0 || idx >= bones.Length || bones[idx] == null) continue;
+                        skinned.Add(bones[idx]);
+                    }
+                    ptr += count;
+                }
+            }
+            return skinned;
+        }
+
+        // The §5.2 `chain subtree` census: three counts over ONE set — the chain's effective root transform
+        // and every descendant. A partial take (dropping some of a mergeable's pieces) leaves chains whose
+        // every count reads 0, and nothing else in the digest says so.
+        //
+        // DRIVEN-SET SIMPLIFICATION, stated because it bounds what the numbers mean: the set is the root
+        // transform's hierarchy subtree, whole. Exclusions the component declares (`ignoreTransforms`) are
+        // not subtracted, and no chain boundary is modelled, so the set is a superset of the bones the chain
+        // moves. That direction is the safe one — it can only inflate `skinned`/`hosting`, never fabricate
+        // the all-zero row a reader would act on. The rendered legend says the same thing to the reader.
+        private static string ChainSubtreeCell(VRCPhysBone b, HashSet<Transform> skinned)
+        {
+            var chainRoot = EffectiveTarget(b);
+            if (chainRoot == null) return "—";
+            int total = 0, skinnedCount = 0, hosting = 0;
+            foreach (var t in chainRoot.GetComponentsInChildren<Transform>(true))
+            {
+                total++;
+                if (skinned.Contains(t)) skinnedCount++;
+                if (HostsBeyondOwnChain(t, b)) hosting++;
+            }
+            return "bones=" + total + " skinned=" + skinnedCount + " hosting=" + hosting;
+        }
+
+        // Does this transform carry anything besides Transform and the row's own physbone? Deliberately
+        // type-blind: a renderer, a contact, a collider, a light, an MA component, another chain's physbone
+        // and an unknown third-party script are all equally "something else uses this bone", and enumerating
+        // the families would silently miss the next one. A MISSING (broken) script counts — something WAS
+        // here, and the tier-2 census names the slot; treating it as empty is the one direction that could
+        // hand a reader a false all-zero row.
+        private static bool HostsBeyondOwnChain(Transform t, VRCPhysBone self)
+        {
+            foreach (var c in t.GetComponents<Component>())
+            {
+                if (c is Transform) continue;      // excludes RectTransform too
+                if (ReferenceEquals(c, self)) continue;
+                return true;                       // includes the null (MISSING-script) slot
+            }
+            return false;
         }
 
         // The transform a physbone's chain actually acts on. Delegated to the SDK's own null-resolving
