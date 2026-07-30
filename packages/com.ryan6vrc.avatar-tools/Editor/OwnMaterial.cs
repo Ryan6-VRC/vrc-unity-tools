@@ -479,14 +479,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // Vendor/ source (untouchable). Vendor textures routinely ship it OFF, which penalizes/blocks
                 // VRChat upload; the fork is the one moment we own a copy we may fix. Only meaningful when the
                 // texture actually has mip maps. A reused pre-existing copy (needsCopy=false) is left alone.
+                // BATCHED, and it has to be: ti.SaveAndReimport() is a full synchronous texture import per
+                // call, and a real own run forks ~25 textures — paid serially that is seconds of wall clock
+                // for a flag flip. Write every .meta first, then import the whole set in one pass with
+                // importing suspended, so the pipeline resolves them together. Safe here because nothing in
+                // the block needs a resolvable import artifact: the importer reads come first (outside), and
+                // O's own save/reimport/reload is after StopAssetEditing. StopAssetEditing MUST run — an
+                // escaped exception would otherwise leave the whole Editor with importing disabled.
                 int mipsEnabled = 0;
+                var mipsToImport = new List<string>();
                 foreach (var texPath in newlyWrittenTex)
                 {
                     var ti = AssetImporter.GetAtPath(texPath) as TextureImporter;
                     if (ti == null || !ti.mipmapEnabled || ti.streamingMipmaps) continue;
                     ti.streamingMipmaps = true;
-                    ti.SaveAndReimport();
-                    mipsEnabled++;
+                    AssetDatabase.WriteImportSettingsIfDirty(texPath);
+                    mipsToImport.Add(texPath);
+                }
+                if (mipsToImport.Count > 0)
+                {
+                    AssetDatabase.StartAssetEditing();
+                    try
+                    {
+                        foreach (var texPath in mipsToImport)
+                            AssetDatabase.ImportAsset(texPath, ImportAssetOptions.ForceUpdate);
+                    }
+                    finally { AssetDatabase.StopAssetEditing(); }
+                    mipsEnabled = mipsToImport.Count;
                 }
                 // The note is deferred to the PASS point below: the save/reload and post-condition gates ahead
                 // can still rollback() (deleting these very textures), so a note here would outlive its subject.

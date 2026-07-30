@@ -46,6 +46,16 @@ namespace Ryan6Vrc.AgentTools.Editor
     [AgentTool]
     public static class ReportGimmick
     {
+        /// <summary>
+        /// The chain-subtree census legend, quoted once at the canon so a test can pin the WHOLE sentence
+        /// instead of carving phrases out of it (`docs/tool-design.md`: verbatim strings are quoted once).
+        /// Both polarities are load-bearing and neither may be dropped by a prose pass: all-zero is not a
+        /// verdict (a pre-bake bone that will name-merge, or a chain read from outside its subtree, reads
+        /// zero while load-bearing), and a nonzero is an upper bound (declared `ignoreTransforms` exclusions
+        /// are not subtracted). A reader who takes either as a judgement deletes a live chain.
+        /// </summary>
+        internal const string ChainSubtreeLegend = "_`chain subtree` = the row's `rootTransform` (else its own transform) and every descendant: `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept over the avatar enclosing THAT ROW's physbone, so a mesh outside the reported subtree still counts while a co-hosted neighbour avatar's does not; a row with no enclosing avatar descriptor falls back to its outermost ancestor), `hosting` how many carry a component besides Transform and this row's own physbone. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside its subtree (a constraint reading it as a source) reads all-zero while load-bearing. A nonzero is an upper bound — exclusions the component declares (`ignoreTransforms`) are not subtracted, so the set is the chain's hierarchy reach, not a claim about which bones it moves._\n";
+
         // ----- Agent entry point ------------------------------------------------------------------
 
         /// <summary>Digest the gimmick subtree rooted at <paramref name="rootPath"/> (a scene hierarchy
@@ -188,7 +198,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                       .Append(" isAnimated=").Append(b.isAnimated ? "1" : "0").Append(" resetWhenDisabled=").Append(b.resetWhenDisabled ? "1" : "0").Append(" | ")
                       .Append(ChainSubtreeCell(b, SkinnedBonesFor(b, reportRoot, scopeCache))).Append(" |\n");
 
-                sb.Append("\n_`chain subtree` = the row's `rootTransform` (else its own transform) and every descendant: `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept over the avatar enclosing THAT ROW's physbone, so a mesh outside the reported subtree still counts while a co-hosted neighbour avatar's does not; a row with no enclosing avatar descriptor falls back to its outermost ancestor), `hosting` how many carry a component besides Transform and this row's own physbone. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside its subtree (a constraint reading it as a source) reads all-zero while load-bearing. A nonzero is an upper bound — exclusions the component declares (`ignoreTransforms`) are not subtracted, so the set is the chain's hierarchy reach, not a claim about which bones it moves._\n");
+                sb.Append('\n').Append(ChainSubtreeLegend);
             }
 
             // Colliders are ingredients, not behaviour — a minimal companion table.

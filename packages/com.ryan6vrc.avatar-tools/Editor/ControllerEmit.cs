@@ -341,6 +341,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 // Reload from disk so EmitResult holds the authoritative persisted objects (a reimport can
                 // remap instances). This makes the returned graph exactly what round-trip verification sees.
+                // The reload does NOT depend on a reimport having happened: when StampProvenance skips (the
+                // scratch door), nothing was re-minted and these loads return the same live, SaveAssets-backed
+                // instances — so it stays correct either way.
                 ReloadFromDisk(path);
                 return _result;
             }
@@ -1093,13 +1096,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private void StampProvenance(string path)
             {
+                // NO STAMP without source bytes. Only the 2-arg scratch door leaves _sourceText null, and it
+                // has no provenance worth recording: the hash would be over SourcePath, which says nothing
+                // about content, and the sole reader (CompileController.WarnIfOutOfBand) only ever inspects a
+                // controller a REAL compile wrote — those always thread the text. Skipping is also the biggest
+                // AssetDatabase saving in the emit path: the SaveAndReimport below is a full import, and the
+                // scratch door is what every emit test and every internal throwaway build goes through.
+                if (_sourceText == null) return;
+
                 var importer = AssetImporter.GetAtPath(path);
                 if (importer == null) return;
-                // CompileController reads this userData to WARN before clobbering an out-of-band edit. Hash the
-                // exact SOURCE BYTES when they were threaded through (the honest signal); fall back to hashing
-                // SourcePath for the scratch/2-arg door that never sees the text.
+                // CompileController reads this userData to WARN before clobbering an out-of-band edit.
                 string src = _doc.SourcePath ?? "";
-                string hash = SourceHash(_sourceText ?? src);
+                string hash = SourceHash(_sourceText);
                 importer.userData = "compiled-from:" + src + ";srchash:" + hash;
                 importer.SaveAndReimport();
             }

@@ -152,7 +152,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
             var path = RunLogDir + "/" + Sanitize(log.kind) + "_" + Sanitize(label) + "_" + stamp + ".json";
             File.WriteAllText(path, sb.ToString());
-            AssetDatabase.Refresh();
+            RunLogFormat.PublishArtifact(RunLogDir, path);
             return path;
         }
 

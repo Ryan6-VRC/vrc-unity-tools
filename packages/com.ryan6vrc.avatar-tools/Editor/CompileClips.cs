@@ -229,11 +229,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     //    subtly across the in-memory→.anim round-trip, so stamping the disk hash guarantees the
                     //    stamp equals what the divergence guard recomputes from the .anim; an unmodified
                     //    clip can never read as diverged. Nothing to stamp under whatIf (nothing was written). ──
+                    // TWO passes on purpose. Every stamp ends in SaveAndReimport, and un-batched that is one
+                    // full import per emitted clip (measured ~0.06s each on a ~0.11s floor — the dominant cost
+                    // of a compile), so the writes go inside ONE asset-editing batch and coalesce. The hashing
+                    // stays OUTSIDE it: LoadAssetAtPath is unreliable while asset editing is paused, and a
+                    // single fused loop would risk hashing null and silently skipping the stamp. Deferring the
+                    // imports is safe because the stamp is only ever READ on a later call (ReadContentStamp,
+                    // for the divergence guard above) — never within this run.
+                    var stamps = new List<(string path, string hash)>();
                     foreach (var spec in doc.Clips)
                     {
                         string path = outClean + "/" + TransplantCore.Sanitize(spec.Name) + ".anim";
                         var onDisk = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
-                        if (onDisk != null) StampContent(path, HashClipContent(onDisk));
+                        if (onDisk != null) stamps.Add((path, HashClipContent(onDisk)));
+                    }
+                    // StopAssetEditing belongs in a finally: an exception thrown inside the batch would
+                    // otherwise leave the AssetDatabase with imports paused for the rest of the Editor session.
+                    AssetDatabase.StartAssetEditing();
+                    try
+                    {
+                        foreach (var st in stamps) StampContent(st.path, st.hash);
+                    }
+                    finally
+                    {
+                        AssetDatabase.StopAssetEditing();
                     }
                 }
 
@@ -374,7 +393,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>Stamp <paramref name="hash"/> into the <c>.anim</c>'s importer userData (the same channel as
-        /// the controller srchash). Reimports so the stamp persists. No-op on a null importer.</summary>
+        /// the controller srchash). Reimports so the stamp persists — which is why a caller stamping a whole
+        /// clip set wraps the calls in <c>StartAssetEditing</c>/<c>StopAssetEditing</c> (one import, not N).
+        /// No-op on a null importer.</summary>
         public static void StampContent(string animPath, string hash)
         {
             var imp = AssetImporter.GetAtPath(animPath);
