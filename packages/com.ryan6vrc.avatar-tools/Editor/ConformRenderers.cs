@@ -210,7 +210,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (mat == null)
                     {
                         data.NullSlots++;
-                        data.Offender("null-slot: renderer '" + rend.name + "' — null material slot after assignment");
+                        // Tense follows the path: on execute the slot IS null on the renderer, on whatIf it is
+                        // null in the source array we would have assigned. The verdict is the same either way,
+                        // but a preview that says "after assignment" asserts a mutation that never happened.
+                        data.Offender("null-slot: renderer '" + rend.name + "' — " + (whatIf
+                            ? "the source material set has a null slot; assigning it would leave this renderer with one"
+                            : "null material slot after assignment"));
                     }
                     else if (mat.name == "Default-Material")
                     {

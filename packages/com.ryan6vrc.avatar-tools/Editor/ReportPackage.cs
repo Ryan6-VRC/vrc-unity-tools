@@ -364,6 +364,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
                     list.Add(path);
             }
+            // FindAssets' order is unspecified (GUID-derived in practice), and FindFxController takes the FIRST
+            // prefab that yields an FX layer — so on a multi-prefab package WHICH controller got reported could
+            // differ between machines or across a reimport, with nothing in the output saying so. Sorting does
+            // not make the pick right; it makes it reproducible, which is the part a reader can rely on.
+            list.Sort(StringComparer.Ordinal);
             return list;
         }
 
@@ -400,7 +405,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             data.NonSdk[key] = seen + 1;
                         }
 
-                        // Constraint detection: Unity built-in + VRChat constraints share "Constraint" in the name
+                        // Constraint detection is a NAME-SUBSTRING rule, not a type test: Unity's built-ins and
+                        // VRChat's own both carry "Constraint" in the name, and matching the name is what lets
+                        // this count them without referencing either. The cost is that it counts anything else
+                        // named that way too — a vendor's ConstraintHelper, a ConstraintSettings data class —
+                        // so the figure is an upper bound on real constraint components, not a census. Read it
+                        // as "constraint-ish components present", and reach for ReportGimmick when the exact
+                        // topology matters. Stated in unity-tools.md's row for the same reason.
                         if (shortName.Contains("Constraint") || fullName.Contains("Constraint"))
                             data.Constraints++;
                     }
@@ -471,10 +482,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             data.ToggleStatus = "clip-m_IsActive; matched=" + matchRatio + " renderer entries across all FBXes; "
                               + (fx != null
                                   ? "source=" + fxPath + " (first FX controller found among " + data.PrefabCount
-                                    + " prefabs; controllers on other prefabs, and controllers a framework merge "
-                                    + "component mounts, are not read)"
+                                    + " prefabs in path order; controllers on other prefabs, and controllers a "
+                                    + "framework merge component mounts, are not read)"
+                                  // The not-found branch has to name the merge-mount blind spot too, and this is
+                                  // where naming it matters most: a package whose FX arrives entirely through MA
+                                  // MergeAnimator or VRCFury FullController has no descriptor slot and no
+                                  // *_FX-named asset, so it lands here reading as "this package has no FX" when it
+                                  // has one this probe cannot see. CheckAnimator resolves those mount points.
                                   : "source=none (no FX controller resolved from " + data.PrefabCount
-                                    + " prefabs — neither a descriptor FX slot nor a *_FX-named asset)");
+                                    + " prefabs — neither a descriptor FX slot nor a *_FX-named asset. A controller "
+                                    + "mounted by MA MergeAnimator or VRCFury FullController is invisible to this "
+                                    + "probe and reads the same way; CheckAnimator resolves those mounts)");
 
             data.ToggleCaveat = ComposeToggleCaveat(data.NonSdk.Count, data.UnresolvedScripts, matched);
         }

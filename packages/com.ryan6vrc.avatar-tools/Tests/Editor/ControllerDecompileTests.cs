@@ -1002,6 +1002,160 @@ public class ControllerDecompileTests
         Assert.AreEqual(y1, AnimatorSchemaEmit.Serialize(w2.Doc), "muscle-binding doc is on the fixpoint");
     }
 
+    // ---- W8: driver Random carries preventRepeats ------------------------------------------------
+
+    [Test]
+    public void Walk_Driver_Random_PreventRepeats_Roundtrips()
+    {
+        // preventRepeats is the SDK's fourth Random field (drawn by the Inspector for a Random onto an Int).
+        // It used to be dropped on decode, so a vendor's no-repeat roll came back as a plain one — a silent
+        // behavioral change, not a cosmetic one. Assert the VALUE off the recompiled object, because a decode
+        // that captured the key but reset it to the SDK default would still reach a clean textual fixpoint.
+        const string yaml =
+            "schema: 1\ncontroller: PrevRep_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  Roll: int\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - driver: { random: { Roll: { min: 0, max: 7, preventRepeats: true } } }\n" +
+            "    default: S\n";
+        var src = AnimatorSchemaYaml.Parse(yaml, "test");
+        ControllerEmit.Build(src, out var emitted);
+
+        var built = (VRC.SDKBase.VRC_AvatarParameterDriver)
+            emitted.Controller.layers[0].stateMachine.states[0].state.behaviours[0];
+        Assert.IsTrue(built.parameters[0].preventRepeats, "emit put preventRepeats on the SDK Parameter");
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.AreEqual(0, w.Refusals.Count, "refusal: " + string.Join(" | ", w.Refusals));
+
+        // Round-trip and read the flag off the SECOND build — the hop the drop used to happen on.
+        var doc2 = AnimatorSchemaYaml.Parse(AnimatorSchemaEmit.Serialize(w.Doc), "roundtrip");
+        ControllerEmit.Build(doc2, out var emitted2);
+        var again = (VRC.SDKBase.VRC_AvatarParameterDriver)
+            emitted2.Controller.layers[0].stateMachine.states[0].state.behaviours[0];
+        Assert.IsTrue(again.parameters[0].preventRepeats, "preventRepeats survived decompile -> recompile");
+    }
+
+    [Test]
+    public void Walk_Driver_Random_Without_PreventRepeats_Stays_Off_The_Document()
+    {
+        // The complement: false is the SDK default, so it must NOT appear in the emitted YAML — otherwise
+        // every existing document churns the first time it round-trips through this build.
+        const string yaml =
+            "schema: 1\ncontroller: PrevRepOff_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  Roll: int\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - driver: { random: { Roll: { min: 0, max: 7 } } }\n" +
+            "    default: S\n";
+        var src = AnimatorSchemaYaml.Parse(yaml, "test");
+        ControllerEmit.Build(src, out var emitted);
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        StringAssert.DoesNotContain("preventRepeats", AnimatorSchemaEmit.Serialize(w.Doc),
+            "an unset preventRepeats must stay implicit");
+    }
+
+    // ---- W8: intra-bucket driver order is a real dependency, so pin it ----------------------------
+
+    [Test]
+    public void Walk_Driver_BucketOrder_Survives_A_Round_Trip()
+    {
+        // `Copy B<-A; Copy C<-B` reads a parameter the PREVIOUS op wrote, so the two are not commutative —
+        // and both live in the same bucket, which is exactly what DetectDriverOrderLoss's interleave check
+        // cannot see (it fires on the bucket index decreasing, i.e. across change-types). Order is carried
+        // only by Dictionary insertion-order enumeration, on four separate hops: the decode bucket, the YAML
+        // writer, the YAML reader's map, and ControllerEmit's iteration. That is a BCL implementation detail
+        // rather than a documented guarantee, so this test is the contract — swap any hop to a hash-ordered
+        // map and it fails here instead of silently rewriting what a driver does.
+        const string yaml =
+            "schema: 1\ncontroller: DrvChain_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  A: float\n  B: float\n  C: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - driver: { copy: { B: A, C: B } }\n" +
+            "    default: S\n";
+        var src = AnimatorSchemaYaml.Parse(yaml, "test");
+        ControllerEmit.Build(src, out var emitted);
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.AreEqual(0, w.Refusals.Count, "refusal: " + string.Join(" | ", w.Refusals));
+
+        var doc2 = AnimatorSchemaYaml.Parse(AnimatorSchemaEmit.Serialize(w.Doc), "roundtrip");
+        ControllerEmit.Build(doc2, out var emitted2);
+        var drv = (VRC.SDKBase.VRC_AvatarParameterDriver)
+            emitted2.Controller.layers[0].stateMachine.states[0].state.behaviours[0];
+
+        var chain = drv.parameters.Select(p => p.name + "<-" + p.source).ToList();
+        Assert.AreEqual(new List<string> { "B<-A", "C<-B" }, chain,
+            "the same-bucket copy chain must re-emit in authored order; got " + string.Join(", ", chain));
+    }
+
+    // ---- W8: a transition carrying BOTH isExit and a destination ----------------------------------
+
+    [Test]
+    public void Walk_Transition_IsExit_With_Destination_Refuses()
+    {
+        // No Inspector authors this, but both setters are public, so a script or a hand-edited asset can.
+        // SetTarget used to take isExit first and return, dropping the destination without a word — a silent
+        // normalization of a contradiction the decoder can neither represent nor adjudicate.
+        const string yaml =
+            "schema: 1\ncontroller: ExitClash_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        transitions:\n          - { to: T, when: [ P greater 0.5 ] }\n" +
+            "      T:\n        motion: ~\n" +
+            "    default: S\n";
+        var src = AnimatorSchemaYaml.Parse(yaml, "test");
+        ControllerEmit.Build(src, out var emitted);
+
+        var tr = emitted.Controller.layers[0].stateMachine.states
+            .First(cs => cs.state.name == "S").state.transitions[0];
+        Assert.IsNotNull(tr.destinationState, "fixture precondition: the transition has a destination");
+        tr.isExit = true;   // now contradictory
+        EditorUtility.SetDirty(tr);
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("isExit AND a destination")),
+            "isExit + destination -> located refusal; got: " + string.Join(" | ", w.Refusals));
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("'T'")), "the refusal names the dropped destination");
+    }
+
+    // ---- W8: a refusal location names its layer ---------------------------------------------------
+
+    [Test]
+    public void Walk_Refusal_Location_Names_Its_Layer()
+    {
+        // Refusals are reported as one controller-wide list, and both location vocabularies used to omit the
+        // layer: a root machine rendered as a bare "(root)", a state as "state 'S'". Two layers that each
+        // carry a state of the same name — the ordinary case, every SDK template ships an "Idle" — therefore
+        // produced identical lines. Both layers here are named S on purpose, so ONLY the layer can tell them
+        // apart, and the refusal is raised from a state-scoped site (the vocabulary the original finding
+        // missed; it named PathLabel alone).
+        const string yaml =
+            "schema: 1\ncontroller: LayerLoc_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: float\n" +
+            "layers:\n" +
+            "  - name: Alpha\n    states:\n      S:\n        motion: ~\n    default: S\n" +
+            "  - name: Beta\n    states:\n      S:\n        motion: ~\n    default: S\n";
+        var src = AnimatorSchemaYaml.Parse(yaml, "test");
+        ControllerEmit.Build(src, out var emitted);
+
+        // Provoke one refusal per layer from the SAME site, so only the layer name can tell them apart.
+        foreach (var layer in emitted.Controller.layers)
+        {
+            var drv = (VRC.SDKBase.VRC_AvatarParameterDriver)
+                layer.stateMachine.states[0].state.AddStateMachineBehaviour(
+                    typeof(VRC.SDK3.Avatars.Components.VRCAvatarParameterDriver));
+            drv.parameters = new List<VRC.SDKBase.VRC_AvatarParameterDriver.Parameter>
+            {
+                new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter {
+                    type = (VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType)99, name = "X", value = 1f },
+            };
+            EditorUtility.SetDirty(drv);
+        }
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("Alpha")), "a refusal names layer Alpha: " + string.Join(" | ", w.Refusals));
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("Beta")), "a refusal names layer Beta: " + string.Join(" | ", w.Refusals));
+    }
+
     private static void EnsureScratch()
     {
         if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");

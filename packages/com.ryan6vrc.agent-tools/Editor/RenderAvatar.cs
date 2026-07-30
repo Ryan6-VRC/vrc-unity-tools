@@ -991,6 +991,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             string label = root != null ? root.name : target;
             if (string.IsNullOrEmpty(against))
                 return Fail(label, "against is empty — pass a prior grab's png path (its png= trailer)");
+            // Target before manifest. `root` is otherwise consulted only for the label, so a bogus target used
+            // to survive every check here and surface much later out of CaptureCore — meaning a call that got
+            // BOTH wrong reported the manifest first and sent the operator off to re-grab frame A with a target
+            // that was never going to resolve. Order the two by which one a re-grab can actually fix.
+            if (root == null)
+                return Fail(label, "target '" + target + "' not found — tried hierarchy path, instance id, then name "
+                    + "in the active scene. CaptureDiff diffs a LIVE scene target, grabbed now as frame B, against a "
+                    + "prior grab's PNG as frame A, so the target has to be present in the open scene");
             string camPath = against + ".cam.json";
             if (!File.Exists(camPath))
                 return Fail(label, "no camera manifest for " + against + " (expected " + Path.GetFileName(camPath)

@@ -226,24 +226,66 @@ namespace Ryan6Vrc.AvatarTools.Editor
             _sceneSetup = null;
         }
 
+        // The saved Enter-Play-Mode Options, mirrored where a domain reload cannot reach them.
+        //
+        // Every field above is a plain static, so a mid-session domain reload — a recompile, a package
+        // import — wipes the whole session at once. Options are NOT statics: they are project settings, so
+        // the forced DisableDomainReload | DisableSceneReload survives the reload that erased the record of
+        // what preceded it. That asymmetry is the bug. Two things then go wrong, and the second is worse:
+        // End() reports "no prepared session" and returns without restoring, and the NEXT Begin() saves the
+        // forced values as if they were the operator's own, cementing them permanently. Measured in a live
+        // editor: options forced on, _optionsOverridden false, _savedOptions None — the originals gone.
+        //
+        // SessionState is the right shelf. It outlives a domain reload and dies with the editor, which is
+        // exactly a play session's lifetime; EditorPrefs would outlive the editor too and let a record from
+        // a crashed session clobber a later one's genuine settings.
+        private const string OptionsKey = "Ryan6Vrc.RenderThumbnailPlay.savedEnterPlayModeOptions";
+
         // Force Enter-Play-Mode Options to both-reload-disabled for the session, saving the operator's
         // originals for End/AbortBegin to put back. Called once per Begin, before End.
         private static void OverrideEnterPlayModeOptions()
         {
+            // Adopt a surviving record rather than overwrite it. Reached when a domain reload cleared the
+            // statics while an override was still in force: the values readable now are OUR forced ones, and
+            // saving those is what turns a recoverable reload into a permanent settings change.
+            if (!_optionsOverridden && LoadSavedOptions()) { ApplyForcedOptions(); return; }
+
             _savedOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;
             _savedOptions = EditorSettings.enterPlayModeOptions;
             _optionsOverridden = true;
+            SessionState.SetString(OptionsKey, (_savedOptionsEnabled ? "1" : "0") + "|" + (int)_savedOptions);
+            ApplyForcedOptions();
+        }
+
+        private static void ApplyForcedOptions()
+        {
             EditorSettings.enterPlayModeOptionsEnabled = true;
             EditorSettings.enterPlayModeOptions =
                 EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
         }
 
+        // Rehydrate _savedOptions* from SessionState. True iff a record was there and parsed; a malformed one
+        // is dropped rather than half-applied, since restoring half a settings pair is worse than refusing to.
+        private static bool LoadSavedOptions()
+        {
+            var raw = SessionState.GetString(OptionsKey, "");
+            if (string.IsNullOrEmpty(raw)) return false;
+            var parts = raw.Split('|');
+            int opts;
+            if (parts.Length != 2 || !int.TryParse(parts[1], out opts)) { SessionState.EraseString(OptionsKey); return false; }
+            _savedOptionsEnabled = parts[0] == "1";
+            _savedOptions = (EnterPlayModeOptions)opts;
+            _optionsOverridden = true;
+            return true;
+        }
+
         private static void RestoreEnterPlayModeOptions()
         {
-            if (!_optionsOverridden) return;
+            if (!_optionsOverridden && !LoadSavedOptions()) return;
             EditorSettings.enterPlayModeOptionsEnabled = _savedOptionsEnabled;
             EditorSettings.enterPlayModeOptions = _savedOptions;
             _optionsOverridden = false;
+            SessionState.EraseString(OptionsKey);
         }
 
         /// <summary>
@@ -473,6 +515,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// </summary>
         public static string End()
         {
+            // No session in these statics, but a saved-options record outlived one: a domain reload happened
+            // mid-session. The scene setup went with it and cannot be recovered, so this is still a failure —
+            // but the operator's Enter-Play-Mode Options CAN be put back, and putting them back here is what
+            // stops the next Begin() from adopting the forced values as their originals. Say which half was
+            // salvaged, so "End failed" is not read as "nothing was restored".
+            if (!_prepared && !Application.isPlaying && LoadSavedOptions())
+            {
+                RestoreEnterPlayModeOptions();
+                return Fail("no prepared session — a domain reload (recompile/package import) ended it mid-session. "
+                    + "Enter-Play-Mode Options restored from the out-of-domain record; the scene setup snapshot did "
+                    + "NOT survive, so reopen your scene(s) by hand before the next Begin()");
+            }
             if (!_prepared) return Fail("no prepared session");
             if (Application.isPlaying) return Fail("still in play mode — exit play (manage_editor stop) before End()");
             if (_shootUpdate != null) { EditorApplication.update -= _shootUpdate; _shootUpdate = null; }

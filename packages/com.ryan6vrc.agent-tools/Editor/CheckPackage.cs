@@ -62,8 +62,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (!path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)) continue;
                 ScanPrefabAsset(path, r);
             }
+            // A model asset gets BOTH scans, matching VerifySelection's FBX branch. It used to get only the
+            // remap probe, so an FBX carrying a broken material reference on its own renderers passed here and
+            // FAILed under VerifySelection on the identical asset — a false PASS, and the divergence was
+            // invisible because neither mode said which scans it had run.
             foreach (var guid in AssetDatabase.FindAssets("t:Model", new[] { assetFolderPath }))
-                ScanModelRemap(AssetDatabase.GUIDToAssetPath(guid), r);
+            {
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                var model = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+                if (model != null) { r.Scanned++; ScanHierarchy(model, path, r); }
+                ScanModelRemap(path, r);
+            }
             return Finish(r, Leaf(assetFolderPath));
         }
 
