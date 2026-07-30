@@ -261,13 +261,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var child in sm.stateMachines)
                 {
                     if (child.stateMachine == null) continue;
-                    // A sub-machine can carry OUTGOING transitions (fired when it reaches Exit) that the schema
-                    // has no "from sub-machine" vocabulary for. CountOrphans walks them (so they leave no orphan
-                    // signal), but the emitted YAML would drop them — refuse (named + located) instead.
+                    // A sub-machine's OUTGOING transitions, fired when it reaches Exit. They hang off THIS
+                    // machine, so they decode against this machine's addressing scope like the entry ladder's do.
+                    var subModel = new SubMachine { Name = child.stateMachine.name, Machine = DecodeMachine(child.stateMachine, isRoot: false) };
                     var smt = sm.GetStateMachineTransitions(child.stateMachine);
-                    if (smt != null && smt.Length > 0)
-                        _result.Refusals.Add($"state-machine '{PathLabel(sm)}': sub-machine '{child.stateMachine.name}' has {smt.Length} outgoing state-machine transition(s) (on Exit) — 'from sub-machine' transitions are out of vocabulary");
-                    model.Machines.Add(new SubMachine { Name = child.stateMachine.name, Machine = DecodeMachine(child.stateMachine, isRoot: false) });
+                    if (smt != null)
+                        foreach (var t in smt)
+                            if (t != null)
+                                subModel.OnExit.Add(DecodeSubMachineExitTransition(t, sm, child.stateMachine));
+                    model.Machines.Add(subModel);
                 }
 
                 // Default: a DIRECT-state default is authoritative; a sub-machine default is the trailing
@@ -491,8 +493,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             //
             // Each `*Aware` set names the scalar properties the decode path consumes, refuses, or deliberately
             // ignores as editor-cosmetic. A property here is NOT swept; everything else non-default is refused.
-            // NOT listed (⇒ swept ⇒ refused when set): m_CycleOffset, m_IKOnFeet, m_Tag (state); m_TransitionOffset
-            // (transition) — the four this census catches.
+            // NOT listed (⇒ swept ⇒ refused when set): m_CycleOffset, m_IKOnFeet, m_Tag (state) — the three this
+            // census catches. m_TransitionOffset was a fourth until the schema grew `offset:` to bind it.
             //
             // SCOPE (what the census actually covers — the rest stays a hand-allowlist): the TOP-LEVEL scalar
             // fields of AnimatorState, state/any/entry transitions, BlendTree, and the seven VRC SMB kinds.
@@ -525,8 +527,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private static readonly HashSet<string> StateTransitionAware = new HashSet<string>
             {
                 "m_Conditions", "m_DstState", "m_DstStateMachine", "m_TransitionDuration", "m_ExitTime",
-                "m_HasExitTime", "m_HasFixedDuration", "m_InterruptionSource", "m_OrderedInterruption",
-                "m_Mute", "m_Solo", "m_CanTransitionToSelf", "m_IsExit", "m_Name",
+                "m_TransitionOffset", "m_HasExitTime", "m_HasFixedDuration", "m_InterruptionSource",
+                "m_OrderedInterruption", "m_Mute", "m_Solo", "m_CanTransitionToSelf", "m_IsExit", "m_Name",
             };
 
             private static readonly HashSet<string> EntryTransitionAware = new HashSet<string>
@@ -579,7 +581,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         string n = it.name;
                         if (UniversalIgnore.Contains(n) || aware.Contains(n)) continue;
                         if (NonDefaultScalar(it, out string shown))
-                            _result.Refusals.Add($"{kind} {loc}: field '{Strip(n)}'{shown} is out of vocabulary — no schema field binds it (silently dropped)");
+                            // Says what IS true, not what was narrowly avoided: the old tail read "(silently
+                            // dropped)", which describes the counterfactual this census exists to prevent and
+                            // lands for a beat as a report that the loss already happened. Nothing was dropped —
+                            // the run refuses and writes no yaml.
+                            _result.Refusals.Add($"{kind} {loc}: field '{Strip(n)}'{shown} is set, and no schema "
+                                + "field binds it — a decompile would lose it, so this run refuses instead");
                     }
                 }
             }
@@ -638,6 +645,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 tr.When = DecodeConditions(t.conditions, loc);
                 tr.ExitTime = t.hasExitTime ? t.exitTime : (float?)null;
+                tr.Offset = t.offset != 0f ? t.offset : (float?)null;
                 tr.Duration = t.duration != 0f ? t.duration : (float?)null;
                 tr.FixedDuration = t.hasFixedDuration ? (bool?)null : false;
                 tr.Interruption = t.interruptionSource == TransitionInterruptionSource.None
@@ -659,6 +667,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (t.mute || t.solo)
                     _result.Refusals.Add($"transition from {loc}: entry transition carries mute/solo, which the entry ladder cannot express");
                 SetTarget(tr, t, srcSm, loc);
+                tr.When = DecodeConditions(t.conditions, loc);
+                CompletenessSweep(t, EntryTransitionAware, "transition from", loc);
+                return tr;
+            }
+
+            // A sub-machine's outgoing (on-Exit) transition. Same AnimatorTransition type as an entry rung, so
+            // the same fields and the same mute/solo refusal apply; `srcSm` is the PARENT, which is both the
+            // machine the transition hangs off and the scope its target resolves in.
+            private Transition DecodeSubMachineExitTransition(AnimatorTransition t, AnimatorStateMachine parentSm,
+                                                              AnimatorStateMachine childSm)
+            {
+                var tr = new Transition();
+                string loc = "onExit of sub-machine '" + childSm.name + "' in '" + PathLabel(parentSm) + "'";
+                if (t.mute || t.solo)
+                    _result.Refusals.Add($"transition from {loc}: carries mute/solo, which an onExit list cannot express");
+                SetTarget(tr, t, parentSm, loc);
                 tr.When = DecodeConditions(t.conditions, loc);
                 CompletenessSweep(t, EntryTransitionAware, "transition from", loc);
                 return tr;
@@ -1152,24 +1176,57 @@ namespace Ryan6Vrc.AvatarTools.Editor
             //   - INTERLEAVING: a change-type appears after a later-bucket type (e.g. Set, Copy, Set). Re-emit
             //     hoists all Sets ahead of the Copy, changing what the Copy reads.
             //   - DUPLICATE: the same (type, name) appears twice. The name-keyed bucket keeps only the last.
+            //
+            // A duplicate is only a LOSS for the types where the earlier write still shows through:
+            //   Set and Copy are plain writes to the destination, so a later one supersedes the earlier
+            //     completely and the bucket's last-write-wins IS the source list's outcome. Tolerated with a
+            //     Note naming the dropped write, so the recompile is behaviour-preserving but not byte-identical.
+            //   Add accumulates — two Adds of 1 move the parameter by 2, the bucket by 1. Random re-rolls, and
+            //     for a bool destination carries its own `chance`, so which roll survives is not "the last one".
+            //     Both stay Refusals: a name-keyed bucket genuinely cannot hold them.
+            // The tolerance is gated on the driver NOT being interleaved. With interleaving, an intervening op
+            // can READ the destination between the two writes (Set A, Copy B←A, Set A), so the earlier write is
+            // observable and superseding it is wrong. An interleaved driver already refuses on that ground, so
+            // the gate makes this function's reasoning stand on its own rather than lean on the other refusal.
             private void DetectDriverOrderLoss(VRC_AvatarParameterDriver drv, string loc)
             {
                 if (drv.parameters == null || drv.parameters.Count == 0) return;
                 int prev = -1;
                 bool interleaved = false;
                 var seen = new HashSet<(Driver.ChangeType, string)>();
+                var superseded = new List<Driver.Parameter>();
                 foreach (var p in drv.parameters)
                 {
                     int bucket = DriverBucket(p.type);
                     if (bucket < prev) interleaved = true;
                     prev = bucket;
-                    if (!seen.Add((p.type, p.name)))
+                    if (seen.Add((p.type, p.name))) continue;
+                    if (p.type == Driver.ChangeType.Add || p.type == Driver.ChangeType.Random)
                         _result.Refusals.Add(
-                            $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' — the schema's name-keyed buckets keep only the last write");
+                            $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' — {p.type} does not " +
+                            "reduce to its last write (Add accumulates, Random re-rolls), and the schema's " +
+                            "name-keyed buckets can hold only one entry per parameter");
+                    else superseded.Add(p);
                 }
                 if (interleaved)
+                {
                     _result.Refusals.Add(
                         $"behaviour on {loc}: driver operations interleave change-types (Set/Add/Copy/Random) — the schema re-applies them grouped by type, which would change their apply order");
+                    // A Set/Copy duplicate is only redundant because nothing reads the destination between the
+                    // two writes. Interleaving is exactly the case where something can, so these lose their
+                    // tolerance here and are refused with the reason named — never dropped in silence because
+                    // the interleaving refusal happens to be failing the run anyway.
+                    foreach (var p in superseded)
+                        _result.Refusals.Add(
+                            $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' in an INTERLEAVED " +
+                            "list — an operation between the two writes can read the destination, so the earlier " +
+                            "write is observable and the schema's last-write-wins bucket would change behaviour");
+                }
+                else
+                    foreach (var p in superseded)
+                        _result.Notes.Add(
+                            $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' — kept the last " +
+                            "write and dropped the earlier one, which the later write already superseded in full");
             }
 
             private static int DriverBucket(Driver.ChangeType t)

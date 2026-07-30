@@ -68,6 +68,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             int layerCount = controller.layers.Length;
             int paramCount = controller.parameters.Length;
             int stateCount = 0;
+            bool sawOffset = false;   // any transition carried a non-zero offset ⇒ emit the legend once
 
             // Recover the dangling-motion GUIDs from the controller YAML (the only handle a broken motion
             // leaves behind — no C# API exposes it), each tagged with the fileID of the block that holds
@@ -142,8 +143,17 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 if (walkSm == null) { bodySb.Append("_(no state machine)_\n"); continue; }
 
-                WalkStateMachine(walkSm, "", bodySb, controller, layer, synced, danglingGuids, visited, ref stateCount);
+                WalkStateMachine(walkSm, "", bodySb, controller, layer, synced, danglingGuids, visited, ref stateCount, ref sawOffset);
             }
+
+            // Said once, and only when some edge carries an offset — the per-edge `offset=` value is the fact,
+            // this is why it decides anything. Placed after the layers so it reads as a note on what was just
+            // rendered rather than a header the reader meets before any offset appears.
+            if (sawOffset)
+                bodySb.Append("\n_A transition `offset=v` starts the destination state's motion at normalized "
+                    + "time v of its own clip, not at the start. Two states holding the SAME clip at speed=0 and "
+                    + "differing only in their incoming offset are therefore two distinct POSES — a pose picker, "
+                    + "not a redundant layer — and zeroing the offset collapses them onto one pose._\n");
 
             // ---- Broken-motion split (the walk has now recorded every live fileID) ----
             var liveGuids = new HashSet<string>();
@@ -180,14 +190,14 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static void WalkStateMachine(AnimatorStateMachine sm, string prefix, StringBuilder sb,
             AnimatorController controller, AnimatorControllerLayer layer, bool synced,
-            List<string> danglingGuids, HashSet<long> visited, ref int stateCount)
+            List<string> danglingGuids, HashSet<long> visited, ref int stateCount, ref bool sawOffset)
         {
             var def = sm.defaultState;
 
             // AnyState / Entry ladders are per-state-machine — render them at this level's head,
             // scoped by the sub-SM path so the reader can tell which level a ladder governs.
             foreach (var t in sm.anyStateTransitions)
-                sb.Append("- ").Append(prefix).Append("AnyState ").Append(RenderTransition(t)).Append('\n');
+                sb.Append("- ").Append(prefix).Append("AnyState ").Append(RenderTransition(t, ref sawOffset)).Append('\n');
             foreach (var t in sm.entryTransitions)
                 sb.Append("- ").Append(prefix).Append("Entry ").Append(RenderEntryTransition(t)).Append('\n');
             if (def != null)
@@ -241,13 +251,13 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 // This state's own transition ladder.
                 foreach (var t in st.transitions)
-                    sb.Append("- → ").Append(RenderTransition(t)).Append('\n');
+                    sb.Append("- → ").Append(RenderTransition(t, ref sawOffset)).Append('\n');
             }
 
             foreach (var child in sm.stateMachines)
             {
                 if (child.stateMachine == null) continue;
-                WalkStateMachine(child.stateMachine, prefix + child.stateMachine.name + "/", sb, controller, layer, synced, danglingGuids, visited, ref stateCount);
+                WalkStateMachine(child.stateMachine, prefix + child.stateMachine.name + "/", sb, controller, layer, synced, danglingGuids, visited, ref stateCount, ref sawOffset);
             }
         }
 
@@ -337,13 +347,19 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Transitions ------------------------------------------------------------------------
 
-        private static string RenderTransition(AnimatorStateTransition t)
+        // A non-zero transition offset is rendered because it can be the ONLY thing distinguishing two states:
+        // a pose-picker layer holds one clip at speed=0 in several states and enters each at a different
+        // normalized time, so without the offset those states' blocks read byte-identical and the layer reads
+        // redundant. The section legend (AppendOffsetLegend) explains it once, when any edge carries one.
+        private static string RenderTransition(AnimatorStateTransition t, ref bool sawOffset)
         {
             string dest = t.isExit ? "Exit"
                         : t.destinationState != null ? "`" + t.destinationState.name + "`"
                         : t.destinationStateMachine != null ? "`" + t.destinationStateMachine.name + "` (state machine)"
                         : "(none)";
-            return dest + " " + Conditions(t.conditions, t.hasExitTime);
+            string offset = "";
+            if (Math.Abs(t.offset) > 1e-6f) { offset = " offset=" + F(t.offset); sawOffset = true; }
+            return dest + " " + Conditions(t.conditions, t.hasExitTime) + offset;
         }
 
         private static string RenderEntryTransition(AnimatorTransition t)

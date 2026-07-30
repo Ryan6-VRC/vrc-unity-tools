@@ -676,19 +676,24 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- Review-2 #1: a sub-machine's OUTGOING (on-Exit) transition -> a located refusal ------------------
+    // ---- A sub-machine's OUTGOING (on-Exit) transition -> decoded onto the PARENT's model ----------------
+    // Formerly a located refusal (Review-2 #1). The schema now carries these as the sub-machine's onExit list;
+    // what this pins is that the edge lands on the parent's own SubMachine entry, since that is the machine it
+    // hangs off and the scope its target resolves in — decoding it onto the child would round-trip wrong.
 
     [Test]
-    public void Walk_SubMachine_Outgoing_Transition_Refuses()
+    public void Walk_SubMachine_Outgoing_Transition_Decodes_Onto_The_Parent()
     {
         var c = new AnimatorController { name = "SmTrans_Fx" };
         c.AddLayer("L");
         var root = c.layers[0].stateMachine;
         var sub = root.AddStateMachine("Sub");
-        root.AddStateMachineExitTransition(sub); // a transition OUT of Sub — no 'from sub-machine' vocabulary
+        root.AddStateMachineExitTransition(sub);
         var w = ControllerDecompile.Walk(c);
-        Assert.IsTrue(w.Refusals.Any(r => r.Contains("from sub-machine") && r.Contains("Sub")),
-            "an outgoing sub-machine transition -> located refusal");
+        Assert.IsEmpty(w.Refusals, "an outgoing sub-machine transition is now in vocabulary");
+        var subModel = w.Doc.Layers[0].Root.Machines.Single(m => m.Name == "Sub");
+        Assert.AreEqual(1, subModel.OnExit.Count, "the edge decodes onto the parent's SubMachine entry");
+        Assert.IsTrue(subModel.OnExit[0].ToExit, "an exit transition decodes as 'to: Exit'");
         Object.DestroyImmediate(c);
     }
 
@@ -825,8 +830,11 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
+    // Formerly a census refusal. m_TransitionOffset is now bound by the schema's `offset:`, so what has to be
+    // pinned is the opposite: it decodes to the value AND stops being swept. A widen that bound the field but
+    // left it out of StateTransitionAware would refuse its own freshly-emitted output.
     [Test]
-    public void Walk_Transition_Offset_Refuses()
+    public void Walk_Transition_Offset_Decodes_And_Is_No_Longer_Swept()
     {
         var c = new AnimatorController { name = "TransOff_Fx" };
         c.AddLayer("L");
@@ -836,8 +844,25 @@ public class ControllerDecompileTests
         var tr = s.AddTransition(t);
         tr.offset = 0.3f;
         var w = ControllerDecompile.Walk(c);
-        Assert.IsTrue(w.Refusals.Any(r => r.Contains("Offset") && r.Contains("state 'S'")),
-            "a non-default transition offset -> census refusal");
+        Assert.IsEmpty(w.Refusals, "a non-default transition offset is now in vocabulary");
+        var decoded = w.Doc.Layers[0].Root.States.Single(x => x.Name == "S").Transitions[0];
+        Assert.That(decoded.Offset, Is.EqualTo(0.3f).Within(1e-5f));
+        Object.DestroyImmediate(c);
+    }
+
+    // A zero offset must stay ABSENT from the model, not decode as an explicit 0 — the emitter only writes
+    // `offset:` when the field is set, so a decoded 0 would add a line to every transition in every vendor
+    // controller and churn the whole corpus's yaml.
+    [Test]
+    public void Walk_Transition_Zero_Offset_Stays_Absent()
+    {
+        var c = new AnimatorController { name = "TransOffZero_Fx" };
+        c.AddLayer("L");
+        var sm = c.layers[0].stateMachine;
+        var s = sm.AddState("S");
+        s.AddTransition(sm.AddState("T"));
+        var w = ControllerDecompile.Walk(c);
+        Assert.IsNull(w.Doc.Layers[0].Root.States.Single(x => x.Name == "S").Transitions[0].Offset);
         Object.DestroyImmediate(c);
     }
 

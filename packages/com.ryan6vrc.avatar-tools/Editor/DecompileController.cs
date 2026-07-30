@@ -63,7 +63,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // A refusal is fail-loud: name every out-of-vocabulary construct, write no .yaml.
             if (walk.Refusals.Count > 0)
-                return Fail(failLabel, controllerPath, string.Join("  ", walk.Refusals));
+                return Fail(failLabel, controllerPath, JoinRefusals(walk.Refusals));
 
             var doc = walk.Doc;
 
@@ -131,6 +131,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
             else foreach (var n in walk.Notes) sb.Append("- ").Append(n).Append('\n');
 
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// Join the walk's refusals into one verdict, collapsing repeats to <c>… (×N)</c> in first-seen order.
+        /// One offending construct yields one refusal, and a vendor controller repeats a construct freely — a
+        /// single real FX layer produced ten refusals of which two pairs were textually identical, so the
+        /// verdict was mostly the same sentence three times. Collapsing costs the reader nothing: identical
+        /// strings were already indistinguishable, and the count is the fact the repetition was standing in for.
+        ///
+        /// <para>What this does NOT recover: a refusal's location can be identical for genuinely different
+        /// offenders, because a layer root renders as <c>(root)</c> on every layer. Two refusals from two layers
+        /// can therefore read the same and collapse into one row. That is a gap in how refusals are LOCATED, not
+        /// one this join introduces — it neither adds nor removes information the un-joined verdict carried.</para>
+        /// </summary>
+        private static string JoinRefusals(System.Collections.Generic.List<string> refusals)
+        {
+            var order = new System.Collections.Generic.List<string>();
+            var counts = new System.Collections.Generic.Dictionary<string, int>();
+            foreach (var r in refusals)
+            {
+                if (!counts.ContainsKey(r)) { counts[r] = 0; order.Add(r); }
+                counts[r]++;
+            }
+            return string.Join("  ", order.Select(r => counts[r] > 1 ? r + " (×" + counts[r] + ")" : r));
         }
 
         /// <summary>Refusal tail, mirror of <see cref="CompileController"/>'s: the house grammar —
