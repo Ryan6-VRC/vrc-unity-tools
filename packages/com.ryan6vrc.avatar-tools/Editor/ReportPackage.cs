@@ -229,10 +229,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── Prefab scan: constraints + the non-SDK component census ───────────────────────────
 
         /// <summary>
-        /// Namespace roots that are Unity or VRChat-SDK infrastructure. A cheap first filter only —
-        /// <see cref="IsFromSdkAssembly"/> is the authority, because a namespace root is neither necessary
-        /// (the SDK ships global-namespace components, which no namespace rule can reach) nor sufficient
-        /// (a vendor is free to author under any root it likes). VRCSDK2 is the legacy SDK.
+        /// Namespace roots that are Unity or VRChat-SDK infrastructure — a cheap first filter that settles
+        /// the overwhelming majority (Transform, the renderers) without touching reflection.
+        /// <see cref="IsFromSdkAssembly"/> is the authority for everything this leaves, because a namespace
+        /// root is neither necessary (the SDK ships global-namespace components, which no namespace rule can
+        /// reach) nor sufficient (a vendor is free to author under any root it likes). VRCSDK2 is the legacy
+        /// SDK.
+        ///
+        /// <para>Read the ordering precisely, because it bounds "authority": a root listed here excludes
+        /// regardless of assembly, so for these six names the assembly is never consulted and a vendor
+        /// component authored under <c>VRC.*</c> or <c>Unity.*</c> would vanish from the census. That is a
+        /// squatting bet, not a derivation. No installed package takes it, and consulting the assembly first
+        /// always would pay reflection on every component to defend a case we have never seen.</para>
         /// </summary>
         private static readonly HashSet<string> SdkNamespaceRoots = new HashSet<string>(StringComparer.Ordinal)
         {
@@ -247,21 +255,45 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// global-namespace type compiled into the SDK's own runtime assembly, so no namespace rule could
         /// exclude it — while excluding the <c>DG</c>/<c>Cysharp</c>/<c>System</c> namespace roots outright
         /// would have hidden a project's own types that merely share those roots.
+        ///
+        /// <para>NO ENTRY MAY SWALLOW A LONGER NON-SDK ASSEMBLY NAME. Matching is plain prefix, and a
+        /// wrongly-excluded framework does not merely go unlisted — it leaves
+        /// <see cref="ComposeToggleCaveat"/> asserting that nothing here compiles toggles at build.
+        /// <c>VRCFury</c> is the live collision, and the reason <c>VRC</c> is split into <c>VRC.</c> /
+        /// <c>VRCSDK</c> / <c>VRCCore</c>: VRCFury's runtime assembly is named exactly that, so a bare
+        /// <c>VRC</c> reaches it. Narrowing further is safe to attempt —
+        /// <c>IsSdkAssemblyName_still_reaches_every_real_sdk_assembly</c> enumerates the SDK side, so a cut
+        /// that hides an SDK assembly fails there rather than in a report. The residual bound: an entry can
+        /// still swallow a name extending it with a letter (a hypothetical <c>UnityEngineExtras</c>). No
+        /// installed package does, and a uniform letter-or-digit boundary rule is not available — it would
+        /// reject <c>VRCSDK3A</c>.</para>
         /// </summary>
         private static readonly string[] SdkAssemblyPrefixes =
         {
             "UnityEngine", "UnityEditor", "Unity.", "mscorlib", "netstandard", "System",
-            "VRC", "SDKBase", "UniTask", "DOTween",
+            "VRC.", "VRCSDK", "VRCCore", "SDKBase", "UniTask", "DOTween",
         };
+
+        /// <summary>
+        /// True when <paramref name="asmName"/> names engine, base-library, or VRChat-SDK code. Split from
+        /// <see cref="IsFromSdkAssembly"/> so the rule above is assertable on strings, which is the only way
+        /// to reach it: the collision is a property of assembly NAMES, and VRCFury's components are
+        /// <c>internal</c> in a non-auto-referenced assembly, so no <c>typeof()</c> in the test assembly can
+        /// name one.
+        /// </summary>
+        internal static bool IsSdkAssemblyName(string asmName)
+        {
+            if (string.IsNullOrEmpty(asmName)) return false;
+            foreach (var prefix in SdkAssemblyPrefixes)
+                if (asmName.StartsWith(prefix, StringComparison.Ordinal)) return true;
+            return false;
+        }
 
         /// <summary>True when <paramref name="t"/>'s assembly is engine, base-library, or VRChat-SDK code.</summary>
         internal static bool IsFromSdkAssembly(Type t)
         {
             if (t == null) return false;
-            var asmName = t.Assembly.GetName().Name ?? "";
-            foreach (var prefix in SdkAssemblyPrefixes)
-                if (asmName.StartsWith(prefix, StringComparison.Ordinal)) return true;
-            return false;
+            return IsSdkAssemblyName(t.Assembly.GetName().Name);
         }
 
         private const string NonSdkNote =
@@ -292,8 +324,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (t == null) return null;
             var ns = t.Namespace;
             int dot = ns == null ? -1 : ns.IndexOf('.');
-            // Namespace root first because it settles the overwhelming majority (Transform, the renderers)
-            // without touching reflection; the assembly check is the authority for everything it leaves.
+            // Namespace root first — see SdkNamespaceRoots for what that ordering concedes.
             if (ns != null && SdkNamespaceRoots.Contains(dot < 0 ? ns : ns.Substring(0, dot))) return null;
             if (IsFromSdkAssembly(t)) return null;
             return ns ?? t.Name;

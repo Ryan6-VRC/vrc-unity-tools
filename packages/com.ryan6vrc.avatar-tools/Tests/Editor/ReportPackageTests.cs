@@ -101,6 +101,60 @@ public class ReportPackageTests
         Assert.IsFalse(ReportPackage.IsFromSdkAssembly(null));
     }
 
+    // ── Assembly NAMES: the near-miss the type-level tests above structurally cannot reach ─────
+    // A bare "VRC" prefix classified VRCFury as SDK infrastructure — its runtime assembly is named
+    // exactly `VRCFury` — so a VRCFury-composed package censused to zero and togglesCaveat went on to
+    // claim nothing compiles toggles at build. VRCFury's components are `internal` in a
+    // non-auto-referenced assembly, so no typeof() here can witness it; the string door can.
+
+    [Test]
+    public void IsSdkAssemblyName_does_not_swallow_VRCFury()
+    {
+        Assert.IsFalse(ReportPackage.IsSdkAssemblyName("VRCFury"), "the runtime assembly VRCFury components live in");
+        Assert.IsFalse(ReportPackage.IsSdkAssemblyName("VRCFury-Editor-Avatars"));
+        Assert.IsFalse(ReportPackage.IsSdkAssemblyName("VRCFury-Editor-Common"));
+        Assert.IsFalse(ReportPackage.IsSdkAssemblyName("VRCFury-Tests"));
+        Assert.IsFalse(ReportPackage.IsSdkAssemblyName("com.vrcfury.api"), "lowercase: no prefix reaches it either");
+    }
+
+    [Test]
+    public void IsSdkAssemblyName_still_reaches_every_real_sdk_assembly()
+    {
+        // Enumerated from the installed SDK rather than invented, so narrowing the prefixes cannot
+        // quietly drop one: com.vrchat.{avatars,base} asmdefs plus their precompiled DLLs.
+        foreach (var name in new[]
+        {
+            "VRC.SDK3A", "VRC.SDK3A.Editor", "VRC.SDKBase", "VRC.SDKBase.Editor",
+            "VRC.SDKBase.Editor.BuildPipeline", "VRC.ExampleCentral.Editor", "VRC.Dynamics",
+            "VRC.SDK3.Dynamics.PhysBone", "VRC.SDK3.Dynamics.Contact", "VRC.SDK3.Dynamics.Constraint",
+            "VRC.Utility", "VRCSDK3A", "VRCSDK3A-Editor", "VRCSDKBase", "VRCSDKBase-Editor",
+            "VRCCore-Standalone", "VRCCore-Editor", "SDKBase-Legacy",
+            "UnityEngine", "UnityEngine.CoreModule", "UnityEditor", "Unity.TextMeshPro",
+            "mscorlib", "netstandard", "System", "System.Core", "UniTask", "UniTask.Linq", "DOTween",
+        })
+            Assert.IsTrue(ReportPackage.IsSdkAssemblyName(name), "must still read as SDK: " + name);
+    }
+
+    [Test]
+    public void IsSdkAssemblyName_leaves_the_frameworks_the_census_exists_to_name()
+    {
+        foreach (var name in new[]
+        {
+            "nadena.dev.modular-avatar.core", "nadena.dev.ndmf", "nadena.dev.ndmf.vrchat",
+            "d4rkpl4y3r.d4rkavataroptimizer.Editor", "dev.limitex.avatar-compressor",
+            "dev.vrlabs.vrcsdkplus", "lyuma.av3emulator", "vrchat.blackstartx.gesture-manager",
+            "lilToon.Editor", "Poi.Tools", "ThryAssemblyDefinition",
+        })
+            Assert.IsFalse(ReportPackage.IsSdkAssemblyName(name), "must survive to the census: " + name);
+    }
+
+    [Test]
+    public void IsSdkAssemblyName_handles_the_empty_cases()
+    {
+        Assert.IsFalse(ReportPackage.IsSdkAssemblyName(null));
+        Assert.IsFalse(ReportPackage.IsSdkAssemblyName(""));
+    }
+
     // ── ComposeToggleCaveat: named vs unknown vs absent ────────────────────────────────────────
 
     [Test]
