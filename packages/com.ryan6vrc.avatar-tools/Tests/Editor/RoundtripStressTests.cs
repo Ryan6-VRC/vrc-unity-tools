@@ -233,9 +233,10 @@ namespace Ryan6Vrc.AvatarTools.Tests
             Assert.IsTrue(root2.GetStateMachineTransitions(sub2)[0].isExit);
         }
 
-        // A repeated driver Set is behaviourally redundant — the later write supersedes the earlier one in
-        // full — so it is tolerated with a Note rather than refused. Add is NOT: two Adds move a parameter
-        // twice, and a name-keyed bucket can only hold one. That asymmetry is the whole of the widen.
+        // A repeated driver write is refused for EVERY change type, including Set, whose later write plainly
+        // supersedes the earlier one. There is no Set/Add asymmetry and no widen here — the rationale lives at
+        // the call site (ControllerDecompile.DetectDriverOrderLoss): the schema CAN represent such a driver, so
+        // the refusal is not about representability but about refusing to NORMALIZE someone else's controller.
         [Test]
         public void Repeated_driver_Set_refuses_even_though_the_later_write_supersedes()
         {

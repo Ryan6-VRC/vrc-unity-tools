@@ -180,6 +180,30 @@ public class ReportGimmickChainSubtreeTests
         StringAssert.Contains("bones=2 skinned=1 hosting=0", report);
     }
 
+    // Same rig, but the digest is aimed at the CONTAINER — the one invocation where no descriptor is an
+    // ancestor of the report root, so the fallback is live. Resolving the scope once from the report root
+    // landed on the container here and swept every co-hosted avatar, letting AvatarB's stale renderer inflate
+    // AvatarA's chain to skinned=2 while the legend promised the enclosing avatar. Scoping from the ROW's own
+    // physbone finds AvatarA's descriptor whichever level the report is aimed at.
+    [Test]
+    public void ChainSubtree_ReportRootAboveEveryDescriptor_StillScopesToTheRowsOwnAvatar()
+    {
+        var staging = new GameObject("Staging");
+
+        var avatarA = Child(staging, "AvatarA");
+        avatarA.AddComponent<VRCAvatarDescriptor>();
+        var chain = Chain(avatarA, "Hair", 2);
+        PhysBone(Child(avatarA, "PB_hair"), chain);
+        Skin(Child(avatarA, "BodyA"), chain);
+
+        var avatarB = Child(staging, "AvatarB");
+        avatarB.AddComponent<VRCAvatarDescriptor>();
+        Skin(Child(avatarB, "BodyB"), chain.GetChild(0));
+
+        string report = ReadReport("Staging");                 // the container, not the avatar
+        StringAssert.Contains("bones=2 skinned=1 hosting=0", report);
+    }
+
     // rootTransform indirection: the set starts at the target, so the host carrying the component is not in
     // it. Counting from the host instead would silently report the wrong subtree for every indirected chain.
     [Test]

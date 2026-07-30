@@ -96,7 +96,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Header count line is emitted AFTER the tier-1 tables/observations run, because `other` is only
             // known once AppendOther has walked the subtree — so build the digest body first, then prepend.
             AppendContacts(body, senders, receivers);
-            AppendPhysBones(body, physbones, colliders, WeightScope(root));
+            AppendPhysBones(body, physbones, colliders, root);
             AppendConstraints(body, constraintRows);
             var applyDuringUploadHosts = AppendVrcFury(body, fury);
             int obsCount = AppendObservations(body, constraintRows, applyDuringUploadHosts, physbones, root);
@@ -158,13 +158,18 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ----- PhysBones + collider companion (§5.2) ----------------------------------------------
 
         private static void AppendPhysBones(StringBuilder sb, VRCPhysBone[] bones, VRCPhysBoneCollider[] colliders,
-                                            Transform weightScope)
+                                            GameObject reportRoot)
         {
             sb.Append("\n## PhysBones\n\n");
             if (bones.Length == 0) sb.Append("_(none)_\n");
             else
             {
-                var skinned = SkinnedBones(weightScope); // swept once for the whole table, not per row
+                // Scope is resolved per ROW from the row's own physbone, memoized so rows sharing a scope share
+                // one sweep. Resolving once from the report ROOT is wrong wherever the root is not itself
+                // inside an avatar: aim the digest at a staging container and no descriptor is an ancestor, so
+                // every row falls back to the container — the scope WeightScope's own comment calls too wide —
+                // and a neighbour avatar's stale renderer inflates `skinned`.
+                var scopeCache = new Dictionary<Transform, HashSet<Transform>>();
                 sb.Append("| transform | rootTransform | parameter prefix | grab/pose | forces | immobile | flags | chain subtree |\n");
                 sb.Append("|---|---|---|---|---|---|---|---|\n");
                 // The walk is includeInactive, so the table lists components that are not running. `enabled`
@@ -181,9 +186,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                       .Append("enabled=").Append(b.enabled ? "1" : "0")
                       .Append(" active=").Append(b.gameObject.activeInHierarchy ? "1" : "0")
                       .Append(" isAnimated=").Append(b.isAnimated ? "1" : "0").Append(" resetWhenDisabled=").Append(b.resetWhenDisabled ? "1" : "0").Append(" | ")
-                      .Append(ChainSubtreeCell(b, skinned)).Append(" |\n");
+                      .Append(ChainSubtreeCell(b, SkinnedBonesFor(b, reportRoot, scopeCache))).Append(" |\n");
 
-                sb.Append("\n_`chain subtree` = the row's `rootTransform` (else its own transform) and every descendant: `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept over the enclosing avatar, so a mesh outside the reported subtree still counts), `hosting` how many carry a component besides Transform and this row's own physbone. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside its subtree (a constraint reading it as a source) reads all-zero while load-bearing. A nonzero is an upper bound — exclusions the component declares (`ignoreTransforms`) are not subtracted, so the set is the chain's hierarchy reach, not a claim about which bones it moves._\n");
+                sb.Append("\n_`chain subtree` = the row's `rootTransform` (else its own transform) and every descendant: `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept over the avatar enclosing THAT ROW's physbone, so a mesh outside the reported subtree still counts while a co-hosted neighbour avatar's does not; a row with no enclosing avatar descriptor falls back to its outermost ancestor), `hosting` how many carry a component besides Transform and this row's own physbone. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside its subtree (a constraint reading it as a source) reads all-zero while load-bearing. A nonzero is an upper bound — exclusions the component declares (`ignoreTransforms`) are not subtracted, so the set is the chain's hierarchy reach, not a claim about which bones it moves._\n");
             }
 
             // Colliders are ingredients, not behaviour — a minimal companion table.
@@ -741,10 +746,24 @@ namespace Ryan6Vrc.AgentTools.Editor
         // the default overload skips inactive objects — it would silently fall back to the container for
         // exactly the avatars most likely to be sharing one. No descriptor at all ⇒ a bare rig or prop, whose
         // outermost ancestor is the only scope available.
-        private static Transform WeightScope(GameObject root)
+        private static Transform WeightScope(GameObject from)
         {
-            var descriptor = root.GetComponentInParent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>(true);
-            return descriptor != null ? descriptor.transform : root.transform.root;
+            var descriptor = from.GetComponentInParent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>(true);
+            return descriptor != null ? descriptor.transform : from.transform.root;
+        }
+
+        // The row's scope and its swept membership set, memoized so N chains under one avatar pay one sweep.
+        // Resolved from the PHYSBONE, not the report root: a row's enclosing avatar is a fact about the chain,
+        // and the report root may sit above every descriptor (a staging container) or below one (an armature).
+        // The report root is passed only as the last-resort anchor for a scene with no descriptor anywhere.
+        private static HashSet<Transform> SkinnedBonesFor(VRCPhysBone b, GameObject reportRoot,
+                                                          Dictionary<Transform, HashSet<Transform>> cache)
+        {
+            var scope = WeightScope(b != null ? b.gameObject : reportRoot);
+            if (scope == null) scope = reportRoot.transform.root;
+            HashSet<Transform> set;
+            if (!cache.TryGetValue(scope, out set)) { set = SkinnedBones(scope); cache[scope] = set; }
+            return set;
         }
 
         // Every transform some SkinnedMeshRenderer under `scope` skins at nonzero weight. Walks the flat
