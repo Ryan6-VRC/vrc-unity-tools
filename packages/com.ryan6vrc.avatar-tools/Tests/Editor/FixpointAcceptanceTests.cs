@@ -27,49 +27,64 @@ using UnityEngine.TestTools;
 //     is an exact fixpoint: decode(C1) == decode(compile(decode(C1))), byte-for-byte, with Lint PASS on C1.
 //     This is the stronger, more meaningful theorem for a raw VENDOR controller: the substrate round-trips
 //     the owned form perfectly; only the raw→first-compile step canonicalizes constructs the schema cannot
-//     represent. For GoLocoBaseFullPoses (597 states / 180 sub-machines / 787 trees) that raw→owned step is
-//     PROVEN here to normalize EXACTLY two benign, documented categories and nothing the substrate models:
-//       (1) 4 genuinely-broken VENDOR motion refs (missing clip assets in this GoGo copy) — decoded
-//           `unresolved:true` then compiled to a null motion slot: the acknowledged
-//           unresolved-ref degradation, and
-//       (2) 1 Unity resolve-through defaultState (the getter resolves through a state-less machine to a
-//           nested default — not an authored field; see ControllerDecompile) canonicalized to an explicit
-//           representable default.
-//     Every other byte is identical and NO authored default changes — the diff-category assertions below
-//     prove it. Separately, the RAW C0 decode carries 3 entry-transition mute/solo refusals (editor debug
-//     residue the entry ladder can't express); they never reach the YAML (entry transitions don't emit
-//     mute/solo), so they are NOT a raw→owned byte diff — they are why the raw vendor decode is not
-//     refusal-free (the door refuses it), while the OWNED form is. GoLoco is in the passing [TestCase] set
-//     via the stabilized form.
+//     represent.
+//
+// THE STABILIZED ARM IS CONDITIONAL ON ITS FIXTURE, AND THE FIXTURE IS EXTERNAL. GoLocoBaseFullPoses ships
+// with the `gogoloco` package, which is NOT in this workspace's vpm-manifest.json; when it is absent the
+// GoLoco [TestCase] hits `Assert.Ignore`, and `AssertRawToOwnedIsOnlyDocumentedNormalization`,
+// `StripDefaultLines` and `DefaultCounts` never execute. So: in a project WITHOUT the package, the
+// stabilized (`clean=false`) path — and with it every claim below about raw→owned normalization — has NO
+// coverage at all; only the two tight-fixpoint fixtures run. The Ignore is deliberate, not a gap to close
+// with a hard failure: the vendor fixture is not license-clean to commit, so a third-party clone would fail
+// a test it cannot satisfy. Keep the machinery; do not delete it to match the fixture's absence.
+//
+// WHEN the GoLoco fixture DOES resolve, the raw→owned step is proven to normalize exactly two benign,
+// documented categories on that controller (597 states / 180 sub-machines / 787 trees) and nothing the
+// substrate models:
+//   (1) 4 genuinely-broken VENDOR motion refs (missing clip assets in that GoGo copy) — decoded
+//       `unresolved:true` then compiled to a null motion slot: the acknowledged unresolved-ref degradation, and
+//   (2) 1 Unity resolve-through defaultState (the getter resolves through a state-less machine to a nested
+//       default — not an authored field; see ControllerDecompile) canonicalized to an explicit representable
+//       default.
+// Every other byte is identical and NO authored default changes — the diff-category assertions below are what
+// prove it, for that fixture, on a run where it was present. Separately, the RAW C0 decode carries 3
+// entry-transition mute/solo refusals (editor debug residue the entry ladder can't express); they never reach
+// the YAML (entry transitions don't emit mute/solo), so they are NOT a raw→owned byte diff — they are why the
+// raw vendor decode is not refusal-free (the door refuses it) while the OWNED form is.
 //
 // Run headless via tools/run-editmode-tests.ps1 (or the Test Runner window / batchmode CI); not via MCP
 // run_tests — wrong venue (live editor). See docs/verify.md. The GrabProp/ContactTracker fixtures live
 // in-package under Tests/Editor/Fixtures (committed, controller + Animations with GUID-preserving .metas),
-// so those cases always run here; the GoLoco vendor fixture is external (not license-clean to commit) and
-// its case self-Ignores in a project lacking it.
+// so those two cases always run here.
 public class FixpointAcceptanceTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/fixpoint_tests";
 
     [SetUp]
-    public void SetUp()
-    {
-        Directory.CreateDirectory(TestRoot);
-        AssetDatabase.Refresh(); // register TestRoot as a valid asset folder so compile can nest under it
-    }
+    public void SetUp() => AnimatorTestHelpers.EnsureFolder(TestRoot);
 
+    // Per-test deletion is load-bearing, not hygiene: the refusal case below asserts a refusal writes NO
+    // .yaml, so the root has to start empty. No AssetDatabase.Refresh() on either side — CreateFolder
+    // registers the folder AND writes its .meta, and DeleteAsset closes its own import.
     [TearDown]
     public void TearDown()
     {
         if (AssetDatabase.IsValidFolder(TestRoot)) AssetDatabase.DeleteAsset(TestRoot);
         if (Directory.Exists(TestRoot)) Directory.Delete(TestRoot, true);
-        AssetDatabase.Refresh();
     }
 
     // clean=true  → also assert the TIGHT fixpoint decode(C0)==decode(C1).
     // clean=false → assert the raw→owned diff is ONLY the documented normalization: after removing `default:`
     //               lines (resolve-through canonicalization), the sole remaining diffs are exactly
     //               expectedBrokenRefs `unresolved`→empty child slots, and no authored default is lost.
+    //
+    // BOTH clean fixtures are load-bearing — neither construct census contains the other, so neither can be
+    // dropped as redundant. GrabProp is the sole witness for exit-time transitions (7× m_HasExitTime: 1;
+    // ContactTracker has none) and for default fixed duration (16× m_HasFixedDuration: 1, which decodes to an
+    // ABSENT `fixedDuration` key). ContactTracker is the sole witness for a blend tree, a nested sub-machine,
+    // Float Greater/Less compares, and m_HasFixedDuration: 0 throughout — the other arm of the same ternary in
+    // ControllerDecompile.DecodeStateTransition. Re-run the census (grep m_HasExitTime / m_HasFixedDuration /
+    // m_BlendType / m_ConditionMode over both .controller files) before proposing to drop either.
     [TestCase("Packages/com.ryan6vrc.avatar-tools/Tests/Editor/Fixtures/GestureTools/GrabProp/GrabProp_Fx.controller", "GrabProp_Fx", true, 0)]
     [TestCase("Packages/com.ryan6vrc.avatar-tools/Tests/Editor/Fixtures/GestureTools/ContactTracker/ContactTracker_Fx.controller", "ContactTracker_Fx", true, 0)]
     [TestCase("Packages/gogoloco/Runtime/GoGo/GoLoco/Controllers/Heavy_Controler/GoLocoBaseFullPoses.controller", "GoLocoBaseFullPoses", false, 4)]
@@ -197,42 +212,14 @@ public class FixpointAcceptanceTests
         StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
     }
 
-    // A `tangents: linear` curve must decompile back to the SAME map form (never silently downgrade to the
-    // bare-list form flat curves use), and that owned form must itself reach a byte-identical fixpoint on a
-    // second compile→decompile — the substrate doesn't just parse the marker once, it OWNS it durably.
-    [Test]
-    public void Roundtrip_LinearTangentCurve_SerializesAsMapForm_And_ReachesFixpoint()
-    {
-        const string yaml = @"schema: 1
-controller: LinearTangent_Fx
-basis: avatar-root
-clips:
-  c:
-    curves:
-      Prop/Renderer.enabled:
-        tangents: linear
-        keys: [[0, 0], [1, 1]]
-layers:
-  - name: L
-    states:
-      S:
-        motion: { clip: c }
-    default: S
-";
-        var c1 = FixpointOracle.CompileTo(TestRoot, yaml, "LinearTangent_Fx", "c1");
-        string yamlB = FixpointOracle.Decode(c1);
-        StringAssert.Contains("Prop/Renderer.enabled: { tangents: linear, keys: [ [0, 0], [1, 1] ] }", yamlB,
-            "the linear-tangent curve decompiles back to the map form, not the bare-list form flat curves use");
-
-        var c2 = FixpointOracle.CompileTo(TestRoot, yamlB, "LinearTangent_Fx", "c2");
-        string yamlC = FixpointOracle.Decode(c2);
-        Assert.AreEqual(yamlB, yamlC, "tight fixpoint: the owned linear-tangent form round-trips byte-for-byte");
-        StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
-    }
-
-    // Regression: a CONSTANT-value linear curve (both keys hold the same value) is `IsConstant` but must NOT
-    // collapse to `set:` — `set:` has no tangent marker, so downgrading it silently drops `tangents: linear`
-    // and breaks the fixpoint. It has to stay the map form like any other linear curve.
+    // TANGENT COVERAGE IS TWO CASES, ONE PER ClassifyTangents BRANCH (Linear and Stepped/Constant), and each is
+    // the CONSTANT-VALUE variant on purpose: a curve whose keys all hold the same value is `IsConstant`, which
+    // is the only input that can tempt the decoder into the `set:` short form — and `set:` carries no tangent
+    // marker, so that downgrade silently drops `tangents:` and breaks the fixpoint. The constant case therefore
+    // subsumes the non-constant one (it asserts the map form AND `DoesNotContain("set:")`), and key COUNT is
+    // irrelevant: ClassifyTangents/AllKeysMode loop every key uniformly, so a 3-key pulse walks the same branch
+    // as a 2-key one. Do not add a non-constant or longer-curve variant here; the emit-side tangent modes are
+    // ControllerEmitTests' Curve_Tangents_* pair.
     [Test]
     public void Roundtrip_ConstantValueLinearCurve_StaysMapForm_NotSet()
     {
@@ -261,30 +248,7 @@ layers:
 
         var c2 = FixpointOracle.CompileTo(TestRoot, yamlB, "ConstLinear_Fx", "c2");
         Assert.AreEqual(yamlB, FixpointOracle.Decode(c2), "tight fixpoint on the constant linear curve");
-    }
-
-    [Test]
-    public void Roundtrip_SteppedPulse_StaysMapForm()
-    {
-        const string yaml = @"schema: 1
-controller: SteppedPulse_Fx
-basis: avatar-root
-clips:
-  c:
-    curves:
-      Prop/Renderer.enabled: { tangents: stepped, keys: [ [0, 0], [0.25, 1], [0.5, 0] ] }
-layers:
-  - name: L
-    states:
-      S:
-        motion: { clip: c }
-    default: S
-";
-        var c1 = FixpointOracle.CompileTo(TestRoot, yaml, "SteppedPulse_Fx", "c1");
-        string yamlB = FixpointOracle.Decode(c1);
-        StringAssert.Contains("tangents: stepped", yamlB);
-        var c2 = FixpointOracle.CompileTo(TestRoot, yamlB, "SteppedPulse_Fx", "c2");
-        Assert.AreEqual(yamlB, FixpointOracle.Decode(c2), "tight fixpoint on the stepped curve");
+        StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
     }
 
     [Test]

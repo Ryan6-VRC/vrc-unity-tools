@@ -288,7 +288,10 @@ public class PlayGateCoreTests
     private static List<PlayGateCore.Offender> Offs(params string[] tags) =>
         tags.Select(t => new PlayGateCore.Offender { Tag = t }).ToList();
 
-    [Test] public void Overlay_zero_offenders_is_empty() => Assert.AreEqual("", PlayGateCore.OverlaySummaryLine(Offs()));
+    // (No zero-offender case for either summary line: an empty list falls out as "" from the string building
+    // itself, so deleting the early return / guard the case appeared to test leaves it green. Nothing
+    // distinguishes it — the one/two/three-offender cases below are where the clamp and join arithmetic live.)
+
     [Test] public void Overlay_one_offender()  => Assert.AreEqual("(A)", PlayGateCore.OverlaySummaryLine(Offs("A")));
     [Test] public void Overlay_two_offenders()  => Assert.AreEqual("(A) (B)", PlayGateCore.OverlaySummaryLine(Offs("A", "B")));
 
@@ -305,30 +308,22 @@ public class PlayGateCoreTests
         os.Select(o => new PlayGateCore.Offender { Tag = o.tag, Message = o.msg, Fix = o.fix }).ToList();
 
     [Test]
-    public void Console_zero_offenders_is_empty() =>
-        Assert.AreEqual("", PlayGateCore.ConsoleSummaryLine(FullOffs()));
-
-    [Test]
     public void Console_one_offender_names_message_and_fix() =>
         Assert.AreEqual("[VRCFury] no Fix Write Defaults (fix: add a VRCFury Fix Write Defaults component (mode Disabled))",
             PlayGateCore.ConsoleSummaryLine(FullOffs(
                 ("VRCFury", "no Fix Write Defaults", "add a VRCFury Fix Write Defaults component (mode Disabled)"))));
 
+    // The exact string also pins the load-bearing property for clean offenders: line 1 carries no newline.
+    // read_console keeps only the first line, so a newline here would be a silently-dropped fix (the exact
+    // bug this repairs). The separator is the only thing joining could inject, so a no-newline assert over
+    // the same shape of input adds nothing on top of this equality — the dirty-input case below is where
+    // flattening is actually decided.
     [Test]
     public void Console_multi_offender_pipe_separated() =>
         Assert.AreEqual("[More than 1 avatar enabled] active avatars: A, B (fix: deactivate all but one) | [Emulator config] flags wrong (fix: set them)",
             PlayGateCore.ConsoleSummaryLine(FullOffs(
                 ("More than 1 avatar enabled", "active avatars: A, B", "deactivate all but one"),
                 ("Emulator config", "flags wrong", "set them"))));
-
-    // The load-bearing property: whatever the offenders, line 1 carries no newline — read_console keeps
-    // only the first line, so a newline here would be a silently-dropped fix (the exact bug this repairs).
-    [Test]
-    public void Console_summary_never_contains_a_newline() =>
-        Assert.IsFalse(PlayGateCore.ConsoleSummaryLine(FullOffs(
-            ("More than 1 avatar enabled", "active avatars: A, B", "deactivate all but one"),
-            ("VRCFury", "no FWD", "add FWD"),
-            ("Emulator config", "flags wrong", "set them"))).Contains("\n"));
 
     // The exception FAIL feeds an offender whose Message embeds a multi-line stack trace (PlayGate's
     // catch). The invariant must be enforced in ConsoleSummaryLine itself, not assumed of the caller:

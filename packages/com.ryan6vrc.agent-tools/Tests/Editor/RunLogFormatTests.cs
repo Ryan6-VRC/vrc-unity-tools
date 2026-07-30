@@ -17,7 +17,10 @@ public class RunLogFormatTests
 
     // CR/LF/tab must not survive as physical control characters (they would break the row) and the pipe must
     // be escaped (column break). A crafted name with a newline + "## injected" must not leave a physical
-    // heading line.
+    // heading line. The backtick is the deliberate exception, asserted here alongside the escapes it is
+    // contrasted with: most call sites wrap the value in a code span, where backslash escapes are inert —
+    // "\`" would neither keep the span closed nor render cleanly, just add a stray char. Structural safety
+    // comes from the row/column handling, so a passed-through backtick stays cosmetic.
     [Test]
     public void Cell_escapesRowAndColumnBreakers()
     {
@@ -27,15 +30,7 @@ public class RunLogFormatTests
         StringAssert.DoesNotContain("\t", encoded);
         StringAssert.Contains("\\n", encoded); // visible escape instead
         StringAssert.Contains("\\|", encoded); // pipe escaped
-    }
-
-    // Backticks are deliberately NOT escaped: most call sites wrap the value in a code span, where backslash
-    // escapes are inert — "\`" would neither keep the span closed nor render cleanly, just add a stray char.
-    // Structural safety comes from the row/column handling, so a passed-through backtick stays cosmetic.
-    [Test]
-    public void Cell_leavesBacktickUnescaped()
-    {
-        Assert.AreEqual("a`b", RunLogFormat.Cell("a`b"));
+        Assert.AreEqual("a`b", RunLogFormat.Cell("a`b")); // backtick passes through untouched
     }
 
     // The defect this shared encoder exists to fix: a backslash immediately before a pipe. Without escaping the

@@ -226,6 +226,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 //    immutable controller silently no-ops — SaveAssets can't persist it), then re-scan every
                 //    motion slot on the reloaded asset. FAIL naming any in-scope clip still referenced (a
                 //    residual means the walk missed a slot OR the write did not land). ──
+                // COVERAGE GAP, on the record (spike 2026-07-08, verdict controller=WRITE LANDED): the FAIL
+                // branch here is not fabricable in EditMode on this Unity/OS combo — SaveAssets bypasses the OS
+                // read-only attribute, so no test can stage a silent no-op on an immutable .controller. The clean
+                // path is covered by OwnControllerClipsTests' happy-path/recursive tests; the FAIL branch is only
+                // ever exercised in production, against Packages/ immutables. Keep the guard.
                 var scanTarget = controller;
                 if (!string.IsNullOrEmpty(controllerPath))
                 {

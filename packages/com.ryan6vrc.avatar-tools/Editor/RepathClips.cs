@@ -291,6 +291,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 //    written still "passes." Comparing the reloaded curve to exactly what we captured/wrote is
                 //    deterministic and catches the silent no-op (Set…Curve is void and never throws on an
                 //    immutable Packages/ write). ──
+                // COVERAGE GAP, on the record (spike 2026-07-08, verdict anim=WRITE LANDED): the FAIL branch for
+                // an unwritable clip is not fabricable in EditMode on this Unity/OS combo — SaveAssets bypasses
+                // the OS read-only attribute, so no test can stage a silent no-op on an immutable .anim. The
+                // happy path is covered by RepathClipsTests (writeLandedFailures=0 on a normal owned rewrite);
+                // the content-mismatch branch IS covered, via a forced 2-into-1 collapse
+                // (Collision_two_sources_onto_one_target_fails_unless_force). Keep the read-back unconditional.
                 int landedFailures = 0;
                 foreach (var cp in plan)
                 {

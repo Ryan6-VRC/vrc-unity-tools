@@ -170,7 +170,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal static void HeadFacing(Quaternion rootRot, Transform headBone, Quaternion restHeadLocal,
             out float headYaw, out float headPitch)
         {
-            Quaternion posedHeadLocal = Quaternion.Inverse(rootRot) * headBone.rotation;
+            HeadFacing(Quaternion.Inverse(rootRot) * headBone.rotation, restHeadLocal, out headYaw, out headPitch);
+        }
+
+        /// <summary>
+        /// The scene-free half of the overload above, taking the posed head rotation already expressed in the
+        /// root's basis. Split out so the invariance-to-rest-orientation property — the whole reason the delta
+        /// form exists — can be pinned against a VARYING rest orientation: reaching this math through the
+        /// Transform door needs a live bone, and an EditMode fixture that builds one to read it back courts the
+        /// object-registry corruption `docs/verify.md` §Test venue documents. Callers with a bone use the
+        /// overload above; nothing else should compute `posedHeadLocal` itself.
+        /// </summary>
+        internal static void HeadFacing(Quaternion posedHeadLocal, Quaternion restHeadLocal,
+            out float headYaw, out float headPitch)
+        {
             Vector3 deltaFwd = (posedHeadLocal * Quaternion.Inverse(restHeadLocal)) * Vector3.forward;
             headYaw = YawOf(deltaFwd);      // Atan2 already yields [-180,180]
             headPitch = PitchOf(deltaFwd);

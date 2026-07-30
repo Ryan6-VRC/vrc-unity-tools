@@ -9,44 +9,33 @@ public class FixViewpointTests
 {
     const float Tol = 1e-4f;
 
-    // Identity: equal head rotation, s = 1, owned eye mid == ref eye mid → the whole offset is preserved
-    // about the same origin, so newVP == vendorVP.
-    [Test]
-    public void Identity_equal_eye_mids_returns_vendorVP()
-    {
-        var vendorVP = new Vector3(0f, 1.5f, 0.1f);
-        var eyeMid   = new Vector3(0f, 1.5f, 0f);
-        var newVP = FixViewpoint.ComputeViewpoint(vendorVP, eyeMid, Quaternion.identity, eyeMid, Quaternion.identity, 1f);
-        Assert.That(Vector3.Distance(newVP, vendorVP), Is.LessThan(Tol));
-    }
-
-    // Identity math with a shifted owned eye mid: newVP == Oowned + (vendorVP − Oref).
-    [Test]
-    public void Identity_shifted_owned_eye_mid_preserves_offset()
+    // Identity math, swept over the owned eye mid's displacement: newVP == eyeMidOwned + (vendorVP − eyeMidRef),
+    // i.e. the creator's nudge rides the eye midpoint wherever it goes. delta = 0 is the no-op case (newVP ==
+    // vendorVP); the other two are a head/body translate up and sideways.
+    [TestCase(0f, 0f, 0f)]
+    [TestCase(0f, 0.1f, 0f)]
+    [TestCase(0.2f, 0f, 0f)]
+    public void Identity_shifted_owned_eye_mid_preserves_offset(float dx, float dy, float dz)
     {
         var vendorVP  = new Vector3(0f, 1.5f, 0.1f);
         var eyeMidRef = new Vector3(0f, 1.5f, 0f);
-        var eyeMidOwn = new Vector3(0f, 1.6f, 0f);
-        var newVP = FixViewpoint.ComputeViewpoint(vendorVP, eyeMidRef, Quaternion.identity, eyeMidOwn, Quaternion.identity, 1f);
-        Assert.That(Vector3.Distance(newVP, new Vector3(0f, 1.6f, 0.1f)), Is.LessThan(Tol));
+        var delta     = new Vector3(dx, dy, dz);
+        var newVP = FixViewpoint.ComputeViewpoint(vendorVP, eyeMidRef, Quaternion.identity,
+                                                 eyeMidRef + delta, Quaternion.identity, 1f);
+        Assert.That(Vector3.Distance(newVP, vendorVP + delta), Is.LessThan(Tol));
     }
 
-    // Uniform scale s = 2 doubles the eye→VP nudge magnitude about the owned eye mid.
+    // Uniform scale s = 2 doubles the eye→VP nudge magnitude ABOUT THE OWNED EYE MID — the eye mids sit at a
+    // realistic 1.5 m, not the origin, because that is what pins where s applies. With zeroed eye mids the
+    // wrong form s·(eyeMidOwned + R·nudge) is arithmetically identical to the right one, and this is the only
+    // s != 1 test in the file: the whole scale leg was passing on a fixture that hid a 1.5 m error.
     [Test]
     public void Uniform_scale_doubles_nudge()
     {
+        var eyeMid = new Vector3(0f, 1.5f, 0f);
         var newVP = FixViewpoint.ComputeViewpoint(
-            new Vector3(0f, 0f, 0.1f), Vector3.zero, Quaternion.identity, Vector3.zero, Quaternion.identity, 2f);
-        Assert.That(Vector3.Distance(newVP, new Vector3(0f, 0f, 0.2f)), Is.LessThan(Tol));
-    }
-
-    // A 90° head-FRAME delta about Y rotates the +Z offset vector to +X.
-    [Test]
-    public void Head_rotate_90_about_Y_rotates_offset()
-    {
-        var newVP = FixViewpoint.ComputeViewpoint(
-            new Vector3(0f, 0f, 0.1f), Vector3.zero, Quaternion.identity, Vector3.zero, Quaternion.Euler(0, 90, 0), 1f);
-        Assert.That(Vector3.Distance(newVP, new Vector3(0.1f, 0f, 0f)), Is.LessThan(Tol));
+            eyeMid + new Vector3(0f, 0f, 0.1f), eyeMid, Quaternion.identity, eyeMid, Quaternion.identity, 2f);
+        Assert.That(Vector3.Distance(newVP, eyeMid + new Vector3(0f, 0f, 0.2f)), Is.LessThan(Tol));
     }
 
     // Order-pinning: ref and owned head frames are BOTH non-identity AND distinct, so
@@ -70,9 +59,20 @@ public class FixViewpointTests
         Assert.That(Vector3.Distance(result, expected), Is.LessThan(Tol), "Rₒ·R_v⁻¹ order");
         Assert.That(Vector3.Distance(expected, reversed), Is.GreaterThan(0.01f),
             "fixture must be order-discriminating (the two compositions differ)");
+
+        // …and the readable special case the order fixture above obscures: an identity ref frame and a 90°
+        // owned frame about Y take the +Z nudge to +X, so a lost or transposed rotation is legible as an axis.
+        var rotated = FixViewpoint.ComputeViewpoint(
+            new Vector3(0f, 0f, 0.1f), Vector3.zero, Quaternion.identity, Vector3.zero,
+            Quaternion.Euler(0f, 90f, 0f), 1f);
+        Assert.That(Vector3.Distance(rotated, new Vector3(0.1f, 0f, 0f)), Is.LessThan(Tol));
     }
 
-    // ── HeadFrame: the landmark frame, and the defect it exists to close ──────────────────────────
+    // ── HeadFrame: the landmark frame, its capability, and its residual limit ─────────────────────
+    // The defect HeadFrame exists to close — a bone-basis rotation delta applying a coordinate convention as
+    // if it were geometry — is not testable here: no argument to ComputeViewpoint or HeadFrame is a bone
+    // basis, so any fixture built on it exercises removed arithmetic rather than the frame-choosing code.
+    // FixViewpoint.HeadFrame's docstring owns that history (measured: a 38 mm forward nudge came back 38 mm UP).
 
     // Realistic humanoid landmarks in descriptor-local metres: 62 mm interocular, eyes 90 mm above and
     // 60 mm forward of the head bone origin.
@@ -82,37 +82,6 @@ public class FixViewpointTests
     static Vector3 EyeMid => (EyeL + EyeR) * 0.5f;
     // The recorded vendor nudge that exposed the defect: 3.5 mm up, 38.4 mm forward of the eye midpoint.
     static Vector3 VendorVP => EyeMid + new Vector3(0f, 0.0035f, 0.0384f);
-
-    // REGRESSION, and the reason HeadFrame exists. Rotating the nudge by the head BONE-basis delta turns a
-    // pure coordinate convention into 54 mm of geometry: a Blender round-trip leaves every bone basis 90°
-    // about X from the source's while joint positions match exactly, and the old algebra returned the forward
-    // nudge as an UPWARD one — measured on a real owned base, and reported as PASS. This pins the arithmetic
-    // of that failure, which the next two tests are checked against.
-    [Test]
-    public void Bone_basis_delta_would_have_moved_the_viewpoint_54mm()
-    {
-        var conventionOnly = Quaternion.Euler(-90f, 0f, 0f);   // Blender Z-up vs Unity Y-up
-        var wrong = FixViewpoint.ComputeViewpoint(VendorVP, EyeMid, Quaternion.identity, EyeMid, conventionOnly, 1f);
-        var nudgeOut = wrong - EyeMid;
-
-        Assert.That(nudgeOut.y * 1000f, Is.EqualTo(38.4f).Within(0.2f), "38 mm forward comes back as 38 mm UP");
-        Assert.That(nudgeOut.z * 1000f, Is.EqualTo(-3.5f).Within(0.2f), "3.5 mm up comes back as 3.5 mm BACK");
-        Assert.That((wrong - VendorVP).magnitude * 1000f, Is.EqualTo(54f).Within(1f));
-    }
-
-    // …and the fix: identical landmark GEOMETRY yields identical frames, whatever the bone bases do. This is
-    // the measured case (eye midpoints matching to 0.0002 mm, every bone 90° apart in world orientation), and
-    // the correct answer is that the viewpoint does not move at all.
-    [Test]
-    public void Landmark_frames_coincide_across_a_pure_convention_difference()
-    {
-        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameRef, out float riseRef));
-        Assert.IsTrue(FixViewpoint.HeadFrame(EyeL, EyeR, HeadO, out var frameOwned, out _));
-        Assert.That(Quaternion.Angle(frameRef, frameOwned), Is.LessThan(1e-3f));
-
-        var newVP = FixViewpoint.ComputeViewpoint(VendorVP, EyeMid, frameRef, EyeMid, frameOwned, 1f);
-        Assert.That(Vector3.Distance(newVP, VendorVP), Is.LessThan(Tol), "viewpoint must land unchanged");
-    }
 
     // The capability the fix must NOT cost: a genuine rest-pose head rotation moves the eyes (they are the
     // head bone's children), so the landmark frame recovers it from geometry alone and the nudge follows.
@@ -204,16 +173,5 @@ public class FixViewpointTests
         Assert.IsFalse(FixViewpoint.HeadFrame(EyeL, EyeR, EyeMid + new Vector3(0.5f, 0f, 0f), out _, out _),
             "head origin ON the eye-to-eye line");
         Assert.IsFalse(FixViewpoint.HeadFrame(EyeL, EyeL, HeadO, out _, out _), "coincident eyes");
-    }
-
-    // Head/body translate: shifting the owned eye mid shifts newVP by the same delta (offset preserved).
-    [Test]
-    public void Body_translate_shifts_result_by_same_delta()
-    {
-        var vendorVP  = new Vector3(0f, 1.5f, 0.1f);
-        var eyeMidRef = new Vector3(0f, 1.5f, 0f);
-        var delta     = new Vector3(0.2f, 0f, 0f);
-        var newVP = FixViewpoint.ComputeViewpoint(vendorVP, eyeMidRef, Quaternion.identity, eyeMidRef + delta, Quaternion.identity, 1f);
-        Assert.That(Vector3.Distance(newVP, vendorVP + delta), Is.LessThan(Tol));
     }
 }

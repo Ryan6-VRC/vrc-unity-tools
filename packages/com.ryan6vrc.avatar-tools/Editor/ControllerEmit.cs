@@ -88,15 +88,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public EmitException(string message) : base(message) { }
         }
 
-        // Convenience door: emit to the scratch dir, hashing SourcePath for provenance (throwaway builds).
-        // CompileController uses the 4-arg overload below.
+        // Convenience door: emit to the scratch dir with NO provenance stamp (throwaway builds — see the
+        // 4-arg overload's null contract below). CompileController uses the 4-arg overload.
         public static void Build(AnimDocument doc, out EmitResult result)
             => Build(doc, ScratchRoot, null, out result);
 
         /// <summary>Emit <paramref name="doc"/> into <paramref name="outDir"/> (an <c>Assets/…</c>-relative
         /// folder). <paramref name="sourceText"/>, when non-null, is the exact source-file text — its BYTES
         /// are hashed into the controller's provenance userData so a later compile can detect an out-of-band
-        /// edit (null falls back to hashing <see cref="AnimDocument.SourcePath"/>).
+        /// edit.
+        /// <para>NULL <paramref name="sourceText"/> writes NO stamp and leaves any existing one untouched, so
+        /// it is for SCRATCH / throwaway targets only — never a path <see cref="CompileController"/> will later
+        /// compile to. On such a path the stale stamp from the PREVIOUS compile survives this emit, the next
+        /// compile compares it against the unchanged source, reads stored == current, and clobbers an
+        /// out-of-band hand-edit with no warning at all.</para>
         /// IDEMPOTENT + GUID-STABLE: an existing controller at the target path is RESET IN PLACE (its
         /// sub-assets stripped and rebuilt) rather than deleted + recreated, so its GUID — and any external
         /// reference to it — survives a recompile.</summary>
@@ -283,7 +288,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             private readonly AnimDocument _doc;
             private readonly string _outDir;
-            private readonly string _sourceText;   // exact source bytes for provenance; null ⇒ hash SourcePath
+            private readonly string _sourceText;   // exact source bytes for provenance; null ⇒ no stamp written
             private readonly EmitResult _result = new EmitResult();
             private readonly HashSet<string> _paramNames;
             private AnimatorController _controller;
@@ -341,6 +346,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 // Reload from disk so EmitResult holds the authoritative persisted objects (a reimport can
                 // remap instances). This makes the returned graph exactly what round-trip verification sees.
+                // The reload does NOT depend on a reimport having happened: when StampProvenance skips (the
+                // scratch door), nothing was re-minted and these loads return the same live, SaveAssets-backed
+                // instances — so it stays correct either way.
                 ReloadFromDisk(path);
                 return _result;
             }
@@ -1093,13 +1101,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private void StampProvenance(string path)
             {
+                // NO STAMP without source bytes, and an existing stamp is left as-is (the null contract on
+                // Build). Only the 2-arg scratch door leaves _sourceText null, and it has no provenance worth
+                // recording: the sole reader (CompileController.WarnIfOutOfBand) only ever inspects a controller
+                // a REAL compile wrote, and BOTH real doors thread the text — the compile itself and
+                // CompileController.ProofCompile's throwaway proof, which therefore does stamp and reimport.
+                // Skipping is also the biggest AssetDatabase saving in the emit path (the SaveAndReimport below
+                // is a full import), and the emit tests are what takes the skip.
+                if (_sourceText == null) return;
+
                 var importer = AssetImporter.GetAtPath(path);
                 if (importer == null) return;
-                // CompileController reads this userData to WARN before clobbering an out-of-band edit. Hash the
-                // exact SOURCE BYTES when they were threaded through (the honest signal); fall back to hashing
-                // SourcePath for the scratch/2-arg door that never sees the text.
+                // CompileController reads this userData to WARN before clobbering an out-of-band edit.
                 string src = _doc.SourcePath ?? "";
-                string hash = SourceHash(_sourceText ?? src);
+                string hash = SourceHash(_sourceText);
                 importer.userData = "compiled-from:" + src + ";srchash:" + hash;
                 importer.SaveAndReimport();
             }

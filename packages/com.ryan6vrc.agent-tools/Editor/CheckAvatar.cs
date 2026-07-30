@@ -72,6 +72,29 @@ namespace Ryan6Vrc.AgentTools.Editor
             "whose scene object carries the VRChat equivalent (VRCRotationConstraint) or vice-versa — it works at " +
             "runtime though it will not resolve here.";
 
+        // ── Conditional Notes lines + the R-H label: quoted once, here ────────────────────────────────
+        // These three are the emitted wording for three GATED behaviours, and the gate — not the phrasing — is
+        // what the tests prove. They were asserted as fragments in seven places (three of them negatives), so a
+        // rewording reddened seven tests for no behaviour change. Per docs/tool-design.md §Duplication the
+        // verbatim string lives at the canon and every other site routes to it: the tests assert these
+        // constants, and the emit sites below are their only literal.
+
+        /// <summary>Fires iff a mixed-live physbone group is present (<see cref="AnyMixedLivePhysboneGroup"/>).</summary>
+        internal const string VariantSetNoteLine =
+            "Live state is measured relative to this avatar root. A `[not-live]` physbone on a base bone " +
+            "is often one of a per-range variant set an FX layer switches between, and de-conflicting against the " +
+            "wrong member is silent (docs/outfits.md §The FX controller is the authoritative map). Which member the " +
+            "layer selects is a property of the graph, not of the scene's static state.";
+
+        /// <summary>Fires iff the inspected root is itself inactive, so `[live]` above reads relative, not absolute.</summary>
+        internal const string InactiveRootNoteLine =
+            "This avatar root is not active in the scene, so nothing under it is running; the live markers " +
+            "above are relative to the root and still discriminate between hosts.";
+
+        /// <summary>Prefix on the Notes entry <see cref="SurfaceUnreflected"/> adds; the remainder is the
+        /// dynamic warning text, so only the label is a constant.</summary>
+        internal const string FailLoudNotePrefix = "fail-loud (R-H): ";
+
         // ── Injectable seams (internal) ───────────────────────────────────────────────────────────────
         // Real MA/VRCF types always reflect and MA's Get(Component) is always reachable in this Editor, and an
         // absent serialized FIELD (the drift the fail-loud rail guards) can't be constructed with the live
@@ -394,7 +417,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             string msg = "[CheckAvatar] frame field '" + anchor + "' on " + c.GetType().Name + " @ " + PathOf(c.gameObject)
                        + " did not reflect — surfacing the merged animator anyway (not dropped); its frame is best-effort.";
             Debug.LogWarning(msg);
-            rep.Notes.Add("fail-loud (R-H): " + msg.Substring("[CheckAvatar] ".Length));
+            rep.Notes.Add(FailLoudNotePrefix + msg.Substring("[CheckAvatar] ".Length));
         }
 
         // R-K: iff a Relative MA's relativePathRoot is SET (non-empty referencePath) yet does not resolve,
@@ -675,13 +698,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                     "physbone pair may already be resolved — verify against a build. VRCFury has no such pass; colliders, " +
                     "constraints, and non-exact/non-zip-merged MA physbone pairs are the residue this check exists for.\n");
             if (AnyMixedLivePhysboneGroup(rep.MergeConflicts))
-                sb.Append("- Live state is measured relative to this avatar root. A `[not-live]` physbone on a base bone " +
-                    "is often one of a per-range variant set an FX layer switches between, and de-conflicting against the " +
-                    "wrong member is silent (docs/outfits.md §The FX controller is the authoritative map). Which member the " +
-                    "layer selects is a property of the graph, not of the scene's static state.\n");
+                sb.Append("- ").Append(VariantSetNoteLine).Append('\n');
             if (!rep.Root.activeInHierarchy)
-                sb.Append("- This avatar root is not active in the scene, so nothing under it is running; the live markers " +
-                    "above are relative to the root and still discriminate between hosts.\n");
+                sb.Append("- ").Append(InactiveRootNoteLine).Append('\n');
 
             var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "avatarlint_" + rep.Root.name, summary, sb.ToString(), ".md");
             if (result == "PASS") Debug.Log(res); else Debug.LogWarning(res);

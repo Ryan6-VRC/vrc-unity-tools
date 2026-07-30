@@ -24,7 +24,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// Body-agnostic artifact writer the family's non-transplant emitters converge on. Writes
         /// <paramref name="body"/> verbatim (the caller's full artifact text, markdown or JSON) to
         /// <paramref name="dir"/> under a <see cref="Sanitize"/>d-<paramref name="label"/> + timestamp +
-        /// <paramref name="ext"/> filename; refreshes the AssetDatabase;
+        /// <paramref name="ext"/> filename; publishes just that file (<see cref="PublishArtifact"/>);
         /// and on success returns <paramref name="summary"/> with the in-band trailer appended
         /// (<c>summary + " | log=" + path</c>). Filename convention: <paramref name="label"/> starts
         /// with the artifact's <c>kind</c> (e.g. <c>check-package_&lt;target&gt;</c>), so anything
@@ -44,7 +44,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
                 var path = dir + "/" + Sanitize(label) + "_" + stamp + ext;
                 File.WriteAllText(path, body);
-                AssetDatabase.Refresh();
+                PublishArtifact(dir, path);
                 return summary + " | log=" + path;
             }
             catch (Exception e)
@@ -56,6 +56,25 @@ namespace Ryan6Vrc.AgentTools.Editor
                 string head = arrow >= 0 ? summary.Substring(0, arrow) : summary + " ";
                 return head + "=> FAIL: write failed: " + e.Message;
             }
+        }
+
+        /// <summary>
+        /// Make a just-written artifact visible in the Project window. Imports ONLY that file: a
+        /// project-wide <c>AssetDatabase.Refresh()</c> here cost ~53 ms and every artifact-emitting door
+        /// paid it, which measured 389 of the 650 full refreshes in one headless suite run — the largest
+        /// single item in the suite's clock, and a tax on every live tool call too. Nothing reads an
+        /// artifact through the AssetDatabase (callers and tests alike use <c>File.ReadAllText</c>), so the
+        /// import is for the operator's Project window and nothing else.
+        ///
+        /// <paramref name="dir"/> is created with <c>Directory.CreateDirectory</c>, which leaves the
+        /// AssetDatabase blind to it — and <c>ImportAsset</c> cannot register a file inside a folder the
+        /// database has never seen. So the FIRST write under a fresh dir still pays one full refresh; every
+        /// write after it is O(1).
+        /// </summary>
+        public static void PublishArtifact(string dir, string path)
+        {
+            if (AssetDatabase.IsValidFolder(dir)) AssetDatabase.ImportAsset(path);
+            else AssetDatabase.Refresh();
         }
 
         /// <summary>JSON string literal for <paramref name="s"/> (quotes included); null → null.</summary>

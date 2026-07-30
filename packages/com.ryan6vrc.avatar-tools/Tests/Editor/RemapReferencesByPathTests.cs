@@ -150,18 +150,11 @@ public class RemapReferencesByPathTests
         Assert.AreEqual(dst.transform.Find("A"), hitA, "basic");
         Assert.AreEqual(dst.transform.GetChild(2), hitB2, "dup-sibling -> 2nd B, not 1st");
 
-        Object.DestroyImmediate(src); Object.DestroyImmediate(dst);
-    }
-
-    [Test]
-    public void Resolves_to_null_when_path_missing_in_dst()
-    {
-        var src = MakeTree("SRC");
-        var dst = new GameObject("DST"); // empty, no A/B
-        var a = src.transform.Find("A");
-
-        var hit = IndexedPath.FindByIndexedPath(src.transform, dst.transform, a);
-        Assert.IsNull(hit);
+        // The absent-counterpart floor, on the same fixture: an empty dst resolves the same path to null.
+        var empty = new GameObject("EMPTY");
+        Assert.IsNull(IndexedPath.FindByIndexedPath(src.transform, empty.transform, a),
+            "no counterpart under dst → null, never a nearest-match guess");
+        Object.DestroyImmediate(empty);
 
         Object.DestroyImmediate(src); Object.DestroyImmediate(dst);
     }

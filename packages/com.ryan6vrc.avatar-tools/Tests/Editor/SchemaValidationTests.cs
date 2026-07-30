@@ -170,20 +170,15 @@ parameters:
     // Unity silently freezes a non-float axis at its first child (proven black-box), so a declared
     // non-float axis is a fatal defect. Undeclared axes are skipped — the undeclared-param lint owns them.
 
+    // One non-float type is enough for the 1D axis: the rule is a single `if (type != AnimParamType.Float)`,
+    // so Bool and Int enter it identically. The cases below vary the SITE (2D Y axis, Direct child weight,
+    // nested tree), which is where the rule actually has separate call paths.
     [Test]
     public void Int_1D_Blend_Axis_Errors()
     {
         var tree = new BlendTreeSpec { Kind = TreeKind.OneD, Param = "Axis" };
         var errors = SchemaValidation.Validate(DocWithTree(tree, P("Axis", AnimParamType.Int)));
         Assert.IsTrue(Any(errors, "blend-axis-type", "Axis"), "an int 1D blend axis must be flagged");
-    }
-
-    [Test]
-    public void Bool_1D_Blend_Axis_Errors()
-    {
-        var tree = new BlendTreeSpec { Kind = TreeKind.OneD, Param = "Axis" };
-        var errors = SchemaValidation.Validate(DocWithTree(tree, P("Axis", AnimParamType.Bool)));
-        Assert.IsTrue(Any(errors, "blend-axis-type", "Axis"), "a bool 1D blend axis must be flagged");
     }
 
     [Test]

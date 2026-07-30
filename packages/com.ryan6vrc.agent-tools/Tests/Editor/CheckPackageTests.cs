@@ -148,6 +148,11 @@ public class CheckPackageTests
         StringAssert.Contains("dangling: 1 ref(s) at 1 distinct target(s)", summary);
     }
 
+    // The dangling tally spans material slots AND meshes, so nesting it inside "materials" would mislabel its
+    // scope. That is a STRUCTURAL claim and it is asserted structurally: the previous form pinned the literal
+    // `"missing": 0 }`, which proved the parent only via the brace's position in the emitted text — adding any
+    // field to the materials block broke it, and nesting danglingDistinctTargets under materials without
+    // disturbing that spacing passed it.
     [Test]
     public void RunLog_carriesDistinctTargetCountsOutsideTheMaterialsObject()
     {
@@ -156,12 +161,32 @@ public class CheckPackageTests
         var logPath = CheckPackage.VerifyFolder(TmpDir).Split(new[] { "log=" }, 2, System.StringSplitOptions.None)[1];
 
         var json = File.ReadAllText(logPath);
-        StringAssert.Contains("\"missing\": 0 }", json); // the materials object closes after missing
+        var materials = MaterialsObject(json);
+        StringAssert.Contains("\"missing\"", materials); // the block still carries its own per-slot counts
         StringAssert.Contains("\"danglingDistinctTargets\": 0", json);
         StringAssert.Contains("\"danglingUnidentifiedTargets\": 0", json);
+        StringAssert.DoesNotContain("danglingDistinctTargets", materials);
+        StringAssert.DoesNotContain("danglingUnidentifiedTargets", materials);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────────────────────────────
+
+    // The "materials" object's own text, brace-balanced from its opening '{' — whitespace-independent, which
+    // is the whole point. The block holds only numbers, so no string literal can carry an unbalanced brace.
+    private static string MaterialsObject(string json)
+    {
+        int at = json.IndexOf("\"materials\"", System.StringComparison.Ordinal);
+        Assert.That(at, Is.GreaterThanOrEqualTo(0), "RunLog lost its materials object: " + json);
+        int open = json.IndexOf('{', at);
+        int depth = 0;
+        for (int i = open; i < json.Length; i++)
+        {
+            if (json[i] == '{') depth++;
+            else if (json[i] == '}' && --depth == 0) return json.Substring(open, i - open + 1);
+        }
+        Assert.Fail("the materials object never closes: " + json);
+        return null;
+    }
 
     private static Material SaveMaterial(string name)
     {

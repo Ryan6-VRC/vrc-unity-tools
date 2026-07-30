@@ -22,26 +22,20 @@ namespace UnityEngineExtras
     public class NearMissRootProbe { }
 }
 
+// A type SQUATTING an SDK namespace root from a non-SDK assembly — the one shape that observes
+// SdkNamespaceRoots at all. Every other probe reaches its verdict through the assembly check, so without
+// this the root list could be deleted with the whole file still green, and the deletion would silently be a
+// behavior change rather than dead-code removal.
+namespace VRC.ReportPackageTests_SquatProbe
+{
+    public class SquattingRootProbe { }
+}
+
 public class ReportPackageTests_GlobalProbe { }
 
 public class ReportPackageTests
 {
     // ── NonSdkKey ─────────────────────────────────────────────────────────────────────────────
-
-    [Test]
-    public void NonSdkKey_excludes_unity_builtin_components()
-    {
-        Assert.IsNull(ReportPackage.NonSdkKey(typeof(Transform)));
-        Assert.IsNull(ReportPackage.NonSdkKey(typeof(SkinnedMeshRenderer)));
-        Assert.IsNull(ReportPackage.NonSdkKey(typeof(UnityEngine.Animations.RotationConstraint)));
-    }
-
-    [Test]
-    public void NonSdkKey_excludes_vrchat_sdk_components()
-    {
-        Assert.IsNull(ReportPackage.NonSdkKey(typeof(VRCAvatarDescriptor)));
-        Assert.IsNull(ReportPackage.NonSdkKey(typeof(VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone)));
-    }
 
     [Test]
     public void NonSdkKey_reports_unknown_namespace_verbatim_without_collapsing()
@@ -57,18 +51,23 @@ public class ReportPackageTests
             ReportPackage.NonSdkKey(typeof(UnityEngineExtras.NearMissRootProbe)));
     }
 
+    // The namespace-root check runs BEFORE the assembly check, and this is the only case where the two
+    // disagree: a type under an SDK root compiled into an assembly that is NOT the SDK's. Excluding it is the
+    // deliberate squatting bet the production docstring argues for — cheap first filter, and no installed
+    // package takes such a name. Asserting it keeps the bet a decision rather than an accident: delete the
+    // root list and this returns the namespace instead of null, which is a census behavior change.
+    [Test]
+    public void NonSdkKey_excludes_a_squatted_sdk_root_even_from_a_non_sdk_assembly()
+    {
+        Assert.IsNull(ReportPackage.NonSdkKey(typeof(VRC.ReportPackageTests_SquatProbe.SquattingRootProbe)));
+    }
+
     [Test]
     public void NonSdkKey_keys_global_namespace_types_on_their_type_name()
     {
         // Their namespace carries nothing to report, and the most-deployed avatar optimizers ship this way.
         Assert.AreEqual("ReportPackageTests_GlobalProbe",
             ReportPackage.NonSdkKey(typeof(ReportPackageTests_GlobalProbe)));
-    }
-
-    [Test]
-    public void NonSdkKey_returns_null_for_a_null_type()
-    {
-        Assert.IsNull(ReportPackage.NonSdkKey(null));
     }
 
     // ── The assembly authority (a namespace root cannot carry these) ───────────────────────────
@@ -82,18 +81,24 @@ public class ReportPackageTests
         Assert.IsNull(ReportPackage.NonSdkKey(typeof(List<int>)));
     }
 
+    // The type door, both directions, with NonSdkKey held to the same verdict: whatever IsFromSdkAssembly
+    // admits must key to null, and whatever it rejects must survive to the census. Asserting the two
+    // together is what keeps them from drifting apart — NonSdkKey consults the namespace roots FIRST, so a
+    // pair that disagrees is a real defect, not a redundancy.
     [Test]
-    public void IsFromSdkAssembly_recognizes_engine_base_library_and_sdk_assemblies()
+    public void IsFromSdkAssembly_admits_engine_and_sdk_rejects_ours_and_NonSdkKey_agrees()
     {
         Assert.IsTrue(ReportPackage.IsFromSdkAssembly(typeof(Transform)));
         Assert.IsTrue(ReportPackage.IsFromSdkAssembly(typeof(int)));
         Assert.IsTrue(ReportPackage.IsFromSdkAssembly(typeof(VRCAvatarDescriptor)));
         Assert.IsTrue(ReportPackage.IsFromSdkAssembly(typeof(VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone)));
-    }
 
-    [Test]
-    public void IsFromSdkAssembly_rejects_our_own_and_test_assemblies()
-    {
+        Assert.IsNull(ReportPackage.NonSdkKey(typeof(Transform)));
+        Assert.IsNull(ReportPackage.NonSdkKey(typeof(SkinnedMeshRenderer)));
+        Assert.IsNull(ReportPackage.NonSdkKey(typeof(UnityEngine.Animations.RotationConstraint)));
+        Assert.IsNull(ReportPackage.NonSdkKey(typeof(VRCAvatarDescriptor)));
+        Assert.IsNull(ReportPackage.NonSdkKey(typeof(VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone)));
+
         // A global-namespace type in a non-SDK assembly must survive to the census, or the assembly check
         // would swallow exactly the optimizers that ship with no namespace.
         Assert.IsFalse(ReportPackage.IsFromSdkAssembly(typeof(ReportPackageTests_GlobalProbe)));
@@ -115,6 +120,22 @@ public class ReportPackageTests
         Assert.IsFalse(ReportPackage.IsSdkAssemblyName("VRCFury-Editor-Common"));
         Assert.IsFalse(ReportPackage.IsSdkAssemblyName("VRCFury-Tests"));
         Assert.IsFalse(ReportPackage.IsSdkAssemblyName("com.vrcfury.api"), "lowercase: no prefix reaches it either");
+
+        // Every other framework the census exists to name, held to the same must-survive rule. VRCFury is
+        // only the collision that was actually found; a new prefix that swallows any of these is the same bug.
+        foreach (var name in new[]
+        {
+            "nadena.dev.modular-avatar.core", "nadena.dev.ndmf", "nadena.dev.ndmf.vrchat",
+            "d4rkpl4y3r.d4rkavataroptimizer.Editor", "dev.limitex.avatar-compressor",
+            "dev.vrlabs.vrcsdkplus", "lyuma.av3emulator", "vrchat.blackstartx.gesture-manager",
+            "lilToon.Editor", "Poi.Tools", "ThryAssemblyDefinition",
+        })
+            Assert.IsFalse(ReportPackage.IsSdkAssemblyName(name), "must survive to the census: " + name);
+
+        // No name at all is not an SDK name: a component with an unresolvable assembly must reach
+        // unresolvedScripts, never get quietly excluded as infrastructure.
+        Assert.IsFalse(ReportPackage.IsSdkAssemblyName(null));
+        Assert.IsFalse(ReportPackage.IsSdkAssemblyName(""));
     }
 
     [Test]
@@ -133,26 +154,6 @@ public class ReportPackageTests
             "mscorlib", "netstandard", "System", "System.Core", "UniTask", "UniTask.Linq", "DOTween",
         })
             Assert.IsTrue(ReportPackage.IsSdkAssemblyName(name), "must still read as SDK: " + name);
-    }
-
-    [Test]
-    public void IsSdkAssemblyName_leaves_the_frameworks_the_census_exists_to_name()
-    {
-        foreach (var name in new[]
-        {
-            "nadena.dev.modular-avatar.core", "nadena.dev.ndmf", "nadena.dev.ndmf.vrchat",
-            "d4rkpl4y3r.d4rkavataroptimizer.Editor", "dev.limitex.avatar-compressor",
-            "dev.vrlabs.vrcsdkplus", "lyuma.av3emulator", "vrchat.blackstartx.gesture-manager",
-            "lilToon.Editor", "Poi.Tools", "ThryAssemblyDefinition",
-        })
-            Assert.IsFalse(ReportPackage.IsSdkAssemblyName(name), "must survive to the census: " + name);
-    }
-
-    [Test]
-    public void IsSdkAssemblyName_handles_the_empty_cases()
-    {
-        Assert.IsFalse(ReportPackage.IsSdkAssemblyName(null));
-        Assert.IsFalse(ReportPackage.IsSdkAssemblyName(""));
     }
 
     // ── ComposeToggleCaveat: named vs unknown vs absent ────────────────────────────────────────
@@ -214,30 +215,20 @@ public class ReportPackageTests
             new[] { ranked[0].Key, ranked[1].Key, ranked[2].Key });
     }
 
-    [Test]
-    public void NonSdkSummary_is_bare_zero_for_an_empty_census()
+    // Both sides of the truncation boundary, plus the empty floor. FOUR entries is the case that earns its
+    // keep: "+1 more" is where an off-by-one lives (three named, one remaining), and nothing else in this
+    // file reaches it. The count always LEADS the parenthesis, so truncation can never hide the total.
+    [TestCase(0, "0")]
+    [TestCase(3, "3(n1, n2, n3)")]
+    [TestCase(4, "4(n1, n2, n3, +1 more)")]
+    [TestCase(6, "6(n1, n2, n3, +3 more)")]
+    public void NonSdkSummary_leads_with_the_count_and_truncates_past_three(int entries, string expected)
     {
-        Assert.AreEqual("0", ReportPackage.NonSdkSummary(Census()));
-    }
+        // Inserted least-present first and named so that rank order is n1, n2, n3 … — the ranking has to
+        // reorder them, so a summary that echoed insertion order would fail rather than coincide.
+        var census = new Dictionary<string, int>();
+        for (int i = entries; i >= 1; i--) census["n" + i] = entries - i + 1;
 
-    [Test]
-    public void NonSdkSummary_names_every_namespace_up_to_three()
-    {
-        Assert.AreEqual("3(a, b, c)",
-            ReportPackage.NonSdkSummary(Census(E("c", 1), E("b", 2), E("a", 3))));
-    }
-
-    [Test]
-    public void NonSdkSummary_truncates_past_three_and_counts_the_remainder()
-    {
-        var census = Census(E("n1", 9), E("n2", 8), E("n3", 7), E("n4", 6), E("n5", 5), E("n6", 4));
-        Assert.AreEqual("6(n1, n2, n3, +3 more)", ReportPackage.NonSdkSummary(census));
-    }
-
-    [Test]
-    public void NonSdkSummary_leads_with_the_count_so_truncation_never_hides_the_total()
-    {
-        var census = Census(E("only", 1));
-        Assert.AreEqual("1(only)", ReportPackage.NonSdkSummary(census));
+        Assert.AreEqual(expected, ReportPackage.NonSdkSummary(census));
     }
 }

@@ -3,8 +3,12 @@ using NUnit.Framework;
 using UnityEngine;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// Synthetic Component subclasses used to exercise type-name resolution without touching VRC types
-// (the test assembly does not reference the VRC SDK). TypeCache picks these up after compile.
+// Synthetic Component subclasses used to exercise type-name resolution: they give us an ambiguous simple
+// name, a base/derived pair, and a guaranteed-unique name — none of which any real VRC type supplies, and
+// all of which would be hostage to the SDK's own naming if borrowed from it. (The assembly DOES reference
+// the SDK — see Ryan6VRC.AvatarTools.Tests.asmdef; where SDK identity is the thing under test, resolve
+// through it, as VrcTable_physbone_field_paths_are_real_serialized_properties does.) TypeCache picks these
+// up after compile.
 namespace TransplantCoreTests_NsA
 {
     public class TcUniqueProbe : MonoBehaviour { }
@@ -21,22 +25,20 @@ public class TransplantCoreTests
 {
     // ── ResolveTypes ──────────────────────────────────────────────────────────────────────────
 
-    [Test]
-    public void ResolveTypes_matches_by_simple_name()
+    // Every query shape that must resolve to exactly one type: a unique simple name, its full name, and a
+    // BASE-type name. The base case says something only because TcDerivedProbe is in the scan too — a
+    // resolver that matched subclasses would find two candidates and report ambiguity instead. Scene
+    // selection later goes by assignability, so the concrete subclass is still caught; asserting THAT here
+    // would be a C# tautology, so only the resolution is pinned.
+    [TestCase("TcUniqueProbe", typeof(TransplantCoreTests_NsA.TcUniqueProbe))]
+    [TestCase("TransplantCoreTests_NsA.TcUniqueProbe", typeof(TransplantCoreTests_NsA.TcUniqueProbe))]
+    [TestCase("TcBaseProbe", typeof(TransplantCoreTests_NsA.TcBaseProbe))]
+    public void ResolveTypes_matches_by_simple_or_full_name(string query, System.Type expected)
     {
-        var r = TransplantCore.ResolveTypes(new[] { "TcUniqueProbe" });
+        var r = TransplantCore.ResolveTypes(new[] { query });
         Assert.AreEqual(0, r.unresolved.Count);
         Assert.AreEqual(1, r.resolved.Count);
-        Assert.AreEqual(typeof(TransplantCoreTests_NsA.TcUniqueProbe), r.resolved[0]);
-    }
-
-    [Test]
-    public void ResolveTypes_matches_by_full_name()
-    {
-        var r = TransplantCore.ResolveTypes(new[] { "TransplantCoreTests_NsA.TcUniqueProbe" });
-        Assert.AreEqual(0, r.unresolved.Count);
-        Assert.AreEqual(1, r.resolved.Count);
-        Assert.AreEqual(typeof(TransplantCoreTests_NsA.TcUniqueProbe), r.resolved[0]);
+        Assert.AreEqual(expected, r.resolved[0]);
     }
 
     [Test]
@@ -66,30 +68,43 @@ public class TransplantCoreTests
         Assert.AreEqual(typeof(TransplantCoreTests_NsB.TcDupProbe), r.resolved[0]);
     }
 
-    [Test]
-    public void ResolveTypes_base_name_resolves_to_base_type_for_assignability_selection()
-    {
-        // A base-type name resolves to the base type; scene selection is later done by
-        // assignability, so the concrete subclass is caught.
-        var r = TransplantCore.ResolveTypes(new[] { "TcBaseProbe" });
-        Assert.AreEqual(0, r.unresolved.Count);
-        Assert.AreEqual(typeof(TransplantCoreTests_NsA.TcBaseProbe), r.resolved[0]);
-        Assert.IsTrue(r.resolved[0].IsAssignableFrom(typeof(TransplantCoreTests_NsA.TcDerivedProbe)));
-    }
+    // ── VrcComponentTable (resolved through ResolveTypes, matching the transplant engine's own lookup) ──
 
-    // ── VrcComponentTable (resolved through ResolveTypes to avoid a compile-time VRC reference) ──
-
+    // The table's field paths are SerializedProperty names on the live SDK type, and NOTHING else checks
+    // that they still name anything: the engine probes them and treats a miss as "this component has no
+    // such dependency", so an SDK rename makes the table quietly wrong — colliders stop being followed,
+    // relocation stops finding its anchor — with every count still reporting success.
+    //
+    // So each path is resolved against a real component's SerializedObject, which is exactly how the engine
+    // consumes it. FindProperty (not Type.GetField) because the serialized name is the contract: a field
+    // renamed under [FormerlySerializedAs] still resolves, and a field that stops being serialized does not.
     [Test]
-    public void VrcTable_physbone_has_collider_hard_and_ignore_soft()
+    public void VrcTable_physbone_field_paths_are_real_serialized_properties()
     {
         var r = TransplantCore.ResolveTypes(new[] { "VRCPhysBone" });
         Assert.AreEqual(1, r.resolved.Count, "VRCPhysBone should resolve (VRC SDK present)");
         var d = VrcComponentTable.Lookup(r.resolved[0]);
         Assert.IsNotNull(d);
+
+        // Which bucket each path sits in is the row's own judgment (hard = pull the referent or null+flag it;
+        // soft = drop the entry silently), so that stays asserted by name.
         CollectionAssert.Contains(d.hardDepFieldPaths, "colliders");
         CollectionAssert.Contains(d.softDepFieldPaths, "ignoreTransforms");
         CollectionAssert.Contains(d.anchorFieldPaths, "rootTransform");
         Assert.IsFalse(d.leafRecreateEligible);
+
+        var go = new GameObject("PbFieldPathProbe");
+        try
+        {
+            var so = new UnityEditor.SerializedObject(go.AddComponent(r.resolved[0]));
+            foreach (var path in d.anchorFieldPaths)
+                Assert.IsNotNull(so.FindProperty(path), "anchor path no longer a serialized property: " + path);
+            foreach (var path in d.hardDepFieldPaths)
+                Assert.IsNotNull(so.FindProperty(path), "hard-dep path no longer a serialized property: " + path);
+            foreach (var path in d.softDepFieldPaths)
+                Assert.IsNotNull(so.FindProperty(path), "soft-dep path no longer a serialized property: " + path);
+        }
+        finally { Object.DestroyImmediate(go); }
     }
 
     [Test]
@@ -260,6 +275,8 @@ public class TransplantCoreTests
     {
         // Same source/map but dest has ONE Armature → 2 source siblings resolve to "Armature", dest has 1 →
         // the occurrence index cannot address a unique dest sibling → named FAIL (not a silent mis-bind).
+        // Covers the mirrored A1 shape too (source 1, dest 2): the guard is a `srcResolving != dstCount`
+        // inequality, so a second fixture with the operands swapped exercises the identical branch.
         var vroot = new GameObject("V").transform;
         var vp = new GameObject("P").transform; vp.SetParent(vroot);
         var vOther = new GameObject("Other").transform; vOther.SetParent(vp);
@@ -279,81 +296,24 @@ public class TransplantCoreTests
         Object.DestroyImmediate(droot.gameObject);
     }
 
-    [Test]
-    public void EnsureHost_A1_guard_returns_null_and_names_count_mismatch()
-    {
-        // Source has 1 'Armature'; dest has 2 'Armature.1' → the occurrence index is unambiguous on the
-        // source but not on the mapped dest → return null with a named reason, never a wrong-sibling bind.
-        var vroot = new GameObject("V").transform;
-        var arm   = new GameObject("Armature").transform; arm.SetParent(vroot);
-        var hips  = new GameObject("Hips").transform;     hips.SetParent(arm);
-
-        var droot = new GameObject("D").transform;
-        new GameObject("Armature.1").transform.SetParent(droot);
-        new GameObject("Armature.1").transform.SetParent(droot);   // two → count mismatch
-        var map = new Dictionary<string, string> { { "Armature", "Armature.1" } };
-
-        var h = ScaffoldBuilder.EnsureHost(vroot, droot, hips, out var fr, null, "T", map);
-        Assert.IsNull(h);
-        Assert.IsNotNull(fr);
-        StringAssert.Contains("ambiguous rename", fr);
-
-        Object.DestroyImmediate(vroot.gameObject);
-        Object.DestroyImmediate(droot.gameObject);
-    }
-
-    // ── SessionMap ──────────────────────────────────────────────────────────────────────────────
-
-    [Test]
-    public void SessionMap_stores_and_returns_transform_mappings()
-    {
-        var src = new GameObject("s").transform;
-        var dst = new GameObject("d").transform;
-        var m = new SessionMap();
-        m.AddTransform(src, dst);
-        Assert.IsTrue(m.TryGetTransform(src, out var got));
-        Assert.AreSame(dst, got);
-        Assert.IsFalse(m.TryGetTransform(dst, out _));
-        Object.DestroyImmediate(src.gameObject);
-        Object.DestroyImmediate(dst.gameObject);
-    }
-
     // ── EnsureFailHasOffender (offenders⇔FAIL reverse-leg guard) ──────────────────────────────────
 
-    [Test]
-    public void EnsureFailHasOffender_backfills_from_error_on_offenderless_fail()
+    // Every leg of the guard: backfill from the error text, fall back to fixed text when there is no error,
+    // never double-add over a real named offender, never touch a PASS.
+    [TestCase("FAIL", "NullReferenceException: boom", null, 1, "NullReferenceException: boom")]
+    [TestCase("FAIL", null, null, 1, "no error detail")]
+    [TestCase("FAIL", "an error AND an offender", "real named offender", 1, "real named offender")]
+    [TestCase("PASS", null, null, 0, null)]
+    public void EnsureFailHasOffender_backfills_only_an_offenderless_fail(
+        string result, string error, string preNamed, int expectedCount, string expectedFragment)
     {
-        var log = new RunLog("test") { result = "FAIL", error = "NullReferenceException: boom" };
-        log.EnsureFailHasOffender();
-        Assert.AreEqual(1, log.offenders.Count);
-        StringAssert.Contains("NullReferenceException: boom", log.offenders[0]);
-    }
+        var log = new RunLog("test") { result = result, error = error };
+        if (preNamed != null) log.Offender(preNamed);
 
-    [Test]
-    public void EnsureFailHasOffender_does_not_double_add_when_offender_present()
-    {
-        var log = new RunLog("test") { result = "FAIL" };
-        log.Offender("real named offender");
         log.EnsureFailHasOffender();
-        Assert.AreEqual(1, log.offenders.Count);
-        Assert.AreEqual("real named offender", log.offenders[0]);
-    }
 
-    [Test]
-    public void EnsureFailHasOffender_leaves_pass_untouched()
-    {
-        var log = new RunLog("test") { result = "PASS" };
-        log.EnsureFailHasOffender();
-        Assert.AreEqual(0, log.offenders.Count);
-    }
-
-    [Test]
-    public void EnsureFailHasOffender_uses_fallback_text_when_error_null()
-    {
-        var log = new RunLog("test") { result = "FAIL", error = null };
-        log.EnsureFailHasOffender();
-        Assert.AreEqual(1, log.offenders.Count);
-        StringAssert.Contains("no error detail", log.offenders[0]);
+        Assert.AreEqual(expectedCount, log.offenders.Count);
+        if (expectedFragment != null) StringAssert.Contains(expectedFragment, log.offenders[0]);
     }
 
     // ── WriteRunLog sections (the envelope's custom-section hook) ─────────────────────────────

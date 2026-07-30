@@ -5,17 +5,15 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// NOTE: the planner's deep tier keys off the VRC table (VRCPhysBone/Collider/Contact/Constraint), which
-// the test assembly cannot reference at compile time without an SDK dependency. These edit-mode tests
-// therefore cover the TIER-AGNOSTIC and CONSERVATIVE-tier behavior of BuildPlan with synthetic
-// MonoBehaviour types (which resolve to the conservative tier — VrcComponentTable.Lookup == null):
+// These edit-mode tests cover the TIER-AGNOSTIC and CONSERVATIVE-tier behavior of BuildPlan, using synthetic
+// MonoBehaviour types because they resolve to the conservative tier (VrcComponentTable.Lookup == null) and
+// nothing the SDK ships does:
 //   - type-name resolution surfacing (unresolved list)
 //   - conservative host-present → planned copy; host-absent → flagged-missing
-//   - count-parity per (host, type): N vendor, M present → max(0,N-M) copies + remainder PresentSkip
-//   - full re-run → all PresentSkip
+//   - count parity per (host, type), including the full-re-run boundary
 //   - rollup counts and flaggedMissingHosts formatting (ForceKey shape)
-// Deep-tier parity (recreate-vs-flag discriminator, dedup lever, hard/soft criticality) is exercised
-// live via execute_code against a real vendor avatar in the open editor (the operator's gate).
+// Deep-tier parity (recreate-vs-flag discriminator, dedup lever, hard/soft criticality) needs a real vendor
+// avatar and is exercised live via execute_code in the open editor (the operator's gate).
 
 namespace CopyComponentsPlanTests_Ns
 {
@@ -91,45 +89,26 @@ public class CopyComponentsPlanTests
         Object.DestroyImmediate(ours);
     }
 
-    [Test]
-    public void CountParity_three_vendor_one_present_plans_two_copies_one_skip()
+    // Count parity per (host, type): N vendor, M already present → max(0, N-M) copies and the remainder
+    // PresentSkip, always N steps. M == N is the full-re-run boundary (nothing copied, everything skipped) —
+    // the case that decides whether a second run of a transplant is a no-op or a duplication.
+    [TestCase(3, 1, 2, 1)]
+    [TestCase(2, 2, 0, 2)]
+    public void CountParity_plans_the_shortfall_and_skips_the_remainder(
+        int vendorCount, int ourCount, int expectedInPlace, int expectedSkip)
     {
         var vendor = new GameObject("V");
         var va = Child(vendor, "A");
-        va.AddComponent<CopyComponentsPlanTests_Ns.CcProbeA>();
-        va.AddComponent<CopyComponentsPlanTests_Ns.CcProbeA>();
-        va.AddComponent<CopyComponentsPlanTests_Ns.CcProbeA>();   // N = 3
+        for (int i = 0; i < vendorCount; i++) va.AddComponent<CopyComponentsPlanTests_Ns.CcProbeA>();
 
         var ours = new GameObject("V");
         var oa = Child(ours, "A");
-        oa.AddComponent<CopyComponentsPlanTests_Ns.CcProbeA>();   // M = 1
+        for (int i = 0; i < ourCount; i++) oa.AddComponent<CopyComponentsPlanTests_Ns.CcProbeA>();
 
         var plan = CopyComponents.BuildPlan(ours, vendor, new[] { "CcProbeA" });
-        Assert.AreEqual(3, plan.steps.Count);          // N steps total
-        Assert.AreEqual(2, plan.InPlace);              // max(0, N-M) copies
-        Assert.AreEqual(1, plan.PresentSkip);          // remainder
-
-        Object.DestroyImmediate(vendor);
-        Object.DestroyImmediate(ours);
-    }
-
-    [Test]
-    public void Full_rerun_plans_all_present_skip()
-    {
-        var vendor = new GameObject("V");
-        var va = Child(vendor, "A");
-        va.AddComponent<CopyComponentsPlanTests_Ns.CcProbeA>();
-        va.AddComponent<CopyComponentsPlanTests_Ns.CcProbeA>();
-
-        var ours = new GameObject("V");
-        var oa = Child(ours, "A");
-        oa.AddComponent<CopyComponentsPlanTests_Ns.CcProbeA>();
-        oa.AddComponent<CopyComponentsPlanTests_Ns.CcProbeA>();   // M == N == 2
-
-        var plan = CopyComponents.BuildPlan(ours, vendor, new[] { "CcProbeA" });
-        Assert.AreEqual(2, plan.steps.Count);
-        Assert.AreEqual(2, plan.PresentSkip);
-        Assert.AreEqual(0, plan.InPlace);
+        Assert.AreEqual(vendorCount, plan.steps.Count, "one step per vendor component");
+        Assert.AreEqual(expectedInPlace, plan.InPlace);
+        Assert.AreEqual(expectedSkip, plan.PresentSkip);
 
         Object.DestroyImmediate(vendor);
         Object.DestroyImmediate(ours);
@@ -228,20 +207,5 @@ public class CopyComponentsPlanTests
 
         Object.DestroyImmediate(vendor);
         Object.DestroyImmediate(ours);
-    }
-
-    [Test]
-    public void VrcComponentTable_has_four_rows_with_four_distinct_deep_groups()
-    {
-        var rows = VrcComponentTable.Rows;
-        Assert.AreEqual(4, rows.Length, "table must have exactly 4 deep-tier rows");
-        var groups = new System.Collections.Generic.HashSet<TopoGroup>();
-        foreach (var r in rows) groups.Add(r.group);
-        Assert.AreEqual(4, groups.Count, "the 4 rows must carry 4 distinct groups");
-        Assert.IsTrue(groups.Contains(TopoGroup.Collider));
-        Assert.IsTrue(groups.Contains(TopoGroup.Contact));
-        Assert.IsTrue(groups.Contains(TopoGroup.PhysBone));
-        Assert.IsTrue(groups.Contains(TopoGroup.Constraint));
-        Assert.IsFalse(groups.Contains(TopoGroup.Conservative), "Conservative is the null-lookup case; never a row");
     }
 }

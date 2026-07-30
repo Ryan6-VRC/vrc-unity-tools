@@ -28,17 +28,27 @@ public class ImportPackageTests
     public void SetUp()
     {
         LogAssert.ignoreFailingMessages = true; // FAIL branches log at Error — expected in negative tests
-        if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", "AgentImportPackageTmp");
     }
 
     [TearDown]
     public void TearDown()
     {
-        if (!string.IsNullOrEmpty(_logPath) && File.Exists(_logPath)) { File.Delete(_logPath); File.Delete(_logPath + ".meta"); }
+        bool touchedAssets = false;
+        if (!string.IsNullOrEmpty(_logPath) && File.Exists(_logPath))
+        { File.Delete(_logPath); File.Delete(_logPath + ".meta"); touchedAssets = true; }
         _logPath = null;
-        if (AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.DeleteAsset(TmpDir);
-        AssetDatabase.Refresh();
+        if (AssetDatabase.IsValidFolder(TmpDir)) { AssetDatabase.DeleteAsset(TmpDir); touchedAssets = true; }
+        // Refresh only when a file actually went away. An unconditional project-wide Refresh here (plus the
+        // matching CreateFolder that used to run in SetUp) charged every test in this fixture ~53 ms of
+        // AssetDatabase work, and most of them — the whole pure Decide table — touch no asset at all.
+        if (touchedAssets) AssetDatabase.Refresh();
         LogAssert.ignoreFailingMessages = false;
+    }
+
+    // Created on demand: only the on-disk-root Verify case needs a real folder in the project.
+    private static void EnsureTmpDir()
+    {
+        if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", "AgentImportPackageTmp");
     }
 
     // A package path that never touches disk — Verify/Decide only need its leaf to derive the log path.
@@ -117,11 +127,15 @@ public class ImportPackageTests
         StringAssert.Contains("domain reload", reason);
     }
 
+    // The verdict alone proves nothing here: `default` also FAILs, so deleting either switch arm would keep
+    // a verdict-only assert green. The reason token is what distinguishes the arm from the fall-through
+    // ("Import was never started"), and it is the only thing the agent reads.
     [Test]
     public void Decide_noRoot_failed_isFail()
     {
         var v = ImportPackage.Decide("failed", false, rootProvided: false, false, 0, out var reason);
         Assert.AreEqual(ImportPackage.Verdict.Fail, v, reason);
+        StringAssert.Contains("the import failed", reason);
     }
 
     [Test]
@@ -129,6 +143,7 @@ public class ImportPackageTests
     {
         var v = ImportPackage.Decide("cancelled", false, rootProvided: false, false, 0, out var reason);
         Assert.AreEqual(ImportPackage.Verdict.Fail, v, reason);
+        StringAssert.Contains("was cancelled", reason);
     }
 
     [Test]
@@ -177,6 +192,7 @@ public class ImportPackageTests
     {
         var pkg = Pkg("Landed");
         FabricateLog(pkg, "pending"); // stale status; the on-disk root is the truth
+        EnsureTmpDir();
         File.WriteAllText(TmpDir + "/asset.txt", "x");
         AssetDatabase.Refresh();
 
@@ -241,14 +257,9 @@ public class ImportPackageTests
         Assert.IsFalse(r.Contains("| log="), r);
     }
 
-    [Test]
-    public void Import_notAPackage_bareFail()
-    {
-        ExpectFail();
-        var r = ImportPackage.Import("C:/vendor/thing.zip");
-        StringAssert.StartsWith("[ImportPackage] FAIL:", r);
-        StringAssert.Contains(".unitypackage", r);
-    }
+    // (No Import-side ".zip" case: both doors share one ValidatePackagePath, whose extension arm
+    // Verify_badInput_bareFail already pins. What was Import-specific — that validation returns BEFORE any
+    // RunLog is written — is what Import_missingFile_bareFail's no-trailer assert proves.)
 
     [Test]
     public void Import_empty_bareFail()
@@ -263,13 +274,12 @@ public class ImportPackageTests
     [Test]
     public void Import_whatIf_reportsPlan_writesNothing()
     {
-        // A real, existing .unitypackage is needed to pass the exists check; export a throwaway one.
-        var asset = TmpDir + "/probe.txt";
-        File.WriteAllText(asset, "probe");
-        AssetDatabase.Refresh();
+        // The fixture only has to make ValidatePackagePath's File.Exists arm true: the whatIf branch returns
+        // after that check plus LogPath's string work, never opening, parsing, or importing the file. A real
+        // AssetDatabase.ExportPackage tarball here cost 6.7 s — the slowest test in the whole suite, ~4% of
+        // in-test time — to produce bytes nothing read.
         var pkgFile = Path.Combine(Path.GetTempPath(), "ImportPackageWhatIf.unitypackage");
-        AssetDatabase.ExportPackage(asset, pkgFile);
-        Assert.IsTrue(File.Exists(pkgFile), "export produced the probe package");
+        File.WriteAllText(pkgFile, "stub");
 
         var logPath = ImportPackage.LogPath(pkgFile);
         if (File.Exists(logPath)) File.Delete(logPath);

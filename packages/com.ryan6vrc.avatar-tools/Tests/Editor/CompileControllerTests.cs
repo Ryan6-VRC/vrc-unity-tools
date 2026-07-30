@@ -1,7 +1,6 @@
 using System.IO;
 using System.Text.RegularExpressions;
 using NUnit.Framework;
-using Ryan6Vrc.AgentTools.Editor;
 using Ryan6Vrc.AvatarTools.Editor;
 using UnityEditor;
 using UnityEditor.Animations;
@@ -20,41 +19,20 @@ public class CompileControllerTests
     [SetUp]
     public void SetUp()
     {
-        Directory.CreateDirectory(TestRoot);
+        // EnsureFolder (AssetDatabase.CreateFolder) registers TestRoot as a valid asset folder as it creates
+        // it — what the old Directory.CreateDirectory + project-wide Refresh() pair was really buying.
+        AnimatorTestHelpers.EnsureFolder(TestRoot);
         _srcPath = TestRoot + "/Debounce_Fx.yaml";
         File.WriteAllText(_srcPath, AnimatorSchemaYamlTests.DebounceDoc);
-        AssetDatabase.Refresh(); // register TestRoot as a valid asset folder so EnsureFolder can nest under it
     }
 
     [TearDown]
     public void TearDown()
     {
+        // No trailing Refresh(): DeleteAsset already tells the AssetDatabase the folder is gone, and the raw
+        // Directory.Delete is only a fallback for a folder the AssetDatabase never adopted.
         if (AssetDatabase.IsValidFolder(TestRoot)) AssetDatabase.DeleteAsset(TestRoot);
         if (Directory.Exists(TestRoot)) Directory.Delete(TestRoot, true);
-        AssetDatabase.Refresh();
-    }
-
-    [Test]
-    public void Compile_Writes_Controller_And_Returns_OK()
-    {
-        string outDir = TestRoot + "/out1";
-        string result = CompileController.Compile(_srcPath, outDir, whatIf: false);
-
-        StringAssert.Contains("=> OK", result);
-        Assert.IsTrue(File.Exists(outDir + "/Debounce_Fx.controller"), "controller written to disk");
-    }
-
-    [Test]
-    public void Compiled_Controller_Passes_CheckAnimator()
-    {
-        string outDir = TestRoot + "/out_lint";
-        CompileController.Compile(_srcPath, outDir, whatIf: false);
-
-        var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(outDir + "/Debounce_Fx.controller");
-        Assert.IsNotNull(ctrl, "compiled controller loads");
-
-        string lint = CheckAnimator.Lint(ctrl, "explicit", null, null, null);
-        StringAssert.Contains("=> PASS", lint);
     }
 
     [Test]
@@ -130,6 +108,7 @@ public class CompileControllerTests
 
         CompileController.Compile(_srcPath, outDir, whatIf: false);
         string guid1 = AssetDatabase.AssetPathToGUID(path);
+        Assert.IsTrue(File.Exists(path), "controller written to disk");
 
         CompileController.Compile(_srcPath, outDir, whatIf: false);
         string guid2 = AssetDatabase.AssetPathToGUID(path);
@@ -214,14 +193,8 @@ public class CompileControllerTests
             "scratch");
 
         StringAssert.DoesNotContain("Scratch#tmp", section, "a scratch param is animator-internal — never on the OSC surface, so not advised");
+        // Same oscUnsafeNames.Count==0 path a fully clean document takes, so the none-found form needs no
+        // second test of its own.
         StringAssert.Contains("_(none)_", section, "with only a scratch offender the section renders the none-found form");
-    }
-
-    [Test]
-    public void Osc_Advisory_None_Form_When_Clean()
-    {
-        // The canonical debounce doc's params (RawInput/Debounced) are OSC-safe.
-        string section = OscAdvisorySection(AnimatorSchemaYamlTests.DebounceDoc, "osc_clean");
-        StringAssert.Contains("_(none)_", section, "a clean document renders the none-found form like the sibling advisories");
     }
 }

@@ -380,9 +380,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             return dest + " " + Conditions(t.conditions, t.hasExitTime) + offset;
         }
 
+        // `isExit` is read FIRST, exactly as RenderTransition does: an exit-targeted edge carries neither
+        // destinationState nor destinationStateMachine, so without this branch it falls through to "(none)"
+        // and a sub-machine's only way out renders identically to an unwired edge.
         private static string RenderEntryTransition(AnimatorTransition t)
         {
-            string dest = t.destinationState != null ? "`" + t.destinationState.name + "`"
+            string dest = t.isExit ? "Exit"
+                        : t.destinationState != null ? "`" + t.destinationState.name + "`"
                         : t.destinationStateMachine != null ? "`" + t.destinationStateMachine.name + "` (state machine)"
                         : "(none)";
             return "→ " + dest + " " + Conditions(t.conditions, false);

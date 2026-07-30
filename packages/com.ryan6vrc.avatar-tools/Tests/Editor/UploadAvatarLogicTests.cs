@@ -19,8 +19,12 @@ public class UploadAvatarLogicTests
         => Assert.AreEqual("real", UploadAvatarLogic.Classify(null, true, false));
     [Test] public void Classify_ServerErrorIsTransient()
         => Assert.AreEqual("transient", UploadAvatarLogic.Classify(503, false, false));
+    // 400, not null: with a null status the fall-through already returns "transient", so the isTimeout
+    // branch could be deleted outright and the test would stay green. A 4xx is the one input where the
+    // branch is load-bearing — it must beat the "non-429 4xx is real" rule, or a timed-out upload gets
+    // classified non-retryable.
     [Test] public void Classify_TimeoutIsTransient()
-        => Assert.AreEqual("transient", UploadAvatarLogic.Classify(null, false, true));
+        => Assert.AreEqual("transient", UploadAvatarLogic.Classify(400, false, true));
     [Test] public void Classify_OtherClientErrorIsReal()
         => Assert.AreEqual("real", UploadAvatarLogic.Classify(403, false, false));
 

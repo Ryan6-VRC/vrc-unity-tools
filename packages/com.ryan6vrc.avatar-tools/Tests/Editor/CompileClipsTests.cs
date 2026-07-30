@@ -289,18 +289,21 @@ public class CompileClipsTests
         finally { File.Delete(cyPath); }
     }
 
-    [TestCase("auto")]
-    [TestCase("free")]
-    public void Tangents_UnsupportedToken_RefusedAtParse(string token)
+    [Test]
+    public void Tangents_UnsupportedToken_RefusedAtParse()
     {
         // 'auto'/'free' are refused fail-loud at parse (Unity recomputes auto/clamped-auto; free carries
-        // explicit tangent values the [t,v] schema can't express) — confirmed real entry point is
-        // AnimatorSchemaYaml.Parse, throwing SchemaException (mirrors AnimatorSchemaYamlTests.cs).
+        // explicit tangent values the [t,v] schema can't express) — the real entry point is
+        // AnimatorSchemaYaml.Parse, throwing SchemaException. This is the ONLY coverage of that refusal
+        // anywhere in the suite, so it stays here even though the door under test is CompileClips.
+        // ONE token is enough: both tokens reach one throw. And the assertion must quote `got '<token>'` —
+        // the refusal text names 'auto' AND 'free' verbatim as the unsupported pair, so a bare
+        // Contains(token) passes for either input and proves nothing about what was actually rejected.
         string body = Head + "clips:\n  Bad:\n    curves:\n      Prop/Renderer.enabled:\n" +
-            "        tangents: " + token + "\n        keys: [[0, 0], [1, 1]]\n";
+            "        tangents: auto\n        keys: [[0, 0], [1, 1]]\n";
         var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(body, "test"));
-        StringAssert.Contains("stepped", ex.Message);
-        StringAssert.Contains(token, ex.Message);
+        StringAssert.Contains("got 'auto'", ex.Message, "the refusal echoes the offending token");
+        StringAssert.Contains("'flat', 'linear', or 'stepped'", ex.Message, "and names the supported set");
     }
 
     [Test]

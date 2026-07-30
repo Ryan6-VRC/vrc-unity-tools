@@ -83,53 +83,11 @@ public class ControllerDecompileTests
     }
 
     // ---- Round-trip: nesting + a non-driver behaviour ---------------------------------------------
-
-    private const string NestedDoc =
-        "schema: 1\ncontroller: NestedRT_Fx\nbasis: avatar-root\nrole: fx\n" +
-        "parameters:\n  P: { type: bool }\n" +
-        "layers:\n  - name: L\n" +
-        "    states:\n      Idle:\n        motion: ~\n" +
-        "        behaviours:\n          - tracking: { head: animation, leftHand: tracking }\n" +
-        "        transitions:\n          - { to: Sub/A, when: [ P is true ] }\n" +
-        "    machines:\n      Sub:\n        states:\n          A:\n            motion: ~\n            transitions:\n              - { to: B, when: [ P is false ] }\n          B: { motion: ~ }\n        default: A\n" +
-        "    entry:\n      - { to: Sub, when: [ P is true ] }\n" +
-        "    default: Idle\n";
-
-    [Test]
-    public void Walk_Roundtrips_Nested_With_NonDriver_Behaviour()
-    {
-        var src = AnimatorSchemaYaml.Parse(NestedDoc, "test");
-        ControllerEmit.Build(src, out var emitted);
-        var w = ControllerDecompile.Walk(emitted.Controller);
-
-        Assert.AreEqual(0, w.Refusals.Count, "nested doc is fully in-vocabulary");
-        var root = w.Doc.Layers[0].Root;
-
-        // Sub-machine decoded.
-        Assert.AreEqual(1, root.Machines.Count, "one sub-machine");
-        var sub = root.Machines[0];
-        Assert.AreEqual("Sub", sub.Name);
-        CollectionAssert.AreEquivalent(new[] { "A", "B" }, sub.Machine.States.ConvertAll(s => s.Name));
-        Assert.AreEqual("A", sub.Machine.DefaultState);
-
-        // Cross-machine addressing: Idle -> Sub/A (slash-qualified).
-        var idle = root.States.First(s => s.Name == "Idle");
-        Assert.AreEqual("Sub/A", idle.Transitions[0].To, "cross-machine target is a slash path from the layer root");
-
-        // Same-machine addressing: A -> B (bare).
-        var a = sub.Machine.States.First(s => s.Name == "A");
-        Assert.AreEqual("B", a.Transitions[0].To, "same-machine target is bare");
-
-        // Entry ladder into the sub-machine.
-        Assert.AreEqual(1, root.EntryLadder.Count);
-        Assert.AreEqual("Sub", root.EntryLadder[0].To);
-
-        // The non-driver behaviour round-trips its Fields keyed by the camelCase tokens.
-        var trk = idle.Behaviours.First(b => b.Kind == "tracking");
-        Assert.AreEqual("animation", (string)trk.Fields["head"]);
-        Assert.AreEqual("tracking", (string)trk.Fields["leftHand"]);
-        Assert.IsFalse(trk.Fields.ContainsKey("rightHand"), "untouched channel (NoChange) is not emitted");
-    }
+    // Lives in AnimatorSchemaEmitTests.Emit_Walk_Serialize_Parse_Roundtrips_Nested_With_Behaviour, not here: on
+    // the same seeded document it makes every assertion this file would (sub-machine name/states/default, the
+    // Sub/A cross-machine target, the bare same-machine target, the entry rung, the tracking Fields including
+    // rightHand's absence, refusal-free) and then carries the doc through Serialize→Parse→re-emit. A Walk-only
+    // copy here would be a prefix of it.
 
     // ---- Orphan counting --------------------------------------------------------------------------
 
@@ -327,6 +285,9 @@ public class ControllerDecompileTests
         var w = ControllerDecompile.Walk(emitted.Controller);
         var L = w.Doc.Layers[0];
         Assert.AreEqual(true, L.WriteDefaults, "modal WD policy on a 1/1 tie prefers true");
+        Assert.AreEqual(0, w.Refusals.Count, "mixed WD is TOLERATED, not refused");
+        Assert.IsTrue(w.Notes.Any(n => n.Contains("mixed Write Defaults")),
+            "the hoist is a tolerance, so a Note records it — the caller's only trace that WD was rewritten");
 
         var a = L.Root.States.First(s => s.Name == "A");
         var b = L.Root.States.First(s => s.Name == "B");

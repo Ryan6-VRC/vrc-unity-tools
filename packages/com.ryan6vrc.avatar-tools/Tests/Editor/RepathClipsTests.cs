@@ -64,6 +64,10 @@ public class RepathClipsTests
         string s = RepathClips.Run(ctrl, new[] { "Armature/Hips" }, new[] { "Armature/Pelvis" });
         StringAssert.Contains("=> PASS", s);
         Assert.AreEqual(2, AnimatorTestHelpers.Count(s, "bindingsRewritten"), "Hips + Hips/Spine, not HipsFoo");
+        // strict Count (require the token): the write path emits writeLandedFailures unconditionally
+        // (RepathClips.cs), so a refactor that dropped the token must fail loud, not silently weaken the
+        // read-back's happy path — which this rewrite is.
+        Assert.AreEqual(0, AnimatorTestHelpers.Count(s, "writeLandedFailures"));
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(clip, "Armature/Pelvis"));
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(clip, "Armature/Pelvis/Spine"));
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(clip, "Armature/HipsFoo"), "sibling-prefix untouched");
@@ -119,20 +123,6 @@ public class RepathClipsTests
         StringAssert.Contains("=> PASS", s);
         Assert.AreEqual(2f, CurveValueAt(clip, "A"), "A now holds B's original curve");
         Assert.AreEqual(1f, CurveValueAt(clip, "B"), "B now holds A's original curve");
-    }
-
-    [Test]
-    public void WriteLanded_readback_passes_on_normal_owned_rewrite()
-    {
-        string cp = Root + "/RB.controller", clip = Root + "/RB.anim";
-        var ctrl = BuildWithClip(cp, clip, "Old/Path");
-        string s = RepathClips.Run(ctrl, new[] { "Old/Path" }, new[] { "New/Path" });
-        StringAssert.Contains("=> PASS", s);
-        // strict Count (require the token): the write path emits writeLandedFailures unconditionally
-        // (RepathClips.cs), so a refactor that dropped the token must fail loud, not silently weaken this.
-        Assert.AreEqual(0, AnimatorTestHelpers.Count(s, "writeLandedFailures"));
-        Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(clip, "New/Path"));
-        Assert.IsFalse(AnimatorTestHelpers.ClipHasBinding(clip, "Old/Path"));
     }
 
     [Test]
@@ -224,17 +214,5 @@ public class RepathClipsTests
         string s = RepathClips.Run(ctrl, new[] { "Ghost" }, new[] { "AlsoGhost" });
         StringAssert.Contains("=> PASS", s);
         StringAssert.Contains("stale move?", s);
-    }
-
-    // Spike (2026-07-08) verdict: anim=WRITE LANDED — SaveAssets bypasses the OS read-only attribute, so a
-    // silent no-op on an immutable .anim is NOT fabricable in EditMode on this Unity/OS combo. The read-back's
-    // happy path is covered by WriteLanded_readback_passes_on_normal_owned_rewrite; the FAIL branch is
-    // exercised in production against Packages/ immutables. Gap kept loud + on the record per plan.
-    [Test]
-    public void WriteLanded_readback_failbranch_not_fabricable()
-    {
-        Assert.Ignore("Spike anim=WRITE LANDED: silent no-op on an immutable .anim not fabricable in EditMode " +
-                      "(SaveAssets bypasses the OS read-only attribute). Happy path covered by " +
-                      "WriteLanded_readback_passes_on_normal_owned_rewrite; FAIL branch exercised in production.");
     }
 }

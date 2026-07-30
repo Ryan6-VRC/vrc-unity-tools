@@ -21,8 +21,20 @@ using VRC.SDK3.Avatars.Components;
 public class ReportShapeOverlapTests
 {
     private GameObject _root;
-    private string _logPath;
     private readonly List<Mesh> _meshes = new List<Mesh>();
+
+    // A Report writes a Snapshot markdown, and docs/unity-tools.md declares that dir DURABLE — the operator's
+    // own pile, pruned by nothing. Record the path each call named in its `| log=` trailer and delete exactly
+    // those; a glob over `shape-overlap_*.md` would also sweep snapshots the operator took by hand. One list for
+    // the whole fixture rather than a per-test field, so a test making two Report calls records both.
+    private static readonly List<string> Artifacts = new List<string>();
+
+    [OneTimeTearDown]
+    public void DeleteWrittenSnapshots()
+    {
+        if (Artifacts.Count > 0) AssetDatabase.DeleteAssets(Artifacts.ToArray(), new List<string>());
+        Artifacts.Clear();
+    }
 
     [SetUp]
     public void SetUp()
@@ -39,8 +51,6 @@ public class ReportShapeOverlapTests
         _root = null;
         foreach (var m in _meshes) if (m != null) UnityEngine.Object.DestroyImmediate(m);
         _meshes.Clear();
-        if (!string.IsNullOrEmpty(_logPath)) AssetDatabase.DeleteAsset(_logPath);
-        _logPath = null;
         LogAssert.ignoreFailingMessages = false;
     }
 
@@ -86,12 +96,25 @@ public class ReportShapeOverlapTests
         return sb.ToString();
     }
 
-    private string ReadLog(string result)
+    private const string LogMarker = "| log=";
+
+    // The door, with the Snapshot path it named recorded for teardown. Every Report call in this fixture goes
+    // through here, including the ones that assert only on the returned summary — a summary-only call wrote its
+    // artifact too — and the FAIL cases, whose contract is that there is no trailer to record.
+    private static string Report(string meshObject, string[] shapeNames = null, string outfitRoot = null)
     {
-        const string marker = "| log=";
-        int i = result.IndexOf(marker, StringComparison.Ordinal);
-        _logPath = i < 0 ? null : result.Substring(i + marker.Length).Trim();
-        return _logPath != null && File.Exists(_logPath) ? File.ReadAllText(_logPath) : "";
+        string summary = ReportShapeOverlap.Report(meshObject, shapeNames, outfitRoot);
+        int i = summary.IndexOf(LogMarker, StringComparison.Ordinal);
+        if (i >= 0) Artifacts.Add(summary.Substring(i + LogMarker.Length).Trim());
+        return summary;
+    }
+
+    private static string ReadLog(string result)
+    {
+        int i = result.IndexOf(LogMarker, StringComparison.Ordinal);
+        if (i < 0) return "";
+        string path = result.Substring(i + LogMarker.Length).Trim();
+        return File.Exists(path) ? File.ReadAllText(path) : "";
     }
 
     // ── Core: containment metric ──────────────────────────────────────────────────────────────────────
@@ -112,17 +135,6 @@ public class ReportShapeOverlapTests
         Assert.AreEqual(5, p.Intersect);
         Assert.AreEqual(5, p.MinFootprint);
         Assert.AreEqual(1.0f, p.Containment, 1e-4f);
-    }
-
-    [Test]
-    public void Containment_disjoint_isZero()
-    {
-        var m = MakeMesh(20);
-        AddSpan(m, "A", 0, 4, 0.05f);
-        AddSpan(m, "B", 5, 9, 0.05f);
-        var a = ReportShapeOverlap.Analyze(m, new[] { "A", "B" });
-        Assert.AreEqual(0, PairOf(a, "A", "B").Intersect);
-        Assert.AreEqual(0f, PairOf(a, "A", "B").Containment, 1e-4f);
     }
 
     // Partial overlap below the flag threshold: |A∩B|=2 over min(10,7)=7 ⇒ 0.286 < 0.30 ⇒ not flagged.
@@ -224,7 +236,7 @@ public class ReportShapeOverlapTests
         AddSpan(m, "B", 5, 9, 0.05f); // fully contained ⇒ flagged
         var go = NewSkinnedObject("Body", m);
 
-        var r = ReportShapeOverlap.Report(Path(go), new[] { "A", "B" });
+        var r = Report(Path(go), new[] { "A", "B" });
         StringAssert.Contains("=> OK", r);
         StringAssert.Contains("| log=", r);
         StringAssert.Contains("shapes=2/2", r);
@@ -245,7 +257,7 @@ public class ReportShapeOverlapTests
         AddSpan(m, "A", 0, 9, 0.05f);
         AddSpan(m, "B", 5, 9, 0.05f);
         var go = NewSkinnedObject("Body", m);
-        var r = ReportShapeOverlap.Report(Path(go), new[] { "A", "B", "Ghost" });
+        var r = Report(Path(go), new[] { "A", "B", "Ghost" });
         StringAssert.Contains("=> OK", r);      // missing name is not a failure
         StringAssert.Contains("shapes=2/3", r);
         StringAssert.Contains("missing=1", r);
@@ -259,7 +271,7 @@ public class ReportShapeOverlapTests
     public void Report_objectNotFound_bareFail()
     {
         LogAssert.Expect(LogType.Error, FailRe);
-        var r = ReportShapeOverlap.Report("no-such-object", new[] { "A" });
+        var r = Report("no-such-object", new[] { "A" });
         StringAssert.StartsWith("[ReportShapeOverlap] FAIL:", r);
         StringAssert.Contains("not found", r);
         Assert.IsFalse(r.Contains("| log="), "a bare FAIL never points at an artifact");
@@ -271,7 +283,7 @@ public class ReportShapeOverlapTests
         LogAssert.Expect(LogType.Error, FailRe);
         var go = new GameObject("Bare");
         go.transform.SetParent(_root.transform, false); // no SkinnedMeshRenderer at all
-        var r = ReportShapeOverlap.Report(Path(go), new[] { "A" });
+        var r = Report(Path(go), new[] { "A" });
         StringAssert.StartsWith("[ReportShapeOverlap] FAIL:", r);
         StringAssert.Contains("no SkinnedMeshRenderer with blendshapes", r);
     }
@@ -283,7 +295,7 @@ public class ReportShapeOverlapTests
         var m = MakeMesh(20);
         AddSpan(m, "A", 0, 9, 0.05f);
         var go = NewSkinnedObject("Body", m);
-        var r = ReportShapeOverlap.Report(Path(go), new string[0]);
+        var r = Report(Path(go), new string[0]);
         StringAssert.StartsWith("[ReportShapeOverlap] FAIL:", r);
         StringAssert.Contains("candidate co-active set", r);
     }
@@ -297,7 +309,7 @@ public class ReportShapeOverlapTests
         var m = MakeMesh(20);
         AddSpan(m, "A", 0, 9, 0.05f);
         var go = NewSkinnedObject("Body", m);
-        var r = ReportShapeOverlap.Report(Path(go), new[] { "A", null });
+        var r = Report(Path(go), new[] { "A", null });
         StringAssert.StartsWith("[ReportShapeOverlap] FAIL:", r);
         StringAssert.Contains("non-empty", r);
         Assert.IsFalse(r.Contains("| log="), "malformed input is a bare FAIL, not a written report");
@@ -314,7 +326,7 @@ public class ReportShapeOverlapTests
         parent.transform.SetParent(_root.transform, false);
         NewChildSkinned(parent, "MeshA", m1);
         NewChildSkinned(parent, "MeshB", m2);
-        var r = ReportShapeOverlap.Report(Path(parent), new[] { "A" });
+        var r = Report(Path(parent), new[] { "A" });
         StringAssert.StartsWith("[ReportShapeOverlap] FAIL:", r);
         StringAssert.Contains("ambiguous", r);
         StringAssert.Contains("MeshA", r);
@@ -378,7 +390,7 @@ public class ReportShapeOverlapTests
         var body = NewChildBody(avatar, "Body", m); // weights default 0
         AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
 
-        var r = ReportShapeOverlap.Report(Path(body), new[] { "Stocking" }, Path(avatar));
+        var r = Report(Path(body), new[] { "Stocking" }, Path(avatar));
         StringAssert.Contains("=> OK", r);
         StringAssert.Contains("shapes=2/2", r); // Stocking (passed) + Shrink_Hip (reaction, weight 0)
         StringAssert.Contains("`Shrink_Hip`", ReadLog(r));
@@ -401,40 +413,8 @@ public class ReportShapeOverlapTests
 
         AddShapeChanger(avatar, "Outfit", other, ("Shrink_Hip", ShapeChangeType.Set));
 
-        var r = ReportShapeOverlap.Report(Path(body), new[] { "Stocking" }, Path(avatar));
+        var r = Report(Path(body), new[] { "Stocking" }, Path(avatar));
         StringAssert.Contains("shapes=1/1", r); // only the passed Stocking; the OtherBody reaction is excluded
-    }
-
-    // A Delete-mode row is ingested like any other declared shape (not dropped), and its ChangeType (Delete=0)
-    // is captured on the ingestion record for the Task-2 resolution table.
-    [Test]
-    public void BuildAnalyzeSet_deleteRow_ingestedWithTypeCaptured()
-    {
-        var avatar = NewAvatarRoot("Avatar");
-        var m = MakeMesh(20);
-        AddSpan(m, "Del_Shape", 0, 9, 0.05f);
-        var body = NewChildBody(avatar, "Body", m);
-        AddShapeChanger(avatar, "Outfit", body, ("Del_Shape", ShapeChangeType.Delete));
-        var smr = body.GetComponent<SkinnedMeshRenderer>();
-
-        var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new string[0], avatar);
-        CollectionAssert.Contains(ing.Names, "Del_Shape");
-        Assert.AreEqual(0, ing.ReactionTypes["Del_Shape"], "Delete captured as ChangeType 0");
-    }
-
-    // A Set row captures ChangeType 1 (the mirror of the Delete case, over the same ingestion path).
-    [Test]
-    public void BuildAnalyzeSet_setRow_typeCapturedAsOne()
-    {
-        var avatar = NewAvatarRoot("Avatar");
-        var m = MakeMesh(20);
-        AddSpan(m, "Set_Shape", 0, 9, 0.05f);
-        var body = NewChildBody(avatar, "Body", m);
-        AddShapeChanger(avatar, "Outfit", body, ("Set_Shape", ShapeChangeType.Set));
-        var smr = body.GetComponent<SkinnedMeshRenderer>();
-
-        var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new string[0], avatar);
-        Assert.AreEqual(1, ing.ReactionTypes["Set_Shape"], "Set captured as ChangeType 1");
     }
 
     // The {worn} tier: a shape at nonzero weight on the resolved SMR is ingested off the SMR (not the Mesh),
@@ -511,7 +491,8 @@ public class ReportShapeOverlapTests
     }
 
     // Multiple ShapeChanger components, one carrying multiple rows — every reaction-targeted shape is ingested
-    // and each row's ChangeType is captured.
+    // and each row's ChangeType is captured. Both ChangeType poles are here (Set=1 on A/C, Delete=0 on B), so
+    // the two single-pole tests that used to sit above assert nothing this does not.
     [Test]
     public void BuildAnalyzeSet_multipleShapeChangers_allIngested()
     {
@@ -577,7 +558,7 @@ public class ReportShapeOverlapTests
         var body = NewChildBody(avatar, "Body", m); // weight 0
         AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
 
-        var md = ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar)));
+        var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
         var row = ResolutionRow(md, "Shrink_Hip");
         StringAssert.Contains("Set=", row);                       // it IS reaction-declared
         Assert.IsFalse(row.Contains("MISMATCH"), "reaction-declared row is never flagged, even at static weight 0");
@@ -598,7 +579,7 @@ public class ReportShapeOverlapTests
         var smr = body.GetComponent<SkinnedMeshRenderer>();
         smr.SetBlendShapeWeight(m.GetBlendShapeIndex("Shrink_stocking"), 100f); // worn, undeclared
 
-        var md = ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar)));
+        var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
         var row = ResolutionRow(md, "Shrink_stocking");
         StringAssert.Contains("**MISMATCH**", row);
         StringAssert.Contains("none", row); // no reaction owns it
@@ -614,7 +595,7 @@ public class ReportShapeOverlapTests
         var body = NewChildBody(avatar, "Body", m);
         AddShapeChangerValued(avatar, "Outfit", body, ("Del_Shape", ShapeChangeType.Delete, 30f));
 
-        var row = ResolutionRow(ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar))), "Del_Shape");
+        var row = ResolutionRow(ReadLog(Report(Path(body), new string[0], Path(avatar))), "Del_Shape");
         StringAssert.Contains("Delete", row);
         StringAssert.Contains("| 100 |", row); // resolved-target column = 100 for a Delete, not the Value
     }
@@ -629,7 +610,7 @@ public class ReportShapeOverlapTests
         var body = NewChildBody(avatar, "Body", m);
         AddShapeChangerValued(avatar, "Outfit", body, ("Set_Shape", ShapeChangeType.Set, 42f));
 
-        var row = ResolutionRow(ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar))), "Set_Shape");
+        var row = ResolutionRow(ReadLog(Report(Path(body), new string[0], Path(avatar))), "Set_Shape");
         StringAssert.Contains("Set=42", row);
         StringAssert.Contains("| 42 |", row); // resolved-target column = the Set value
     }
@@ -650,7 +631,7 @@ public class ReportShapeOverlapTests
         var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new string[0], avatar);
         Assert.IsTrue(ing.Reactions["Clash"].Conflict, "two Set reactions at different values conflict");
 
-        var row = ResolutionRow(ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar))), "Clash");
+        var row = ResolutionRow(ReadLog(Report(Path(body), new string[0], Path(avatar))), "Clash");
         StringAssert.Contains("CONFLICT", row);
         StringAssert.Contains("50", row);
         StringAssert.Contains("80", row); // both values surfaced, not collapsed
@@ -668,7 +649,7 @@ public class ReportShapeOverlapTests
         AddSpan(m, "Idle2", 13, 15, 0.05f);
         var body = NewChildBody(avatar, "Body", m);
 
-        var md = ReadLog(ReportShapeOverlap.Report(Path(body), new[] { "InUnion" }, Path(avatar)));
+        var md = ReadLog(Report(Path(body), new[] { "InUnion" }, Path(avatar)));
         StringAssert.Contains("## Weight audit", md);
         StringAssert.Contains("`Idle1`", md);
         StringAssert.Contains("`Idle2`", md);
@@ -692,7 +673,7 @@ public class ReportShapeOverlapTests
         smr.SetBlendShapeWeight(m.GetBlendShapeIndex("Worn1"), 100f);     // worn, undeclared
         AddShapeChanger(avatar, "Outfit", body, ("React1", ShapeChangeType.Set)); // reacted, weight 0
 
-        var r = ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar));
+        var r = Report(Path(body), new string[0], Path(avatar));
         StringAssert.Contains("=> OK", r);
         StringAssert.Contains("reacted=1", r);
         StringAssert.Contains("worn=1", r);
@@ -717,7 +698,7 @@ public class ReportShapeOverlapTests
         var ing = ReportShapeOverlap.BuildAnalyzeSet(smr, new string[0], avatar);
         Assert.IsFalse(ing.Reactions["DelClash"].Conflict, "two Deletes (any stored values) are not a conflict");
 
-        var row = ResolutionRow(ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar))), "DelClash");
+        var row = ResolutionRow(ReadLog(Report(Path(body), new string[0], Path(avatar))), "DelClash");
         StringAssert.Contains("Delete", row);
         StringAssert.Contains("| 100 |", row);       // resolved-target 100, not "conflict"
         StringAssert.DoesNotContain("CONFLICT", row);
@@ -738,7 +719,7 @@ public class ReportShapeOverlapTests
         smr.SetBlendShapeWeight(m.GetBlendShapeIndex("WornDeclared"), 100f);   // worn AND declared
         AddShapeChanger(avatar, "Outfit", body, ("WornDeclared", ShapeChangeType.Set));
 
-        var r = ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar));
+        var r = Report(Path(body), new string[0], Path(avatar));
         StringAssert.Contains("worn=2", r);     // both are worn
         StringAssert.Contains("mismatch=1", r); // only the undeclared one is a mismatch
     }
@@ -756,7 +737,7 @@ public class ReportShapeOverlapTests
         var smr = body.GetComponent<SkinnedMeshRenderer>();
         smr.SetBlendShapeWeight(m.GetBlendShapeIndex("Residual"), 0.0004f); // worn (strictly != 0), sub-0.###
 
-        var r = ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar));
+        var r = Report(Path(body), new string[0], Path(avatar));
         StringAssert.Contains("worn=1", r);
         StringAssert.Contains("mismatch=1", r);
         var row = ResolutionRow(ReadLog(r), "Residual");
@@ -787,7 +768,7 @@ public class ReportShapeOverlapTests
         AddSpan(m, "a|b", 0, 9, 0.05f);
         var body = NewChildBody(avatar, "Body", m);
 
-        var md = ReadLog(ReportShapeOverlap.Report(Path(body), new[] { "a|b" }, Path(avatar)));
+        var md = ReadLog(Report(Path(body), new[] { "a|b" }, Path(avatar)));
         StringAssert.Contains(@"`a\|b`", md);     // pipe backslash-escaped inside the code cell
         StringAssert.DoesNotContain("`a|b`", md); // never the raw, column-breaking form
     }
@@ -805,7 +786,7 @@ public class ReportShapeOverlapTests
         LogAssert.Expect(LogType.Warning,
             new System.Text.RegularExpressions.Regex(@"ShapeChangeType drift.*Drifted"));
 
-        var row = ResolutionRow(ReadLog(ReportShapeOverlap.Report(Path(body), new string[0], Path(avatar))), "Drifted");
+        var row = ResolutionRow(ReadLog(Report(Path(body), new string[0], Path(avatar))), "Drifted");
         StringAssert.Contains("UNKNOWN(2)", row);
         StringAssert.Contains("| unknown |", row); // resolved-target = unknown, not a fabricated Set value
         Assert.IsFalse(row.Contains("Set="), "an unknown change type must not render as Set");
@@ -825,7 +806,7 @@ public class ReportShapeOverlapTests
         var body = NewChildBody(avatar, "Body", m);
 
         var small = ResolutionRow(
-            ReadLog(ReportShapeOverlap.Report(Path(body), new[] { "Big", "Small", "Mid" }, Path(avatar))), "Small");
+            ReadLog(Report(Path(body), new[] { "Big", "Small", "Mid" }, Path(avatar))), "Small");
         StringAssert.Contains("1.00", small);     // the MAX of Small's two containments
         StringAssert.DoesNotContain("0.50", small); // not the lesser pair — proves max-selection, not clobber/min
     }

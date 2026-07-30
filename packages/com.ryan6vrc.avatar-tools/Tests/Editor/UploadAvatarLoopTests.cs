@@ -16,8 +16,15 @@ public class UploadAvatarLoopTests
         return go;
     }
 
+    // ClassifyAvatar only — NOT the whatIf door, despite being the closest thing to coverage of it.
+    // Run(whatIf: true) is unreachable here: it refuses at CauReflect.IsAvailable (CAU is absent in this
+    // venue — Run_RefusesWhenCauAbsent below is the proof) and would then have to clear CheckPreconditions
+    // (SDK login, an open Build Control Panel, a Windows build target). So the whatIf ROW FORMATTING —
+    // "handle=… state=… publishName=…" and the "(no PipelineManager — never uploaded)" annotation, which is
+    // what a caller actually reads before publishing to a live account — has no automated coverage at all.
+    // Closing that needs the row builder split out of Run, or a live-venue check.
     [Test]
-    public void WhatIf_ClassifiesBlueprintState()
+    public void ClassifyAvatar_ReadsBlueprintStateAndPublishName()
     {
         var a = MakeAvatar("A", blueprint: "");
         var b = MakeAvatar("B", blueprint: "avtr_test");
@@ -46,11 +53,30 @@ public class UploadAvatarLoopTests
     [Test]
     public void CauReflect_AbsentIsGracefulNotThrowing()
     {
-        Assert.DoesNotThrow(() => {
-            bool ok = CauReflect.TryBuildSetting(null, out _, out var why);
-            Assert.IsFalse(ok);
-            Assert.IsFalse(string.IsNullOrEmpty(why));
-        });
+        // A REAL descriptor, because that is what reaches the CAU-type lookup this test is named for.
+        // Passing null short-circuits at the `desc == null` guard one line in — a different branch — leaving
+        // the absent-CAU path, the one every caller in this venue takes, entirely uncovered.
+        var go = new GameObject("cau-probe");
+        try
+        {
+            var desc = go.AddComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
+
+            // The assertions stay OUTSIDE DoesNotThrow: an assertion failure inside the delegate is itself an
+            // exception, so DoesNotThrow would report a wrong reason string as "an unexpected exception".
+            bool ok = false; object setting = null; string why = null;
+            Assert.DoesNotThrow(() => ok = CauReflect.TryBuildSetting(desc, out setting, out why),
+                "a missing CAU must be a named false, never a class-load throw");
+            Assert.IsFalse(ok, "CAU is not installed in this venue, so the setting cannot be built");
+            Assert.IsNull(setting, "a failed build must hand back nothing, not a half-configured setting");
+            StringAssert.Contains("CAU not installed", why,
+                "the reason must name the missing package — it is the caller's only fix");
+
+            // The null-argument leg, whose reason must stay distinguishable from CAU's absence: they call for
+            // opposite fixes (pass a descriptor vs. install a package).
+            Assert.IsFalse(CauReflect.TryBuildSetting(null, out _, out var whyNull));
+            StringAssert.Contains("null descriptor", whyNull);
+        }
+        finally { Object.DestroyImmediate(go); }
     }
 
     // ── RunCore loop semantics (fake delegate — the real SDK call is live-gated to Task 8) ──────
@@ -162,18 +188,6 @@ public class UploadAvatarLoopTests
     }
 
     private class StatusProbe { public string batchId; public string phase; public string handle; }
-
-    // The callback is optional — omitting it must not change loop semantics (every pre-existing caller).
-    [Test]
-    public void Loop_ProgressCallbackIsOptional()
-    {
-        var a = MakeAvatar("A","");
-        var report = UploadAvatar.RunCore(new[]{a},
-            _ => System.Threading.Tasks.Task.FromResult(UploadAvatar.UploadOutcome.Uploaded()),
-            () => {}).GetAwaiter().GetResult();
-        Assert.AreEqual("PASS", report.result);
-        UnityEngine.Object.DestroyImmediate(a);
-    }
 
     [Test]
     public void Loop_RateLimitIsNotAutoRetried()

@@ -1,6 +1,7 @@
 using System.Linq;
 using NUnit.Framework;
 using Ryan6Vrc.AvatarTools.Editor;
+using Ryan6Vrc.AvatarTools.Tests;   // FixpointOracle — the shared decode oracle
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
@@ -30,19 +31,10 @@ public class ControllerEmitTests
         sm.states.First(cs => cs.state.name == name).state;
 
     // ---- Debounce topology -----------------------------------------------------------------------
-
-    [Test]
-    public void Debounce_Topology_Is_Correct()
-    {
-        var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "mem://debounce");
-        ControllerEmit.Build(doc, out var r);
-
-        Assert.AreEqual(1, r.Controller.layers.Length, "one layer");
-        var sm = RootSm(r);
-        Assert.AreEqual(3, sm.states.Length, "three states");
-        Assert.IsNotNull(sm.defaultState);
-        Assert.AreEqual("Idle", sm.defaultState.name, "default state is Idle");
-    }
+    // No standalone topology/state-count test: ControllerDecompileTests.Walk_Roundtrips_An_Emitted_Controller
+    // asserts the layer count, the state-name set and the Idle default off this same document, and each
+    // debounce test below opens with State(sm, "…"), which throws on a missing state — so a broken topology
+    // cannot reach an assertion here.
 
     [Test]
     public void Debounce_ExitTime_Only_On_Pending_To_Active()
@@ -468,26 +460,10 @@ layers:
         Assert.AreEqual(y, s2.transitions[0].destinationState, "M2's S wires to M2's Y");
     }
 
-    [Test]
-    public void Qualified_Path_Resolves_Into_Nested_SubMachine()
-    {
-        // A deep slash-qualified path `A/inner` from the layer root walks sub-machine A, then its state
-        // `inner`. Top-level state Idle → `A/inner`.
-        var doc = AnimatorSchemaYaml.Parse(
-            "schema: 1\ncontroller: Path_Fx\nbasis: avatar-root\nrole: fx\n" +
-            "parameters:\n  P: { type: bool }\n" +
-            "layers:\n  - name: L\n" +
-            "    states:\n      Idle:\n        motion: ~\n        transitions:\n          - { to: A/inner, when: [ P is true ] }\n" +
-            "    machines:\n      A:\n        states:\n          inner: { motion: ~ }\n        default: inner\n" +
-            "    default: Idle\n", "test");
-        ControllerEmit.Build(doc, out var r);
-        var sm = r.Controller.layers[0].stateMachine;
-        var a = sm.stateMachines.First(cs => cs.stateMachine.name == "A").stateMachine;
-        var inner = a.states.First(cs => cs.state.name == "inner").state;
-        var idle = State(sm, "Idle");
-        Assert.AreEqual(1, idle.transitions.Length);
-        Assert.AreEqual(inner, idle.transitions[0].destinationState, "Idle resolves A/inner into the nested machine");
-    }
+    // No separate 2-segment-path test: Emit_Nested_SubMachine_Produces_Child_StateMachine already resolves
+    // `Sub/A` — the same one-machine-deep walk through the same ResolveName — so a second two-segment case
+    // differs only in its state names. A THREE-segment path would be a new walk; add that if the addressing
+    // ever nests deeper.
 
     // Fail-loud is the change's core value and nothing upstream backstops it — ResolveName's throws are the
     // only guard against a mis-scoped/typo'd target. Pin both scope rules.
@@ -525,69 +501,80 @@ layers:
 
     // ---- Behaviours: the six non-driver VRC SMB kinds --------------------------------------------
 
-    private static AnimatorState SingleStateWithBehaviours(string kindLine)
+    // ONE build carries all six kinds. Each kind is an independent branch of ControllerEmit's behaviour switch
+    // reading its own disjoint field set, so a per-kind build isolates nothing — and a build costs ~0.13s.
+    // Every field the six separate tests asserted is retained below; keep it that way when a kind gains a
+    // field. The fail-loud cases stay separate because they throw, so they cannot share a build.
+    [Test]
+    public void Emit_All_Six_NonDriver_Behaviour_Kinds_Set_Their_Fields()
     {
         var doc = AnimatorSchemaYaml.Parse(
             "schema: 1\ncontroller: Bhv_Fx\nbasis: avatar-root\nrole: fx\n" +
             "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
-            "        behaviours:\n          - " + kindLine + "\n" +
+            "        behaviours:\n" +
+            "          - tracking: { head: animation, leftHand: tracking }\n" +
+            "          - playableLayer: { layer: fx, goalWeight: 1, blendDuration: 0.25 }\n" +
+            "          - locomotion: { disableLocomotion: true }\n" +
+            "          - poseSpace: { enterPoseSpace: true, delayTime: 0.5 }\n" +
+            "          - layerControl: { playable: gesture, layer: 3, goalWeight: 0.5, blendDuration: 0.1 }\n" +
+            "          - playAudio: { sourcePath: Audio/Src, playbackOrder: uniqueRandom, parameter: Idx, " +
+            "volume: [ 0.8, 1.0 ], volumeApply: neverApply, pitch: [ 1, 1 ], pitchApply: alwaysApply, " +
+            "loop: true, loopApply: applyIfStopped, clipsApply: alwaysApply, delaySeconds: 0.1, " +
+            "playOnEnter: true, stopOnEnter: true, playOnExit: true, stopOnExit: true }\n" +
             "    default: S\n", "test");
         ControllerEmit.Build(doc, out var r);
-        return State(RootSm(r), "S");
-    }
+        var st = State(RootSm(r), "S");
+        Assert.AreEqual(6, st.behaviours.Length, "all six kinds emitted onto the one state");
 
-    [Test]
-    public void Emit_Tracking_Behaviour_Sets_Channels()
-    {
-        var st = SingleStateWithBehaviours("tracking: { head: animation, leftHand: tracking }");
-        var smb = st.behaviours[0] as VRCAnimatorTrackingControl;
-        Assert.IsNotNull(smb, "tracking SMB emitted");
-        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.Animation, smb.trackingHead);
-        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.Tracking, smb.trackingLeftHand);
-        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.NoChange, smb.trackingRightHand,
+        var tracking = Only<VRCAnimatorTrackingControl>(st);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.Animation, tracking.trackingHead);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.Tracking, tracking.trackingLeftHand);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorTrackingControl.TrackingType.NoChange, tracking.trackingRightHand,
             "an unmentioned channel keeps the SDK default (NoChange)");
+
+        var playable = Only<VRCPlayableLayerControl>(st);
+        Assert.AreEqual(VRC.SDKBase.VRC_PlayableLayerControl.BlendableLayer.FX, playable.layer);
+        Assert.AreEqual(1f, playable.goalWeight, 1e-6f);
+        Assert.AreEqual(0.25f, playable.blendDuration, 1e-6f);
+
+        Assert.IsTrue(Only<VRCAnimatorLocomotionControl>(st).disableLocomotion);
+
+        var pose = Only<VRCAnimatorTemporaryPoseSpace>(st);
+        Assert.IsTrue(pose.enterPoseSpace);
+        Assert.AreEqual(0.5f, pose.delayTime, 1e-6f);
+
+        var layerCtl = Only<VRCAnimatorLayerControl>(st);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorLayerControl.BlendableLayer.Gesture, layerCtl.playable);
+        Assert.AreEqual(3, layerCtl.layer, "the integer layer index");
+        Assert.AreEqual(0.5f, layerCtl.goalWeight, 1e-6f);
+        Assert.AreEqual(0.1f, layerCtl.blendDuration, 1e-6f);
+
+        var audio = Only<VRCAnimatorPlayAudio>(st);
+        Assert.AreEqual("Audio/Src", audio.SourcePath);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.Order.UniqueRandom, audio.PlaybackOrder);
+        Assert.AreEqual("Idx", audio.ParameterName);
+        Assert.AreEqual(0.8f, audio.Volume.x, 1e-6f);
+        Assert.AreEqual(1.0f, audio.Volume.y, 1e-6f);
+        Assert.AreEqual(1f, audio.Pitch.x, 1e-6f);
+        Assert.AreEqual(1f, audio.Pitch.y, 1e-6f);
+        // Each ApplySettings site decodes its token (the enum map's 3 members × 4 sites).
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.NeverApply, audio.VolumeApplySettings);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.AlwaysApply, audio.PitchApplySettings);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.ApplyIfStopped, audio.LoopApplySettings);
+        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.AlwaysApply, audio.ClipsApplySettings);
+        Assert.IsTrue(audio.Loop);
+        Assert.AreEqual(0.1f, audio.DelayInSeconds, 1e-6f);
+        Assert.IsTrue(audio.PlayOnEnter);
+        Assert.IsTrue(audio.StopOnEnter);
+        Assert.IsTrue(audio.PlayOnExit);
+        Assert.IsTrue(audio.StopOnExit);
     }
 
-    [Test]
-    public void Emit_PlayableLayer_Behaviour_Sets_Layer_And_Weight()
+    private static T Only<T>(AnimatorState st) where T : StateMachineBehaviour
     {
-        var st = SingleStateWithBehaviours("playableLayer: { layer: fx, goalWeight: 1, blendDuration: 0.25 }");
-        var smb = st.behaviours[0] as VRCPlayableLayerControl;
-        Assert.IsNotNull(smb, "playableLayer SMB emitted");
-        Assert.AreEqual(VRC.SDKBase.VRC_PlayableLayerControl.BlendableLayer.FX, smb.layer);
-        Assert.AreEqual(1f, smb.goalWeight, 1e-6f);
-        Assert.AreEqual(0.25f, smb.blendDuration, 1e-6f);
-    }
-
-    [Test]
-    public void Emit_Locomotion_Behaviour_Sets_Disable()
-    {
-        var st = SingleStateWithBehaviours("locomotion: { disableLocomotion: true }");
-        var smb = st.behaviours[0] as VRCAnimatorLocomotionControl;
-        Assert.IsNotNull(smb, "locomotion SMB emitted");
-        Assert.IsTrue(smb.disableLocomotion);
-    }
-
-    [Test]
-    public void Emit_PoseSpace_Behaviour_Sets_Fields()
-    {
-        var st = SingleStateWithBehaviours("poseSpace: { enterPoseSpace: true, delayTime: 0.5 }");
-        var smb = st.behaviours[0] as VRCAnimatorTemporaryPoseSpace;
-        Assert.IsNotNull(smb, "poseSpace SMB emitted");
-        Assert.IsTrue(smb.enterPoseSpace);
-        Assert.AreEqual(0.5f, smb.delayTime, 1e-6f);
-    }
-
-    [Test]
-    public void Emit_LayerControl_Behaviour_Sets_Playable_LayerIndex_And_Weight()
-    {
-        var st = SingleStateWithBehaviours("layerControl: { playable: gesture, layer: 3, goalWeight: 0.5, blendDuration: 0.1 }");
-        var smb = st.behaviours[0] as VRCAnimatorLayerControl;
-        Assert.IsNotNull(smb, "layerControl SMB emitted");
-        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorLayerControl.BlendableLayer.Gesture, smb.playable);
-        Assert.AreEqual(3, smb.layer, "the integer layer index");
-        Assert.AreEqual(0.5f, smb.goalWeight, 1e-6f);
-        Assert.AreEqual(0.1f, smb.blendDuration, 1e-6f);
+        var hits = st.behaviours.OfType<T>().ToList();
+        Assert.AreEqual(1, hits.Count, typeof(T).Name + " emitted exactly once");
+        return hits[0];
     }
 
     [Test]
@@ -617,36 +604,6 @@ layers:
         var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
         StringAssert.Contains("layerControl.layer", ex.Message);
         StringAssert.Contains("non-integral", ex.Message);
-    }
-
-    [Test]
-    public void Emit_PlayAudio_Behaviour_Sets_Order_Flags_Range_And_ApplySettings()
-    {
-        var st = SingleStateWithBehaviours(
-            "playAudio: { sourcePath: Audio/Src, playbackOrder: uniqueRandom, parameter: Idx, " +
-            "volume: [ 0.8, 1.0 ], volumeApply: neverApply, pitch: [ 1, 1 ], pitchApply: alwaysApply, " +
-            "loop: true, loopApply: applyIfStopped, clipsApply: alwaysApply, delaySeconds: 0.1, " +
-            "playOnEnter: true, stopOnEnter: true, playOnExit: true, stopOnExit: true }");
-        var smb = st.behaviours[0] as VRCAnimatorPlayAudio;
-        Assert.IsNotNull(smb, "playAudio SMB emitted");
-        Assert.AreEqual("Audio/Src", smb.SourcePath);
-        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.Order.UniqueRandom, smb.PlaybackOrder);
-        Assert.AreEqual("Idx", smb.ParameterName);
-        Assert.AreEqual(0.8f, smb.Volume.x, 1e-6f);
-        Assert.AreEqual(1.0f, smb.Volume.y, 1e-6f);
-        Assert.AreEqual(1f, smb.Pitch.x, 1e-6f);
-        Assert.AreEqual(1f, smb.Pitch.y, 1e-6f);
-        // Each ApplySettings site decodes its token (the enum map's 3 members × 4 sites).
-        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.NeverApply, smb.VolumeApplySettings);
-        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.AlwaysApply, smb.PitchApplySettings);
-        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.ApplyIfStopped, smb.LoopApplySettings);
-        Assert.AreEqual(VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings.AlwaysApply, smb.ClipsApplySettings);
-        Assert.IsTrue(smb.Loop);
-        Assert.AreEqual(0.1f, smb.DelayInSeconds, 1e-6f);
-        Assert.IsTrue(smb.PlayOnEnter);
-        Assert.IsTrue(smb.StopOnEnter);
-        Assert.IsTrue(smb.PlayOnExit);
-        Assert.IsTrue(smb.StopOnExit);
     }
 
     [Test]
@@ -713,22 +670,21 @@ layers:
     {
         var doc = AnimatorSchemaYaml.Parse(AnimatorSchemaYamlTests.DebounceDoc, "mem://debounce");
 
+        // The witness is the DECODE of each build, not a state-position grid: a recompile that permuted
+        // transitions, dropped a behaviour or reordered parameters keeps every state at its coordinate, so a
+        // position comparison passes on exactly the non-determinism this test exists to catch. The decode is
+        // the canonical whole-controller intermediate (FixpointOracle) and includes the layout block, so it
+        // strictly contains the grid check.
+        //
+        // Decode build 1 BEFORE building again: the second build resets the asset in place at the same scratch
+        // path, destroying r1's sub-asset objects while keeping the top-level controller and its GUID.
         ControllerEmit.Build(doc, out var r1);
-        var sm1 = RootSm(r1);
-        // Snapshot BEFORE the second build (it resets the asset in place at the same scratch path,
-        // destroying r1's sub-asset objects while keeping the top-level controller + its GUID).
-        var snap1 = sm1.states.ToDictionary(cs => cs.state.name, cs => cs.position);
+        string decoded1 = FixpointOracle.Decode(r1.Controller);
 
         ControllerEmit.Build(doc, out var r2);
-        var sm2 = RootSm(r2);
-        var snap2 = sm2.states.ToDictionary(cs => cs.state.name, cs => cs.position);
+        string decoded2 = FixpointOracle.Decode(r2.Controller);
 
-        Assert.AreEqual(snap1.Count, snap2.Count, "same state count");
-        foreach (var kv in snap1)
-        {
-            Assert.IsTrue(snap2.ContainsKey(kv.Key), "state " + kv.Key + " present in both builds");
-            Assert.AreEqual(kv.Value, snap2[kv.Key], "state " + kv.Key + " keeps the same grid position");
-        }
+        Assert.AreEqual(decoded1, decoded2, "a second build of the same document decodes byte-identically");
     }
 
     // ---- Unresolved motion refs ---------------------------------------------------------

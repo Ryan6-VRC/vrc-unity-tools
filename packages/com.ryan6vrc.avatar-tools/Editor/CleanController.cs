@@ -308,9 +308,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 data.MenuPath     = menuPath;
                 data.MenuControls = 0;
 
-                // Persist the copied controller with trimmed layers
+                // Persist the copied controller with trimmed layers. No Refresh(): every write above went
+                // through the AssetDatabase (EnsureFolderExists → CreateFolder, CopyAsset, CreateAsset,
+                // SetDirty), so there is no out-of-band filesystem change to re-scan — and a Refresh is a
+                // project-wide import sweep, the most expensive call in this tool.
                 AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
 
                 // ── Step 5: Wire the descriptor ───────────────────────────────────────────
                 var desc = ownedRoot.GetComponent<VRCAvatarDescriptor>()
