@@ -272,11 +272,13 @@ public class ReportGimmickTests
     // The legend paragraph, isolated so the comparison is against the legend and nothing else: its tokens
     // (`skinned=0`) also occur in the census CELL, so a whole-document match would pass with it deleted.
     // Fails loud rather than returning null — an absent legend is the branch defect, not a null-deref.
-    private static string LegendLine(string report)
+    private static string LegendLine(string report) => LegendLine(report, "_`chain subtree`");
+
+    private static string LegendLine(string report, string startsWith)
     {
         foreach (var line in report.Split('\n'))
-            if (line.StartsWith("_`chain subtree`")) return line;
-        Assert.Fail("the chain-subtree census carries no legend:\n" + report);
+            if (line.StartsWith(startsWith)) return line;
+        Assert.Fail("no legend line starting `" + startsWith + "`:\n" + report);
         return null;
     }
 
@@ -694,8 +696,11 @@ public class ReportGimmickTests
 
         string rays = Section(ReadReport("Rig"), "## Raycasts");
         StringAssert.Contains("HitCustomLayers", rays);
-        StringAssert.Contains("0(Default)", rays); // name annotation, on a layer Unity always names
-        StringAssert.Contains("31", rays);         // index renders whether or not the venue names layer 31
+        // One assertion pinning three things at once: the name annotation on a layer Unity always names,
+        // ascending index order, and the join separator. It stays venue-neutral by matching a PREFIX of the
+        // second entry — a venue that does name layer 31 renders `31(Something)` and still satisfies it,
+        // while a bare `Contains("31")` would be satisfied by any digit that drifts into the row.
+        StringAssert.Contains("0(Default),31", rays);
     }
 
     [Test]
@@ -714,6 +719,11 @@ public class ReportGimmickTests
 
     // The silent-death configuration: no result transform, so the component has nothing to write. The tier-2
     // census rendered this as an ABSENT line, indistinguishable from a field that does not exist.
+    //
+    // The assertion pins the CELL, not the row. A fresh VRCRaycast defaults to an all-off mask (measured), so
+    // this very row also renders `layers=(none)` in its collision cell — a bare Contains("(none)") passes on
+    // that alone and stays green while the result column regresses to empty. Sectioning the report is not
+    // enough when the coincidence lives inside the section; the delimiters are what discriminate.
     [Test]
     public void Raycast_NoResultTransform_RendersNoneRatherThanVanishing()
     {
@@ -722,7 +732,25 @@ public class ReportGimmickTests
 
         string rays = Section(ReadReport("Rig"), "## Raycasts");
         StringAssert.Contains("Rig/Origin", rays);
-        StringAssert.Contains("(none)", rays);
+        StringAssert.Contains("| (none) |", rays);
+    }
+
+    // The legend makes the same promise ChainSubtreeLegend does, so it earns the same pair of assertions —
+    // (a) delivered intact and untruncated, blind to content; (b) the load-bearing clauses present in the
+    // CONSTANT, which survives a reword but fails a deletion. Without (b) a prose pass can drop the layer
+    // sentence — the one the constant's own doc comment calls load-bearing — against a green suite.
+    [Test]
+    public void Raycast_TableIsAccompaniedByItsLegend()
+    {
+        var root = new GameObject("Rig");
+        var host = Child(root, "Origin");
+        Ray(host, "Ray", Child(host, "Hit").transform);
+
+        Assert.AreEqual(ReportGimmick.RaycastLegend.TrimEnd('\n'),
+                        LegendLine(ReadReport("Rig"), "_`layers`"));
+
+        StringAssert.Contains("Layer NAMES come from the project's TagManager", ReportGimmick.RaycastLegend);
+        StringAssert.Contains("not the post-build name", ReportGimmick.RaycastLegend);
     }
 
     // The prefix is concatenated locally, the way the component does it — not traced into an animator, and
