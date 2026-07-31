@@ -931,7 +931,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return p;
             }
 
-            // random: { Name: { min, max, chance } }
+            // random: { Name: { min, max, chance, preventRepeats } }
+            //
+            // preventRepeats is the SDK's fourth Random field and the one the schema used to have no word for.
+            // The SDK Inspector draws it for exactly one shape — Random onto an INT destination, alongside min
+            // and max (VRCAvatarParameterDriverEditor.DrawRandom); a Bool/Trigger destination draws chance
+            // instead, and a Float destination draws min/max but not preventRepeats. The field is serialized
+            // on every Parameter
+            // regardless, so it is accepted here for any Random entry rather than gated on a destination type
+            // this layer does not resolve. Left out, it defaults false — which is why omitting it from the
+            // decode side silently turned a vendor's no-repeat roll into a plain one on recompile.
             private static Driver.Parameter BuildRandom(string name, object value)
             {
                 var p = new Driver.Parameter { type = Driver.ChangeType.Random, name = name };
@@ -943,6 +952,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case DriverKeys.Min: p.valueMin = AsFloat(kv.Value, "driver.random." + name + ".min"); break;
                         case DriverKeys.Max: p.valueMax = AsFloat(kv.Value, "driver.random." + name + ".max"); break;
                         case DriverKeys.Chance: p.chance = AsFloat(kv.Value, "driver.random." + name + ".chance"); break;
+                        case DriverKeys.PreventRepeats: p.preventRepeats = AsBool(kv.Value, "driver.random." + name + ".preventRepeats"); break;
                         default: throw new EmitException($"driver.random.{name}: unknown field '{kv.Key}'");
                     }
                 }
@@ -1329,7 +1339,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             public const string LocalOnly = "localOnly", Set = "set", Add = "add", Copy = "copy", Random = "random";
             public const string Source = "source", SourceMin = "sourceMin", SourceMax = "sourceMax", DestMin = "destMin", DestMax = "destMax";
-            public const string Min = "min", Max = "max", Chance = "chance";
+            public const string Min = "min", Max = "max", Chance = "chance", PreventRepeats = "preventRepeats";
         }
 
         internal static class PlayAudioKeys

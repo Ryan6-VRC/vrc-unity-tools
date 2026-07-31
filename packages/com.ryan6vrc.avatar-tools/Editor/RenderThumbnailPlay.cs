@@ -196,6 +196,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 bool optsChanged = !(_savedOptionsEnabled
                     && (_savedOptions & EnterPlayModeOptions.DisableDomainReload) != 0
                     && (_savedOptions & EnterPlayModeOptions.DisableSceneReload) != 0);
+                // …and if they were already forced, is that the operator's own setting or an earlier session's
+                // residue? SessionState covers a domain reload but dies with the EDITOR, so a Begin followed by
+                // a close or a crash leaves the forced pair on disk (a project setting) with no record beside
+                // it. The next Begin then reads our own values as the originals and End "restores" them —
+                // cementing the very state this machinery exists to prevent. Nothing here can tell the two
+                // apart, so say so rather than adopt silently: refusing would be wrong (running both-reload-
+                // disabled is a legitimate project setting) but so is a reassuring silence.
+                bool adoptedForced = !optsChanged && !_recordWasPresent;
 
                 _targetName = target0.name;
                 _prepared = true;
@@ -206,6 +214,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return Ok("Begin " + _targetName + " => READY-TO-PLAY"
                     + (emuMade ? " emulator=created/enabled" : " emulator=present")
                     + (optsChanged ? " playmode-reload=disabled(restored on End)" : "")
+                    + (adoptedForced ? " playmode-reload=already-forced(no saved record — cannot tell your setting"
+                                       + " from an interrupted session's residue; End will leave it as found)" : "")
                     + (deactivated.Count > 0 ? " deactivated=[" + string.Join(",", deactivated) + "]" : "")
                     + " — enter play (manage_editor play), then Shoot(...)");
             }
@@ -226,24 +236,78 @@ namespace Ryan6Vrc.AvatarTools.Editor
             _sceneSetup = null;
         }
 
+        // The saved Enter-Play-Mode Options, mirrored where a domain reload cannot reach them.
+        //
+        // Every field above is a plain static, so a mid-session domain reload — a recompile, a package
+        // import — wipes the whole session at once. Options are NOT statics: they are project settings, so
+        // the forced DisableDomainReload | DisableSceneReload survives the reload that erased the record of
+        // what preceded it. That asymmetry is the bug. Two things then go wrong, and the second is worse:
+        // End() reports "no prepared session" and returns without restoring, and the NEXT Begin() saves the
+        // forced values as if they were the operator's own, cementing them permanently. Measured in a live
+        // editor: options forced on, _optionsOverridden false, _savedOptions None — the originals gone.
+        //
+        // SessionState is the right shelf. It outlives a domain reload and dies with the editor, which is
+        // exactly a play session's lifetime; EditorPrefs would outlive the editor too and let a record from
+        // a crashed session clobber a later one's genuine settings.
+        private const string OptionsKey = "Ryan6Vrc.RenderThumbnailPlay.savedEnterPlayModeOptions";
+        // Whether THIS Begin found a surviving record. Distinguishes "the operator runs both-reload-disabled"
+        // from "an earlier session forced it and died before End" — indistinguishable from the settings alone.
+        private static bool _recordWasPresent;
+
         // Force Enter-Play-Mode Options to both-reload-disabled for the session, saving the operator's
         // originals for End/AbortBegin to put back. Called once per Begin, before End.
         private static void OverrideEnterPlayModeOptions()
         {
+            // Adopt a surviving record rather than overwrite it. Reached when a domain reload cleared the
+            // statics while an override was still in force: the values readable now are OUR forced ones, and
+            // saving those is what turns a recoverable reload into a permanent settings change.
+            //
+            // Both decisions below key off the PARSE, not off the raw string being non-empty. Keying the flag
+            // on the raw string let the two disagree on a malformed record: LoadSavedOptions drops it and
+            // returns false (so the forced values get saved as the operator's originals), while the flag read
+            // true and suppressed the very warning that case needs. No writer can emit a malformed record
+            // today, so this is a latent inconsistency rather than a live bug — but the two answers should
+            // never have come from different questions.
+            bool usableRecord = !_optionsOverridden && LoadSavedOptions();
+            _recordWasPresent = _optionsOverridden || usableRecord;
+            if (usableRecord) { ApplyForcedOptions(); return; }
+
             _savedOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;
             _savedOptions = EditorSettings.enterPlayModeOptions;
             _optionsOverridden = true;
+            SessionState.SetString(OptionsKey, (_savedOptionsEnabled ? "1" : "0") + "|" + (int)_savedOptions);
+            ApplyForcedOptions();
+        }
+
+        private static void ApplyForcedOptions()
+        {
             EditorSettings.enterPlayModeOptionsEnabled = true;
             EditorSettings.enterPlayModeOptions =
                 EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
         }
 
+        // Rehydrate _savedOptions* from SessionState. True iff a record was there and parsed; a malformed one
+        // is dropped rather than half-applied, since restoring half a settings pair is worse than refusing to.
+        private static bool LoadSavedOptions()
+        {
+            var raw = SessionState.GetString(OptionsKey, "");
+            if (string.IsNullOrEmpty(raw)) return false;
+            var parts = raw.Split('|');
+            int opts;
+            if (parts.Length != 2 || !int.TryParse(parts[1], out opts)) { SessionState.EraseString(OptionsKey); return false; }
+            _savedOptionsEnabled = parts[0] == "1";
+            _savedOptions = (EnterPlayModeOptions)opts;
+            _optionsOverridden = true;
+            return true;
+        }
+
         private static void RestoreEnterPlayModeOptions()
         {
-            if (!_optionsOverridden) return;
+            if (!_optionsOverridden && !LoadSavedOptions()) return;
             EditorSettings.enterPlayModeOptionsEnabled = _savedOptionsEnabled;
             EditorSettings.enterPlayModeOptions = _savedOptions;
             _optionsOverridden = false;
+            SessionState.EraseString(OptionsKey);
         }
 
         /// <summary>
@@ -473,6 +537,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// </summary>
         public static string End()
         {
+            // No session in these statics, but a saved-options record outlived one: a domain reload happened
+            // mid-session. The scene setup went with it and cannot be recovered, so this is still a failure —
+            // but the operator's Enter-Play-Mode Options CAN be put back, and putting them back here is what
+            // stops the next Begin() from adopting the forced values as their originals. Say which half was
+            // salvaged, so "End failed" is not read as "nothing was restored".
+            if (!_prepared && !Application.isPlaying && LoadSavedOptions())
+            {
+                RestoreEnterPlayModeOptions();
+                return Fail("no prepared session — a domain reload (recompile/package import) ended it mid-session. "
+                    + "Enter-Play-Mode Options restored from the out-of-domain record; the scene setup snapshot did "
+                    + "NOT survive, so reopen your scene(s) by hand before the next Begin()");
+            }
             if (!_prepared) return Fail("no prepared session");
             if (Application.isPlaying) return Fail("still in play mode — exit play (manage_editor stop) before End()");
             if (_shootUpdate != null) { EditorApplication.update -= _shootUpdate; _shootUpdate = null; }
