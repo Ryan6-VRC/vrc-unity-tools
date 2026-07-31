@@ -459,6 +459,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case "parameters": BindParameters(doc, ToMap(kv.Value, "parameters")); break;
                     case "layers": BindLayers(doc, ToList(kv.Value, "layers")); break;
                     case "clips": BindClips(doc, ToMap(kv.Value, "clips")); break;
+                    case "menu": doc.Menu = BindMenu(ToList(kv.Value, "menu"), "menu"); break;
                     default: throw new SchemaException($"unknown top-level key '{key}'");
                 }
             }
@@ -782,6 +783,75 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     into.Add(new Behaviour { Kind = kv.Key, Fields = ToMap(kv.Value, $"behaviour '{kv.Key}'") });
                 }
+            }
+        }
+
+        // A control is a single-key map whose key is the KIND and whose value is the control NAME
+        // (`- toggle: Enable`), with the remaining fields as siblings. The single-key-dispatch shape is
+        // `behaviours:`'s; the name sits in value position because a control always has one and identity
+        // reads better inline than as a `name:` field three lines down.
+        private static List<MenuControl> BindMenu(List<object> list, string ctx)
+        {
+            var into = new List<MenuControl>();
+            for (int i = 0; i < list.Count; i++)
+            {
+                var m = ToMap(list[i], $"{ctx}[{i}]");
+                string where = $"{ctx}[{i}]";
+
+                // Find the kind key first: everything else is validated against it, and reporting an
+                // unknown sibling before knowing the kind would name the wrong offender.
+                MenuControl ctl = null;
+                foreach (var kv in m)
+                {
+                    if (!TryParseControlKind(kv.Key, out var kind)) continue;
+                    if (ctl != null)
+                        throw new SchemaException($"{where}: two control kinds in one entry ('{ctl.Kind.ToString().ToLowerInvariant()}' and '{kv.Key}') — a control is one kind");
+                    ctl = new MenuControl { Kind = kind, Name = ToStr(kv.Value, $"{where}.{kv.Key}") };
+                }
+                if (ctl == null)
+                    throw new SchemaException($"{where}: no control kind — expected one of button, toggle, submenu, radial as the entry's kind key (e.g. '- toggle: Enable')");
+                where = $"{ctx}[{i}] '{ctl.Name}'";
+
+                bool sawValue = false;
+                foreach (var kv in m)
+                {
+                    if (TryParseControlKind(kv.Key, out _)) continue;   // the kind key, already consumed
+                    switch (kv.Key)
+                    {
+                        case "param": ctl.Param = ToStr(kv.Value, $"{where}.param"); break;
+                        case "value": ctl.Value = ToNumber(kv.Value, $"{where}.value"); sawValue = true; break;
+                        case "controls":
+                            if (ctl.Kind != MenuControlKind.SubMenu)
+                                throw new SchemaException($"{where}: 'controls' is a submenu field — a {ctl.Kind.ToString().ToLowerInvariant()} has no children");
+                            ctl.Controls = BindMenu(ToList(kv.Value, $"{where}.controls"), $"{where}.controls");
+                            break;
+                        default: throw new SchemaException($"{where}: unknown control field '{kv.Key}' (expected param, value, or controls)");
+                    }
+                }
+
+                // A radial's knob is its subParameter, not a written constant — `value:` has nowhere to go
+                // on emit, so accepting it silently would be a lie about what the control does.
+                if (sawValue && ctl.Kind == MenuControlKind.Radial)
+                    throw new SchemaException($"{where}: a radial has no 'value' — its parameter carries the position, and nothing is written on press");
+                if (sawValue && ctl.Kind == MenuControlKind.SubMenu && ctl.Param == null)
+                    throw new SchemaException($"{where}: 'value' without 'param' — a submenu writes a value only when it also names a parameter");
+                if (ctl.Kind == MenuControlKind.SubMenu && ctl.Controls == null)
+                    throw new SchemaException($"{where}: a submenu needs 'controls' (an empty submenu is a dead end in the wearer's menu)");
+
+                into.Add(ctl);
+            }
+            return into;
+        }
+
+        private static bool TryParseControlKind(string key, out MenuControlKind kind)
+        {
+            switch (key)
+            {
+                case "button":  kind = MenuControlKind.Button;  return true;
+                case "toggle":  kind = MenuControlKind.Toggle;  return true;
+                case "submenu": kind = MenuControlKind.SubMenu; return true;
+                case "radial":  kind = MenuControlKind.Radial;  return true;
+                default: kind = default; return false;
             }
         }
 

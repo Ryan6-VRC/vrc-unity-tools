@@ -75,6 +75,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public List<AnimationClip> ClipList = new List<AnimationClip>();
             public List<BlendTree> Trees = new List<BlendTree>();
             public VRCExpressionParameters Params; // null only when every declared param is excluded (built-in / scratch)
+            // The root expression menu, null unless the document carries a `menu:` block. Sub-menu pages hang
+            // off it by reference and are persisted as hidden sub-assets of the same file (MenuChildren), so
+            // one menu asset holds the whole tree and a consumer references only the root by GUID.
+            public VRCExpressionsMenu Menu;
+            public List<VRCExpressionsMenu> MenuChildren = new List<VRCExpressionsMenu>();
             // Motion refs that carried the `unresolved: true` marker and did NOT resolve — emitted as a null
             // motion (a clean-empty state) instead of a fail-loud throw. Each entry names the owning STATE and
             // the verbatim GUID so a compile advisory can preserve the round-trip note. A BARE broken ref (no
@@ -338,6 +343,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 EmitClips();          // clips first: states/trees reference them by name
                 EmitLayers();
                 EmitVrcParameters();  // in-memory only; CompileController persists
+                EmitMenu();           // in-memory only; CompileController persists
 
                 EditorUtility.SetDirty(_controller);
                 AssetDatabase.SaveAssets();
@@ -1105,6 +1111,96 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 ep.parameters = list.ToArray();
                 _result.Params = ep;
+            }
+
+            // ----- VRC expressions menu (in-memory; CompileController persists) -----
+
+            // Build the menu tree the `menu:` block describes. The controller cannot store a menu, so this is
+            // an EMIT-ONLY surface with no decompile counterpart — the same asymmetry the params asset already
+            // has (docs/animator-schema.md §menu).
+            //
+            // THE TRAP THIS CODE EXISTS TO AVOID (docs/menus.md): VRChat's control type is written here through
+            // the typed `type` field, never through SerializedProperty.enumValueIndex. The serialized numbers
+            // (101 Button, 102 Toggle, 103 SubMenu, 203 RadialPuppet) are NOT the enum's ordinals, so assigning
+            // a serialized number to enumValueIndex is out of range and Unity DISCARDS it silently, leaving a
+            // childless Button behind. Setting the strongly-typed field cannot express that mistake.
+            private void EmitMenu()
+            {
+                if (_doc.Menu == null) return;
+
+                // Managed-echo check: SchemaValidation enforces the page cap without the SDK on hand, so if the
+                // SDK ever moves it, fail here rather than let validation pass a menu the SDK will truncate.
+                if (VRCExpressionsMenu.MAX_CONTROLS != MenuLimits.MaxControlsPerMenu)
+                    throw new EmitException(
+                        $"menu: SDK VRCExpressionsMenu.MAX_CONTROLS is {VRCExpressionsMenu.MAX_CONTROLS} but MenuLimits.MaxControlsPerMenu mirrors {MenuLimits.MaxControlsPerMenu} — update the echo in AnimatorSchema.cs");
+
+                _result.Menu = BuildMenuPage(_doc.Menu, _doc.ControllerName + "_Menu");
+            }
+
+            private VRCExpressionsMenu BuildMenuPage(List<MenuControl> controls, string assetName)
+            {
+                var menu = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
+                menu.name = assetName;
+                menu.controls = new List<VRCExpressionsMenu.Control>();
+
+                foreach (var c in controls)
+                {
+                    var control = new VRCExpressionsMenu.Control
+                    {
+                        name = c.Name,
+                        type = MapControlType(c.Kind),
+                        // The SDK reads `parameter` on every kind but Radial, whose knob rides subParameters[0].
+                        // Both fields are always constructed: a null `parameter` serializes as an empty name,
+                        // which is what a bare sub-menu carries.
+                        parameter = new VRCExpressionsMenu.Control.Parameter { name = c.Param ?? "" },
+                        subParameters = new VRCExpressionsMenu.Control.Parameter[0],
+                        labels = new VRCExpressionsMenu.Control.Label[0],
+                    };
+
+                    if (c.Kind == MenuControlKind.Radial)
+                    {
+                        // A radial writes nothing on press; the parameter IS the position, so it moves to
+                        // subParameters and `parameter` stays empty (the SDK's optional on-open bool, unused here).
+                        control.parameter = new VRCExpressionsMenu.Control.Parameter { name = "" };
+                        control.subParameters = new[] { new VRCExpressionsMenu.Control.Parameter { name = c.Param } };
+                    }
+                    else
+                    {
+                        control.value = c.Value;
+                    }
+
+                    if (c.Kind == MenuControlKind.SubMenu)
+                    {
+                        var child = BuildMenuPage(c.Controls, assetName + "_" + SanitizeAssetName(c.Name));
+                        _result.MenuChildren.Add(child);
+                        control.subMenu = child;
+                    }
+
+                    menu.controls.Add(control);
+                }
+                return menu;
+            }
+
+            private static VRCExpressionsMenu.Control.ControlType MapControlType(MenuControlKind k)
+            {
+                switch (k)
+                {
+                    case MenuControlKind.Button:  return VRCExpressionsMenu.Control.ControlType.Button;
+                    case MenuControlKind.Toggle:  return VRCExpressionsMenu.Control.ControlType.Toggle;
+                    case MenuControlKind.SubMenu: return VRCExpressionsMenu.Control.ControlType.SubMenu;
+                    case MenuControlKind.Radial:  return VRCExpressionsMenu.Control.ControlType.RadialPuppet;
+                    default: throw new EmitException($"menu: unhandled control kind '{k}'");
+                }
+            }
+
+            // A sub-asset name is cosmetic (nothing addresses a page by name — the parent holds an object
+            // reference), so this only keeps the Project window readable and the name legal.
+            private static string SanitizeAssetName(string name)
+            {
+                var sb = new StringBuilder(name.Length);
+                foreach (var ch in name)
+                    sb.Append(char.IsLetterOrDigit(ch) ? ch : '_');
+                return sb.ToString();
             }
 
             // ----- persistence / provenance -----
