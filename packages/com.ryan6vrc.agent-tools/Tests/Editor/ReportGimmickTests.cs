@@ -272,11 +272,13 @@ public class ReportGimmickTests
     // The legend paragraph, isolated so the comparison is against the legend and nothing else: its tokens
     // (`skinned=0`) also occur in the census CELL, so a whole-document match would pass with it deleted.
     // Fails loud rather than returning null — an absent legend is the branch defect, not a null-deref.
-    private static string LegendLine(string report)
+    private static string LegendLine(string report) => LegendLine(report, "_`chain subtree`");
+
+    private static string LegendLine(string report, string startsWith)
     {
         foreach (var line in report.Split('\n'))
-            if (line.StartsWith("_`chain subtree`")) return line;
-        Assert.Fail("the chain-subtree census carries no legend:\n" + report);
+            if (line.StartsWith(startsWith)) return line;
+        Assert.Fail("no legend line starting `" + startsWith + "`:\n" + report);
         return null;
     }
 
@@ -648,6 +650,161 @@ public class ReportGimmickTests
         // Upper bound of the one-struct-level peek: parameter.name is a SECOND struct level (Control →
         // parameter → name) and must NOT surface in-tool — it's AgentInspector's depth (design decision A).
         StringAssert.DoesNotContain("MyDrivenParam", report);
+    }
+
+    // ----- Raycasts (F2) -------------------------------------------------------------------------
+    //
+    // Before this table a VRCRaycast fell to the tier-2 census, which reads `collisionMode = Hit Custom
+    // Layers` and then prints nothing for the mask — LayerMask has no case in the shallow peek's switch, is
+    // neither an array nor a struct with visible children, and so falls through silently. That mask is the
+    // whole discriminator of a player-masked ray, and the same peek drops a null `resultTransform` entirely
+    // (a clean-null object ref emits no line at all), which is exactly the configuration that fails silently
+    // in Unity. Both are facts here, in cells; neither is a verdict.
+    //
+    // The layer assertions are deliberately split. `0(Default)` pins the NAME annotation on a layer Unity
+    // reserves and never leaves blank; bit 31 pins only that the INDEX renders, which holds whether or not
+    // the venue's TagManager names it. Nothing here may assert a VRChat layer name — those come from the
+    // project, so the same mask reads `10(PlayerLocal)` in a venue whose layer setup has run and `10` in one
+    // whose has not, and a test pinning the name would encode the author's venue.
+
+    private static VRCRaycast Ray(GameObject host, string parameter, Transform result)
+    {
+        var r = host.AddComponent<VRCRaycast>();
+        r.Parameter = parameter;
+        r.ResultTransform = result;
+        return r;
+    }
+
+    // The report sliced to one section, so an assertion cannot be satisfied by a coincidence elsewhere in the
+    // digest — "(none)" in particular is also how every empty section renders.
+    private static string Section(string report, string heading)
+    {
+        int start = report.IndexOf(heading);
+        if (start < 0) return "";
+        int next = report.IndexOf("\n## ", start + heading.Length);
+        return next < 0 ? report.Substring(start) : report.Substring(start, next - start);
+    }
+
+    [Test]
+    public void Raycast_CustomLayerMask_RendersIndexAlwaysAndNameWhenTheProjectHasOne()
+    {
+        var root = new GameObject("Rig");
+        var host = Child(root, "Origin");
+        var r = Ray(host, "Ray", Child(host, "Hit").transform);
+        r.RaycastCollisionMode = VRCRaycast.CollisionMode.HitCustomLayers;
+        r.CustomCollisionLayers = (1 << 0) | (1 << 31);
+
+        string rays = Section(ReadReport("Rig"), "## Raycasts");
+        StringAssert.Contains("HitCustomLayers", rays);
+        // One assertion pinning three things at once: the name annotation on a layer Unity always names,
+        // ascending index order, and the join separator. It stays venue-neutral by matching a PREFIX of the
+        // second entry — a venue that does name layer 31 renders `31(Something)` and still satisfies it,
+        // while a bare `Contains("31")` would be satisfied by any digit that drifts into the row.
+        StringAssert.Contains("0(Default),31", rays);
+    }
+
+    [Test]
+    public void Raycast_EmptyAndFullMasks_ReadAsWordsNotBitLists()
+    {
+        var root = new GameObject("Rig");
+        var a = Child(root, "A");
+        Ray(a, "A", Child(a, "HitA").transform).CustomCollisionLayers = 0;
+        var b = Child(root, "B");
+        Ray(b, "B", Child(b, "HitB").transform).CustomCollisionLayers = ~0;
+
+        string rays = Section(ReadReport("Rig"), "## Raycasts");
+        StringAssert.Contains("layers=(none)", rays);
+        StringAssert.Contains("layers=everything", rays); // never a 32-entry cell
+    }
+
+    // The silent-death configuration: no result transform, so the component has nothing to write. The tier-2
+    // census rendered this as an ABSENT line, indistinguishable from a field that does not exist.
+    //
+    // The assertion pins the CELL, not the row. A fresh VRCRaycast defaults to an all-off mask (measured), so
+    // this very row also renders `layers=(none)` in its collision cell — a bare Contains("(none)") passes on
+    // that alone and stays green while the result column regresses to empty. Sectioning the report is not
+    // enough when the coincidence lives inside the section; the delimiters are what discriminate.
+    [Test]
+    public void Raycast_NoResultTransform_RendersNoneRatherThanVanishing()
+    {
+        var root = new GameObject("Rig");
+        Ray(Child(root, "Origin"), "Ray", null);
+
+        string rays = Section(ReadReport("Rig"), "## Raycasts");
+        StringAssert.Contains("Rig/Origin", rays);
+        StringAssert.Contains("| (none) |", rays);
+    }
+
+    // The legend makes the same promise ChainSubtreeLegend does, so it earns the same pair of assertions —
+    // (a) delivered intact and untruncated, blind to content; (b) the load-bearing clauses present in the
+    // CONSTANT, which survives a reword but fails a deletion. Without (b) a prose pass can drop the layer
+    // sentence — the one the constant's own doc comment calls load-bearing — against a green suite.
+    [Test]
+    public void Raycast_TableIsAccompaniedByItsLegend()
+    {
+        var root = new GameObject("Rig");
+        var host = Child(root, "Origin");
+        Ray(host, "Ray", Child(host, "Hit").transform);
+
+        Assert.AreEqual(ReportGimmick.RaycastLegend.TrimEnd('\n'),
+                        LegendLine(ReadReport("Rig"), "_`layers`"));
+
+        StringAssert.Contains("Layer NAMES come from the project's TagManager", ReportGimmick.RaycastLegend);
+        StringAssert.Contains("not the post-build name", ReportGimmick.RaycastLegend);
+    }
+
+    // The prefix is concatenated locally, the way the component does it — not traced into an animator, and
+    // not the post-build name, which VRCFury and MA rewrite.
+    [Test]
+    public void Raycast_ParameterPrefix_RendersTheDerivedTriple()
+    {
+        var root = new GameObject("Rig");
+        var host = Child(root, "Origin");
+        Ray(host, "SelectiveAnimation/Ray", Child(host, "Hit").transform);
+
+        string rays = Section(ReadReport("Rig"), "## Raycasts");
+        StringAssert.Contains("`SelectiveAnimation/Ray` + _Hit/_Ratio/_Distance", rays);
+    }
+
+    // Two rays on one origin is the shipped idiom (a player ray and a world ray), so the path alone cannot
+    // identify a row — the same ambiguity HostHandle solves for physbones sharing a GameObject.
+    [Test]
+    public void Raycast_TwoOnOneHost_DisambiguatedByComponentOrdinal()
+    {
+        var root = new GameObject("Rig");
+        var host = Child(root, "Origin");
+        Ray(host, "Player", Child(host, "PlayerHit").transform);
+        Ray(host, "World", Child(host, "WallHit").transform);
+
+        string rays = Section(ReadReport("Rig"), "## Raycasts");
+        StringAssert.Contains("[VRCRaycast#0]", rays);
+        StringAssert.Contains("[VRCRaycast#1]", rays);
+    }
+
+    [Test]
+    public void Raycast_DisabledComponent_ReadsNotLiveWithItsReason()
+    {
+        var root = new GameObject("Rig");
+        var host = Child(root, "Origin");
+        Ray(host, "Ray", Child(host, "Hit").transform).enabled = false;
+
+        StringAssert.Contains("0 (enabled)", Section(ReadReport("Rig"), "## Raycasts"));
+    }
+
+    // Tier-1 promotion is only honest if the table replaces the census rows rather than doubling them: the
+    // count line gains raycasts=N, and `other` must not still be counting the same components.
+    [Test]
+    public void Raycast_CountedInHeader_AndNoLongerInTheTierTwoCensus()
+    {
+        var root = new GameObject("Rig");
+        var host = Child(root, "Origin");
+        Ray(host, "Player", Child(host, "PlayerHit").transform);
+        Ray(host, "World", Child(host, "WallHit").transform);
+
+        string report = ReadReport("Rig");
+        StringAssert.Contains("raycasts=2", report);
+        StringAssert.Contains("other=0", report);
+        StringAssert.DoesNotContain("VRCRaycast", Section(report, "## Other components"));
     }
 
     [Test]
