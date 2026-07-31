@@ -158,7 +158,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return clip;
         }
 
-        // Author one keyframed curve onto `clip`. Split out of BuildClipContent verbatim (unchanged logic).
+        // Author one keyframed curve onto `clip`.
         private static void SetKeyedCurve(AnimationClip clip, ClipSpec spec, CurveSpec cs, HashSet<string> paramNames)
         {
             var binding = ResolveBinding(cs.Binding, paramNames);
@@ -167,15 +167,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // stamped onto the curve too or it is silently ignored (animator-schema.md: seconds declares
             // the length; matters for motion-time / blend-tree timing). Hold the last value out to
             // `seconds`; refuse a `seconds` shorter than the authored content (it can't truncate a key).
-            if (spec.Seconds.HasValue && keys.Count > 0)
+            //
+            // With no `seconds:`, hold instead to this curve's OWN last key floored at MinClipLength —
+            // per curve, never the clip-wide max, so a clip mixing a long and a short curve emits both
+            // exactly as authored. The floor is what does the work: a curve ending inside the first frame
+            // (a lone key at time 0 is the case that reaches it) would otherwise emit a ZERO-length clip,
+            // and the animator gives any non-positive state length an effective 1s, so `exitTime: 0.2`
+            // would dwell 0.2 SECONDS instead of 0.2 x 1/60 (runtime.md §Animator evaluation). It would
+            // also survive the .anim round-trip only as the floored form — decompile reads a lone constant
+            // key back as `set:` — silently retiming the document with both directions reporting OK.
+            if (keys.Count > 0)
             {
                 var last = keys[0];
                 foreach (var k in keys) if (k.time > last.time) last = k;
-                if (spec.Seconds.Value < last.time)
+                if (spec.Seconds.HasValue && spec.Seconds.Value < last.time)
                     throw new EmitException(
                         $"clip '{spec.Name}': seconds={spec.Seconds.Value} is shorter than curve '{cs.Binding}' last key at {last.time}");
-                if (spec.Seconds.Value > last.time)
-                    keys.Add(new Keyframe(spec.Seconds.Value, last.value)); // hold to the declared length
+                float hold = spec.Seconds ?? Mathf.Max(last.time, MinClipLength);
+                if (hold > last.time)
+                    keys.Add(new Keyframe(hold, last.value)); // hold to the declared or floored length
             }
             var animCurve = new AnimationCurve(keys.ToArray());
             var mode = cs.Tangents switch
@@ -193,12 +203,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             AnimationUtility.SetEditorCurve(clip, binding, animCurve);
         }
 
+        // The key-derived clip length, floored at one frame — the floor animator-schema.md §clips
+        // documents for any `set`/`curves` clip with no `seconds:`. It applies to a curves clip whose
+        // keys all land inside the first frame exactly as it does to a keyless one; without that, a lone
+        // key at time 0 derives length 0 and emits a zero-length clip (see SetKeyedCurve).
         private static float CurveLength(ClipSpec spec)
         {
-            float max = 0f; bool any = false;
+            float max = 0f;
             foreach (var cs in spec.Curves)
-                foreach (var k in cs.Keys) { if (k.Time > max) max = k.Time; any = true; }
-            return any ? max : MinClipLength;
+                foreach (var k in cs.Keys) if (k.Time > max) max = k.Time;
+            return Mathf.Max(max, MinClipLength);
         }
 
         // A bare identifier naming a declared Animator parameter → an Animator-parameter curve (path="").

@@ -166,6 +166,33 @@ parameters:
         StringAssert.Contains("basis", ex.Message);
     }
 
+    // A declared clip length must be positive. Unity reports a zero/negative-length clip as length 0 and
+    // the animator substitutes a 1s state length for any non-positive one, so `exitTime` silently reads
+    // as seconds. The derived path floors (the author declared nothing); a declared zero is a mistake and
+    // is refused rather than rounded up, or the mistake is hidden.
+    [TestCase("seconds", "0")]
+    [TestCase("seconds", "-1")]
+    [TestCase("length", "0")]
+    public void NonPositive_Clip_Length_Throws_At_Parse(string key, string value)
+    {
+        string doc = @"schema: 1
+controller: BadLen
+basis: avatar-root
+clips:
+  c:
+    " + key + ": " + value + @"
+    set: { Prop/Renderer.enabled: 1 }
+layers:
+  - name: L
+    states:
+      S:
+        motion: { clip: c }
+    default: S
+";
+        var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, null));
+        StringAssert.Contains("must be positive", ex.Message);
+    }
+
     // ── blend-axis-type: a blend-tree axis must be a Float animator param ──────────────────────────
     // Unity silently freezes a non-float axis at its first child (proven black-box), so a declared
     // non-float axis is a fatal defect. Undeclared axes are skipped — the undeclared-param lint owns them.

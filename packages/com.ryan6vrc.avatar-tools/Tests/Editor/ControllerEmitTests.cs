@@ -133,6 +133,71 @@ public class ControllerEmitTests
     }
 
     [Test]
+    public void Curve_Ending_Inside_First_Frame_Is_Floored_To_MinClipLength()
+    {
+        // A lone key at time 0 derives length 0. Unfloored, Unity reports clip.length 0 and the animator
+        // gives ANY non-positive state length an effective 1s — so `exitTime: 0.2` on such a state would
+        // dwell 0.2 SECONDS rather than 0.2 x 1/60, a 60x retime no advisory or lint surfaces. The floor
+        // is what animator-schema.md §clips already documents for a `set`/`curves` clip with no
+        // `seconds:`; this asserts `curves:` obeys it, not only `set:`.
+        var doc = new AnimDocument { Schema = 1, ControllerName = "T_Floor" };
+        var clip = new ClipSpec { Name = "c" };
+        clip.Curves.Add(new CurveSpec { Binding = "Prop/Renderer.enabled", Keys = { new Keyframe2(0f, 1f) } });
+        doc.Clips.Add(clip);
+        var layer = new Layer { Name = "L" };
+        layer.Root.States.Add(new State { Name = "S", Motion = new MotionRef { Clip = "c" } });
+        layer.Root.DefaultState = "S";
+        doc.Layers.Add(layer);
+        ControllerEmit.Build(doc, out var r);
+        Assert.AreEqual(1f / 60f, r.Clips["c"].length, 1e-4f, "a lone key at t=0 emits one frame, not zero length");
+    }
+
+    [Test]
+    public void Uneven_Curves_In_One_Clip_Are_Not_Stretched_To_The_Longest()
+    {
+        // The floor is per curve, not clip-wide: a short curve beside a long one keeps its own last key.
+        // Stretching every curve to the clip's max would still evaluate identically (curves clamp past
+        // their last key) but would rewrite the author's curve — a decompile would hand back a key they
+        // never wrote.
+        var doc = new AnimDocument { Schema = 1, ControllerName = "T_Uneven" };
+        var clip = new ClipSpec { Name = "c" };
+        clip.Curves.Add(new CurveSpec { Binding = "A/Renderer.enabled", Keys = { new Keyframe2(0f, 0f), new Keyframe2(0.5f, 1f) } });
+        clip.Curves.Add(new CurveSpec { Binding = "B/Renderer.enabled", Keys = { new Keyframe2(0f, 0f), new Keyframe2(0.2f, 1f) } });
+        doc.Clips.Add(clip);
+        var layer = new Layer { Name = "L" };
+        layer.Root.States.Add(new State { Name = "S", Motion = new MotionRef { Clip = "c" } });
+        layer.Root.DefaultState = "S";
+        doc.Layers.Add(layer);
+        ControllerEmit.Build(doc, out var r);
+        var emitted = r.Clips["c"];
+        var shortCurve = AnimationUtility.GetEditorCurve(emitted,
+            AnimationUtility.GetCurveBindings(emitted).First(b => b.path == "B"));
+        Assert.AreEqual(2, shortCurve.length, "the short curve keeps its own two keys");
+        Assert.AreEqual(0.2f, shortCurve.keys.Last().time, 1e-4f, "and its own last key time");
+        Assert.AreEqual(0.5f, emitted.length, 1e-3f, "clip length still comes from the longest curve");
+    }
+
+    [Test]
+    public void Curve_Past_First_Frame_Gains_No_Padding_Key()
+    {
+        // The floor must not reach a curve that already runs past one frame: it holds to the curve's own
+        // last key, so an ordinary two-key ramp emits unchanged.
+        var doc = new AnimDocument { Schema = 1, ControllerName = "T_NoPad" };
+        var clip = new ClipSpec { Name = "c" };
+        clip.Curves.Add(new CurveSpec { Binding = "Prop/Renderer.enabled", Keys = { new Keyframe2(0f, 0f), new Keyframe2(0.5f, 1f) } });
+        doc.Clips.Add(clip);
+        var layer = new Layer { Name = "L" };
+        layer.Root.States.Add(new State { Name = "S", Motion = new MotionRef { Clip = "c" } });
+        layer.Root.DefaultState = "S";
+        doc.Layers.Add(layer);
+        ControllerEmit.Build(doc, out var r);
+        var emitted = r.Clips["c"];
+        var binding = AnimationUtility.GetCurveBindings(emitted).First(b => b.path == "Prop");
+        Assert.AreEqual(2, AnimationUtility.GetEditorCurve(emitted, binding).length, "no padding key added");
+        Assert.AreEqual(0.5f, emitted.length, 1e-3f, "length still comes from the curve's own last key");
+    }
+
+    [Test]
     public void Curve_Tangents_Linear_Marker_Sets_Linear_Tangents_Flat_Stays_Default()
     {
         // `tangents: linear` (map form) opts a curve into linear tangents on every key; the bare-list form
