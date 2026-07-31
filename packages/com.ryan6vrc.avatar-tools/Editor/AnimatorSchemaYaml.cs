@@ -1060,8 +1060,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     switch (ck.Key)
                     {
-                        case "seconds": clip.Seconds = ToNumber(ck.Value, $"clip '{name}' seconds"); break;
-                        case "length": clip.Seconds = ToNumber(ck.Value, $"clip '{name}' length"); break;
+                        case "seconds": clip.Seconds = ToClipLength(ck.Value, name, "seconds"); break;
+                        case "length": clip.Seconds = ToClipLength(ck.Value, name, "length"); break;
                         case "set":
                             foreach (var sv in ToMap(ck.Value, $"clip '{name}' set"))
                                 clip.Sets[sv.Key] = ToNumber(sv.Value, $"clip '{name}' set.{sv.Key}");
@@ -1142,6 +1142,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             if (v is bool b) return b;
             throw new SchemaException($"{ctx}: expected a boolean, got {Describe(v)}");
+        }
+
+        // A declared clip length must be POSITIVE. Unity reports a zero- or negative-length clip as
+        // length 0, and the animator gives any non-positive state length an effective 1s — so
+        // `exitTime: 0.2` on such a state dwells 0.2 SECONDS instead of 0.2 x the clip's length
+        // (animator-schema.md §clips). Refuse rather than floor: the derived path floors because the
+        // author declared nothing, but a declared `seconds: 0` is an authoring mistake, and silently
+        // rounding it up to one frame would hide it.
+        private static float ToClipLength(object v, string clipName, string key)
+        {
+            float s = ToNumber(v, $"clip '{clipName}' {key}");
+            if (!(s > 0f))
+                throw new SchemaException(
+                    $"clip '{clipName}': {key}={s} must be positive — a non-positive clip length reads back "
+                    + "as 0 and the animator substitutes a 1s state length, so exit-time hops silently retime");
+            return s;
         }
 
         // InferScalar only ever yields long/double for numbers, never int — no int arm needed.

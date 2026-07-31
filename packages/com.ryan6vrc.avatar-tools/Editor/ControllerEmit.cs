@@ -154,28 +154,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 AnimationUtility.SetEditorCurve(clip, binding, AnimationCurve.Constant(0f, length, kv.Value));
             }
             foreach (var cs in spec.Curves)
-                SetKeyedCurve(clip, spec, cs, paramNames, length);
+                SetKeyedCurve(clip, spec, cs, paramNames);
             return clip;
         }
 
-        // Author one keyframed curve onto `clip`. `length` is the clip's resolved length — an explicit
-        // `seconds:` if declared, else CurveLength's key-derived value (already floored at MinClipLength).
-        private static void SetKeyedCurve(AnimationClip clip, ClipSpec spec, CurveSpec cs, HashSet<string> paramNames,
-            float length)
+        // Author one keyframed curve onto `clip`.
+        private static void SetKeyedCurve(AnimationClip clip, ClipSpec spec, CurveSpec cs, HashSet<string> paramNames)
         {
             var binding = ResolveBinding(cs.Binding, paramNames);
             var keys = cs.Keys.Select(k => new Keyframe(k.Time, k.Value)).ToList();
-            // Unity derives a keyframed clip's length from its last key, so the resolved length must be
+            // Unity derives a keyframed clip's length from its last key, so an explicit `seconds:` must be
             // stamped onto the curve too or it is silently ignored (animator-schema.md: seconds declares
             // the length; matters for motion-time / blend-tree timing). Hold the last value out to
-            // `length`; refuse a declared `seconds` shorter than the authored content (it can't truncate
-            // a key). The floor inside `length` is load-bearing, not cosmetic: a curve ending inside the
-            // first frame — a lone key at time 0 is the case that reaches this — would otherwise emit a
-            // ZERO-length clip, and the animator gives any non-positive state length an effective 1s, so
-            // `exitTime: 0.2` would dwell 0.2 SECONDS instead of 0.2 x 1/60 (runtime.md §Animator
-            // evaluation). It would also survive the .anim round-trip only as the floored form — decompile
-            // reads a lone constant key back as `set:` — silently retiming the document with both
-            // directions reporting OK.
+            // `seconds`; refuse a `seconds` shorter than the authored content (it can't truncate a key).
+            //
+            // With no `seconds:`, hold instead to this curve's OWN last key floored at MinClipLength —
+            // per curve, never the clip-wide max, so a clip mixing a long and a short curve emits both
+            // exactly as authored. The floor is what does the work: a curve ending inside the first frame
+            // (a lone key at time 0 is the case that reaches it) would otherwise emit a ZERO-length clip,
+            // and the animator gives any non-positive state length an effective 1s, so `exitTime: 0.2`
+            // would dwell 0.2 SECONDS instead of 0.2 x 1/60 (runtime.md §Animator evaluation). It would
+            // also survive the .anim round-trip only as the floored form — decompile reads a lone constant
+            // key back as `set:` — silently retiming the document with both directions reporting OK.
             if (keys.Count > 0)
             {
                 var last = keys[0];
@@ -183,8 +183,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (spec.Seconds.HasValue && spec.Seconds.Value < last.time)
                     throw new EmitException(
                         $"clip '{spec.Name}': seconds={spec.Seconds.Value} is shorter than curve '{cs.Binding}' last key at {last.time}");
-                if (length > last.time)
-                    keys.Add(new Keyframe(length, last.value)); // hold to the clip's length
+                float hold = spec.Seconds ?? Mathf.Max(last.time, MinClipLength);
+                if (hold > last.time)
+                    keys.Add(new Keyframe(hold, last.value)); // hold to the declared or floored length
             }
             var animCurve = new AnimationCurve(keys.ToArray());
             var mode = cs.Tangents switch
