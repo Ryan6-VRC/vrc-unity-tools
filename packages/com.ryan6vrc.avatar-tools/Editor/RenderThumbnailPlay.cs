@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using Ryan6Vrc.AgentTools.Editor;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -837,8 +838,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Type[] types; try { types = asm.GetTypes(); } catch { continue; }
                 foreach (var t in types)
                 {
-                    if (t.FullName == "Lyuma.Av3Emulator.Runtime.LyumaAv3Runtime") _runtimeType = t;
-                    else if (t.FullName == "Lyuma.Av3Emulator.Runtime.LyumaAv3Emulator") _emulatorType = t;
+                    // Names live in agent-tools' EmulatorBinding; its canary test asserts each one against
+                    // the installed package, so a rename reds the suite before it reaches a Begin() here.
+                    if (t.FullName == EmulatorBinding.RuntimeFullName) _runtimeType = t;
+                    else if (t.FullName == EmulatorBinding.EmulatorFullName) _emulatorType = t;
                 }
             }
             if (_runtimeType == null || _emulatorType == null)
@@ -846,10 +849,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             const BindingFlags BF = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
             var missing = new List<string>();
-            _fIsLocal = Req(_runtimeType, "IsLocal", BF, missing);
-            _fPlayableMixer = Req(_runtimeType, "playableMixer", BF, missing);
-            _fPlayables = Req(_runtimeType, "playables", BF, missing);
-            _fFxIndex = Req(_runtimeType, "fxIndex", BF, missing);
+            _fIsLocal = Req(_runtimeType, EmulatorBinding.IsLocal, BF, missing);
+            _fPlayableMixer = Req(_runtimeType, EmulatorBinding.PlayableMixer, BF, missing);
+            _fPlayables = Req(_runtimeType, EmulatorBinding.Playables, BF, missing);
+            _fFxIndex = Req(_runtimeType, EmulatorBinding.FxIndex, BF, missing);
             if (missing.Count > 0)
                 { err = "LyumaAv3Runtime drifted — missing member(s) the render reads: " + string.Join(", ", missing) + " (the emulator version is not the one this render targets)"; return false; }
             return true;

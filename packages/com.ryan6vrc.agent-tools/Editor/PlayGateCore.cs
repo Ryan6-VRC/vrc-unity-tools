@@ -48,11 +48,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             FwdFeatureFullName.Substring(FwdFeatureFullName.LastIndexOf('.') + 1);
 
         // Full type names of the reflected hazards (mirrors verify.md's assert snippet + ReportGimmick).
-        // The emulator control component is `LyumaAv3Emulator` (the installed lyuma.av3emulator package ships
-        // no bare `Av3Emulator` type — a wrong literal here silently disables the whole emulator rule).
+        // The emulator's own type and field names live in EmulatorBinding, which the canary asserts against
+        // the installed package — don't re-spell them here.
         private const string VrcFuryComponentFullName = "VF.Model.VRCFury";
         private const string GestureManagerFullName   = "BlackStartX.GestureManager.GestureManager";
-        private const string LyumaEmulatorFullName    = "Lyuma.Av3Emulator.Runtime.LyumaAv3Emulator";
 
         public struct PlayGateResult { public bool Pass; public List<Offender> Offenders; }
         public struct Offender { public string Tag; public string Message; public string Fix; }
@@ -242,22 +241,25 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static void CheckEmulatorConfig(MonoBehaviour emu, List<Offender> offenders)
         {
             var t = emu.GetType();
-            bool? run  = ReportGimmick.ReadBoolMember(emu, t, "RunPreprocessAvatarHook");
-            bool? perm = ReportGimmick.ReadBoolMember(emu, t, "EnablePlayerContactPermissions");
+            bool? run  = ReportGimmick.ReadBoolMember(emu, t, EmulatorBinding.RunPreprocessAvatarHook);
+            bool? perm = ReportGimmick.ReadBoolMember(emu, t, EmulatorBinding.EnablePlayerContactPermissions);
 
             // present-but-unreadable: the emulator IS here but a needed flag can't be reflected (renamed
             // field) → block loud rather than skip a live hazard.
             if (run == null || perm == null)
             {
                 var missing = new List<string>();
-                if (run == null)  missing.Add("RunPreprocessAvatarHook");
-                if (perm == null) missing.Add("EnablePlayerContactPermissions");
+                if (run == null)  missing.Add(EmulatorBinding.RunPreprocessAvatarHook);
+                if (perm == null) missing.Add(EmulatorBinding.EnablePlayerContactPermissions);
                 offenders.Add(new Offender
                 {
                     Tag = "Emulator config",
                     Message = "emulator '" + Path(emu.transform) + "' field(s) not reflectable: " +
                               string.Join(", ", missing) + " — cannot verify config",
-                    Fix = "re-pin PlayGateCore's emulator field names to the installed LyumaAv3Emulator",
+                    // ReadBoolMember binds public-only, so a field that went NON-PUBLIC lands here too —
+                    // naming only a rename would send the reader looking for the wrong change.
+                    Fix = "re-pin EmulatorBinding's emulator field names to the installed LyumaAv3Emulator; " +
+                          "if the field still exists but is no longer public, the read path needs NonPublic binding",
                 });
                 return;
             }
@@ -284,7 +286,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             foreach (var root in roots)
                 foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(false))
-                    if (mb != null && mb.GetType().FullName == LyumaEmulatorFullName && mb.isActiveAndEnabled)
+                    if (mb != null && mb.GetType().FullName == EmulatorBinding.EmulatorFullName && mb.isActiveAndEnabled)
                         return mb;
             return null;
         }

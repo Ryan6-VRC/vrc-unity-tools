@@ -73,15 +73,16 @@ public class PlayGateCoreTests
         b.enabled = enabled;
     }
 
-    // Real Lyuma.Av3Emulator.Runtime.LyumaAv3Emulator control object (public bool config fields set by
-    // reflection). This is the exact type the core matches — a synthetic stub would mask a wrong const.
+    // Real emulator control object (public bool config fields set by reflection). This is the exact type the
+    // core matches — a synthetic stub would mask a wrong const — so it resolves through EmulatorBinding for
+    // the same reason production does: one re-pin site, and no literal here to survive the next rename.
     private void NewEmulator(bool run, bool perm, bool enabled = true)
     {
-        var t = Resolve("Lyuma.Av3Emulator.Runtime.LyumaAv3Emulator");
+        var t = Resolve(EmulatorBinding.EmulatorFullName);
         Assert.IsNotNull(t, "LyumaAv3Emulator must resolve (lyuma.av3emulator present)");
         var b = (Behaviour)NewGo("Emu").AddComponent(t);
-        t.GetField("RunPreprocessAvatarHook").SetValue(b, run);
-        t.GetField("EnablePlayerContactPermissions").SetValue(b, perm);
+        t.GetField(EmulatorBinding.RunPreprocessAvatarHook).SetValue(b, run);
+        t.GetField(EmulatorBinding.EnablePlayerContactPermissions).SetValue(b, perm);
         b.enabled = enabled;
     }
 
