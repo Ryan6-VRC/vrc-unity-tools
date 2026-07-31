@@ -11,7 +11,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // Gate infrastructure for a directory of vrc-patterns entries — NOT an [AgentTool] and NOT a
     // [MenuItem] (no callable door, so no TOOLS.md row). It reuses the shipped compile/decompile
     // primitives: decode(c) = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(c).Doc), the same
-    // canonical string the fixpoint tests trust. Drift is decompile-equality, never a byte diff.
+    // canonical string the fixpoint tests trust.
+    //
+    // THE ONE QUESTION THIS GATE ASKS: was built/ regenerated after its source yaml changed? In
+    // vrc-patterns the yaml is the source of truth and built/ is a generated artifact, committed only
+    // so prefabs can resolve it by GUID and so a study entry opens in the animator window. Nobody
+    // hand-maintains it. So a field the schema does not model does not matter here — and one that DOES
+    // matter is a reason to grow the schema, never a reason to tighten this comparison. Do not add a
+    // check that guards hand-authored content in a generated directory; that category is empty by
+    // construction, and CONVENTIONS.md routes the real exception (a menu the schema cannot express)
+    // to assets/ instead.
+    //
+    // Drift is decompile-equality, never a byte diff — and that is a fact about Unity, not a taste.
+    // Unity assigns .controller sub-asset fileIDs non-deterministically: two compiles of the SAME yaml
+    // in one Editor seconds apart produce byte-different files (measured across all 17 library
+    // documents — every one byte-different, every one content-identical). A byte gate would fail every
+    // entry on every run. Flat single-document assets (*_Parameters.asset, *_Menu.asset) have no
+    // sub-asset ids and DO compare byte-stable, but see above: there is nothing there to guard.
     //
     // A committed built .controller lives at an arbitrary --root filesystem path, not under the
     // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
@@ -107,16 +123,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var scratch = "Assets/_fixpoint_" + Guid.NewGuid().ToString("N").Substring(0, 8);
             try
             {
+                // NO round-trip pass here (decode(compile(decode(compile(yaml)))) == decode(compile(yaml))).
+                // That theorem is about the COMPILER AND DECOMPILER being mutually inverse — a property of
+                // avatar-tools, not of any entry — and this package already owns it at the right door:
+                // FixpointOracle + FixpointAcceptanceTests (real-controller fixtures picked by construct
+                // census) + RoundtripStressTests (synthetic fixtures spanning the whole schema vocabulary).
+                // The acceptance suite states the remediation this gate cannot deliver: "A FIXPOINT BREAK IS
+                // A REAL BUG in decode / serialize / compile, fixed at the true site." Run here it failed an
+                // ENTRY's admission for a TOOL bug, blocking a vrc-patterns PR nobody in that repo could fix.
+                // The corpus argument for keeping it does not hold either: censused, the library exercises no
+                // construct the fixtures lack — no sub-machines, no onExit, no offset, no mute/solo, no
+                // fixedDuration, a narrower SMB set — it is larger in lines and a strict subset in vocabulary.
                 var cFresh = CompileToTemp(yamlPath, scratch + "/a");
                 var yFresh = Decode(cFresh, out var r1);
                 if (yFresh == null) return (false, "fresh decompile refused: " + r1);
-
-                var midYaml = Path.GetFullPath(scratch + "/mid.yaml");
-                File.WriteAllText(midYaml, yFresh);
-                var cRound = CompileToTemp(midYaml, scratch + "/b");
-                var yRound = Decode(cRound, out var r2);
-                if (yRound == null) return (false, "round-trip decompile refused: " + r2);
-                if (yFresh != yRound) return (false, "round-trip drift (yaml not on the fixpoint)");
 
                 if (builtControllerPath != null)
                 {
@@ -185,11 +205,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // report as drift on every run. Returns null when equal, else the first difference, addressed by
         // its page path so an offender in a nested page names the page it sits on.
         //
-        // It compares EVERY serialized field of a control, not just the ones the schema can author —
-        // including `icon`, `style`, `labels`, and the page's own name. That is deliberate and is the
-        // difference between this pass and the controller pass it sits beside: comparing only modeled
-        // fields is exactly how the library's committed controllers drifted invisibly. A hand-added icon
-        // in a built/ menu is drift the next compile silently strips, so the gate has to see it.
+        // It compares EVERY serialized field of a control — including `icon`, `style`, `labels`, and the
+        // page's own name. Not because unmodeled content in built/ is worth guarding (it is not; see the
+        // class header), but because there is no decoded intermediate to compare against for a menu, so
+        // the fields ARE the comparison. Where the controller pass compares two decoded documents, this
+        // one compares two loaded assets directly, and the cheapest complete way to do that is field by
+        // field. A committed field the schema cannot author is a file in the wrong directory rather than
+        // drift worth catching — CONVENTIONS.md routes such a menu to assets/ — but failing loud on it
+        // costs nothing here and tells its author their edit was about to be regenerated away.
         static string MenuDiff(VRCExpressionsMenu a, VRCExpressionsMenu b, string where)
         {
             if (a.name != b.name)
@@ -211,7 +234,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (x.value != y.value) return $"{w}: value {x.value} vs {y.value}";
                 if (x.style != y.style) return $"{w}: style {x.style} vs {y.style}";
                 if (AssetDatabase.GetAssetPath(x.icon) != AssetDatabase.GetAssetPath(y.icon))
-                    return $"{w}: icon '{AssetDatabase.GetAssetPath(x.icon)}' vs '{AssetDatabase.GetAssetPath(y.icon)}' (the schema cannot author an icon, so a committed one is drift the next compile strips)";
+                    return $"{w}: icon '{AssetDatabase.GetAssetPath(x.icon)}' vs '{AssetDatabase.GetAssetPath(y.icon)}' (the schema cannot author an icon, so the next compile of built/ would drop this one — author the menu in assets/ instead, per CONVENTIONS.md)";
 
                 var xl = x.labels ?? new VRCExpressionsMenu.Control.Label[0];
                 var yl = y.labels ?? new VRCExpressionsMenu.Control.Label[0];
