@@ -8,6 +8,7 @@ using UnityEngine;
 using UnityEngine.Animations;
 using UnityEngine.SceneManagement;
 using VRC.Dynamics;
+using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Dynamics.Contact.Components;
 using VRC.SDK3.Dynamics.PhysBone.Components;
 
@@ -16,7 +17,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// <summary>
     /// Read-only markdown TOPOLOGY digest of a gimmick subtree — the SPACE-dimension companion to the
     /// H report family's TIME dimension (ReportController / ReportClip / CheckAnimator). Walks a chosen
-    /// subtree and renders, as factual tables, its VRC contacts, physbones (+ colliders), constraints
+    /// subtree and renders, as factual tables, its VRC contacts, raycasts, physbones (+ colliders), constraints
     /// (as a constrained→source edge-list with weights, affected-axis mask, and TargetTransform
     /// indirection made explicit), and its VRCFury AUTHORING inventory — plus a short Observations index
     /// naming only the six mechanically-certain structural idioms (world anchor, feedback loop,
@@ -26,13 +27,13 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// count (the tier-2 census names renderers/animators too), so a whole-avatar subtree is a
     /// proportionally large, honest digest, not a compact one; scope the root to the gimmick.
     ///
-    /// Two seams are deliberately NOT crossed: it reports a contact/physbone's DECLARED `parameter`
+    /// Two seams are deliberately NOT crossed: it reports a contact/physbone/raycast's DECLARED `parameter`
     /// field but never traces it into an animator (H's domain), and it reports VRCFury features verbatim
     /// but predicts no bake output — no prefix rewrite, no sync-bit tally, no bake diff (J's domain).
     /// No verdict, no heuristic/"suspected" tier: it is a digest like ReportController, not a lint.
     ///
     /// SUBTREE-COMPLETE BY CONSTRUCTION: the tier-1 tables above interpret the known gimmick families
-    /// (contacts, physbones+colliders, VRC/Unity constraints, VRCFury), and a generic tier-2 "Other
+    /// (contacts, raycasts, physbones+colliders, VRC/Unity constraints, VRCFury), and a generic tier-2 "Other
     /// components" census then names EVERY remaining component (Modular Avatar, VRCLens, custom scripts)
     /// plus every MISSING/broken-script slot — with its object-reference seam and a SHALLOW scalar peek
     /// (top-level + one struct level; arrays as `name[N]`; no asset-following, no deep recursion). Nothing
@@ -56,6 +57,14 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// </summary>
         internal const string ChainSubtreeLegend = "_`chain subtree` = the row's `rootTransform` (else its own transform) and every descendant: `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept over the avatar enclosing THAT ROW's physbone, so a mesh outside the reported subtree still counts while a co-hosted neighbour avatar's does not; a row with no enclosing avatar descriptor falls back to its outermost ancestor), `hosting` how many carry a component besides Transform and this row's own physbone. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside its subtree (a constraint reading it as a source) reads all-zero while load-bearing. A nonzero is an upper bound — exclusions the component declares (`ignoreTransforms`) are not subtracted, so the set is the chain's hierarchy reach, not a claim about which bones it moves._\n";
 
+        /// <summary>
+        /// The raycast-table legend, quoted once at the canon so a test can pin whole sentences rather than
+        /// carve phrases out of them (`docs/tool-design.md`: verbatim strings are quoted once). The layer
+        /// clause is the load-bearing one and may not be dropped by a prose pass: the mask is the whole
+        /// discriminator of a player-masked ray, and its NAME is the project's to give, not the component's.
+        /// </summary>
+        internal const string RaycastLegend = "_`layers` renders under every mode, but the component consults it only under `HitCustomLayers` — a mask left behind by another mode still shows here. Layer NAMES come from the project's TagManager, not from the raycast: a bare index means this project does not name that layer, never that the mask is empty, which renders `(none)`. `params` concatenates the AUTHORED prefix, so it is not the post-build name — VRCFury and Modular Avatar both rewrite that prefix at build. A `result` of `(none)` leaves the ray with no output transform to write._\n";
+
         // ----- Agent entry point ------------------------------------------------------------------
 
         /// <summary>Digest the gimmick subtree rooted at <paramref name="rootPath"/> (a scene hierarchy
@@ -74,6 +83,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             //      transform count, so no depth cap: a large honest count is a real signal. -------------
             var senders     = root.GetComponentsInChildren<VRCContactSender>(true);
             var receivers   = root.GetComponentsInChildren<VRCContactReceiver>(true);
+            var raycasts    = root.GetComponentsInChildren<VRCRaycast>(true);
             var physbones   = root.GetComponentsInChildren<VRCPhysBone>(true);
             var colliders   = root.GetComponentsInChildren<VRCPhysBoneCollider>(true);
             var constraints = root.GetComponentsInChildren<VRCConstraintBase>(true);
@@ -96,6 +106,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var tier1 = new HashSet<Component>();
             foreach (var a in senders) tier1.Add(a);
             foreach (var a in receivers) tier1.Add(a);
+            foreach (var a in raycasts) tier1.Add(a);
             foreach (var a in physbones) tier1.Add(a);
             foreach (var a in colliders) tier1.Add(a);
             foreach (var a in constraints) tier1.Add(a);
@@ -106,6 +117,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Header count line is emitted AFTER the tier-1 tables/observations run, because `other` is only
             // known once AppendOther has walked the subtree — so build the digest body first, then prepend.
             AppendContacts(body, senders, receivers);
+            AppendRaycasts(body, raycasts, root);
             AppendPhysBones(body, physbones, colliders, root);
             AppendConstraints(body, constraintRows);
             var applyDuringUploadHosts = AppendVrcFury(body, fury);
@@ -119,6 +131,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             doc.Append("root: `").Append(GetHierarchyPath(root.transform)).Append("`  \n");
             doc.Append("_transform handles are full scene-root-absolute paths; under first-match resolution a duplicate-named sibling makes a handle non-unique (a pre-existing family caveat, surfaced here because the interior walk can hit duplicate-named bones)._\n");
             doc.Append("\ncontacts=").Append(contactCount)
+                  .Append(" raycasts=").Append(raycasts.Length)
                   .Append(" physbones=").Append(physbones.Length)
                   .Append(" constraints=").Append(constraintCount)
                   .Append(" vrcfury=").Append(fury.Count)
@@ -127,6 +140,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             var summary = "[ReportGimmick] " + root.name
                         + ": contacts=" + contactCount
+                        + " raycasts=" + raycasts.Length
                         + " physbones=" + physbones.Length
                         + " constraints=" + constraintCount
                         + " vrcfury=" + fury.Count
@@ -164,6 +178,72 @@ namespace Ryan6Vrc.AgentTools.Editor
                   .Append(string.IsNullOrEmpty(r.parameter) ? "—" : "`" + Cell(r.parameter) + "`").Append(" | ")
                   .Append(RootIndirection(r.rootTransform, r.transform)).Append(" |\n");
         }
+
+        // ----- Raycasts -----------------------------------------------------------------------------
+
+        private static void AppendRaycasts(StringBuilder sb, VRCRaycast[] rays, GameObject root)
+        {
+            sb.Append("\n## Raycasts\n\n");
+            if (rays.Length == 0) { sb.Append("_(none)_\n"); return; }
+            sb.Append("| transform | ray | collision | result | params | on miss | result rotation | live |\n");
+            sb.Append("|---|---|---|---|---|---|---|---|\n");
+            foreach (var r in rays)
+                sb.Append("| `").Append(Cell(RaycastHandle(r, rays))).Append("` | ")
+                  .Append(Cell("dir=" + V3(r.RaycastDirection) + " dist=" + F(r.Distance)
+                               + (r.ApplyTransformScale ? " (×transform scale)" : ""))).Append(" | ")
+                  .Append(Cell(r.RaycastCollisionMode + " layers=" + LayerMaskCell(r.CustomCollisionLayers))).Append(" | ")
+                  // Unity fake-null test, never ?? — the same reason FromVrc states for TargetTransform.
+                  .Append(r.ResultTransform != null ? "`" + Cell(GetHierarchyPath(r.ResultTransform)) + "`" : "(none)").Append(" | ")
+                  .Append(Cell(ParamCell(r.Parameter))).Append(" | ")
+                  .Append(r.BehaviorOnMiss).Append(" | ")
+                  .Append(Cell(r.ApplyRotation ? "align=" + V3(r.AlignmentAxis) : "off")).Append(" | ")
+                  .Append(LiveCell(NotLiveReason(r, root.transform))).Append(" |\n");
+
+            sb.Append('\n').Append(RaycastLegend);
+        }
+
+        // The three params a raycast drives are its declared `parameter` prefix with three fixed suffixes.
+        // Rendering the suffixes is local concatenation — the same thing the component does — and stays on
+        // the near side of both seams this tool declares: no animator is consulted (H's domain), and the
+        // prefix is the AUTHORED one, not what VRCFury/MA rewrite it to at build (J's domain).
+        private static string ParamCell(string prefix) =>
+            string.IsNullOrEmpty(prefix) ? "—" : "`" + prefix + "` + _Hit/_Ratio/_Distance";
+
+        // A LayerMask rendered INDEX-FIRST, with the name only as an annotation, because the name is not the
+        // component's to give: `LayerMask.LayerToName` reads the PROJECT's TagManager. Measured across two
+        // venues here, one mask value renders `10(PlayerLocal)` in a project VRChat's layer setup has run and
+        // a bare `10` in one it has not. A name-first cell would print an empty string there, which reads as
+        // "no layer" — the one misreading this cell exists to prevent, since an all-off mask renders `(none)`.
+        private static string LayerMaskCell(int mask)
+        {
+            if (mask == 0) return "(none)";
+            if (mask == ~0) return "everything";
+            var parts = new List<string>();
+            for (int i = 0; i < 32; i++)
+            {
+                if ((mask & (1 << i)) == 0) continue;
+                string name = LayerMask.LayerToName(i);
+                parts.Add(string.IsNullOrEmpty(name) ? i.ToString() : i + "(" + name + ")");
+            }
+            return string.Join(",", parts.ToArray());
+        }
+
+        // Two raycasts on ONE GameObject is the shipped idiom, not an edge case — a player ray and a world ray
+        // share one origin transform in `vrc-patterns/selective-animation` — so the path alone is ambiguous
+        // exactly where this table is most worth reading. Same component-ordinal fallback HostHandle uses.
+        private static string RaycastHandle(VRCRaycast r, VRCRaycast[] all)
+        {
+            int sharing = 0;
+            foreach (var o in all) if (o.transform == r.transform) sharing++;
+            string path = GetHierarchyPath(r.transform);
+            if (sharing < 2) return path;
+            var onHost = r.GetComponents<VRCRaycast>();
+            for (int i = 0; i < onHost.Length; i++)
+                if (ReferenceEquals(onHost[i], r)) return path + " [VRCRaycast#" + i + "]";
+            return path;
+        }
+
+        private static string V3(Vector3 v) => "(" + F(v.x) + "," + F(v.y) + "," + F(v.z) + ")";
 
         // ----- PhysBones + collider companion (§5.2) ----------------------------------------------
 
