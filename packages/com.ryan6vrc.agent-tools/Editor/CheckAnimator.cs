@@ -475,7 +475,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         //     binding is resolved against (ClipRewritersService walks upward from the mount, first match wins,
         //     and so does AncestorChain), so the root a binding FIRST resolves at is the frame the build picks.
         //     Nothing here replicates VRCFury's per-binding prop-root-vs-avatar-root choice - it reads the
-        //     answer off the walk.
+        //     answer off the walk. One divergence, narrow but real: the walk probes with GetAnimatedObject
+        //     while VRCFury probes with ValidateBindingsService.IsValid, which also accepts a BoxCollider
+        //     binding on a VRCStation and cross-accepts IConstraint against IVRCConstraint. A clip binding a
+        //     Unity ParentConstraint on a node now carrying VRCParentConstraint resolves for the build and
+        //     not here, so that binding lands in the clip-binding class instead of this one.
         //   - the animated LEAF is INCLUDED. A mover on the leaf kills the binding by the identical walk, so
         //     excluding it would buy nothing but a false negative.
         //   - NOT claimed: false-positive-free in general. The walk stops at the mover and never asks where the
@@ -493,10 +497,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // Whether a mover carries its whole subtree to one new parent, which decides the FRAME-ROOT case.
         // A wholesale mover at the frame root is the documented safe anchor: the module moves intact and its
-        // component-relative paths still resolve, so it is excluded. A SCATTERING mover is not safe there:
-        // MergeArmature reparents each matched bone individually onto a different base bone (MergeArmatureHook
-        // recurses per child with its own childNewParent) and renames them, so an interior binding dies even
-        // though the mover sits at the frame root.
+        // component-relative paths still resolve, so it is excluded. A SCATTERING node is never safe: it is
+        // relocated (and by default renamed) on its own, so a binding pathing through it dies wherever it sits
+        // relative to the frame root.
         internal struct MoverInfo
         {
             public string Label;
@@ -515,13 +518,17 @@ namespace Ryan6Vrc.AgentTools.Editor
         //   WorldFixedObject       WorldFixedObjectProcessor      reparents its own GameObject under a generated root
         //   VisibleHeadAccessory   VisibleHeadAccessoryProcessor  reparents its own GameObject under a shim
         //   ReplaceObject          ReplaceObjectPass              reparents its own GameObject onto the target's parent
-        // ReplaceObject ALSO reparents the replaced object's children onto the replacement, and that second
-        // move is not modelled: the replaced object is named by an AvatarObjectReference this walk does not
-        // resolve. A binding pathing through the REPLACED object's children is a known false negative.
+        // ReplaceObject's second effect - it destroys the object it replaces and adopts that object's children
+        // - is modelled by registering the replaced object (resolved from its AvatarObjectReference) as a
+        // scattering mover; an unresolvable reference is the residual false negative.
         //
         // A mover whose target does not resolve moves nothing at build (BoneProxyProcessor guards its
-        // SetParent on `proxy.Target != null && ValidateTarget(...) == OK`), but is still counted: an
-        // unresolved anchor is a broken module, not a licence to animate through it.
+        // SetParent on `proxy.Target != null && ValidateTarget(...) == OK`), but is still counted. That is not
+        // only a policy call about broken modules: in the vrc-patterns gate the entry prefab is instantiated
+        // BARE, with no avatar and no humanoid rig, so no proxy target can resolve there at all. Requiring
+        // resolution would make the gate's whole pass vacuous. The cost is that the gate's FAIL tier can fire
+        // on a rig whose move would not have happened on that particular host - loud, and repaired the same
+        // way, but a harsher bargain than CheckAvatar's CLASSIFY makes.
         internal static Dictionary<GameObject, MoverInfo> CollectMovers(GameObject scanRoot)
         {
             var movers = new Dictionary<GameObject, MoverInfo>();
@@ -537,15 +544,59 @@ namespace Ryan6Vrc.AgentTools.Editor
                     case "nadena.dev.modular_avatar.core.ModularAvatarMergeArmature": label = "MA MergeArmature"; scatters = true; break;
                     case "nadena.dev.modular_avatar.core.ModularAvatarWorldFixedObject": label = "MA WorldFixedObject"; break;
                     case "nadena.dev.modular_avatar.core.ModularAvatarVisibleHeadAccessory": label = "MA VisibleHeadAccessory"; break;
-                    case "nadena.dev.modular_avatar.core.ModularAvatarReplaceObject": label = "MA ReplaceObject"; break;
+                    case "nadena.dev.modular_avatar.core.ModularAvatarReplaceObject":
+                        label = "MA ReplaceObject";
+                        // The REPLACED object is destroyed outright (ReplaceObjectPass DestroyImmediate), and
+                        // the replacement takes its parent and sibling index WITHOUT taking its name - so a
+                        // binding through the replaced object dies as surely as one through a moved node.
+                        var replaced = ReplaceObjectTarget(c, scanRoot);
+                        if (replaced != null) Register(movers, replaced, "MA ReplaceObject (replaced object)", true);
+                        break;
                 }
                 if (label == null) continue;
-                // First writer wins, except that a scattering mover upgrades the entry: two movers on one
-                // GameObject is pathological, and reporting the one with the WIDER consequence is the safe read.
-                if (movers.TryGetValue(c.gameObject, out var existing) && !(scatters && !existing.Scatters)) continue;
-                movers[c.gameObject] = new MoverInfo { Label = label, Scatters = scatters };
+                if (scatters)
+                {
+                    // MergeArmature relocates every node UNDER it, individually: MergeArmatureHook recurses
+                    // per child with its own childNewParent, and mangleNames (default TRUE) appends a GUID to
+                    // each matched bone's name. Registering only the carrier would miss the shape where the
+                    // FullController is mounted INSIDE the merged armature - the movers are then all ANCESTORS
+                    // of the frame root, which the leaf-to-root walk can never reach, and every interior
+                    // binding dies unreported. Registering the subtree puts a mover between the frame root and
+                    // the leaf where the walk will find it, and makes the frame-root exemption moot for these.
+                    foreach (var t in c.gameObject.GetComponentsInChildren<Transform>(true))
+                        Register(movers, t.gameObject, label, true);
+                    continue;
+                }
+                Register(movers, c.gameObject, label, false);
             }
             return movers;
+        }
+
+        // First writer wins, except that a scattering entry upgrades a wholesale one: two movers on one
+        // GameObject is pathological, and reporting the one with the WIDER consequence is the safe read.
+        private static void Register(Dictionary<GameObject, MoverInfo> movers, GameObject go, string label, bool scatters)
+        {
+            if (movers.TryGetValue(go, out var existing) && !(scatters && !existing.Scatters)) return;
+            movers[go] = new MoverInfo { Label = label, Scatters = scatters };
+        }
+
+        // The GameObject an MA ReplaceObject destroys and supplants, read off its `targetObject`
+        // AvatarObjectReference (referencePath is the authoritative half; the cached targetObject is trusted
+        // only as a fallback). Null when the field is absent or names nothing resolvable from the scan root.
+        private static GameObject ReplaceObjectTarget(Component c, GameObject scanRoot)
+        {
+            SerializedObject so;
+            try { so = new SerializedObject(c); } catch { return null; } // B6 parity: reflection never throws out
+            var aor = so.FindProperty("targetObject");
+            if (aor == null) return null;
+            var path = aor.FindPropertyRelative("referencePath");
+            if (path != null && !string.IsNullOrEmpty(path.stringValue) && scanRoot != null)
+            {
+                var t = scanRoot.transform.Find(path.stringValue);
+                if (t != null) return t.gameObject;
+            }
+            var cached = aor.FindPropertyRelative("targetObject");
+            return cached != null ? cached.objectReferenceValue as GameObject : null;
         }
 
         // Walk a VRCFury-merged controller's bindings and report the ones an MA move kills at build. Mirrors

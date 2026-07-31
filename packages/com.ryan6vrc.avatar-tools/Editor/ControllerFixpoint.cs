@@ -289,7 +289,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         static System.Collections.Generic.List<string> ScanAnchorSeams(GameObject prefab)
         {
             var inst = PrefabUtility.InstantiatePrefab(prefab) as GameObject;
-            if (inst == null) return new System.Collections.Generic.List<string>();
+            // An instantiation that yields nothing FAILS rather than reporting a clean prefab: an empty list
+            // here is indistinguishable from "scanned, found nothing", which is the silent no-op this pass
+            // exists to prevent.
+            if (inst == null)
+                return new System.Collections.Generic.List<string> {
+                    Ryan6Vrc.AgentTools.Editor.CheckAvatar.DegradedPrefix +
+                    "PrefabUtility.InstantiatePrefab returned null, so no seam scan ran on this prefab"
+                };
             try { return Ryan6Vrc.AgentTools.Editor.CheckAvatar.ScanAnchorSeams(inst); }
             finally { UnityEngine.Object.DestroyImmediate(inst); }
         }

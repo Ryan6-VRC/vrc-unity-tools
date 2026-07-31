@@ -360,7 +360,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// dedup is per (controller + frame root + kind), not global, so a controller shared across frames is
         /// resolved once per frame. Fail-loud frame notes land in <paramref name="rep"/>.</summary>
         private static List<Pair> EnumerateSurfaces(
-            GameObject root, VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor, Report rep)
+            GameObject root, VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor, Report rep,
+            bool vrcfOnly = false)
         {
             var pairs = new List<Pair>();
             var seen = new HashSet<(int ctrl, int root, int kind)>();
@@ -380,7 +381,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 if (c == null) continue;
 
-                if (TryMaFrame(c, root, out var maCtrl, out var maFrame))
+                // vrcfOnly: the anchor-seam door walks VRCFury surfaces alone, so enumerating MA ones would
+                // only manufacture notes for a class MA surfaces cannot be in — and that door turns every note
+                // into a gate FAIL.
+                if (!vrcfOnly && TryMaFrame(c, root, out var maCtrl, out var maFrame))
                 {
                     string anchor = FrameAnchorOverride(maFrame.UnreflectedAnchor);
                     if (anchor != null) SurfaceUnreflected(c, anchor, rep); // R-H — loud, but not dropped
@@ -418,25 +422,26 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// note and this door would have discarded it — reporting zero seams at exactly the moment the drift
         /// it guards against occurs. (R-K's uncertainty note is written only to the report, never logged, so
         /// there is no second channel to fall back on.)</summary>
+        /// <summary>Prefix marking a <see cref="ScanAnchorSeams"/> line as a DEGRADED-READ report rather than a
+        /// seam offender. Both fail the gate; only these two are distinguishable to a caller counting seams.</summary>
+        public const string DegradedPrefix = "scan not trustworthy: ";
+
         public static List<string> ScanAnchorSeams(GameObject root)
         {
             var lines = new List<string>();
             if (root == null) return lines;
             var rep = new Report { Root = root };
-            foreach (var o in CollectAnchorSeams(root, EnumerateSurfaces(root, null, rep)))
+            foreach (var o in CollectAnchorSeams(root, EnumerateSurfaces(root, null, rep, vrcfOnly: true)))
                 lines.Add(o.Animator + ": clip `" + o.Clip + "` binds `" + o.Path + "`, moved by "
                           + o.MoverLabel + " @ `" + o.Mover + "` [" + o.Host + "]");
-            foreach (var n in rep.Notes) lines.Add("frame read degraded, seam scan is not trustworthy here — " + n);
-            foreach (var n in rep.FrameUncertain) lines.Add("frame is a guess, seam scan is not trustworthy here — " + n);
+            foreach (var n in rep.Notes) lines.Add(DegradedPrefix + n);
+            foreach (var n in rep.FrameUncertain) lines.Add(DegradedPrefix + "frame is a guess — " + n);
             return lines;
         }
 
-        // The anchor-seam walk over already-enumerated surfaces. The mover sets are scanned once over the
-        // whole root, not per pair: an ArmatureLink's propBone is a raw ref that may name a node outside the
-        // component's own subtree. Each pair is walked against the movers of the framework that is NOT
-        // merging it, so a module keeping both operations in one framework contributes no movers to its own
-        // controllers and cannot self-flag. The dedup key matches the clip-binding class (frame omitted) for
-        // the same reason stated there.
+        // The anchor-seam walk over already-enumerated surfaces. The MA mover set is scanned once over the
+        // whole root rather than per pair, because a mover need not sit inside the merged module. The dedup
+        // key matches the clip-binding class (frame omitted) for the same reason stated there.
         private static List<Offender> CollectAnchorSeams(GameObject root, List<Pair> pairs)
         {
             var found = new List<Offender>();

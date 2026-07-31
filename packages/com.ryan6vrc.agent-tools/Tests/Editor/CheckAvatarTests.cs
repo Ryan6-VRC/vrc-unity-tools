@@ -690,6 +690,26 @@ public class CheckAvatarTests
     }
 
     [Test]
+    public void AnchorSeam_mergeArmatureAboveTheMount_isClassified()
+    {
+        // The mover is an ANCESTOR of the FullController's mount, which a leaf-to-root walk can never reach —
+        // so registering only the component's own GameObject reported nothing here. MergeArmature relocates
+        // every node beneath it individually and mangleNames (default true) renames each one, so the interior
+        // nodes ARE movers and the walk finds them between the frame root and the leaf.
+        var a = NewAvatar("SeamScatterAbove");
+        var outfit = NewChild(a, "Outfit");
+        AddMaComponent(outfit, "nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
+        var hips = NewChild(outfit, "Hips");
+        var mount = NewChild(hips, "Mount");
+        NewChild(NewChild(mount, "Aim"), "Origin");
+        AddVrcfFullController(mount, NewController("SeamCtrlAbove", NewClip(TmpDir, "seam_above", "Aim/Origin")), mount);
+
+        var res = Inspect("SeamScatterAbove");
+        Assert.AreEqual(1, SeamCount(res), res);
+        StringAssert.Contains("moved-by=MA MergeArmature", ReadLog(res));
+    }
+
+    [Test]
     public void AnchorSeam_proxiedNodeIsTheAnimatedLeaf_isClassified()
     {
         var prop = NewSeamRig("SeamLeaf", out var aim, out _);
@@ -784,6 +804,9 @@ public class CheckAvatarTests
         // Animator-typed binding is retargeted to the avatar's Animator whatever its authored path.
         var prop = NewSeamRig("SeamAnimatorTyped", out var aim, out _);
         AddMaBoneProxy(aim, "Bone");
+        // The Animator component is what makes this test bite: without it the binding never RESOLVES, so it
+        // would be skipped as unresolved and the test would pass with the type-skip deleted.
+        aim.AddComponent<Animator>();
         var clip = new AnimationClip { name = "seam_animtyped" };
         AnimationUtility.SetEditorCurve(clip,
             EditorCurveBinding.FloatCurve("Aim", typeof(Animator), "m_Enabled"), AnimationCurve.Linear(0, 0, 1, 1));
@@ -792,6 +815,7 @@ public class CheckAvatarTests
 
         var res = Inspect("SeamAnimatorTyped");
         Assert.AreEqual(0, SeamCount(res), res);
+        StringAssert.Contains("clipBinding=0", res); // resolved-and-skipped, not quietly reclassified
     }
 
     [Test]
@@ -839,7 +863,23 @@ public class CheckAvatarTests
 
         var lines = CheckAvatar.ScanAnchorSeams(prop);
         Assert.IsNotEmpty(lines, "a degraded frame read must fail the gate, not pass it");
-        Assert.IsTrue(lines.Exists(l => l.Contains("not trustworthy")), string.Join(" | ", lines));
+        Assert.IsTrue(lines.Exists(l => l.StartsWith(CheckAvatar.DegradedPrefix)), string.Join(" | ", lines));
+    }
+
+    [Test]
+    public void ScanAnchorSeams_maOnlyModule_raisesNothing()
+    {
+        // The door FAILs the gate on any line it returns, so it must not manufacture one for a surface that
+        // structurally cannot carry this break. A bare MA-merged module has no descriptor ancestor, so its
+        // frame read is uncertain — a note that would hard-FAIL an entry with no FullController at all.
+        var prop = new GameObject("MaOnlyModule");
+        _avatar = prop;
+        var aim = NewChild(prop, "Aim");
+        NewChild(aim, "Origin");
+        AddMaBoneProxy(aim, "Bone");
+        AddMaMergeAnimator(prop, NewController("SeamCtrlMaOnly", NewClip(TmpDir, "seam_maonly_gate", "Aim/Origin")));
+
+        Assert.IsEmpty(CheckAvatar.ScanAnchorSeams(prop));
     }
 }
 
