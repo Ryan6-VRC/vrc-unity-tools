@@ -314,12 +314,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (i == subDefaultIdx)
                     {
                         // This rung folds into the machine's `default:` and never reaches
-                        // DecodeEntryTransition, so it needs its own copy of that method's dropped-name Note —
-                        // otherwise the one entry rung most likely to exist in a vendor FX controller is the
-                        // one whose name still vanishes silently.
+                        // DecodeEntryTransition, so it needs its own copy of EVERY guarantee that method
+                        // carries — not just the dropped-name Note. `default:` is a bare target with nowhere
+                        // to put mute/solo, and the sweep is what catches a field neither of us knows about,
+                        // so without all three this is the one entry rung in the controller that decodes
+                        // unguarded. `model.DefaultState` was already set above, so a muted rung silently
+                        // recompiles as a LIVE unconditional default: a behavioural rewrite, which is exactly
+                        // the class of silent drop the rest of this walk refuses.
+                        string dloc = "Entry in " + MachineLabel(sm);
+                        if (entries[i].mute || entries[i].solo)
+                            _result.Refusals.Add($"transition from {dloc}: the default sub-machine rung carries "
+                                + "mute/solo, which a `default:` cannot express — it would recompile as a live "
+                                + "unconditional default");
                         if (!string.IsNullOrEmpty(entries[i].name))
-                            _result.Notes.Add($"Entry in {MachineLabel(sm)}: the default sub-machine rung's cosmetic "
+                            _result.Notes.Add($"{dloc}: the default sub-machine rung's cosmetic "
                                 + $"name '{entries[i].name}' is not carried by the schema and will not survive a recompile");
+                        CompletenessSweep(entries[i], EntryTransitionAware, "transition from", dloc);
                         continue;
                     }
                     model.EntryLadder.Add(DecodeEntryTransition(entries[i], sm));

@@ -441,7 +441,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var entry in data.FbxEntries) rendererCount += entry.Renderers.Count;
 
             string fxPath;
-            AnimatorController fx = FindFxController(vendorFolder, prefabPaths, data, out fxPath, out bool byNameConvention);
+            AnimatorController fx = FindFxController(vendorFolder, prefabPaths, data, out fxPath,
+                                                     out bool byPathMatch, out string fxPrefabPath);
             data.FxControllerPath = fxPath;
 
             int matched = 0;
@@ -481,11 +482,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             data.ToggleStatus = "clip-m_IsActive; matched=" + matchRatio + " renderer entries across all FBXes; "
                               + (fx != null
-                                  ? "source=" + fxPath + (byNameConvention
-                                      ? " (matched by the *_FX name convention in " + vendorFolder
-                                        + ", path order; no descriptor FX slot on any of " + data.PrefabCount + " prefabs)"
-                                      : " (descriptor FX slot on the first of " + data.PrefabCount
-                                        + " prefabs in path order; controllers on other prefabs are not read)")
+                                  // Name the prefab, never an ordinal, and say "path" rather than "name
+                                  // convention" — see FindFxController for why both were false.
+                                  ? "source=" + fxPath + (byPathMatch
+                                      ? " (asset path carries _FX under " + vendorFolder
+                                        + ", first in path order; no prefab of " + data.PrefabCount
+                                        + " resolved a descriptor FX slot)"
+                                      : " (descriptor FX slot on " + fxPrefabPath + " — the first of "
+                                        + data.PrefabCount + " prefabs in path order that resolved one; "
+                                        + "controllers on other prefabs are not read)")
                                     + " — a controller a framework merge component mounts is not read, unless its "
                                     + "own asset path happens to carry _FX and this scan reached it"
                                   // The not-found branch has to name the merge-mount blind spot too, and this is
@@ -494,7 +499,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                   // *_FX-named asset, so it lands here reading as "this package has no FX" when it
                                   // has one this probe cannot see. CheckAnimator resolves those mount points.
                                   : "source=none (no FX controller resolved from " + data.PrefabCount
-                                    + " prefabs — neither a descriptor FX slot nor a *_FX-named asset. A controller "
+                                    + " prefabs — neither a descriptor FX slot nor an asset whose path carries "
+                                    + "_FX. A controller "
                                     + "mounted by MA MergeAnimator or VRCFury FullController is invisible to this "
                                     + "probe and reads the same way; CheckAnimator resolves those mounts)");
 
@@ -546,14 +552,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Tries two strategies in order:
         /// 1. Load each prefab via PrefabUtility.LoadPrefabContents, find VRCAvatarDescriptor,
         ///    walk baseAnimationLayers for the FX layer's animatorController.
-        /// 2. Scan t:AnimatorController under vendorFolder for one whose name contains "_FX".
+        /// 2. Scan t:AnimatorController under vendorFolder for one whose ASSET PATH contains "_FX".
         /// Returns null (and sets fxPath to null) if neither succeeds — caller degrades gracefully.
+        /// <para><paramref name="fxPrefabPath"/> is the prefab Strategy 1 answered from — the first in path
+        /// order that RESOLVED a controller, which is not necessarily the first prefab. Null when Strategy 2
+        /// answered. The status line names it rather than an ordinal, because "the first of N prefabs" is
+        /// false the moment an earlier prefab carries no descriptor, an isDefault layer, or fails to load,
+        /// and it is the one field a reader uses to decide which prefab to open.</para>
         /// </summary>
         private static AnimatorController FindFxController(string vendorFolder, List<string> prefabPaths, GraphData data,
-                                                           out string fxPath, out bool byNameConvention)
+                                                           out string fxPath, out bool byPathMatch,
+                                                           out string fxPrefabPath)
         {
             fxPath = null;
-            byNameConvention = false;
+            byPathMatch = false;
+            fxPrefabPath = null;
 
             // Strategy 1: VRCAvatarDescriptor playable layers
             foreach (var path in prefabPaths)
@@ -603,12 +616,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     PrefabUtility.UnloadPrefabContents(root);
                 }
 
-                if (found != null) { fxPath = foundPath; return found; }
+                if (found != null) { fxPath = foundPath; fxPrefabPath = path; return found; }
             }
 
-            // Strategy 2: scan by name convention (_FX in the filename). Sorted for the same reason the
-            // prefab list is: FindAssets' order is unspecified, and this also takes the first hit, so a
-            // package with two *_FX controllers would otherwise report a machine-dependent pick.
+            // Strategy 2: scan for "_FX" anywhere in the ASSET PATH — not the filename, which is what a
+            // "*_FX name convention" would mean. A folder named *_FX therefore qualifies every controller
+            // under it, `Base.controller` included. Kept as-is (narrowing it to the filename would stop
+            // resolving packages this currently finds); the status line and unity-tools.md say "path" so the
+            // reader knows which of the two they got.
+            //
+            // Sorted for the same reason the prefab list is: FindAssets' order is unspecified, and this also
+            // takes the first hit, so a package with two matching controllers would otherwise report a
+            // machine-dependent pick.
             var byName = new List<string>();
             foreach (var guid in AssetDatabase.FindAssets("t:AnimatorController", new[] { vendorFolder }))
             {
@@ -619,7 +638,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var ap in byName)
             {
                 var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(ap);
-                if (ctrl != null) { fxPath = ap; byNameConvention = true; return ctrl; }
+                if (ctrl != null) { fxPath = ap; byPathMatch = true; return ctrl; }
             }
 
             return null;

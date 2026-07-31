@@ -1188,6 +1188,44 @@ public class ControllerDecompileTests
             "a location nested the layer inside another entity's quotes: " + string.Join(" | ", w.Refusals));
     }
 
+    // ---- review: the folded default rung decodes under the SAME guarantees as a ladder rung -------
+
+    [Test]
+    public void Walk_Default_SubMachine_Rung_Refuses_Mute()
+    {
+        // A `default:` naming a direct sub-machine is emitted as a trailing unconditional entry rung, which
+        // DecodeMachine folds back into `default:` and skips past DecodeEntryTransition. It used to skip that
+        // method's mute/solo refusal along with it: a MUTED rung — inert in the source — then recompiled as a
+        // LIVE unconditional default, a behavioural rewrite rather than a cosmetic loss, and `default:` has
+        // nowhere to carry mute. The dropped-name Note was copied into that branch; these guards were not.
+        const string yaml =
+            "schema: 1\ncontroller: DefRungMute_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: float\n" +
+            "layers:\n  - name: L\n    machines:\n      Sub:\n        states:\n          Inner:\n" +
+            "            motion: ~\n        default: Inner\n    default: Sub\n";
+        var src = AnimatorSchemaYaml.Parse(yaml, "test");
+        ControllerEmit.Build(src, out var emitted);
+
+        var root = emitted.Controller.layers[0].stateMachine;
+        Assert.Greater(root.entryTransitions.Length, 0, "fixture precondition: the default emitted an entry rung");
+        var rung = root.entryTransitions[root.entryTransitions.Length - 1];
+        Assert.IsNotNull(rung.destinationStateMachine, "fixture precondition: that rung targets the sub-machine");
+
+        // Clean first — the added guards must not invent a refusal on the ordinary shape.
+        Assert.AreEqual(0, ControllerDecompile.Walk(emitted.Controller).Refusals.Count,
+            "an unmuted default rung must still decode clean");
+
+        rung.mute = true;
+        EditorUtility.SetDirty(rung);
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("default sub-machine rung carries mute/solo")),
+            "a muted default rung -> refusal; got: " + string.Join(" | ", w.Refusals));
+        // Located like every sibling entry refusal, layer included, so one controller-wide list stays readable.
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("transition from Entry in layer [0] 'L'")),
+            "the refusal carries the standard located prefix: " + string.Join(" | ", w.Refusals));
+    }
+
     private static void EnsureScratch()
     {
         if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");

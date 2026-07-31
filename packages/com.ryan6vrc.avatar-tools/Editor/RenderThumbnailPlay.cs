@@ -261,8 +261,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Adopt a surviving record rather than overwrite it. Reached when a domain reload cleared the
             // statics while an override was still in force: the values readable now are OUR forced ones, and
             // saving those is what turns a recoverable reload into a permanent settings change.
-            _recordWasPresent = _optionsOverridden || !string.IsNullOrEmpty(SessionState.GetString(OptionsKey, ""));
-            if (!_optionsOverridden && LoadSavedOptions()) { ApplyForcedOptions(); return; }
+            //
+            // Both decisions below key off the PARSE, not off the raw string being non-empty. Keying the flag
+            // on the raw string let the two disagree on a malformed record: LoadSavedOptions drops it and
+            // returns false (so the forced values get saved as the operator's originals), while the flag read
+            // true and suppressed the very warning that case needs. No writer can emit a malformed record
+            // today, so this is a latent inconsistency rather than a live bug — but the two answers should
+            // never have come from different questions.
+            bool usableRecord = !_optionsOverridden && LoadSavedOptions();
+            _recordWasPresent = _optionsOverridden || usableRecord;
+            if (usableRecord) { ApplyForcedOptions(); return; }
 
             _savedOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;
             _savedOptions = EditorSettings.enterPlayModeOptions;
