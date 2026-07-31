@@ -48,6 +48,23 @@ public class EmulatorBindingCanaryTests
                 t.Name + "." + n + " is gone (" + why + ") — the emulator moved under us");
     }
 
+    // Mirrors ReportGimmick.ReadBoolMember, which tries property THEN field: a field converted to a public
+    // auto-property keeps production working, so asserting field-only here would red on a change that broke
+    // nothing and send the reader hunting a rename that never happened.
+    private static void AssertBoolPropertyOrField(Type t, string[] names, string why)
+    {
+        foreach (var n in names)
+        {
+            var p = t.GetProperty(n, Public);
+            var f = t.GetField(n, Public);
+            bool readable = (p != null && p.PropertyType == typeof(bool))
+                         || (f != null && f.FieldType == typeof(bool));
+            Assert.IsTrue(readable,
+                t.Name + "." + n + " is no longer readable as a public bool property or field (" + why +
+                ") — either it was renamed or its type changed");
+        }
+    }
+
     // ── The two types every reader binds ─────────────────────────────────────────────────────────────
 
     [Test]
@@ -60,12 +77,13 @@ public class EmulatorBindingCanaryTests
     // ── Members a shipped tool reads ─────────────────────────────────────────────────────────────────
 
     [Test]
-    public void PinnedEmulatorFields_Resolve_Publicly()
+    public void PinnedEmulatorFields_StayReadableAsPublicBools()
     {
         // Public specifically: PlayGateCore reads these through ReportGimmick.ReadBoolMember, which binds
-        // public-only. A field that survived but went non-public would still break it.
-        AssertFields(RequireType(EmulatorBinding.EmulatorFullName),
-            EmulatorBinding.PinnedEmulatorFields, Public, "PlayGateCore's emulator-config rule reads it");
+        // public-only, so a member that survived but went non-public would still break it. Property-or-field
+        // because that read path accepts either.
+        AssertBoolPropertyOrField(RequireType(EmulatorBinding.EmulatorFullName),
+            EmulatorBinding.PinnedEmulatorFields, "PlayGateCore's emulator-config rule reads it");
     }
 
     [Test]
@@ -115,14 +133,8 @@ public class EmulatorBindingCanaryTests
     {
         var t = RequireType(EmulatorBinding.RuntimeFullName);
         foreach (var listName in new[] { "Floats", "Ints", "Bools" })
-        {
-            var list = t.GetField(listName, Public);
-            Assert.IsNotNull(list, listName + " is gone — the parameter mirror verify.md reads");
-            var entry = EntryType(list.FieldType);
-            Assert.IsNotNull(entry, listName + " is no longer a generic list — cannot reach its entry type");
-            AssertFields(entry, EmulatorBinding.ParamEntryCommonFields, Public,
+            AssertFields(RequireEntryType(t, listName), EmulatorBinding.ParamEntryCommonFields, Public,
                 "verify.md reads it off every " + listName + " entry");
-        }
     }
 
     [Test]
@@ -132,8 +144,8 @@ public class EmulatorBindingCanaryTests
         // (a `.value` write reverts on synced params), while "Bools have no expressionValue" and drive via
         // `.value`. If the emulator ever adds one to bools, that instruction becomes wrong silently.
         var t = RequireType(EmulatorBinding.RuntimeFullName);
-        var floatEntry = EntryType(t.GetField("Floats", Public).FieldType);
-        var boolEntry = EntryType(t.GetField("Bools", Public).FieldType);
+        var floatEntry = RequireEntryType(t, "Floats");
+        var boolEntry = RequireEntryType(t, "Bools");
 
         Assert.IsNotNull(floatEntry.GetField(EmulatorBinding.ExpressionValue, Public),
             "the float param entry lost `" + EmulatorBinding.ExpressionValue +
@@ -141,6 +153,20 @@ public class EmulatorBindingCanaryTests
         Assert.IsNull(boolEntry.GetField(EmulatorBinding.ExpressionValue, Public),
             "the bool param entry GAINED `" + EmulatorBinding.ExpressionValue +
             "` — verify.md says bools have none and routes them to `.value`; re-measure the drive rule");
+    }
+
+    // Resolve one mirror list's entry type, failing with the reason rather than an NRE at the deref. The
+    // canary's whole value is a legible message at the moment of drift, so every step that can be absent
+    // says so by name.
+    private static Type RequireEntryType(Type runtime, string listName)
+    {
+        var list = runtime.GetField(listName, Public);
+        Assert.IsNotNull(list, runtime.Name + "." + listName +
+            " is gone — the parameter mirror verify.md drives and reads");
+        var entry = EntryType(list.FieldType);
+        Assert.IsNotNull(entry, runtime.Name + "." + listName + " is no longer a single-arg generic list (" +
+            list.FieldType.Name + ") — cannot reach its entry type to check the drive route");
+        return entry;
     }
 
     // The element type behind a List<T> field, or null when the field is not a generic collection.
