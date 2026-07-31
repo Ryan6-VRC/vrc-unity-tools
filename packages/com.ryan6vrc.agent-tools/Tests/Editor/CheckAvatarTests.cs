@@ -262,7 +262,7 @@ public class CheckAvatarTests
         AddMaObjectToggle(outfit, "Body_Base", null); // resolves
 
         var r = Inspect("LintClean");
-        StringAssert.Contains("maSceneRef=0 clipBinding=0 mergeConflict=0 => PASS", r, r);
+        StringAssert.Contains("maSceneRef=0 clipBinding=0 anchorSeam=0 mergeConflict=0 => PASS", r, r);
     }
 
     // ── Proof A + Proof B coexist ─────────────────────────────────────────────────────────────────────
@@ -354,7 +354,7 @@ public class CheckAvatarTests
         SetVrcfRewriteBindings(c, ("DeleteMe", "", true)); // delete: the binding vanishes at build
 
         var r = Inspect("LintVrcfDel");
-        StringAssert.Contains("clipBinding=0 mergeConflict=0 => PASS", r, "a delete-ruled binding is not a break: " + r);
+        StringAssert.Contains("clipBinding=0 anchorSeam=0 mergeConflict=0 => PASS", r, "a delete-ruled binding is not a break: " + r);
     }
 
     // ── clipAssetPath routing (R-E) ───────────────────────────────────────────────────────────────────
@@ -563,6 +563,183 @@ public class CheckAvatarTests
         var targets = CheckAvatar.CollectDynamicsTargets(root); // real default
         Assert.IsTrue(targets.Exists(x => x.category == "physbone" && x.target == child.transform),
             "physbone with null rootTransform should target its own transform");
+    }
+
+    // ── anchor-seam: the cross-framework move that kills a binding the scene still resolves ────────────
+    //
+    // The true positive these are modelled on is vrc-patterns/selective-animation before #26: a VRCFury
+    // FullController on the module root, an MA BoneProxy on an interior `Aim` node, and clips binding
+    // `Aim/Origin/Beam/...`. Every one of those bindings resolved in the placed scene and came out of the
+    // merged FX with zero curves. The negatives are the shape five shipped entries actually use — a proxied
+    // anchor that is referenced by object and never animated — which is why the root/leaf endpoints are
+    // asserted separately from the interior case.
+
+    private Component AddMaBoneProxy(GameObject go)
+    {
+        var t = Resolve("nadena.dev.modular_avatar.core.ModularAvatarBoneProxy");
+        Assert.IsNotNull(t, "MA BoneProxy type must resolve");
+        return go.AddComponent(t); // target left unset: the predicate counts the authored intent to move
+    }
+
+    // A VRCFury ArmatureLink whose Link From is propBone (null ⇒ the build warns and moves nothing).
+    private Component AddVrcfArmatureLink(GameObject go, GameObject propBone)
+    {
+        var vt = Resolve("VF.Model.VRCFury");
+        var ft = Resolve("VF.Model.Feature.ArmatureLink");
+        Assert.IsNotNull(vt); Assert.IsNotNull(ft, "VF.Model.Feature.ArmatureLink must resolve");
+        var c = go.AddComponent(vt);
+        var so = new SerializedObject(c);
+        so.FindProperty("content").managedReferenceValue = Activator.CreateInstance(ft);
+        so.ApplyModifiedPropertiesWithoutUndo();
+        so = new SerializedObject(c);
+        so.FindProperty("content").FindPropertyRelative("propBone").objectReferenceValue = propBone;
+        so.ApplyModifiedPropertiesWithoutUndo();
+        return c;
+    }
+
+    // avatar → Prop → Aim → Origin → Beam, plus a Payload sibling of Aim under Prop. Returns Prop.
+    private GameObject NewSeamRig(string avatarName, out GameObject aim, out GameObject payload)
+    {
+        var a = NewAvatar(avatarName);
+        var prop = NewChild(a, "Prop");
+        aim = NewChild(prop, "Aim");
+        var origin = NewChild(aim, "Origin");
+        NewChild(origin, "Beam");
+        payload = NewChild(prop, "Payload");
+        return prop;
+    }
+
+    private static int SeamCount(string summary)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(summary, @"anchorSeam=(\d+)");
+        Assert.IsTrue(m.Success, "summary carries no anchorSeam count: " + summary);
+        return int.Parse(m.Groups[1].Value);
+    }
+
+    [Test]
+    public void AnchorSeam_vrcfBindingThroughInteriorBoneProxy_isClassified()
+    {
+        var prop = NewSeamRig("SeamPositive", out var aim, out _);
+        AddMaBoneProxy(aim);
+        AddVrcfFullController(prop, NewController("SeamCtrl", NewClip(TmpDir, "seam_beam", "Aim/Origin/Beam")), prop);
+
+        var res = Inspect("SeamPositive");
+        Assert.AreEqual(1, SeamCount(res), res);
+        StringAssert.Contains("CLASSIFY", res);
+        var log = ReadLog(res);
+        StringAssert.Contains("**anchor-seam**", log);
+        StringAssert.Contains("moved-by=MA BoneProxy", log);
+        StringAssert.Contains("Aim/Origin/Beam", log);
+        StringAssert.Contains(CheckAvatar.AnchorSeamNoteLine, log); // the repair is stated, not left to inference
+    }
+
+    [Test]
+    public void AnchorSeam_proxiedAnchorNeverAnimated_isPass()
+    {
+        var prop = NewSeamRig("SeamAnchorOnly", out var aim, out _);
+        AddMaBoneProxy(aim); // referenced by object, never path-animated — what five shipped entries do
+        AddVrcfFullController(prop, NewController("SeamCtrl2", NewClip(TmpDir, "seam_payload", "Payload")), prop);
+
+        var res = Inspect("SeamAnchorOnly");
+        Assert.AreEqual(0, SeamCount(res), res);
+    }
+
+    [Test]
+    public void AnchorSeam_moduleRootItselfProxied_isPass()
+    {
+        var prop = NewSeamRig("SeamRootAnchored", out _, out _);
+        AddMaBoneProxy(prop); // the frame root moves WHOLESALE — the documented safe case
+        AddVrcfFullController(prop, NewController("SeamCtrl3", NewClip(TmpDir, "seam_root", "Aim/Origin/Beam")), prop);
+
+        var res = Inspect("SeamRootAnchored");
+        Assert.AreEqual(0, SeamCount(res), res);
+    }
+
+    [Test]
+    public void AnchorSeam_proxiedNodeIsTheAnimatedLeaf_isClassified()
+    {
+        var prop = NewSeamRig("SeamLeaf", out var aim, out _);
+        AddMaBoneProxy(aim);
+        AddVrcfFullController(prop, NewController("SeamCtrl4", NewClip(TmpDir, "seam_leaf", "Aim")), prop);
+
+        // Leaf-INCLUSIVE: the nearest-match walk fails on `Aim` exactly as it fails on `Aim/Origin/Beam`,
+        // so excluding the leaf would buy only a false negative.
+        var res = Inspect("SeamLeaf");
+        Assert.AreEqual(1, SeamCount(res), res);
+    }
+
+    [Test]
+    public void AnchorSeam_maClipThroughVrcfArmatureLink_isClassified()
+    {
+        var prop = NewSeamRig("SeamSymmetric", out var aim, out _);
+        AddVrcfArmatureLink(prop, aim); // the mover is propBone, NOT the component's own GameObject
+        AddMaMergeAnimator(prop, NewController("SeamCtrl5", NewClip(TmpDir, "seam_sym", "Aim/Origin")));
+
+        var res = Inspect("SeamSymmetric");
+        Assert.AreEqual(1, SeamCount(res), res);
+        StringAssert.Contains("moved-by=VRCFury ArmatureLink", ReadLog(res));
+    }
+
+    [Test]
+    public void AnchorSeam_armatureLinkWithNoPropBone_isPass()
+    {
+        var prop = NewSeamRig("SeamNoPropBone", out _, out _);
+        AddVrcfArmatureLink(prop, null); // build-side: "Root bone is null on armature link" — moves nothing
+        AddMaMergeAnimator(prop, NewController("SeamCtrl6", NewClip(TmpDir, "seam_nopb", "Aim/Origin")));
+
+        var res = Inspect("SeamNoPropBone");
+        Assert.AreEqual(0, SeamCount(res), res);
+    }
+
+    [Test]
+    public void AnchorSeam_moveAndAnimateInOneFramework_isPass()
+    {
+        var prop = NewSeamRig("SeamOneFramework", out var aim, out _);
+        AddVrcfArmatureLink(prop, aim); // VRCFury moves it AND VRCFury merges the clips — #26's fix shape
+        AddVrcfFullController(prop, NewController("SeamCtrl7", NewClip(TmpDir, "seam_one", "Aim/Origin/Beam")), prop);
+
+        var res = Inspect("SeamOneFramework");
+        Assert.AreEqual(0, SeamCount(res), res);
+    }
+
+    [Test]
+    public void AnchorSeam_maMoveUnderMaMergeAnimator_isPass()
+    {
+        var prop = NewSeamRig("SeamMaOnly", out var aim, out _);
+        AddMaBoneProxy(aim); // MA moves it AND MA merges the clips — MA repaths what it moved
+        AddMaMergeAnimator(prop, NewController("SeamCtrl8", NewClip(TmpDir, "seam_maonly", "Aim/Origin")));
+
+        var res = Inspect("SeamMaOnly");
+        Assert.AreEqual(0, SeamCount(res), res);
+    }
+
+    [Test]
+    public void AnchorSeam_unresolvedBinding_staysInTheClipBindingClass()
+    {
+        var prop = NewSeamRig("SeamUnresolved", out var aim, out _);
+        AddMaBoneProxy(aim);
+        AddVrcfFullController(prop, NewController("SeamCtrl9", NewClip(TmpDir, "seam_dead", "Aim/Gone/Beam")), prop);
+
+        var res = Inspect("SeamUnresolved");
+        Assert.AreEqual(0, SeamCount(res), res); // an unresolved binding is a break the scene ALREADY shows
+        StringAssert.Contains("clipBinding=1", res);
+    }
+
+    [Test]
+    public void ScanAnchorSeams_bareModuleWithNoDescriptor_findsTheSeam()
+    {
+        // The vrc-patterns gate's home: an entry prefab instantiated on its own. There is no avatar root and
+        // no descriptor, so the mount root is the only frame there is.
+        var prop = new GameObject("BareModule");
+        _avatar = prop; // TearDown destroys it
+        var aim = NewChild(prop, "Aim");
+        NewChild(NewChild(aim, "Origin"), "Beam");
+        AddMaBoneProxy(aim);
+        AddVrcfFullController(prop, NewController("SeamCtrl10", NewClip(TmpDir, "seam_bare", "Aim/Origin/Beam")), prop);
+
+        var lines = CheckAvatar.ScanAnchorSeams(prop);
+        Assert.AreEqual(1, lines.Count, string.Join(" | ", lines));
+        StringAssert.Contains("MA BoneProxy", lines[0]);
     }
 }
 

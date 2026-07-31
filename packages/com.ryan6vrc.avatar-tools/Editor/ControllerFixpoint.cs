@@ -32,8 +32,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // A committed built .controller lives at an arbitrary --root filesystem path, not under the
     // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
     // A second RunGate pass loads each entry's prefab(s) the same way — copied into Assets/ to
-    // import — and fails any with a missing MonoBehaviour script; the coverage a Structural
-    // Module (a prefab, no controller.yaml) otherwise never gets.
+    // import — and fails any with a missing MonoBehaviour script or a cross-framework anchor seam;
+    // the coverage a Structural Module (a prefab, no controller.yaml) otherwise never gets.
     public static class ControllerFixpoint
     {
         static string Decode(AnimatorController c, out string refusal)
@@ -278,6 +278,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
+        // The cross-framework anchor seam (CheckAvatar owns the predicate): a binding a build-time move in
+        // the other framework silently kills. It runs on an INSTANTIATED copy, because the walk resolves
+        // bindings against a live hierarchy — the same resolution CheckAvatar performs on a placed avatar,
+        // which is what keeps one predicate serving both homes. The instance is destroyed either way.
+        //
+        // The gate's tier is FAIL where CheckAvatar's is CLASSIFY, and the asymmetry is the point: an entry
+        // in this library is ours and CONVENTIONS.md forbids the shape outright ("only object-referenced,
+        // never path-animated, nodes may be proxied"), while a composed avatar is not ours to rule on.
+        static System.Collections.Generic.List<string> ScanAnchorSeams(GameObject prefab)
+        {
+            var inst = PrefabUtility.InstantiatePrefab(prefab) as GameObject;
+            if (inst == null) return new System.Collections.Generic.List<string>();
+            try { return Ryan6Vrc.AgentTools.Editor.CheckAvatar.ScanAnchorSeams(inst); }
+            finally { UnityEngine.Object.DestroyImmediate(inst); }
+        }
+
         // Copy an entry's WHOLE directory into a scratch Assets/ dir as a UNIT — every file, subpath
         // preserved — then import it and assert none of its prefabs has a missing MonoBehaviour script
         // or fails to load. Copying the entry entire (not just *.prefab) is what lets a prefab's hard
@@ -318,6 +334,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     foreach (var t in go.GetComponentsInChildren<Transform>(true))
                         missing += GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(t.gameObject);
                     if (missing > 0) { offenders.Add($"{label} ({missing} missing script(s))"); totalMissing += missing; }
+
+                    foreach (var seam in ScanAnchorSeams(go))
+                    {
+                        offenders.Add($"{label} anchor-seam: {seam}");
+                        totalMissing++;
+                    }
                 }
                 return totalMissing == 0 ? (true, "OK") : (false, string.Join(", ", offenders));
             }
@@ -414,10 +436,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             Debug.Log($"[gate] {entries.Count - failedEntries}/{entries.Count} entries passed ({checkedDocs} documents)");
 
-            // Second pass: every non-dot dir shipping a prefab must import with zero missing scripts.
-            // Structural Modules (a prefab, no controller.yaml) are invisible to the loop above; this
-            // pass covers them and every other entry's prefab alike — a vanished VRCFury/MA script ref
-            // is the regression it catches. Script integrity only; behaviour still rests on the README.
+            // Second pass: every non-dot dir shipping a prefab must import with zero missing scripts and
+            // zero anchor-seam breaks. Structural Modules (a prefab, no controller.yaml) are invisible to
+            // the loop above; this pass covers them and every other entry's prefab alike — a vanished
+            // VRCFury/MA script ref and a module that animates through a node the other framework moves are
+            // the two regressions it catches. Everything else about behaviour still rests on the README.
             var prefabEntries = Directory.GetDirectories(root)
                 .Where(d => !Path.GetFileName(d).StartsWith("."))
                 .Where(d => Directory.GetFiles(d, "*.prefab", SearchOption.AllDirectories).Length > 0)
