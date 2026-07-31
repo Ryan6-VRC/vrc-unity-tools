@@ -54,6 +54,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
     public enum TransitionInterruption { None, Source, Destination, SourceThenDestination, DestinationThenSource }
     public enum TreeKind { OneD, SimpleDirectional2D, FreeformDirectional2D, FreeformCartesian2D, Direct }
     public enum CondOp { Is, IsNot, Greater, Less, Equals, NotEqual }
+    // The four control kinds in the schema. The SDK also has TwoAxisPuppet/FourAxisPuppet; they are
+    // deliberately out of vocabulary (docs/menus.md: "TwoAxis/FourAxis puppets are effectively unused
+    // here"), so an unknown kind fails by name rather than half-emitting a puppet with no labels.
+    public enum MenuControlKind { Button, Toggle, SubMenu, Radial }
 
     // Parameter names the compiler owns — an authored document must NOT declare these (SchemaValidation
     // refuses them), so emission can inject them without colliding with a user param.
@@ -65,6 +69,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public const string CarrierParam = "_CompilerNull";
     }
 
+    // The SDK's per-menu control cap, mirrored here because SchemaValidation is System.*-only and cannot
+    // reach the SDK type. A MANAGED ECHO: ControllerEmit asserts this against VRCExpressionsMenu.MAX_CONTROLS
+    // on every emit, so an SDK change fails loud here instead of drifting. Violating it is destructive, not
+    // cosmetic — the SDK's own menu inspector silently truncates `controls` to the cap on open
+    // (VRCExpressionsMenuEditor.RefreshListSizeView), so an over-long menu loses controls the first time a
+    // human looks at it.
+    public static class MenuLimits { public const int MaxControlsPerMenu = 8; }
+
     public sealed class AnimDocument
     {
         public int Schema;
@@ -75,8 +87,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public List<ParamSpec> Parameters = new List<ParamSpec>();
         public List<Layer> Layers = new List<Layer>();
         public List<ClipSpec> Clips = new List<ClipSpec>();
+        public List<MenuControl> Menu;          // null == no menu: block (emit writes no menu asset)
         public Dictionary<string, object> ReservedNotes = new Dictionary<string, object>();
         public string SourcePath;
+    }
+
+    // One expression-menu control. Ordered (menu display order is what the wearer sees), so the schema
+    // holds a LIST, not a name-keyed map: two controls may legitimately share a name, and a map would
+    // both forbid that and lose the order.
+    //
+    // Sub-menu children hang here rather than in a separate document-level collection, so the YAML nests
+    // exactly as the menu does. ControllerEmit flattens the tree into one root asset plus a hidden
+    // sub-asset per sub-menu, the same way an inline clip embeds.
+    public sealed class MenuControl
+    {
+        public string Name;
+        public MenuControlKind Kind;
+        public string Param;                    // the driven parameter; null for a bare SubMenu
+        public float Value = 1f;                // Button/Toggle: the value written while active
+        public List<MenuControl> Controls;      // SubMenu only; null otherwise
     }
 
     public sealed class Defaults

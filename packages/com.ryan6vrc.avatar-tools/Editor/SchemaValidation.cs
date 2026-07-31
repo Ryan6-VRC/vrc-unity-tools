@@ -47,6 +47,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var c in doc.Clips)
                 if (c != null && c.Name != null) clipNames.Add(c.Name);
 
+            // Rule 7 — the menu tree. Keyed on the WIRE type, not the animator type: emission lists the
+            // expression parameter as `vrc.type ?? type` (ControllerEmit.EmitVrcParameters), and a menu
+            // control is read by VRChat against that listed type. Validating against the animator type
+            // would let every `vrc: { type: … }` override through unchecked — a radial on a float-on-the-
+            // animator/bool-on-the-wire param compiles clean and yields a knob carrying only 0 and 1.
+            if (doc.Menu != null)
+            {
+                var wireTypes = new Dictionary<string, AnimParamType>();
+                var scratch = new HashSet<string>();
+                foreach (var p in doc.Parameters)
+                {
+                    if (p == null || p.Name == null) continue;
+                    if (!wireTypes.ContainsKey(p.Name)) wireTypes[p.Name] = p.Vrc?.VrcType ?? p.Type;
+                    if (p.Scratch) scratch.Add(p.Name);
+                }
+                CheckMenu(doc.Menu, "menu", wireTypes, scratch, errors);
+            }
+
             foreach (var layer in doc.Layers)
             {
                 if (layer == null || layer.Root == null) continue;
@@ -63,6 +81,54 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             return errors;
+        }
+
+        // Rule 7 carrier: one menu page and, recursively, its sub-menus. `where` is the authored path
+        // (menu / menu 'Colors' / …) so an offender in a nested page names the page it sits on.
+        private static void CheckMenu(List<MenuControl> controls, string where,
+            Dictionary<string, AnimParamType> wireTypes, HashSet<string> scratch, List<string> errors)
+        {
+            if (controls.Count > MenuLimits.MaxControlsPerMenu)
+                errors.Add($"# menu-overflow: {where} holds {controls.Count} controls but a VRChat menu page holds {MenuLimits.MaxControlsPerMenu} — split it into sub-menus (at {where})");
+
+            foreach (var c in controls)
+            {
+                if (c == null) continue;
+                string w = $"{where} '{c.Name}'";
+
+                if (string.IsNullOrEmpty(c.Name))
+                    errors.Add($"# menu-unnamed: a {c.Kind.ToString().ToLowerInvariant()} control has no name (at {where})");
+
+                // A bare sub-menu drives nothing; every other kind is meaningless without a parameter.
+                if (c.Param == null)
+                {
+                    if (c.Kind != MenuControlKind.SubMenu)
+                        errors.Add($"# menu-no-param: {w} is a {c.Kind.ToString().ToLowerInvariant()} with no 'param' — it would render as a control that does nothing (at {w})");
+                }
+                else
+                {
+                    // A scratch param is excluded from the emitted VRCExpressionParameters, so VRChat never
+                    // sees the name and the control is inert on the avatar — a defect the built menu cannot show.
+                    if (scratch.Contains(c.Param))
+                        errors.Add($"# menu-scratch-param: {w} drives '{c.Param}', declared scratch: — scratch params are kept out of the params asset, so the control would be inert (at {w})");
+
+                    if (wireTypes.TryGetValue(c.Param, out var pt))
+                    {
+                        if (c.Kind == MenuControlKind.Radial && pt != AnimParamType.Float)
+                            errors.Add($"# menu-radial-type: {w} is a radial on '{c.Param}', declared {pt.ToString().ToLowerInvariant()} — a radial's position is a float (at {w})");
+                        if (pt == AnimParamType.Bool && c.Kind != MenuControlKind.Radial && c.Value != 0f && c.Value != 1f)
+                            errors.Add($"# menu-bool-value: {w} writes {c.Value} to bool '{c.Param}' (expected 0 or 1) (at {w})");
+                        if (pt == AnimParamType.Int && c.Kind != MenuControlKind.Radial && c.Value != (int)c.Value)
+                            errors.Add($"# menu-int-value: {w} writes {c.Value} to int '{c.Param}' (expected a whole number) (at {w})");
+                    }
+                    else
+                    {
+                        errors.Add($"# menu-undeclared-param: {w} drives '{c.Param}', which the document does not declare under parameters: (at {w})");
+                    }
+                }
+
+                if (c.Controls != null) CheckMenu(c.Controls, w, wireTypes, scratch, errors);
+            }
         }
 
         // Rule 3 & 5 carrier: walk one state machine's ladders, states, and nested submachines.

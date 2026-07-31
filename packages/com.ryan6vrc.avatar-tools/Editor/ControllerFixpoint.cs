@@ -4,6 +4,7 @@ using System.Linq;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
+using VRC.SDK3.Avatars.ScriptableObjects;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
@@ -125,10 +126,117 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (yCommitted == null) return (false, "committed decompile refused: " + r3);
                     if (yCommitted != yFresh) return (false, "committed built/ differs from compile(yaml) — regenerate built/");
                 }
+
+                // The MENU pass. Decompile-equality above cannot reach a menu: both sides of that comparison
+                // are decoded from a .controller, which stores no menu at all, so an emitted menu asset is
+                // dropped identically on both sides and drift between built/ and the yaml passes unseen.
+                // Compare the emitted menu against the committed one directly, or built/ silently rots.
+                if (builtControllerPath != null)
+                {
+                    var freshMenu = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(
+                        MenuBeside(AssetDatabase.GetAssetPath(cFresh)));
+                    var committedMenuPath = MenuBeside(builtControllerPath);
+                    bool committedExists = File.Exists(committedMenuPath);
+
+                    if (freshMenu == null && committedExists)
+                        return (false, "built/ ships a menu asset the yaml no longer emits — delete it or restore the menu: block");
+                    if (freshMenu != null && !committedExists)
+                        return (false, "yaml emits a menu but built/ has none — regenerate built/");
+                    if (freshMenu != null)
+                    {
+                        var imported = ImportCommittedMenu(committedMenuPath, scratch + "/menu");
+                        if (imported == null) return (false, "committed menu asset failed to import");
+                        var diff = MenuDiff(imported, freshMenu, "menu");
+                        if (diff != null) return (false, "committed built/ menu differs from compile(yaml): " + diff + " — regenerate built/");
+                    }
+                }
                 return (true, "OK");
             }
             catch (Exception e) { return (false, e.Message); }
             finally { CleanupScratch(scratch); }
+        }
+
+        // The menu asset CompileController writes beside a controller, by the same formula it uses:
+        // "<dir>/<name>_Menu.asset". Path arithmetic only — the file need not exist.
+        static string MenuBeside(string controllerPath)
+        {
+            var dir = Path.GetDirectoryName(controllerPath) ?? "";
+            return Path.Combine(dir, Path.GetFileNameWithoutExtension(controllerPath) + "_Menu.asset")
+                       .Replace('\\', '/');
+        }
+
+        // Copy the committed menu (+ its .meta, for the committed GUID) into Assets/ and load it. Same
+        // constraint as ImportCommitted: entry files live outside the project and cannot be loaded in place.
+        static VRCExpressionsMenu ImportCommittedMenu(string menuPath, string destAssetsDir)
+        {
+            var full = Path.GetFullPath(destAssetsDir);
+            Directory.CreateDirectory(full);
+            var src = Path.GetFullPath(menuPath);
+            File.Copy(src, Path.Combine(full, Path.GetFileName(src)), true);
+            if (File.Exists(src + ".meta"))
+                File.Copy(src + ".meta", Path.Combine(full, Path.GetFileName(src) + ".meta"), true);
+            AssetDatabase.Refresh();
+            return AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(
+                ToAssetsRelative(Path.Combine(full, Path.GetFileName(menuPath))));
+        }
+
+        // Structural comparison of two menu trees, recursing sub-menus. NOT a byte diff: the two assets
+        // carry different file GUIDs and sub-asset fileIDs by construction, which a byte compare would
+        // report as drift on every run. Returns null when equal, else the first difference, addressed by
+        // its page path so an offender in a nested page names the page it sits on.
+        //
+        // It compares EVERY serialized field of a control, not just the ones the schema can author —
+        // including `icon`, `style`, `labels`, and the page's own name. That is deliberate and is the
+        // difference between this pass and the controller pass it sits beside: comparing only modeled
+        // fields is exactly how the library's committed controllers drifted invisibly. A hand-added icon
+        // in a built/ menu is drift the next compile silently strips, so the gate has to see it.
+        static string MenuDiff(VRCExpressionsMenu a, VRCExpressionsMenu b, string where)
+        {
+            if (a.name != b.name)
+                return $"{where}: page name '{a.name}' vs '{b.name}'";
+            var ac = a.controls ?? new System.Collections.Generic.List<VRCExpressionsMenu.Control>();
+            var bc = b.controls ?? new System.Collections.Generic.List<VRCExpressionsMenu.Control>();
+            if (ac.Count != bc.Count)
+                return $"{where}: committed has {ac.Count} control(s), compiled has {bc.Count}";
+
+            for (int i = 0; i < ac.Count; i++)
+            {
+                var x = ac[i]; var y = bc[i];
+                string w = $"{where}[{i}]";
+                if (x.name != y.name) return $"{w}: name '{x.name}' vs '{y.name}'";
+                w = $"{where} '{x.name}'";
+                if (x.type != y.type) return $"{w}: type {x.type} vs {y.type}";
+                if ((x.parameter?.name ?? "") != (y.parameter?.name ?? ""))
+                    return $"{w}: parameter '{x.parameter?.name}' vs '{y.parameter?.name}'";
+                if (x.value != y.value) return $"{w}: value {x.value} vs {y.value}";
+                if (x.style != y.style) return $"{w}: style {x.style} vs {y.style}";
+                if (AssetDatabase.GetAssetPath(x.icon) != AssetDatabase.GetAssetPath(y.icon))
+                    return $"{w}: icon '{AssetDatabase.GetAssetPath(x.icon)}' vs '{AssetDatabase.GetAssetPath(y.icon)}' (the schema cannot author an icon, so a committed one is drift the next compile strips)";
+
+                var xl = x.labels ?? new VRCExpressionsMenu.Control.Label[0];
+                var yl = y.labels ?? new VRCExpressionsMenu.Control.Label[0];
+                if (xl.Length != yl.Length) return $"{w}: {xl.Length} label(s) vs {yl.Length}";
+                // Label is a STRUCT (unlike Control.Parameter, a class) — no null-conditional here.
+                for (int k = 0; k < xl.Length; k++)
+                    if ((xl[k].name ?? "") != (yl[k].name ?? ""))
+                        return $"{w}: label[{k}] '{xl[k].name}' vs '{yl[k].name}'";
+
+                var xs = x.subParameters ?? new VRCExpressionsMenu.Control.Parameter[0];
+                var ys = y.subParameters ?? new VRCExpressionsMenu.Control.Parameter[0];
+                if (xs.Length != ys.Length) return $"{w}: {xs.Length} subParameter(s) vs {ys.Length}";
+                for (int k = 0; k < xs.Length; k++)
+                    if ((xs[k]?.name ?? "") != (ys[k]?.name ?? ""))
+                        return $"{w}: subParameter[{k}] '{xs[k]?.name}' vs '{ys[k]?.name}'";
+
+                if ((x.subMenu == null) != (y.subMenu == null))
+                    return $"{w}: one side has a sub-menu and the other does not";
+                if (x.subMenu != null)
+                {
+                    var deeper = MenuDiff(x.subMenu, y.subMenu, w);
+                    if (deeper != null) return deeper;
+                }
+            }
+            return null;
         }
 
         // Reads the `controller:` name off a schema document without compiling it. Null when the file
@@ -264,6 +372,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         .Select(Path.GetFileNameWithoutExtension).Where(n => !claimed.Contains(n)))
                     {
                         Debug.Log($"[gate] FAIL {entry}: built/{orphan}.controller matches no yaml document (drift)");
+                        entryFailed = true;
+                    }
+
+                // Same rule for a committed menu: it is named off its controller, so one whose controller
+                // no document claims is the same drift. Check() catches a menu the yaml stopped emitting;
+                // this catches the case where the whole document went away and took the check with it.
+                if (Directory.Exists(builtDir))
+                    foreach (var orphan in Directory.GetFiles(builtDir, "*_Menu.asset")
+                        .Select(Path.GetFileNameWithoutExtension)
+                        .Where(n => !claimed.Contains(n.Substring(0, n.Length - "_Menu".Length))))
+                    {
+                        Debug.Log($"[gate] FAIL {entry}: built/{orphan}.asset matches no yaml document (drift)");
                         entryFailed = true;
                     }
 
