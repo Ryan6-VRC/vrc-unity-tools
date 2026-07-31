@@ -565,23 +565,40 @@ public class CheckAvatarTests
             "physbone with null rootTransform should target its own transform");
     }
 
-    // ── anchor-seam: the cross-framework move that kills a binding the scene still resolves ────────────
+    // ── anchor-seam: the MA build-time move that kills a binding the scene still resolves ─────────────
     //
     // The true positive these are modelled on is vrc-patterns/selective-animation before #26: a VRCFury
     // FullController on the module root, an MA BoneProxy on an interior `Aim` node, and clips binding
     // `Aim/Origin/Beam/...`. Every one of those bindings resolved in the placed scene and came out of the
     // merged FX with zero curves. The negatives are the shape five shipped entries actually use — a proxied
-    // anchor that is referenced by object and never animated — which is why the root/leaf endpoints are
+    // anchor that is referenced by object and never animated — which is why the root and leaf endpoints are
     // asserted separately from the interior case.
+    //
+    // Every proxy here is given a RESOLVABLE target (boneReference LastBone + subPath, which MA resolves as
+    // avatarTransform.Find(subPath) with no humanoid rig needed). The predicate deliberately does not read
+    // the target — an unresolved anchor is a broken module, not a licence — but a fixture whose proxy MA
+    // would refuse to move is not the rig this class exists for, and would keep passing if the predicate
+    // ever started reading it. AnchorSeam_proxyWithNoTarget_isStillCounted pins that policy on its own.
 
-    private Component AddMaBoneProxy(GameObject go)
+    private Component AddMaBoneProxy(GameObject go, string subPath)
     {
         var t = Resolve("nadena.dev.modular_avatar.core.ModularAvatarBoneProxy");
         Assert.IsNotNull(t, "MA BoneProxy type must resolve");
-        return go.AddComponent(t); // target left unset: the predicate counts the authored intent to move
+        var c = go.AddComponent(t);
+        var so = new SerializedObject(c);
+        so.FindProperty("subPath").stringValue = subPath; // boneReference stays LastBone ⇒ avatar-root-relative Find
+        so.ApplyModifiedPropertiesWithoutUndo();
+        return c;
     }
 
-    // A VRCFury ArmatureLink whose Link From is propBone (null ⇒ the build warns and moves nothing).
+    private Component AddMaComponent(GameObject go, string typeName)
+    {
+        var t = Resolve(typeName);
+        Assert.IsNotNull(t, typeName + " must resolve");
+        return go.AddComponent(t);
+    }
+
+    // A VRCFury ArmatureLink whose Link From is propBone.
     private Component AddVrcfArmatureLink(GameObject go, GameObject propBone)
     {
         var vt = Resolve("VF.Model.VRCFury");
@@ -597,10 +614,12 @@ public class CheckAvatarTests
         return c;
     }
 
-    // avatar → Prop → Aim → Origin → Beam, plus a Payload sibling of Aim under Prop. Returns Prop.
+    // avatar → Prop → Aim → Origin → Beam, plus a Payload sibling of Aim under Prop and a Bone the proxies
+    // can resolve onto. Returns Prop.
     private GameObject NewSeamRig(string avatarName, out GameObject aim, out GameObject payload)
     {
         var a = NewAvatar(avatarName);
+        NewChild(a, "Bone");
         var prop = NewChild(a, "Prop");
         aim = NewChild(prop, "Aim");
         var origin = NewChild(aim, "Origin");
@@ -620,7 +639,7 @@ public class CheckAvatarTests
     public void AnchorSeam_vrcfBindingThroughInteriorBoneProxy_isClassified()
     {
         var prop = NewSeamRig("SeamPositive", out var aim, out _);
-        AddMaBoneProxy(aim);
+        AddMaBoneProxy(aim, "Bone");
         AddVrcfFullController(prop, NewController("SeamCtrl", NewClip(TmpDir, "seam_beam", "Aim/Origin/Beam")), prop);
 
         var res = Inspect("SeamPositive");
@@ -637,7 +656,7 @@ public class CheckAvatarTests
     public void AnchorSeam_proxiedAnchorNeverAnimated_isPass()
     {
         var prop = NewSeamRig("SeamAnchorOnly", out var aim, out _);
-        AddMaBoneProxy(aim); // referenced by object, never path-animated — what five shipped entries do
+        AddMaBoneProxy(aim, "Bone"); // referenced by object, never path-animated — what five shipped entries do
         AddVrcfFullController(prop, NewController("SeamCtrl2", NewClip(TmpDir, "seam_payload", "Payload")), prop);
 
         var res = Inspect("SeamAnchorOnly");
@@ -648,7 +667,7 @@ public class CheckAvatarTests
     public void AnchorSeam_moduleRootItselfProxied_isPass()
     {
         var prop = NewSeamRig("SeamRootAnchored", out _, out _);
-        AddMaBoneProxy(prop); // the frame root moves WHOLESALE — the documented safe case
+        AddMaBoneProxy(prop, "Bone"); // the frame root moves WHOLESALE — the documented safe case
         AddVrcfFullController(prop, NewController("SeamCtrl3", NewClip(TmpDir, "seam_root", "Aim/Origin/Beam")), prop);
 
         var res = Inspect("SeamRootAnchored");
@@ -656,11 +675,26 @@ public class CheckAvatarTests
     }
 
     [Test]
+    public void AnchorSeam_mergeArmatureAtTheFrameRoot_isClassified()
+    {
+        // The root exemption is WHOLESALE-ONLY. MergeArmature reparents each matched bone individually onto a
+        // different base bone and renames it, so the subtree scatters and an interior binding dies even though
+        // the mover sits at the frame root — the one shape where excluding the root would be a false negative.
+        var prop = NewSeamRig("SeamScatterRoot", out _, out _);
+        AddMaComponent(prop, "nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
+        AddVrcfFullController(prop, NewController("SeamCtrl4", NewClip(TmpDir, "seam_scatter", "Aim/Origin/Beam")), prop);
+
+        var res = Inspect("SeamScatterRoot");
+        Assert.AreEqual(1, SeamCount(res), res);
+        StringAssert.Contains("moved-by=MA MergeArmature", ReadLog(res));
+    }
+
+    [Test]
     public void AnchorSeam_proxiedNodeIsTheAnimatedLeaf_isClassified()
     {
         var prop = NewSeamRig("SeamLeaf", out var aim, out _);
-        AddMaBoneProxy(aim);
-        AddVrcfFullController(prop, NewController("SeamCtrl4", NewClip(TmpDir, "seam_leaf", "Aim")), prop);
+        AddMaBoneProxy(aim, "Bone");
+        AddVrcfFullController(prop, NewController("SeamCtrl5", NewClip(TmpDir, "seam_leaf", "Aim")), prop);
 
         // Leaf-INCLUSIVE: the nearest-match walk fails on `Aim` exactly as it fails on `Aim/Origin/Beam`,
         // so excluding the leaf would buy only a false negative.
@@ -669,25 +703,55 @@ public class CheckAvatarTests
     }
 
     [Test]
-    public void AnchorSeam_maClipThroughVrcfArmatureLink_isClassified()
+    public void AnchorSeam_worldFixedObjectIsAMover()
     {
-        var prop = NewSeamRig("SeamSymmetric", out var aim, out _);
-        AddVrcfArmatureLink(prop, aim); // the mover is propBone, NOT the component's own GameObject
-        AddMaMergeAnimator(prop, NewController("SeamCtrl5", NewClip(TmpDir, "seam_sym", "Aim/Origin")));
+        // The mover set is an enumerated allowlist, so each member needs its own case: a hole here is silent.
+        var prop = NewSeamRig("SeamWorldFixed", out var aim, out _);
+        AddMaComponent(aim, "nadena.dev.modular_avatar.core.ModularAvatarWorldFixedObject");
+        AddVrcfFullController(prop, NewController("SeamCtrl6", NewClip(TmpDir, "seam_wf", "Aim/Origin")), prop);
 
-        var res = Inspect("SeamSymmetric");
+        var res = Inspect("SeamWorldFixed");
         Assert.AreEqual(1, SeamCount(res), res);
-        StringAssert.Contains("moved-by=VRCFury ArmatureLink", ReadLog(res));
+        StringAssert.Contains("moved-by=MA WorldFixedObject", ReadLog(res));
     }
 
     [Test]
-    public void AnchorSeam_armatureLinkWithNoPropBone_isPass()
+    public void AnchorSeam_visibleHeadAccessoryIsAMover()
     {
-        var prop = NewSeamRig("SeamNoPropBone", out _, out _);
-        AddVrcfArmatureLink(prop, null); // build-side: "Root bone is null on armature link" — moves nothing
-        AddMaMergeAnimator(prop, NewController("SeamCtrl6", NewClip(TmpDir, "seam_nopb", "Aim/Origin")));
+        var prop = NewSeamRig("SeamVisHead", out var aim, out _);
+        AddMaComponent(aim, "nadena.dev.modular_avatar.core.ModularAvatarVisibleHeadAccessory");
+        AddVrcfFullController(prop, NewController("SeamCtrl7", NewClip(TmpDir, "seam_vh", "Aim/Origin")), prop);
 
-        var res = Inspect("SeamNoPropBone");
+        var res = Inspect("SeamVisHead");
+        Assert.AreEqual(1, SeamCount(res), res);
+    }
+
+    [Test]
+    public void AnchorSeam_proxyWithNoTarget_isStillCounted()
+    {
+        // Policy, pinned on its own: MA moves nothing for an unresolved proxy (ProcessProxy guards the
+        // SetParent), but an unresolved anchor is a broken module rather than a licence to animate through it.
+        var prop = NewSeamRig("SeamNoTarget", out var aim, out _);
+        AddMaBoneProxy(aim, ""); // no subPath, boneReference LastBone ⇒ target resolves to null
+        AddVrcfFullController(prop, NewController("SeamCtrl8", NewClip(TmpDir, "seam_notarget", "Aim/Origin")), prop);
+
+        var res = Inspect("SeamNoTarget");
+        Assert.AreEqual(1, SeamCount(res), res);
+    }
+
+    [Test]
+    public void AnchorSeam_maClipThroughVrcfArmatureLink_isPass()
+    {
+        // The MIRROR direction is NOT a break, and this is the regression that holds the correction. VRCFury
+        // relocates through ObjectMoveService, whose ApplyDeferred rewrites every clip in
+        // ControllersService.GetAllUsedControllers() — the descriptor's controllers, which by then already
+        // carry what MA merged at -11000. FeatureOrder orders FullController before ArmatureLink for exactly
+        // this reason. Flagging it would hard-FAIL a working entry in the vrc-patterns gate.
+        var prop = NewSeamRig("SeamMirror", out var aim, out _);
+        AddVrcfArmatureLink(prop, aim);
+        AddMaMergeAnimator(prop, NewController("SeamCtrl9", NewClip(TmpDir, "seam_mirror", "Aim/Origin")));
+
+        var res = Inspect("SeamMirror");
         Assert.AreEqual(0, SeamCount(res), res);
     }
 
@@ -696,7 +760,7 @@ public class CheckAvatarTests
     {
         var prop = NewSeamRig("SeamOneFramework", out var aim, out _);
         AddVrcfArmatureLink(prop, aim); // VRCFury moves it AND VRCFury merges the clips — #26's fix shape
-        AddVrcfFullController(prop, NewController("SeamCtrl7", NewClip(TmpDir, "seam_one", "Aim/Origin/Beam")), prop);
+        AddVrcfFullController(prop, NewController("SeamCtrl10", NewClip(TmpDir, "seam_one", "Aim/Origin/Beam")), prop);
 
         var res = Inspect("SeamOneFramework");
         Assert.AreEqual(0, SeamCount(res), res);
@@ -706,10 +770,27 @@ public class CheckAvatarTests
     public void AnchorSeam_maMoveUnderMaMergeAnimator_isPass()
     {
         var prop = NewSeamRig("SeamMaOnly", out var aim, out _);
-        AddMaBoneProxy(aim); // MA moves it AND MA merges the clips — MA repaths what it moved
-        AddMaMergeAnimator(prop, NewController("SeamCtrl8", NewClip(TmpDir, "seam_maonly", "Aim/Origin")));
+        AddMaBoneProxy(aim, "Bone"); // MA moves it AND MA merges the clips — NDMF's ObjectPathRemapper repaths
+        AddMaMergeAnimator(prop, NewController("SeamCtrl11", NewClip(TmpDir, "seam_maonly", "Aim/Origin")));
 
         var res = Inspect("SeamMaOnly");
+        Assert.AreEqual(0, SeamCount(res), res);
+    }
+
+    [Test]
+    public void AnchorSeam_animatorTypedBinding_isPass()
+    {
+        // FullControllerBuilder composes AnimatorBindingsAlwaysTargetRoot after the nearest-match walk, so an
+        // Animator-typed binding is retargeted to the avatar's Animator whatever its authored path.
+        var prop = NewSeamRig("SeamAnimatorTyped", out var aim, out _);
+        AddMaBoneProxy(aim, "Bone");
+        var clip = new AnimationClip { name = "seam_animtyped" };
+        AnimationUtility.SetEditorCurve(clip,
+            EditorCurveBinding.FloatCurve("Aim", typeof(Animator), "m_Enabled"), AnimationCurve.Linear(0, 0, 1, 1));
+        AssetDatabase.CreateAsset(clip, TmpDir + "/seam_animtyped.anim");
+        AddVrcfFullController(prop, NewController("SeamCtrl12", clip), prop);
+
+        var res = Inspect("SeamAnimatorTyped");
         Assert.AreEqual(0, SeamCount(res), res);
     }
 
@@ -717,8 +798,8 @@ public class CheckAvatarTests
     public void AnchorSeam_unresolvedBinding_staysInTheClipBindingClass()
     {
         var prop = NewSeamRig("SeamUnresolved", out var aim, out _);
-        AddMaBoneProxy(aim);
-        AddVrcfFullController(prop, NewController("SeamCtrl9", NewClip(TmpDir, "seam_dead", "Aim/Gone/Beam")), prop);
+        AddMaBoneProxy(aim, "Bone");
+        AddVrcfFullController(prop, NewController("SeamCtrl13", NewClip(TmpDir, "seam_dead", "Aim/Gone/Beam")), prop);
 
         var res = Inspect("SeamUnresolved");
         Assert.AreEqual(0, SeamCount(res), res); // an unresolved binding is a break the scene ALREADY shows
@@ -734,12 +815,31 @@ public class CheckAvatarTests
         _avatar = prop; // TearDown destroys it
         var aim = NewChild(prop, "Aim");
         NewChild(NewChild(aim, "Origin"), "Beam");
-        AddMaBoneProxy(aim);
-        AddVrcfFullController(prop, NewController("SeamCtrl10", NewClip(TmpDir, "seam_bare", "Aim/Origin/Beam")), prop);
+        AddMaBoneProxy(aim, "Bone");
+        AddVrcfFullController(prop, NewController("SeamCtrl14", NewClip(TmpDir, "seam_bare", "Aim/Origin/Beam")), prop);
 
         var lines = CheckAvatar.ScanAnchorSeams(prop);
         Assert.AreEqual(1, lines.Count, string.Join(" | ", lines));
         StringAssert.Contains("MA BoneProxy", lines[0]);
+    }
+
+    [Test]
+    public void ScanAnchorSeams_degradedFrameRead_isReportedNotSwallowed()
+    {
+        // The gate FAILs on any line this returns, so a frame that did not reflect must produce one. Otherwise
+        // an MA/VRCFury field rename turns the gate's whole seam pass into a silent no-op at exactly the moment
+        // the drift it guards against occurs.
+        var prop = new GameObject("DegradedModule");
+        _avatar = prop;
+        var aim = NewChild(prop, "Aim");
+        NewChild(aim, "Origin");
+        AddMaBoneProxy(aim, "Bone");
+        AddVrcfFullController(prop, NewController("SeamCtrl15", NewClip(TmpDir, "seam_degraded", "Payload")), prop);
+        SetSeam("FrameAnchorOverride", (Func<string, string>)(_ => "VRCF.content")); // force the fail-loud branch
+
+        var lines = CheckAvatar.ScanAnchorSeams(prop);
+        Assert.IsNotEmpty(lines, "a degraded frame read must fail the gate, not pass it");
+        Assert.IsTrue(lines.Exists(l => l.Contains("not trustworthy")), string.Join(" | ", lines));
     }
 }
 

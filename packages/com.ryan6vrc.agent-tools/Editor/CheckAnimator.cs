@@ -447,91 +447,114 @@ namespace Ryan6Vrc.AgentTools.Editor
             return unresolved;
         }
 
-        // ----- Anchor seam: the binding a build-time move in the OTHER framework silently kills ---------
+        // ----- Anchor seam: the binding an MA build-time move kills under a VRCFury merge ---------------
         //
         // nondestructive.md §Reference hardening owns the mechanism. MA's passes run inside NDMF at -11000;
         // VRCFury applies at -10000 and re-resolves every merged binding against the POST-MA hierarchy by a
-        // nearest-match prefix walk up from the FullController's object. So a binding pathing through a node
-        // MA moved out of the module subtree "finds no valid prefix and silently vanishes from the merged FX
-        // — no error, no warning". The reverse is symmetric: an MA-merged clip pathing through a node
-        // VRCFury's ArmatureLink later moves froze its paths at -11000, and nothing repaths after.
+        // nearest-match prefix walk up from the FullController's object. A binding pathing through a node MA
+        // moved out of the module subtree finds no valid prefix, and the merged FX stops driving the object
+        // the author meant.
         //
-        // This is the family's first BUILD-PREDICTION predicate. Every artifact a pre-build check can see is
-        // VALID — the authored prefab really does contain the path, and the binding resolves right now — so
-        // unlike every other class here it asserts something about what the build will MOVE. It is
-        // false-positive-free by construction rather than by heuristic:
+        // ONE DIRECTION ONLY, and the asymmetry is a fact about the two builds rather than a scope decision.
+        // VRCFury tracks its own moves: ArmatureLink relocates through ObjectMoveService, which records
+        // (oldPath, newPath) and - in the same pass, after the move loop - calls ApplyDeferred() to rewrite
+        // every clip in ControllersService.GetAllUsedControllers(). That set is the descriptor's controllers,
+        // which by then already carry whatever MA merged at -11000, so an MA MergeAnimator clip pathing
+        // through an ArmatureLinked node is REPAIRED, not broken. FeatureOrder says so outright: FullController
+        // is ordered before ArmatureLink because it "needs to happen before any objects are moved, so otherwise
+        // the imported animations would not be adjusted to point to the new moved object paths". MA has no
+        // counterpart running late enough to do the same for VRCFury, because a FullController's clips are not
+        // on the avatar yet at -11000. Hence: MA movers under a VRCFury merge break; the reverse does not, and
+        // neither does a move and a merge in the SAME framework (each build repaths what it moved).
+        //
+        // This is the family's only BUILD-PREDICTION predicate. Every artifact a pre-build check can see is
+        // VALID - the authored prefab really does contain the path, and the binding resolves right now - so
+        // unlike every other class here it asserts something about what the build will MOVE. Two properties
+        // hold it up, and a third is deliberately NOT claimed:
         //   - the frame is MEASURED, not predicted. `roots` is the same nearest-match ancestor chain the
-        //     binding is resolved against, so the root it FIRST resolves at is the frame the build picks
-        //     (VRCFury prefers the mount root on ties; the chain is mount-first). Nothing here replicates
-        //     VRCFury's per-binding prop-root-vs-avatar-root choice — it reads the answer off the walk.
-        //   - the frame root is EXCLUDED. A module whose own root is MA-anchored moves wholesale and its
-        //     component-relative paths still resolve; that is the documented safe case, and excluding the
-        //     root endpoint is the whole of what keeps a proxied-but-never-animated anchor legal.
+        //     binding is resolved against (ClipRewritersService walks upward from the mount, first match wins,
+        //     and so does AncestorChain), so the root a binding FIRST resolves at is the frame the build picks.
+        //     Nothing here replicates VRCFury's per-binding prop-root-vs-avatar-root choice - it reads the
+        //     answer off the walk.
         //   - the animated LEAF is INCLUDED. A mover on the leaf kills the binding by the identical walk, so
         //     excluding it would buy nothing but a false negative.
-        // Only the two cross-framework directions are covered. Within one framework the mover's own build
-        // repaths what it moved (MA carries an ObjectPathRemapper for the animators it processes), which is
-        // why the rule is stated cross-framework and why a DescriptorLayer frame yields no movers at all.
+        //   - NOT claimed: false-positive-free in general. The walk stops at the mover and never asks where the
+        //     moved node LANDS, so a proxy whose target is the avatar root itself can leave a higher prefix
+        //     that still validates - a binding that survives, reported anyway. That needs a proxy target of the
+        //     avatar root rather than the documented AsChildAtRoot-onto-a-humanoid-bone idiom, so it is a
+        //     narrow over-report, not a general one. Closing it means modelling the post-move hierarchy.
         internal struct AnchorSeamHit
         {
             public AnimationClip Clip;
             public EditorCurveBinding Binding; // the ORIGINAL binding (what the .anim holds)
-            public GameObject Mover;           // the node the other framework relocates at build
+            public GameObject Mover;           // the node MA relocates at build
             public string MoverLabel;          // the component that will move it
         }
 
-        // The nodes the framework that is NOT merging this controller relocates at build, over `scanRoot`
-        // (the avatar root in CheckAvatar; the entry prefab in the vrc-patterns gate). Scanned from a root
-        // rather than from the module, because a mover need not sit inside the merged subtree: VRCFury's
-        // ArmatureLink names the moved node in `content.propBone` — a raw ref that may point anywhere, and
-        // null ⇒ the build warns and moves nothing, so it is skipped here too. MA's BoneProxy and
-        // MergeArmature both move the object they are attached to (BoneProxyProcessor reparents
-        // `proxy.Proxy.transform`; MergeArmatureHook reparents the bones under its own object), so for those
-        // the carrier IS the mover. A BoneProxy whose target does not resolve moves nothing either, but is
-        // still counted: an unresolved anchor is a broken module, not a licence to animate through it.
-        internal static Dictionary<GameObject, string> CollectMovers(GameObject scanRoot, FrameKind mergedBy)
+        // Whether a mover carries its whole subtree to one new parent, which decides the FRAME-ROOT case.
+        // A wholesale mover at the frame root is the documented safe anchor: the module moves intact and its
+        // component-relative paths still resolve, so it is excluded. A SCATTERING mover is not safe there:
+        // MergeArmature reparents each matched bone individually onto a different base bone (MergeArmatureHook
+        // recurses per child with its own childNewParent) and renames them, so an interior binding dies even
+        // though the mover sits at the frame root.
+        internal struct MoverInfo
         {
-            var movers = new Dictionary<GameObject, string>();
-            if (scanRoot == null || mergedBy == FrameKind.DescriptorLayer) return movers;
+            public string Label;
+            public bool Scatters;
+        }
+
+        // The nodes MA relocates at build, over `scanRoot` (the avatar root in CheckAvatar; the entry prefab
+        // in the vrc-patterns gate). Scanned from a root rather than from the merged module, because a mover
+        // need not sit inside it.
+        //
+        // This is an ENUMERATED ALLOWLIST against the MA version pinned in this venue, NOT a derived property
+        // of the framework - MA has no "I move objects" interface to reflect on. Re-derive it after an MA bump
+        // by grepping the Editor passes for SetParent; every entry below is one such call site:
+        //   BoneProxy              BoneProxyProcessor             reparents its own GameObject
+        //   MergeArmature          MergeArmatureHook              reparents each bone under it, individually
+        //   WorldFixedObject       WorldFixedObjectProcessor      reparents its own GameObject under a generated root
+        //   VisibleHeadAccessory   VisibleHeadAccessoryProcessor  reparents its own GameObject under a shim
+        //   ReplaceObject          ReplaceObjectPass              reparents its own GameObject onto the target's parent
+        // ReplaceObject ALSO reparents the replaced object's children onto the replacement, and that second
+        // move is not modelled: the replaced object is named by an AvatarObjectReference this walk does not
+        // resolve. A binding pathing through the REPLACED object's children is a known false negative.
+        //
+        // A mover whose target does not resolve moves nothing at build (BoneProxyProcessor guards its
+        // SetParent on `proxy.Target != null && ValidateTarget(...) == OK`), but is still counted: an
+        // unresolved anchor is a broken module, not a licence to animate through it.
+        internal static Dictionary<GameObject, MoverInfo> CollectMovers(GameObject scanRoot)
+        {
+            var movers = new Dictionary<GameObject, MoverInfo>();
+            if (scanRoot == null) return movers;
             foreach (var c in scanRoot.GetComponentsInChildren<Component>(true))
             {
                 if (c == null) continue;
-                string tn = c.GetType().FullName;
-                if (mergedBy == FrameKind.VRCF)
+                string label = null;
+                bool scatters = false;
+                switch (c.GetType().FullName)
                 {
-                    if (tn == "nadena.dev.modular_avatar.core.ModularAvatarBoneProxy") movers[c.gameObject] = "MA BoneProxy";
-                    else if (tn == "nadena.dev.modular_avatar.core.ModularAvatarMergeArmature") movers[c.gameObject] = "MA MergeArmature";
+                    case "nadena.dev.modular_avatar.core.ModularAvatarBoneProxy": label = "MA BoneProxy"; break;
+                    case "nadena.dev.modular_avatar.core.ModularAvatarMergeArmature": label = "MA MergeArmature"; scatters = true; break;
+                    case "nadena.dev.modular_avatar.core.ModularAvatarWorldFixedObject": label = "MA WorldFixedObject"; break;
+                    case "nadena.dev.modular_avatar.core.ModularAvatarVisibleHeadAccessory": label = "MA VisibleHeadAccessory"; break;
+                    case "nadena.dev.modular_avatar.core.ModularAvatarReplaceObject": label = "MA ReplaceObject"; break;
                 }
-                else if (mergedBy == FrameKind.MA && tn == "VF.Model.VRCFury")
-                {
-                    var moved = ArmatureLinkPropBone(c);
-                    if (moved != null) movers[moved] = "VRCFury ArmatureLink";
-                }
+                if (label == null) continue;
+                // First writer wins, except that a scattering mover upgrades the entry: two movers on one
+                // GameObject is pathological, and reporting the one with the WIDER consequence is the safe read.
+                if (movers.TryGetValue(c.gameObject, out var existing) && !(scatters && !existing.Scatters)) continue;
+                movers[c.gameObject] = new MoverInfo { Label = label, Scatters = scatters };
             }
             return movers;
         }
 
-        // content.propBone of a VRCFury component whose single feature is an ArmatureLink; null for any
-        // other feature, for an unreflectable component, or for an ArmatureLink with no Link From set.
-        private static GameObject ArmatureLinkPropBone(Component c)
-        {
-            SerializedObject so;
-            try { so = new SerializedObject(c); } catch { return null; } // B6 parity: reflection never throws out
-            var content = so.FindProperty("content");
-            if (content == null) return null;
-            var tn = content.managedReferenceFullTypename;
-            if (string.IsNullOrEmpty(tn) || !tn.EndsWith("ArmatureLink")) return null;
-            var prop = content.FindPropertyRelative("propBone");
-            return prop != null ? prop.objectReferenceValue as GameObject : null;
-        }
-
-        // Walk a merged controller's bindings and report the ones a `movers` node kills at build. Mirrors
+        // Walk a VRCFury-merged controller's bindings and report the ones an MA move kills at build. Mirrors
         // CollectUnresolvedBindings' traversal, skips, and rewrite order exactly; the difference is that it
         // acts on the bindings that DO resolve. One hit per binding: the walk stops at the first mover found
         // going up from the leaf, which is the node closest to the break.
         internal static List<AnchorSeamHit> CollectAnchorSeamBreaks(
             AnimatorController controller, List<GameObject> roots,
-            Dictionary<GameObject, string> movers, Func<string, string> pathRewrite = null)
+            Dictionary<GameObject, MoverInfo> movers, Func<string, string> pathRewrite = null)
         {
             var hits = new List<AnchorSeamHit>();
             if (controller == null || roots == null || roots.Count == 0 || movers == null || movers.Count == 0)
@@ -546,6 +569,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var b in bindings)
                 {
                     if (IsHumanoidAnimatorCurve(b)) continue;
+                    // An Animator-typed binding is retargeted to the avatar's own Animator whatever its
+                    // authored path (FullControllerBuilder composes AnimatorBindingsAlwaysTargetRoot after the
+                    // nearest-match walk), so no node on its path can break it.
+                    if (b.type == typeof(Animator)) continue;
                     var probe = b;
                     if (pathRewrite != null)
                     {
@@ -556,16 +583,20 @@ namespace Ryan6Vrc.AgentTools.Editor
                     GameObject frame = null;
                     foreach (var root in roots)
                         if (AnimationUtility.GetAnimatedObject(root, probe) != null) { frame = root; break; }
-                    if (frame == null) continue;              // unresolved — the broken-binding class owns it
+                    if (frame == null) continue;              // unresolved - the broken-binding class owns it
                     if (string.IsNullOrEmpty(probe.path)) continue; // the leaf IS the frame root: nothing between
 
                     var leaf = frame.transform.Find(probe.path);
-                    if (leaf == null) continue; // resolved by a route Find cannot retrace — never guess a chain
-                    for (var t = leaf; t != null && t != frame.transform; t = t.parent)
+                    if (leaf == null) continue; // resolved by a route Find cannot retrace - never guess a chain
+                    for (var t = leaf; t != null; t = t.parent)
                     {
-                        if (!movers.TryGetValue(t.gameObject, out var label)) continue;
-                        hits.Add(new AnchorSeamHit { Clip = clip, Binding = b, Mover = t.gameObject, MoverLabel = label });
-                        break;
+                        bool atFrameRoot = t == frame.transform;
+                        if (movers.TryGetValue(t.gameObject, out var m) && (!atFrameRoot || m.Scatters))
+                        {
+                            hits.Add(new AnchorSeamHit { Clip = clip, Binding = b, Mover = t.gameObject, MoverLabel = m.Label });
+                            break;
+                        }
+                        if (atFrameRoot) break;
                     }
                 }
             }

@@ -22,12 +22,12 @@ namespace Ryan6Vrc.AgentTools.Editor
     ///   - <b>clip/controller bindings</b> (descriptor playable layers + every MA MergeAnimator / VRCFury
     ///     FullController merged animator) that resolve to no scene object → the skill owns the vendor
     ///     <c>.anim</c> and repaths (routed by the per-offender <c>clipAssetPath</c>).
-    ///   - <b>anchor-seam</b> — a binding that resolves perfectly today and dies at bake, because the module
-    ///     both MOVES and ANIMATES the same node across two frameworks: a VRCFury <c>FullController</c>
-    ///     binding pathing through a node MA relocates (<c>BoneProxy</c>/<c>MergeArmature</c>), or an MA
-    ///     <c>MergeAnimator</c> clip pathing through a node VRCFury's <c>ArmatureLink</c> relocates → the
-    ///     skill moves both operations into one framework. <c>CheckAnimator.CollectAnchorSeamBreaks</c> owns
-    ///     the predicate and the argument that it is false-positive-free.
+    ///   - <b>anchor-seam</b> — a binding that resolves perfectly today and dies at bake: a VRCFury
+    ///     <c>FullController</c> binding pathing through a node MA relocates at build (<c>BoneProxy</c>,
+    ///     <c>MergeArmature</c>, and the rest of the enumerated mover set) → the skill moves both operations
+    ///     into one framework. One direction only — VRCFury repairs its own moves, so the mirror case is not
+    ///     a break. <c>CheckAnimator.CollectAnchorSeamBreaks</c> owns the predicate, the source citations for
+    ///     the asymmetry, and the one over-report it does not claim to exclude.
     ///   - <b>merge-conflict</b> (NOT path-encoded — transform-identity, not a name): two+ dynamics
     ///     components in one category (physbone/collider/constraint) that resolve to the SAME post-merge
     ///     transform via the MA/VRCFury merge map, ≥1 of them mergeable-sourced — i.e. a mergeable's bone
@@ -50,6 +50,8 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// the whole contract should read it as scoped to the two path-encoded classes now. Note the standing
     /// limitation below is its MIRROR image, not a contradiction: an ArmatureLink-RELOCATED bone fails in-scene
     /// though the build repairs it, while an anchor-seam binding passes in-scene though the build breaks it.
+    /// Unlike the other classes, anchor-seam rests on an ENUMERATED set of MA components rather than a
+    /// signature every member of the family carries, so it can miss a mover a later MA version adds.
     ///
     /// Verdict is <c>PASS</c> (clean) or <c>CLASSIFY</c> (any finding) — never <c>FAIL</c> for a finding (bad
     /// input alone bare-FAILs). No computed near-miss/absent/N-of-M SCORING: every class is a definite
@@ -111,9 +113,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// invalidates it afterwards.</summary>
         internal const string AnchorSeamNoteLine =
             "An anchor-seam offender resolves in this scene and dies at bake, so repathing the clip fixes nothing. " +
-            "The repair is to put the move and the animation in ONE framework: re-anchor the named node with the " +
-            "animating framework's own seam (VRCFury ArmatureLink under a FullController, MA BoneProxy under a " +
-            "MergeAnimator), or animate the node from inside the subtree by constraint instead of by path " +
+            "The repair is to put the move and the animation in ONE framework — re-anchor the named node with a " +
+            "VRCFury ArmatureLink, which relocates through VRCFury's own ObjectMoveService and repaths the merged " +
+            "clips with it — or to animate the node from inside the subtree by constraint rather than by path " +
             "(docs/nondestructive.md §Reference hardening; docs/gimmicks.md §Packaging).";
 
         /// <summary>Prefix on the Notes entry <see cref="SurfaceUnreflected"/> adds; the remainder is the
@@ -409,7 +411,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// vrc-patterns gate can run it on a module prefab instantiated on its own, where the only frame
         /// available IS the prop root. Returns one rendered line per offender (empty ⇒ clean). Shares the
         /// enumeration, the mover scan, and the walk with <see cref="Inspect"/>; what differs is the caller's
-        /// tier — the gate FAILs on a finding, Inspect CLASSIFYs it.</summary>
+        /// tier — the gate FAILs on a finding, Inspect CLASSIFYs it.
+        ///
+        /// The fail-loud notes are returned as lines too, so they FAIL the gate rather than being dropped.
+        /// Without that, an MA/VRCFury field rename degrades the frame to best-effort, `Inspect` records the
+        /// note and this door would have discarded it — reporting zero seams at exactly the moment the drift
+        /// it guards against occurs. (R-K's uncertainty note is written only to the report, never logged, so
+        /// there is no second channel to fall back on.)</summary>
         public static List<string> ScanAnchorSeams(GameObject root)
         {
             var lines = new List<string>();
@@ -418,6 +426,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var o in CollectAnchorSeams(root, EnumerateSurfaces(root, null, rep)))
                 lines.Add(o.Animator + ": clip `" + o.Clip + "` binds `" + o.Path + "`, moved by "
                           + o.MoverLabel + " @ `" + o.Mover + "` [" + o.Host + "]");
+            foreach (var n in rep.Notes) lines.Add("frame read degraded, seam scan is not trustworthy here — " + n);
+            foreach (var n in rep.FrameUncertain) lines.Add("frame is a guess, seam scan is not trustworthy here — " + n);
             return lines;
         }
 
@@ -430,14 +440,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static List<Offender> CollectAnchorSeams(GameObject root, List<Pair> pairs)
         {
             var found = new List<Offender>();
-            var maMovers = CollectMovers(root, FrameKind.VRCF);   // MA moves that break VRCF-merged bindings
-            var vrcfMovers = CollectMovers(root, FrameKind.MA);   // VRCF moves that break MA-merged bindings
+            var maMovers = CollectMovers(root);
             var seen = new HashSet<(int ctrl, int clip, string path, Type type)>();
             foreach (var p in pairs)
             {
-                var movers = p.Kind == FrameKind.VRCF ? maMovers : p.Kind == FrameKind.MA ? vrcfMovers : null;
-                if (movers == null) continue; // descriptor layers: no cross-framework seam (see the collector)
-                foreach (var hit in CollectAnchorSeamBreaks(p.Controller, p.Roots, movers, p.PathRewrite))
+                // VRCFury-merged surfaces only. An MA MergeAnimator clip pathing through a VRCFury-moved node
+                // is repaired by VRCFury's own ObjectMoveService, and a descriptor layer has no module seam at
+                // all — CheckAnimator's collector carries the source citations for both.
+                if (p.Kind != FrameKind.VRCF) continue;
+                foreach (var hit in CollectAnchorSeamBreaks(p.Controller, p.Roots, maMovers, p.PathRewrite))
                 {
                     if (!seen.Add((p.Controller.GetInstanceID(), hit.Clip.GetInstanceID(), hit.Binding.path, hit.Binding.type))) continue;
                     found.Add(new Offender
