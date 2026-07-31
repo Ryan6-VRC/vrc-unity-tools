@@ -184,8 +184,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // carry different file GUIDs and sub-asset fileIDs by construction, which a byte compare would
         // report as drift on every run. Returns null when equal, else the first difference, addressed by
         // its page path so an offender in a nested page names the page it sits on.
+        //
+        // It compares EVERY serialized field of a control, not just the ones the schema can author —
+        // including `icon`, `style`, `labels`, and the page's own name. That is deliberate and is the
+        // difference between this pass and the controller pass it sits beside: comparing only modeled
+        // fields is exactly how the library's committed controllers drifted invisibly. A hand-added icon
+        // in a built/ menu is drift the next compile silently strips, so the gate has to see it.
         static string MenuDiff(VRCExpressionsMenu a, VRCExpressionsMenu b, string where)
         {
+            if (a.name != b.name)
+                return $"{where}: page name '{a.name}' vs '{b.name}'";
             var ac = a.controls ?? new System.Collections.Generic.List<VRCExpressionsMenu.Control>();
             var bc = b.controls ?? new System.Collections.Generic.List<VRCExpressionsMenu.Control>();
             if (ac.Count != bc.Count)
@@ -201,6 +209,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if ((x.parameter?.name ?? "") != (y.parameter?.name ?? ""))
                     return $"{w}: parameter '{x.parameter?.name}' vs '{y.parameter?.name}'";
                 if (x.value != y.value) return $"{w}: value {x.value} vs {y.value}";
+                if (x.style != y.style) return $"{w}: style {x.style} vs {y.style}";
+                if (AssetDatabase.GetAssetPath(x.icon) != AssetDatabase.GetAssetPath(y.icon))
+                    return $"{w}: icon '{AssetDatabase.GetAssetPath(x.icon)}' vs '{AssetDatabase.GetAssetPath(y.icon)}' (the schema cannot author an icon, so a committed one is drift the next compile strips)";
+
+                var xl = x.labels ?? new VRCExpressionsMenu.Control.Label[0];
+                var yl = y.labels ?? new VRCExpressionsMenu.Control.Label[0];
+                if (xl.Length != yl.Length) return $"{w}: {xl.Length} label(s) vs {yl.Length}";
+                // Label is a STRUCT (unlike Control.Parameter, a class) — no null-conditional here.
+                for (int k = 0; k < xl.Length; k++)
+                    if ((xl[k].name ?? "") != (yl[k].name ?? ""))
+                        return $"{w}: label[{k}] '{xl[k].name}' vs '{yl[k].name}'";
 
                 var xs = x.subParameters ?? new VRCExpressionsMenu.Control.Parameter[0];
                 var ys = y.subParameters ?? new VRCExpressionsMenu.Control.Parameter[0];

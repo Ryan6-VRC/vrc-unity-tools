@@ -1134,7 +1134,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     throw new EmitException(
                         $"menu: SDK VRCExpressionsMenu.MAX_CONTROLS is {VRCExpressionsMenu.MAX_CONTROLS} but MenuLimits.MaxControlsPerMenu mirrors {MenuLimits.MaxControlsPerMenu} — update the echo in AnimatorSchema.cs");
 
+                // A control on a VRC built-in is inert for the same reason a scratch one is: EmitVrcParameters
+                // excludes both from the params asset, so VRChat never sees the name. SchemaValidation catches
+                // the scratch half but is System.*-only and cannot reach ControllerRules, so the built-in half
+                // is checked here, where the same exclusion is applied.
+                RefuseReservedMenuParams(_doc.Menu, "menu");
+
                 _result.Menu = BuildMenuPage(_doc.Menu, _doc.ControllerName + "_Menu");
+            }
+
+            private static void RefuseReservedMenuParams(List<MenuControl> controls, string where)
+            {
+                foreach (var c in controls)
+                {
+                    if (c == null) continue;
+                    if (c.Param != null && ControllerRules.IsVrcReserved(c.Param))
+                        throw new EmitException(
+                            $"menu: {where} '{c.Name}' drives the VRC built-in '{c.Param}' — built-ins are excluded from the emitted VRCExpressionParameters, so the control would be inert on the avatar");
+                    if (c.Controls != null) RefuseReservedMenuParams(c.Controls, $"{where} '{c.Name}'");
+                }
             }
 
             private VRCExpressionsMenu BuildMenuPage(List<MenuControl> controls, string assetName)

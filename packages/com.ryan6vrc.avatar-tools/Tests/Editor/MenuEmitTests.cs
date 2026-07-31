@@ -156,6 +156,41 @@ layers: []
     }
 
     [Test]
+    public void RecompileReportsTheMenuInTheSummary()
+    {
+        // The in-place branch destroys the in-memory root, and a destroyed UnityEngine.Object compares
+        // equal to null — so the summary has to key off a flag captured before that, or every recompile
+        // silently under-reports a menu that was in fact written.
+        Compile(@"menu:
+  - toggle: A
+    param: Enable
+");
+        var second = Compile(@"menu:
+  - toggle: A
+    param: Enable
+");
+        StringAssert.Contains("menu=1c/1p", second);
+    }
+
+    [Test]
+    public void InPlaceWrite_SyncsTheObjectName()
+    {
+        // An entry moving its menu into built/ renames the file; the in-place write is the path that skips
+        // Unity's filename-driven rename, so m_Name would otherwise stay stale forever.
+        Compile(@"menu:
+  - toggle: A
+    param: Enable
+");
+        Compile(@"menu:
+  - toggle: A
+    param: Enable
+  - toggle: B
+    param: Enable
+");
+        Assert.AreEqual("M_Fx_Menu", Load().name);
+    }
+
+    [Test]
     public void DroppingTheMenuBlock_DeletesTheAsset()
     {
         Compile(@"menu:
@@ -165,6 +200,67 @@ layers: []
         Assert.IsNotNull(Load());
         Compile("");
         Assert.IsNull(Load(), "a menu asset must not outlive the block that declared it");
+    }
+
+    [Test]
+    public void ControlOnAVrcBuiltIn_FailsTheCompile()
+    {
+        // EmitVrcParameters excludes built-ins from the params asset exactly as it excludes scratch params,
+        // so VRChat never sees the name and the control is inert. SchemaValidation catches the scratch half
+        // but is System.*-only and cannot reach ControllerRules, so this half is refused at emit.
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*emit:.*IsLocal.*=> FAIL"));
+        File.WriteAllText(_srcPath, @"schema: 1
+controller: M_Fx
+basis: avatar-root
+parameters:
+  IsLocal: bool
+layers: []
+menu:
+  - toggle: Local
+    param: IsLocal
+");
+        var msg = CompileController.Compile(_srcPath, OutDir);
+        StringAssert.Contains("FAIL", msg);
+        Assert.IsNull(Load());
+    }
+
+    [Test]
+    public void FailedCompileDoesNotDestroyAPreExistingMenu()
+    {
+        // "Nothing written on failure" covers side assets. A FRESH compile over a folder that already holds
+        // a menu skips ProofCompile — there is no prior controller to protect — so persisting before the
+        // lint would delete an asset CleanupAfterLint cannot restore.
+        Compile(@"menu:
+  - toggle: A
+    param: Enable
+");
+        var before = File.ReadAllText(MenuPath);
+        AssetDatabase.DeleteAsset(OutDir + "/M_Fx.controller");   // controller gone, menu stays
+
+        // A document whose graph fails the lint: an unconditional state hop with no exit time.
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*graph lint.*=> FAIL"));
+        File.WriteAllText(_srcPath, @"schema: 1
+controller: M_Fx
+basis: avatar-root
+parameters:
+  Enable: bool
+layers:
+  - name: L
+    states:
+      A:
+        motion: ~
+        transitions:
+          - { to: B, when: [] }
+      B:
+        motion: ~
+    default: A
+menu:
+  - toggle: A
+    param: Enable
+");
+        StringAssert.Contains("FAIL", CompileController.Compile(_srcPath, OutDir));
+        Assert.IsTrue(File.Exists(MenuPath), "a failed compile must not delete the pre-existing menu asset");
+        Assert.AreEqual(before, File.ReadAllText(MenuPath), "nor overwrite it");
     }
 
     [Test]

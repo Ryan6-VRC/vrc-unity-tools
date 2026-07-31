@@ -835,8 +835,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     throw new SchemaException($"{where}: a radial has no 'value' — its parameter carries the position, and nothing is written on press");
                 if (sawValue && ctl.Kind == MenuControlKind.SubMenu && ctl.Param == null)
                     throw new SchemaException($"{where}: 'value' without 'param' — a submenu writes a value only when it also names a parameter");
-                if (ctl.Kind == MenuControlKind.SubMenu && ctl.Controls == null)
-                    throw new SchemaException($"{where}: a submenu needs 'controls' (an empty submenu is a dead end in the wearer's menu)");
+                // Count, not just null: `controls: []` binds to an empty non-null list, so a null-only guard
+                // would let the exact dead-end page through that this refusal names.
+                if (ctl.Kind == MenuControlKind.SubMenu && (ctl.Controls == null || ctl.Controls.Count == 0))
+                    throw new SchemaException($"{where}: a submenu needs at least one entry under 'controls' (an empty submenu is a dead end in the wearer's menu)");
 
                 into.Add(ctl);
             }

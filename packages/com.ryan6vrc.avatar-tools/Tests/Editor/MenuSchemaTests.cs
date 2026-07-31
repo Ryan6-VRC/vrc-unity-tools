@@ -131,7 +131,19 @@ layers: []
         var e = Assert.Throws<SchemaException>(() => Parse(@"menu:
   - submenu: Empty
 "));
-        StringAssert.Contains("needs 'controls'", e.Message);
+        StringAssert.Contains("at least one entry", e.Message);
+    }
+
+    [Test]
+    public void SubMenuWithEmptyControlsList_Fails()
+    {
+        // `controls: []` binds to an empty NON-null list, so a null-only guard would let through the exact
+        // dead-end page the absent-key refusal exists to prevent.
+        var e = Assert.Throws<SchemaException>(() => Parse(@"menu:
+  - submenu: Empty
+    controls: []
+"));
+        StringAssert.Contains("at least one entry", e.Message);
     }
 
     [Test]
@@ -248,6 +260,45 @@ layers: []
 ");
         Assert.AreEqual(1, errs.Length);
         StringAssert.Contains("menu-int-value", errs[0]);
+    }
+
+    [Test]
+    public void TypeRulesReadTheWireType_NotTheAnimatorType()
+    {
+        // The params asset lists `vrc.type ?? type`, and VRChat reads the control against THAT. Validating
+        // on the animator type let every vrc-type override through unchecked: `selective-animation` ships
+        // exactly this shape (float on the animator, bool on the wire), so a radial on it would have
+        // compiled clean and yielded a knob carrying only 0 and 1.
+        const string head = @"schema: 1
+controller: W_Fx
+basis: avatar-root
+parameters:
+  Tag: { type: float, vrc: { type: bool } }
+  Count: { type: float, vrc: { type: int } }
+layers: []
+";
+        var radial = SchemaValidation.Validate(AnimatorSchemaYaml.Parse(head + @"menu:
+  - radial: Knob
+    param: Tag
+", "t.yaml"));
+        Assert.AreEqual(1, radial.Count);
+        StringAssert.Contains("menu-radial-type", radial[0]);
+
+        var boolValue = SchemaValidation.Validate(AnimatorSchemaYaml.Parse(head + @"menu:
+  - toggle: T
+    param: Tag
+    value: 5
+", "t.yaml"));
+        Assert.AreEqual(1, boolValue.Count);
+        StringAssert.Contains("menu-bool-value", boolValue[0]);
+
+        var intValue = SchemaValidation.Validate(AnimatorSchemaYaml.Parse(head + @"menu:
+  - toggle: T
+    param: Count
+    value: 1.5
+", "t.yaml"));
+        Assert.AreEqual(1, intValue.Count);
+        StringAssert.Contains("menu-int-value", intValue[0]);
     }
 
     [Test]

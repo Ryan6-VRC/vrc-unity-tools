@@ -115,6 +115,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
             catch (ControllerEmit.EmitException ee) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders); return Fail(failLabel, sourcePath, "emit: " + ee.Message); }
             catch (Exception e) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders); return Fail(failLabel, sourcePath, "emit: " + e.GetType().Name + ": " + e.Message); }
 
+            // Captured BEFORE the side-asset writes below (which destroy the in-memory root): a destroyed
+            // UnityEngine.Object compares equal to null, so a later `built.Menu != null` would read false.
+            bool emittedMenu = built.Menu != null;
+
+            // ── 5. Pre-emission graph lint (roots empty ⇒ broken-binding rule skipped: no scene) ─────
+            // BEFORE the side assets are written. A FRESH compile over a folder that already holds a params
+            // or menu asset skips ProofCompile (there is no prior controller to protect), so persisting first
+            // would let a lint failure delete or overwrite a pre-existing side asset it cannot restore —
+            // CleanupAfterLint can only remove what this run created. Nothing written on failure means nothing.
+            var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
+            {
+                CleanupAfterLint(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders);
+                string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
+                return Fail(failLabel, sourcePath, "post-emit graph lint (" + lint.Errors.Count + "): " + offenders);
+            }
+
             // Persist the VRCExpressionParameters side-asset (ControllerEmit builds it in-memory only). REUSE an
             // existing asset IN PLACE — overwrite its parameters, never delete+recreate — so its GUID survives a
             // recompile (mirroring the controller's reset-in-place: any expressionParameters reference stays
@@ -122,7 +139,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // survives (all built-in/scratch), drop any stale asset so it can't linger. In whatIf the whole
             // emit lands in the temp folder and is swept with it.
             var existingParams = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(paramsPath);
-            bool paramsPreExisted = existingParams != null;
             if (built.Params != null)
             {
                 if (existingParams != null) { existingParams.parameters = built.Params.parameters; EditorUtility.SetDirty(existingParams); }
@@ -137,7 +153,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Recompile churns them wholesale: every prior page is removed and destroyed before the new ones
             // are added, or a renamed/deleted sub-menu would linger inside the file forever.
             var existingMenu = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(menuPath);
-            bool menuPreExisted = existingMenu != null;
             if (built.Menu != null)
             {
                 if (existingMenu != null)
@@ -149,6 +164,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         UnityEngine.Object.DestroyImmediate(sub, true);
                     }
                     existingMenu.controls = built.Menu.controls;
+                    // Sync the object name too: a main asset renamed on disk (an entry moving its menu into
+                    // built/) keeps whatever m_Name it was created with otherwise, and the in-place write is
+                    // exactly the path that skips Unity's filename-driven rename.
+                    existingMenu.name = built.Menu.name;
                     // The in-memory root has handed off its controls (and with them the child references);
                     // drop it so a recompile does not leave an unowned ScriptableObject behind.
                     UnityEngine.Object.DestroyImmediate(built.Menu);
@@ -161,15 +180,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var child in built.MenuChildren) AssetDatabase.AddObjectToAsset(child, menuPath);
                 EditorUtility.SetDirty(existingMenu);
             }
-            else if (existingMenu != null) AssetDatabase.DeleteAsset(menuPath);
-
-            // ── 5. Pre-emission graph lint (roots empty ⇒ broken-binding rule skipped: no scene) ─────
-            var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
-            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
+            else if (existingMenu != null)
             {
-                CleanupAfterLint(whatIf, tempFolder, finalPath, paramsPath, menuPath, controllerPreExisted, paramsPreExisted, menuPreExisted, newFolders);
-                string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
-                return Fail(failLabel, sourcePath, "post-emit graph lint (" + lint.Errors.Count + "): " + offenders);
+                // LOUD, because this is reachable without anyone intending it: DecompileController emits no
+                // `menu:` block (there is nothing in a .controller to recover one from), so recompiling a
+                // decompiled document into the folder it came from deletes the menu asset — and with it the
+                // GUID a consumer's FullController `menus:` row resolves. The gate cannot catch it either:
+                // both sides then agree the menu is absent.
+                Debug.LogWarning("[CompileController] '" + sourcePath + "' declares no menu: block, deleting the existing '"
+                    + menuPath + "'. Any FullController menus: row referencing it will dangle. If this source was "
+                    + "produced by DecompileController, the block was dropped by the decompile, not by you.");
+                AssetDatabase.DeleteAsset(menuPath);
             }
 
             // ── 6. Compile-only advisories (into the RunLog body; never fail the compile) ────────────
@@ -181,7 +202,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             int states = doc.Layers.Sum(l => l.Root.CountStates());
             // A menu is reported as total controls across every page, and only when one was emitted — a
             // document with no `menu:` block reads exactly as it did before the surface existed.
-            string menuPart = built.Menu == null ? "" :
+            string menuPart = !emittedMenu ? "" :
                 string.Format(CultureInfo.InvariantCulture, " menu={0}c/{1}p", CountControls(doc.Menu), built.MenuChildren.Count + 1);
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[CompileController] {0}: layers={1} states={2} params={3}{4} => OK{5}",
@@ -486,11 +507,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
             catch (ControllerEmit.EmitException ee) { return "emit: " + ee.Message; }
             catch (Exception e) { return "emit: " + e.GetType().Name + ": " + e.Message; }
 
-            var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
-            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
-                return "post-emit graph lint (" + lint.Errors.Count + "): "
-                     + string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
-            return null;
+            // The proof's side assets are only ever built in memory — the whole point is that nothing is
+            // persisted — so destroy them here. Their folder is swept, but these never reached it.
+            try
+            {
+                var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+                if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
+                    return "post-emit graph lint (" + lint.Errors.Count + "): "
+                         + string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
+                return null;
+            }
+            finally
+            {
+                if (built.Menu != null) UnityEngine.Object.DestroyImmediate(built.Menu);
+                foreach (var child in built.MenuChildren)
+                    if (child != null) UnityEngine.Object.DestroyImmediate(child);
+            }
         }
 
         // Emit failed before any params side-asset was written. whatIf sweeps its temp. A FRESH compile deletes
@@ -508,13 +540,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ProofCompile makes this unreachable for an overwrite (an overwrite is proven lint-clean first), but the
         // guards make the atomicity local rather than resting on that cross-function invariant: delete ONLY a
         // freshly-created controller / params asset, never one that pre-existed the compile.
-        private static void CleanupAfterLint(bool whatIf, string tempFolder, string finalPath, string paramsPath,
-            string menuPath, bool controllerPreExisted, bool paramsPreExisted, bool menuPreExisted, List<string> newFolders)
+        // The lint now runs BEFORE any side asset is written, so there is no params/menu asset from this run
+        // to roll back — only the controller and the folders that carried it.
+        private static void CleanupAfterLint(bool whatIf, string tempFolder, string finalPath,
+            bool controllerPreExisted, List<string> newFolders)
         {
             if (whatIf) { if (tempFolder != null && AssetDatabase.IsValidFolder(tempFolder)) AssetDatabase.DeleteAsset(tempFolder); return; }
             if (!controllerPreExisted) AssetDatabase.DeleteAsset(finalPath);
-            if (!paramsPreExisted && !string.IsNullOrEmpty(paramsPath)) AssetDatabase.DeleteAsset(paramsPath);
-            if (!menuPreExisted && !string.IsNullOrEmpty(menuPath)) AssetDatabase.DeleteAsset(menuPath);
             // Roll folders back only when nothing we created pre-existed — an overwrite keeps the folder (its
             // prior controller lives there); a fresh compile that just deleted its only assets can shed them.
             if (!controllerPreExisted) DeleteEmptyNewFolders(newFolders);
