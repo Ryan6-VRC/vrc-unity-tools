@@ -83,6 +83,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return errors;
         }
 
+        // Rooted in the filesystem sense, spelled without System.IO (Path.IsPathRooted is System.IO, which
+        // this file deliberately does not take): a leading '/' or '\', or a Windows drive prefix "X:".
+        private static bool IsRootedIconPath(string p)
+            => p[0] == '/' || p[0] == '\\' || (p.Length >= 2 && p[1] == ':');
+
         // Rule 7 carrier: one menu page and, recursively, its sub-menus. `where` is the authored path
         // (menu / menu 'Colors' / …) so an offender in a nested page names the page it sits on.
         private static void CheckMenu(List<MenuControl> controls, string where,
@@ -125,6 +130,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         errors.Add($"# menu-undeclared-param: {w} drives '{c.Param}', which the document does not declare under parameters: (at {w})");
                     }
+                }
+
+                // Icon SHAPE only. Whether the file is there, and whether it imported as a Texture2D, is
+                // ControllerEmit's to answer — this validator is System.*-only and cannot reach the
+                // AssetDatabase. What it can rule out is the two spellings that resolve nowhere by
+                // construction: an empty string, and a rooted path (a drive letter or a leading separator),
+                // which is neither a project path nor document-relative and would bake one machine's layout
+                // into a committed document the way an absolute `compiled-from:` once did.
+                if (c.Icon != null)
+                {
+                    if (c.Icon.Trim().Length == 0)
+                        errors.Add($"# menu-icon-empty: {w} declares an empty 'icon' — give it a path or drop the field (at {w})");
+                    else if (IsRootedIconPath(c.Icon))
+                        errors.Add($"# menu-icon-absolute: {w} has an absolute icon path '{c.Icon}' — write a project path (Assets/… or Packages/…) or one relative to this document (at {w})");
                 }
 
                 if (c.Controls != null) CheckMenu(c.Controls, w, wireTypes, scratch, errors);

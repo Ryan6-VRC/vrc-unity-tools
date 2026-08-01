@@ -820,12 +820,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         case "param": ctl.Param = ToStr(kv.Value, $"{where}.param"); break;
                         case "value": ctl.Value = ToNumber(kv.Value, $"{where}.value"); sawValue = true; break;
+                        // Every kind renders an icon, so unlike `value`/`controls` this needs no kind guard.
+                        case "icon": ctl.Icon = ToStr(kv.Value, $"{where}.icon"); break;
                         case "controls":
                             if (ctl.Kind != MenuControlKind.SubMenu)
                                 throw new SchemaException($"{where}: 'controls' is a submenu field — a {ctl.Kind.ToString().ToLowerInvariant()} has no children");
                             ctl.Controls = BindMenu(ToList(kv.Value, $"{where}.controls"), $"{where}.controls");
                             break;
-                        default: throw new SchemaException($"{where}: unknown control field '{kv.Key}' (expected param, value, or controls)");
+                        default: throw new SchemaException($"{where}: unknown control field '{kv.Key}' (expected param, value, icon, or controls)");
                     }
                 }
 

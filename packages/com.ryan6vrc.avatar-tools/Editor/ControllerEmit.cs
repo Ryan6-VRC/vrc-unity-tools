@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -85,6 +86,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // the verbatim GUID so a compile advisory can preserve the round-trip note. A BARE broken ref (no
             // marker) is never recorded here — it still throws EmitException.
             public List<(string state, string guid)> UnresolvedRefs = new List<(string state, string guid)>();
+            // Menu icons whose file is on disk but outside this project's AssetDatabase — emitted as a null
+            // icon instead of a fail-loud throw, and recorded here for a compile advisory. This is the
+            // out-of-project compile (the vrc-patterns gate compiles an entry from an arbitrary filesystem
+            // --root into a host that never loads the entry's package), never an authoring mistake: a path
+            // that resolves to nothing at all still throws. Each entry names the control and the path tried.
+            public List<(string control, string path)> IconsOutsideProject = new List<(string control, string path)>();
         }
 
         // Fail-loud emission error, named so a coordinator/log points straight at the offending construct.
@@ -1154,7 +1161,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // is checked here, where the same exclusion is applied.
                 RefuseReservedMenuParams(_doc.Menu, "menu");
 
-                _result.Menu = BuildMenuPage(_doc.Menu, _doc.ControllerName + "_Menu");
+                _result.Menu = BuildMenuPage(_doc.Menu, _doc.ControllerName + "_Menu", "menu");
             }
 
             private static void RefuseReservedMenuParams(List<MenuControl> controls, string where)
@@ -1169,7 +1176,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            private VRCExpressionsMenu BuildMenuPage(List<MenuControl> controls, string assetName)
+            private VRCExpressionsMenu BuildMenuPage(List<MenuControl> controls, string assetName, string where)
             {
                 var menu = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
                 menu.name = assetName;
@@ -1201,9 +1208,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         control.value = c.Value;
                     }
 
+                    if (c.Icon != null) control.icon = ResolveIcon(c.Icon, $"{where} '{c.Name}'");
+
                     if (c.Kind == MenuControlKind.SubMenu)
                     {
-                        var child = BuildMenuPage(c.Controls, assetName + "_" + SanitizeAssetName(c.Name));
+                        var child = BuildMenuPage(c.Controls, assetName + "_" + SanitizeAssetName(c.Name),
+                            $"{where} '{c.Name}'");
                         _result.MenuChildren.Add(child);
                         control.subMenu = child;
                     }
@@ -1211,6 +1221,89 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     menu.controls.Add(control);
                 }
                 return menu;
+            }
+
+            // Resolve an authored `icon:` to a Texture2D. THREE OUTCOMES, and the middle one is the whole
+            // reason this is not a one-line LoadAssetAtPath:
+            //
+            //   1. It resolves in the AssetDatabase        → the icon is set.
+            //   2. The file is on disk but the path is not reachable as a project path → emit a NULL icon and
+            //      record it for a compile advisory. This is the OUT-OF-PROJECT COMPILE and nothing else: the
+            //      vrc-patterns gate compiles an entry's yaml from an arbitrary filesystem --root into a host
+            //      that never loads that entry's package (ControllerFixpoint.CompileToTemp; the TestEditor
+            //      payload is the SDK + a fixed community list). Failing there would make the field
+            //      unauthorable by exactly the library it exists for.
+            //   3. Nothing at that path → EmitException.
+            //
+            // The soft case is ENVIRONMENTAL, never authorial — which is why the motion-ref precedent is not
+            // the one followed here. A motion ref degrades only when the document explicitly marks it
+            // `unresolved: true`; a bare broken ref throws. There is no authoring-side marker for an icon and
+            // no reason to mint one, so a typo must throw, and the disk probe is what tells a typo apart from
+            // a compile that simply cannot see the file. A missing icon being merely cosmetic (unlike a
+            // missing `mask:`, which silently ships a layer animating the whole avatar) is what makes
+            // degrading admissible at all here.
+            private Texture2D ResolveIcon(string authored, string where)
+            {
+                // RESOLUTION HAPPENS IN ASSET-PATH SPACE WHENEVER IT CAN, and that is not a detail. A project
+                // asset path is NOT a filesystem path: a `file:`-mounted or registry package lives at
+                // `Packages/<name>/…` for the AssetDatabase while its bytes sit anywhere on disk. Doing this
+                // arithmetic with Path.GetFullPath sends `Packages/…` out to the real folder, which is
+                // (correctly) outside the project — so every icon in a mounted package silently took the
+                // out-of-project branch and emitted null. Measured, on the vrc-patterns package mounted into
+                // a Sandbox editor. The filesystem branch below is only for a document that is genuinely not
+                // in the AssetDatabase at all, which is the gate.
+                if (authored.StartsWith("Assets/", StringComparison.Ordinal)
+                    || authored.StartsWith("Packages/", StringComparison.Ordinal))
+                    return LoadIconAsset(authored, authored, where);
+
+                if (string.IsNullOrEmpty(_doc.SourcePath))
+                    throw new EmitException(
+                        $"{where}: icon '{authored}' is document-relative but this document has no source path to resolve it against — write a project path (Assets/… or Packages/…) instead");
+
+                var src = _doc.SourcePath.Replace('\\', '/');
+                if (src.StartsWith("Assets/", StringComparison.Ordinal)
+                    || src.StartsWith("Packages/", StringComparison.Ordinal))
+                {
+                    int cut = src.LastIndexOf('/');
+                    var dir = cut < 0 ? "" : src.Substring(0, cut + 1);
+                    return LoadIconAsset(CollapseDotSegments(dir + authored), authored, where);
+                }
+
+                // The document is outside the AssetDatabase — filesystem arithmetic, and the icon cannot be
+                // loaded however well-formed it is. Present on disk ⇒ advisory + null icon; absent ⇒ fatal.
+                var docDir = Path.GetDirectoryName(Path.GetFullPath(src)) ?? "";
+                var abs = Path.GetFullPath(Path.Combine(docDir, authored)).Replace('\\', '/');
+                if (!File.Exists(abs))
+                    throw new EmitException($"{where}: icon not found — '{authored}' resolved to '{abs}'");
+                _result.IconsOutsideProject.Add((where, abs));
+                return null;
+            }
+
+            // Load a resolved project path as a Texture2D, telling "no asset there" apart from "an asset that
+            // is not a texture" — the repairs differ, so the messages must. AssetPathToGUID, not File.Exists:
+            // a package path has no meaning to the filesystem (see ResolveIcon).
+            private static Texture2D LoadIconAsset(string projectPath, string authored, string where)
+            {
+                var tex = AssetDatabase.LoadAssetAtPath<Texture2D>(projectPath);
+                if (tex != null) return tex;
+                if (!string.IsNullOrEmpty(AssetDatabase.AssetPathToGUID(projectPath)))
+                    throw new EmitException(
+                        $"{where}: icon '{authored}' is at '{projectPath}' but did not load as a Texture2D — check the file is an image the project has imported");
+                throw new EmitException($"{where}: icon not found — '{authored}' resolved to '{projectPath}'");
+            }
+
+            // Collapse "a/b/../c" and "a/./b" inside an ASSET path. Path.GetFullPath would do it, but only by
+            // rooting the result at the filesystem, which is the very thing a package path must not do.
+            private static string CollapseDotSegments(string p)
+            {
+                var outSeg = new List<string>();
+                foreach (var seg in p.Split('/'))
+                {
+                    if (seg.Length == 0 || seg == ".") continue;
+                    if (seg == ".." && outSeg.Count > 0 && outSeg[outSeg.Count - 1] != "..") outSeg.RemoveAt(outSeg.Count - 1);
+                    else outSeg.Add(seg);
+                }
+                return string.Join("/", outSeg);
             }
 
             private static VRCExpressionsMenu.Control.ControlType MapControlType(MenuControlKind k)

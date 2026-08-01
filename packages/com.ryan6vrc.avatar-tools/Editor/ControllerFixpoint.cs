@@ -213,6 +213,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // field. A committed field the schema cannot author is a file in the wrong directory rather than
         // drift worth catching — CONVENTIONS.md routes such a menu to assets/ — but failing loud on it
         // costs nothing here and tells its author their edit was about to be regenerated away.
+        //
+        // ONE FIELD IS COMPARED BUT NOT COVERED: `icon`. It became authorable in the schema, and an entry's
+        // icon lives in that entry's assets/ — which the gate host does not load, so both sides resolve to
+        // null and any real difference between them is invisible here. Closing it means importing the entry
+        // dir before the compile pass, the way the prefab pass already does. Deliberately not done: it is a
+        // gate change, and no library entry authors an icon yet.
         static string MenuDiff(VRCExpressionsMenu a, VRCExpressionsMenu b, string where)
         {
             if (a.name != b.name)
@@ -233,8 +239,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return $"{w}: parameter '{x.parameter?.name}' vs '{y.parameter?.name}'";
                 if (x.value != y.value) return $"{w}: value {x.value} vs {y.value}";
                 if (x.style != y.style) return $"{w}: style {x.style} vs {y.style}";
+                // Both sides read null whenever the entry's own assets/ is absent from THIS host's
+                // AssetDatabase, which is the normal gate condition (the host never loads the package under
+                // test). So this comparison is largely vacuous at the gate and is not what keeps an authored
+                // `icon:` honest — see the class header.
                 if (AssetDatabase.GetAssetPath(x.icon) != AssetDatabase.GetAssetPath(y.icon))
-                    return $"{w}: icon '{AssetDatabase.GetAssetPath(x.icon)}' vs '{AssetDatabase.GetAssetPath(y.icon)}' (the schema cannot author an icon, so the next compile of built/ would drop this one — author the menu in assets/ instead, per CONVENTIONS.md)";
+                    return $"{w}: icon '{AssetDatabase.GetAssetPath(x.icon)}' vs '{AssetDatabase.GetAssetPath(y.icon)}' — regenerate built/";
 
                 var xl = x.labels ?? new VRCExpressionsMenu.Control.Label[0];
                 var yl = y.labels ?? new VRCExpressionsMenu.Control.Label[0];

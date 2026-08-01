@@ -198,6 +198,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var driverIsolation = DriverIsolationAdvisories(doc);
             var unresolvedRefs = UnresolvedRefAdvisories(built);
             var oscUnsafeNames = OscUnsafeNameAdvisories(doc);
+            var outsideIcons = IconAdvisories(built);
 
             int states = doc.Layers.Sum(l => l.Root.CountStates());
             // A menu is reported as total controls across every page, and only when one was emitted — a
@@ -208,7 +209,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 "[CompileController] {0}: layers={1} states={2} params={3}{4} => OK{5}",
                 name, doc.Layers.Count, states, doc.Parameters.Count, menuPart, whatIf ? " (whatIf)" : "");
 
-            string body = BuildBody(doc, finalPath, lint, frameLatency, driverIsolation, unresolvedRefs, oscUnsafeNames, whatIf);
+            string body = BuildBody(doc, finalPath, lint, frameLatency, driverIsolation, unresolvedRefs, oscUnsafeNames, outsideIcons, whatIf);
 
             // ── 7/8. Finalize: whatIf sweeps the temp; a real compile saves the asset ────────────────
             if (whatIf) { if (tempFolder != null) AssetDatabase.DeleteAsset(tempFolder); }
@@ -398,6 +399,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return lines;
         }
 
+        // ── Advisory: menu icons outside the project ─────────────────────────────────────────────────
+        // An `icon:` whose file is on disk but not reachable through the AssetDatabase — ControllerEmit
+        // emitted the control with a null icon rather than fail the compile (a path resolving to NOTHING
+        // stays fatal). Reached in practice only by an out-of-project compile, which is why the line says
+        // what to check rather than what to fix: in a real project this is a defect, at the gate it is normal.
+        private static List<string> IconAdvisories(ControllerEmit.EmitResult built)
+        {
+            var lines = new List<string>();
+            if (built == null || built.IconsOutsideProject == null) return lines;
+            foreach (var (control, path) in built.IconsOutsideProject)
+                lines.Add(control + " — icon `" + path + "` is on disk but outside this project's AssetDatabase; "
+                    + "emitted with no icon. Expected when compiling from outside the project (the gate); "
+                    + "in a project, the file's folder is not imported");
+            return lines;
+        }
+
         // ── Advisory: OSC-unsafe parameter names ─────────────────────────────────────────────────────
         // VRChat's OSC interface replaces a space in a parameter name with '_' (a resulting collision with
         // another param can crash the client), and "# * , ? [ ] { }" are OSC address-pattern metacharacters.
@@ -430,7 +447,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── RunLog body ──────────────────────────────────────────────────────────────────────────────
         private static string BuildBody(AnimDocument doc, string finalPath, LintResult lint,
             List<string> frameLatency, List<string> driverIsolation, List<string> unresolvedRefs,
-            List<string> oscUnsafeNames, bool whatIf)
+            List<string> oscUnsafeNames, List<string> outsideIcons, bool whatIf)
         {
             var sb = new StringBuilder();
             sb.Append("# CompileController: ").Append(doc.ControllerName).Append('\n');
@@ -461,6 +478,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("\n## Compile advisory: unresolved motion refs\n\n");
             if (unresolvedRefs.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in unresolvedRefs) sb.Append("- ").Append(l).Append('\n');
+
+            sb.Append("\n## Compile advisory: menu icons outside the project\n\n");
+            if (outsideIcons.Count == 0) sb.Append("_(none)_\n");
+            else foreach (var l in outsideIcons) sb.Append("- ").Append(l).Append('\n');
 
             sb.Append("\n## Compile advisory: OSC-unsafe parameter names\n\n");
             if (oscUnsafeNames.Count == 0) sb.Append("_(none)_\n");
