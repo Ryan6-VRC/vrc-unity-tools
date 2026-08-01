@@ -1,6 +1,7 @@
 using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 // ReportConsole exists because the MCP read_console door returns only an entry's first line. These pin
 // the properties that make it a fix rather than a second opinion:
@@ -112,6 +113,18 @@ public class ReportConsoleTests
         Assert.AreEqual("", stack);
     }
 
+    // Only the single separator newline is removed. A trailing blank line the payload meant to have
+    // is content, and TrimEnd would have eaten the whole run of them.
+    [Test]
+    public void SplitAt_keepsABlankLineAtTheBoundary()
+    {
+        string body, stack;
+        // "head" 0-3, newlines at 4/5/6, callstack from index 7.
+        ReportConsole.SplitAt("head\n\n\nFoo:Bar ()", 7, out body, out stack);
+        Assert.AreEqual("head\n\n", body);   // one separator gone, the deliberate blank kept
+        Assert.AreEqual("Foo:Bar ()", stack);
+    }
+
     // ----- 3. Type comes from mode bits ------------------------------------------------------
 
     [Test]
@@ -125,15 +138,64 @@ public class ReportConsoleTests
         Assert.AreEqual(ReportConsole.EntryKind.Log, ReportConsole.ClassifyMode(1 << 10));    // ScriptingLog
     }
 
-    // The error bits that are easy to omit: an entry carrying one of these must not read as Log, or
-    // `types:"error"` misses it silently. Verified against UnityEditor.ConsoleWindow.Mode.
+    // ClassifyMode against LIVE entries, not against ErrorMask's own constants. Asserting that
+    // `1<<20 => Error` is true by construction and stays green even if every bit label is wrong --
+    // which is how three unjustified bits got into the mask. This logs one entry of each severity
+    // and requires the classification Unity itself would give, so a wrong bit shows up as a wrong
+    // answer about a real entry.
     [Test]
-    public void ClassifyMode_coversTheLessObviousErrorBits()
+    public void ClassifyMode_matchesUnityOnLiveEntriesOfEachSeverity()
     {
-        Assert.AreEqual(ReportConsole.EntryKind.Error, ReportConsole.ClassifyMode(1 << 4));  // Fatal
-        Assert.AreEqual(ReportConsole.EntryKind.Error, ReportConsole.ClassifyMode(1 << 13)); // StickyError
-        Assert.AreEqual(ReportConsole.EntryKind.Error, ReportConsole.ClassifyMode(1 << 20)); // GraphCompileError
-        Assert.AreEqual(ReportConsole.EntryKind.Error, ReportConsole.ClassifyMode(1 << 22)); // VisualScriptingError
+        string token = "RCSEV-" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
+        // The error and exception below are the point of the test, so the framework must not treat
+        // them as unhandled failures. Scoped tightly and restored.
+        LogAssert.ignoreFailingMessages = true;
+        try
+        {
+            Debug.Log(token + " plain log");
+            Debug.LogWarning(token + " plain warning");
+            Debug.LogError(token + " plain error");
+            Debug.LogException(new System.InvalidOperationException(token + " exception"));
+        }
+        finally
+        {
+            LogAssert.ignoreFailingMessages = false;
+        }
+
+        var kinds = new System.Collections.Generic.Dictionary<string, ReportConsole.EntryKind>();
+        var asm = typeof(UnityEditor.Editor).Assembly;
+        var les = asm.GetType("UnityEditor.LogEntries");
+        var le = asm.GetType("UnityEditor.LogEntry");
+        const System.Reflection.BindingFlags S =
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+        const System.Reflection.BindingFlags I =
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        var fMsg = le.GetField("message", I);
+        var fMode = le.GetField("mode", I);
+        var getEntry = les.GetMethod("GetEntryInternal", S);
+        int n = (int)les.GetMethod("StartGettingEntries", S).Invoke(null, null);
+        try
+        {
+            var inst = System.Activator.CreateInstance(le);
+            for (int i = 0; i < n; i++)
+            {
+                var args = new object[] { i, inst };
+                if (!(bool)getEntry.Invoke(null, args)) continue;
+                string m = fMsg.GetValue(args[1]) as string ?? "";
+                if (!m.Contains(token)) continue;
+                var kind = ReportConsole.ClassifyMode((int)fMode.GetValue(args[1]));
+                if (m.Contains("plain log")) kinds["log"] = kind;
+                else if (m.Contains("plain warning")) kinds["warning"] = kind;
+                else if (m.Contains("plain error")) kinds["error"] = kind;
+                else if (m.Contains("exception")) kinds["exception"] = kind;
+            }
+        }
+        finally { les.GetMethod("EndGettingEntries", S).Invoke(null, null); }
+
+        Assert.AreEqual(ReportConsole.EntryKind.Log, kinds["log"]);
+        Assert.AreEqual(ReportConsole.EntryKind.Warning, kinds["warning"]);
+        Assert.AreEqual(ReportConsole.EntryKind.Error, kinds["error"]);
+        Assert.AreEqual(ReportConsole.EntryKind.Error, kinds["exception"]);
     }
 
     [Test]
@@ -185,6 +247,24 @@ public class ReportConsoleTests
         Assert.IsNull(ReportConsole.BenignLabel(null));
     }
 
+    // The strip takes the whole FAMILY, real failures included -- these pin that honestly rather than
+    // letting the suite imply a safety it does not have. If one of these ever needs to survive, the
+    // predicate has to narrow; until then the reported count is the only trace, which is why the
+    // summary must always carry it (next test).
+    [Test]
+    public void BenignLabel_swallowsRealFailuresOfTheSameFamily()
+    {
+        Assert.AreEqual("MACS third-party load noise",
+            ReportConsole.BenignLabel("[MACS] Failed to apply patch: target method missing"));
+        Assert.AreEqual("FBX importer inconsistent-result noise",
+            ReportConsole.BenignLabel("Import of avatar.fbx failed: inconsistent result in mesh topology"));
+        Assert.AreEqual("VRCFury build-progress",
+            ReportConsole.BenignLabel("VF.Exceptions: build failed during Progress (4/9)"));
+        // Matched via the CALLSTACK, not the body: an exception routed through this frame goes too.
+        Assert.AreEqual("DestroyBlendTreeRecursive",
+            ReportConsole.BenignLabel("NullReferenceException\nVF.DestroyBlendTreeRecursive (at X.cs:1)"));
+    }
+
     // Stripping must be visible in the summary. A dropped entry whose count is not reported is the
     // silent loss this whole tool exists to end -- the text may go, the number may not.
     [Test]
@@ -224,6 +304,59 @@ public class ReportConsoleTests
         // is on disk instead. The entry just logged is the newest, so a small count still contains it.
         string kept = ReportConsole.Report(types: "all", count: 5, stripBenign: false);
         StringAssert.Contains(token, kept);
+    }
+
+    // ----- 6. The Console window's filters bound the read, and must be declared ---------------
+
+    // The most dangerous state this door can be in: a search filter set in the Console window makes
+    // GetEntryInternal enumerate almost nothing, so an unannotated digest reports `scanned=0 => OK`
+    // on a console full of errors -- a cleaner loss than the truncation this tool replaces. Measured
+    // on a live console: 8 entries, 6 with Log hidden, 0 with a search filter. The summary must say so.
+    [Test]
+    public void Report_declaresTheConsoleWindowsOwnFilterState()
+    {
+        var asm = typeof(UnityEditor.Editor).Assembly;
+        var les = asm.GetType("UnityEditor.LogEntries");
+        const System.Reflection.BindingFlags S =
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+        var getFlags = les.GetMethod("get_consoleFlags", S);
+        var setFlags = les.GetMethod("set_consoleFlags", S);
+        var getText = les.GetMethod("GetFilteringText", S);
+        var setText = les.GetMethod("SetFilteringText", S);
+        Assert.NotNull(getFlags, "consoleFlags accessor missing — the disclosure cannot work");
+        Assert.NotNull(getText, "GetFilteringText missing — the disclosure cannot work");
+
+        int origFlags = (int)getFlags.Invoke(null, null);
+        string origText = getText.Invoke(null, null) as string;
+        try
+        {
+            // Unfiltered: nothing to declare.
+            setFlags.Invoke(null, new object[] { origFlags | 128 | 256 | 512 });
+            setText.Invoke(null, new object[] { "" });
+            StringAssert.DoesNotContain("console-filter=", ReportConsole.Report(count: 1));
+
+            // Log severity hidden.
+            setFlags.Invoke(null, new object[] { (origFlags | 128 | 256 | 512) & ~128 });
+            string hidden = ReportConsole.Report(count: 1);
+            StringAssert.Contains("console-filter=", hidden);
+            StringAssert.Contains("log-hidden", hidden);
+            StringAssert.Contains("FILTERED VIEW", hidden);
+
+            // Search box set — the total-blackout case.
+            setFlags.Invoke(null, new object[] { origFlags | 128 | 256 | 512 });
+            setText.Invoke(null, new object[] { "zzz-no-such-text-zzz" });
+            string searched = ReportConsole.Report(count: 1);
+            StringAssert.Contains("search=\"zzz-no-such-text-zzz\"", searched);
+            StringAssert.Contains("FILTERED VIEW", searched);
+        }
+        finally
+        {
+            setText.Invoke(null, new object[] { origText ?? "" });
+            setFlags.Invoke(null, new object[] { origFlags });
+        }
+
+        Assert.AreEqual(origFlags, (int)getFlags.Invoke(null, null), "console flags must be restored");
+        Assert.AreEqual(origText ?? "", getText.Invoke(null, null) as string ?? "", "filter text must be restored");
     }
 
     [Test]

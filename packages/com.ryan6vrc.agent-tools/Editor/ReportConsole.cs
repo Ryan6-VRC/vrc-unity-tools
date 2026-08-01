@@ -13,16 +13,22 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// payload is a list (VRCFury names each dropped binding and its source clip in the body)
     /// arrives there as its header alone — the count survives and the diagnosis does not.
     ///
-    /// Unity hands over everything on request. <c>LogEntry.message</c> holds the body and the
-    /// callstack concatenated, and <c>LogEntry.callstackTextStartUTF16</c> is the exact index where
-    /// the callstack begins — so the two are separated by reading a number Unity already computed,
-    /// never by guessing at which lines look like stack frames. Guessing is what loses payload
-    /// lines; there is no heuristic here to get wrong.
+    /// Unity hands over each entry whole. <c>LogEntry.message</c> holds the body and the callstack
+    /// concatenated, and <c>LogEntry.callstackTextStartUTF16</c> is the exact index where the
+    /// callstack begins — so the two are separated by reading a number Unity already computed, never
+    /// by guessing at which lines look like stack frames. Guessing is what loses payload lines; there
+    /// is no heuristic here to get wrong.
+    ///
+    /// What it does NOT hand over is the whole console: this enumerates the Console *window's* rows,
+    /// so its filters bound the read (see <see cref="ConsoleFilterNote"/>, which names that state).
     ///
     /// INSPECTION ONLY. It does not write to the console it reads — no door here logs, because a
     /// logging console reader pollutes its own next read (and an error it logs is indistinguishable
     /// from a real one to `PlayGate` and to any "console is clean" check). The return value is the
-    /// only channel. Clearing is not mirrored here; `read_console`'s `clear` action was its own.
+    /// only channel. The one caveat is indirect: past the inline budget the digest spills through
+    /// `RunLogFormat.WriteRunLog`, whose asset import can make Unity's own importers log. Nothing this
+    /// door writes lands in the console; something it triggers may.
+    /// Clearing is not mirrored here; `read_console`'s `clear` action was its own.
     /// </summary>
     [AgentTool]
     public static class ReportConsole
@@ -40,8 +46,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// </summary>
         /// <param name="types">Comma-separated subset of <c>error</c>/<c>warning</c>/<c>log</c>, or
         /// <c>all</c>. Anything else is a bare <c>[ReportConsole] FAIL: …</c> naming it.</param>
-        /// <param name="filterText">Keep only entries whose full text contains this (ordinal, case-
-        /// sensitive) — the whole body is matched, not just the header.</param>
+        /// <param name="filterText">Keep only entries whose text contains this (ordinal, case-sensitive).
+        /// The whole ENTRY is matched — body and callstack — not just the header, so a frame name is a
+        /// valid search term. A match also exempts the entry from <paramref name="stripBenign"/>.</param>
         /// <param name="count">Maximum entries returned, taken from the newest end. Clamped to 1..500.</param>
         /// <param name="includeStackTrace">Include each entry's callstack. On by default: for an
         /// exception the frames are the diagnosis, and withholding them by default would reproduce the
@@ -113,7 +120,10 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // Neither a stripped entry nor one Unity declined to hand over is absorbed into a
             // clean-looking count: both are named here, so nothing this door removed is invisible.
-            string summary = "[ReportConsole] scanned=" + scanned + " matched=" + matched + " shown=" + kept.Count
+            // The Console window's own filter state comes first because it bounds everything after
+            // it — a `scanned=` computed under a search filter is a view, not the console.
+            string summary = "[ReportConsole]" + ConsoleFilterNote()
+                + " scanned=" + scanned + " matched=" + matched + " shown=" + kept.Count
                 + BenignNote(benign) + (unreadable > 0 ? " unreadable=" + unreadable : "") + " => OK";
 
             if (body.Length <= InlineBudget)
@@ -182,12 +192,24 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             var list = new List<Entry>();
-            int total;
+            // StartGettingEntries is invoked OUTSIDE the try: if it throws, it never acquired the
+            // console lock, and a finally that called EndGettingEntries anyway would be an unbalanced
+            // end on the one API whose imbalance this pairing exists to prevent. Everything after a
+            // successful Start — the cast included — belongs inside, so drift cannot strand the lock.
+            object rawTotal;
             try
             {
-                // Inside the try: a cast failure on upstream drift must still reach EndGettingEntries,
-                // or the console stays locked for the rest of the session.
-                total = (int)start.Invoke(null, null);
+                rawTotal = start.Invoke(null, null);
+            }
+            catch (Exception ex)
+            {
+                error = "console reflection failed at StartGettingEntries: " + ex.Message;
+                return false;
+            }
+
+            try
+            {
+                int total = (int)rawTotal;
                 var instance = Activator.CreateInstance(logEntryType);
                 for (int i = 0; i < total; i++)
                 {
@@ -210,6 +232,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                         Line = (int)fLine.GetValue(boxed),
                     });
                 }
+            }
+            catch (Exception ex)
+            {
+                // Field types drifting under us (mode becoming uint, say) would otherwise escape as a
+                // raw TargetInvocationException, which through execute_code reads as an opaque MCP
+                // failure rather than this door's named FAIL. Fail loud, in the documented shape.
+                error = "console reflection failed during read: " + ex.Message;
+                return false;
             }
             finally
             {
@@ -234,8 +264,29 @@ namespace Ryan6Vrc.AgentTools.Editor
                 stack = string.Empty;
                 return;
             }
-            body = full.Substring(0, stackStart).TrimEnd('\r', '\n');
-            stack = full.Substring(stackStart).TrimStart('\r', '\n').TrimEnd('\r', '\n');
+            // Remove at most the ONE separator newline on each side. TrimEnd/TrimStart would eat a run,
+            // silently deleting a blank line the payload meant to contain — a small version of exactly
+            // the loss this tool exists to end.
+            body = TrimOneNewlineEnd(full.Substring(0, stackStart));
+            stack = TrimOneNewlineEnd(TrimOneNewlineStart(full.Substring(stackStart)));
+        }
+
+        /// <summary>Drop one trailing newline (CRLF counts as one), never a run.</summary>
+        private static string TrimOneNewlineEnd(string s)
+        {
+            if (s.EndsWith("\r\n", StringComparison.Ordinal)) return s.Substring(0, s.Length - 2);
+            if (s.EndsWith("\n", StringComparison.Ordinal) || s.EndsWith("\r", StringComparison.Ordinal))
+                return s.Substring(0, s.Length - 1);
+            return s;
+        }
+
+        /// <summary>Drop one leading newline (CRLF counts as one), never a run.</summary>
+        private static string TrimOneNewlineStart(string s)
+        {
+            if (s.StartsWith("\r\n", StringComparison.Ordinal)) return s.Substring(2);
+            if (s.StartsWith("\n", StringComparison.Ordinal) || s.StartsWith("\r", StringComparison.Ordinal))
+                return s.Substring(1);
+            return s;
         }
 
         // LogEntry.mode bit flags, mirroring UnityEditor.ConsoleWindow.Mode. This is the authoritative
@@ -251,15 +302,18 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const int ModeScriptingWarning = 1 << 9;
         private const int ModeScriptCompileError = 1 << 11;
         private const int ModeScriptCompileWarning = 1 << 12;
-        private const int ModeStickyError = 1 << 13;
         private const int ModeScriptingException = 1 << 17;
-        private const int ModeGraphCompileError = 1 << 20;
         private const int ModeScriptingAssertion = 1 << 21;
-        private const int ModeVisualScriptingError = 1 << 22;
 
+        // Bits 13, 20 and 22 are deliberately absent. They read as StickyError / GraphCompileError /
+        // VisualScriptingError in ConsoleWindow.Mode, but Unity's LogMessageFlags names 13 and 22
+        // kStickyLog and kStacktraceIsPostprocessed — and bit 22 is measurably set on an ordinary
+        // Debug.LogException, which is not a Visual Scripting entry. Two enums overlay this one int
+        // with different meanings, so the name is not evidence. Measured over a live console, adding
+        // them changes no classification (every such entry already carries bit 8 or 17), so they buy
+        // nothing and would promote a log to an error if the LogMessageFlags reading is the right one.
         private const int ErrorMask = ModeError | ModeAssert | ModeFatal | ModeAssetImportError
-            | ModeScriptingError | ModeScriptCompileError | ModeStickyError | ModeScriptingException
-            | ModeGraphCompileError | ModeScriptingAssertion | ModeVisualScriptingError;
+            | ModeScriptingError | ModeScriptCompileError | ModeScriptingException | ModeScriptingAssertion;
         private const int WarningMask = ModeAssetImportWarning | ModeScriptingWarning | ModeScriptCompileWarning;
 
         /// <summary>Map a <c>LogEntry.mode</c> bitfield to its console type. Error bits win over warning
@@ -272,14 +326,67 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>
+        /// Name the Console window's own filter state when it narrows what can be read, else "".
+        ///
+        /// This matters more than it looks. <c>StartGettingEntries</c>/<c>GetEntryInternal</c> enumerate
+        /// the Console *window's* rows, not the console's backing store, so the window's LogLevel
+        /// toggles, Collapse, and search box all bound this read. Measured on a console holding 8
+        /// entries: 6 with Log hidden, 4 with Error also hidden, and <b>0 with a search filter set</b> —
+        /// at which point an unannotated digest reads <c>scanned=0 … =&gt; OK</c>, certifying a console
+        /// full of errors as clean. That is a worse loss than the truncation this tool exists to fix, so
+        /// a narrowing state is named before any count that it bounds.
+        ///
+        /// Reported, never corrected: clearing the operator's filters would fight their UI and mutate
+        /// state this door has no business touching. The caller is told, and decides.
+        /// </summary>
+        public static string ConsoleFilterNote()
+        {
+            var les = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntries");
+            if (les == null) return "";
+            const BindingFlags S = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+            var getFlags = les.GetMethod("get_consoleFlags", S);
+            var getText = les.GetMethod("GetFilteringText", S);
+            if (getFlags == null || getText == null)
+                return " console-filter=[unknown: cannot read the Console window's filter state]";
+
+            var narrowing = new List<string>();
+            try
+            {
+                int flags = (int)getFlags.Invoke(null, null);
+                string text = getText.Invoke(null, null) as string;
+                // ConsoleWindow.ConsoleFlags: Collapse=1, LogLevelLog=128, LogLevelWarning=256,
+                // LogLevelError=512. A cleared level bit hides that whole severity from the read.
+                if (!string.IsNullOrEmpty(text)) narrowing.Add("search=\"" + text + "\"");
+                if ((flags & 128) == 0) narrowing.Add("log-hidden");
+                if ((flags & 256) == 0) narrowing.Add("warning-hidden");
+                if ((flags & 512) == 0) narrowing.Add("error-hidden");
+                if ((flags & 1) != 0) narrowing.Add("collapse");
+            }
+            catch (Exception ex)
+            {
+                return " console-filter=[unknown: " + ex.Message + "]";
+            }
+
+            if (narrowing.Count == 0) return "";
+            return " console-filter=[" + string.Join(", ", narrowing.ToArray())
+                + "] THIS READ IS A FILTERED VIEW, not the whole console";
+        }
+
+        /// <summary>
         /// The label of the known-benign noise family matching this entry, or null when it is signal.
         /// <paramref name="full"/> is the entry's whole text (body and callstack) — several of these
         /// families identify themselves in the stack, not the message.
         ///
         /// These are substring heuristics against third-party and importer output, so they are
-        /// re-validated by reading that source, never by a green test run. Each one is a family whose
-        /// every member is noise: none discriminates a benign instance of a real diagnostic from a
-        /// dangerous one, which is the property that makes dropping them safe.
+        /// re-validated by reading that source, never by a green test run.
+        ///
+        /// They match the FAMILY, not a safe subset of it — a real failure from one of these sources is
+        /// dropped along with its chatter. `[MACS]` takes that package's `Failed to apply patch` too
+        /// (deliberately: the whole source is noise here); the other three match the callstack as well
+        /// as the body, so an exception routed through one of those frames goes with them. That is the
+        /// accepted cost of a default-on strip, and the reason the summary always reports the counts:
+        /// when one of these families is implicated in a real failure, the count is the trace that says
+        /// to re-run with <c>stripBenign: false</c>. `ReportConsoleTests` pins the collisions by name.
         /// </summary>
         public static string BenignLabel(string full)
         {
