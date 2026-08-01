@@ -751,7 +751,7 @@ public class ReportShapeOverlapTests
     [Test]
     public void ModularAvatarInstalled_trueWhenReferenced()
     {
-        Assert.IsTrue(ReportShapeOverlap.ModularAvatarInstalled(),
+        Assert.IsTrue(VendorReflect.ModularAvatarInstalled(),
             "MA is referenced by the test asmdef; the presence probe's assembly name must match");
     }
 

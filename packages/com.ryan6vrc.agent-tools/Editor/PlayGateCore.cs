@@ -151,7 +151,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             // Blind-detection self-check (finding-#1 policy): resolve the pinned FWD type in the loaded
             // domain. Resolved once; only consulted when an avatar actually carries VRCFury.
-            var fwdType = ResolveType(FwdFeatureFullName);
+            var fwdType = VendorReflect.FindType(FwdFeatureFullName);
             bool blindReported = false; // the blind FAIL is domain-global — emit it once, not per avatar
 
             foreach (var d in descriptors)
@@ -288,20 +288,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(false))
                     if (mb != null && mb.GetType().FullName == EmulatorBinding.EmulatorFullName && mb.isActiveAndEnabled)
                         return mb;
-            return null;
-        }
-
-        // Resolve a type by full name across the loaded domain (the FWD-present-in-project blind check).
-        // A genuinely-absent type returns null → the caller treats absence as a safe silent skip.
-        private static Type ResolveType(string fullName)
-        {
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                Type t;
-                try { t = asm.GetType(fullName, false); }
-                catch { continue; }
-                if (t != null) return t;
-            }
             return null;
         }
 

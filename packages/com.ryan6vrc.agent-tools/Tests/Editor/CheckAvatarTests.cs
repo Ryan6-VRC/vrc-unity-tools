@@ -32,11 +32,15 @@ internal static class CheckAvatarFixture
         return go;
     }
 
-    internal static void SetSeam(string field, object value) =>
-        typeof(CheckAvatar).GetField(field, BindingFlags.NonPublic | BindingFlags.Static).SetValue(null, value);
+    // Seams live on CheckAvatar (frame/merge seams) or VendorReflect (the shared AOR boxing/pin seams) —
+    // one lookup covers both homes so a test names the seam, not the type that holds it.
+    private static FieldInfo SeamField(string field) =>
+        typeof(CheckAvatar).GetField(field, BindingFlags.NonPublic | BindingFlags.Static)
+        ?? typeof(VendorReflect).GetField(field, BindingFlags.NonPublic | BindingFlags.Static);
 
-    internal static object GetSeam(string field) =>
-        typeof(CheckAvatar).GetField(field, BindingFlags.NonPublic | BindingFlags.Static).GetValue(null);
+    internal static void SetSeam(string field, object value) => SeamField(field).SetValue(null, value);
+
+    internal static object GetSeam(string field) => SeamField(field).GetValue(null);
 
     // The artifact path off a summary's `| log=` trailer; null when the summary carries none (a bad-input
     // refusal must not point at an artifact — that is itself asserted below).
@@ -68,7 +72,7 @@ public class CheckAvatarTests
     private GameObject _avatar;
     private string _logPath;
     private object _origBoxed, _origResolve, _origAnchor;
-    private object _origMergePairs, _origDynamics;
+    private object _origMergePairs, _origDynamics, _origVrcfRewrite;
 
     [SetUp]
     public void SetUp()
@@ -81,10 +85,11 @@ public class CheckAvatarTests
         EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", "AgentCheckAvatarTmp");
         _origBoxed = GetSeam("GetBoxedValue");
-        _origResolve = GetSeam("ResolveGetOverload");
+        _origResolve = GetSeam("ResolveAorGetOverload");
         _origAnchor = GetSeam("FrameAnchorOverride");
         _origMergePairs = GetSeam("ResolveMergePairs");
         _origDynamics = GetSeam("CollectDynamicsTargets");
+        _origVrcfRewrite = GetSeam("ResolveVrcfRewritePath");
     }
 
     [TearDown]
@@ -117,10 +122,11 @@ public class CheckAvatarTests
     private void ResetSeams()
     {
         SetSeam("GetBoxedValue", _origBoxed);
-        SetSeam("ResolveGetOverload", _origResolve);
+        SetSeam("ResolveAorGetOverload", _origResolve);
         SetSeam("FrameAnchorOverride", _origAnchor);
         SetSeam("ResolveMergePairs", _origMergePairs);
         SetSeam("CollectDynamicsTargets", _origDynamics);
+        SetSeam("ResolveVrcfRewritePath", _origVrcfRewrite);
     }
 
     private static string Inspect(string root) => CheckAvatar.Inspect(root);
@@ -431,7 +437,7 @@ public class CheckAvatarTests
         // Stale referencePath but a live targetObject → targetObject-first must resolve it in the fallback.
         AddMaObjectToggle(outfit, "Stale_wrong_path", bone);
 
-        SetSeam("ResolveGetOverload", (Func<Type, MethodInfo>)(_ => null)); // force the Get(Component) overload unreachable
+        SetSeam("ResolveAorGetOverload", (Func<Type, MethodInfo>)(_ => null)); // force the Get(Component) overload unreachable
         var r = Inspect("LintSelfResolve");
         ReadLog(r);
 
@@ -530,13 +536,13 @@ public class CheckAvatarTests
         Assert.IsFalse(ok, "a present-but-null animator is an intentional empty, not drift — stays quiet");
     }
 
-    // ── W12: the frame walk resolves relativePathRoot the way the BUILD does ──────────────────────────
+    // ── W12/A1: the frame walk resolves relativePathRoot the way the BUILD does ───────────────────────
     //
     // MergeAnimatorProcessor calls relativePathRoot.Get(avatarRootTransform) and falls back to
-    // merge.gameObject on null, so TryMaFrame must mirror AvatarObjectReference.Get(Component)'s order —
-    // empty path first, then an IN-AVATAR targetObject, then the AVATAR_ROOT sentinel, then the path. It read
-    // targetObject first with no empty-path guard, which is the INSPECTOR's order (nondestructive.md), so the
-    // three tests below all reported a frame the build never uses. Each fails against the pre-W12 walk.
+    // merge.gameObject on null. Since A1, TryMaFrame INVOKES that same Get(Component) rather than mirroring
+    // its order (W12's hand-copy was wrong on the day it landed — the drift class invoking closes), so these
+    // tests now pin the invoke wiring end-to-end against MA's real resolution: empty path first, then an
+    // IN-AVATAR targetObject, then the AVATAR_ROOT sentinel, then the path. Each fails against the pre-W12 walk.
 
     // The frame root TryMaFrame computes for c, via the same reflective call the B2 test above uses.
     private GameObject MaFrameRoot(Component c, GameObject avatarGO)
@@ -656,6 +662,74 @@ public class CheckAvatarTests
             "with no avatar root to resolve against, nothing resolves and the build mounts at the own GameObject");
     }
 
+    // ── A1: the frame walk INVOKES Get(Component), and the hand-walk survives only as the drift fallback ─
+
+    // Get re-derives the avatar root internally, and FindAvatarTransformInParents walks to the OUTERMOST
+    // descriptor — so a nested descriptor above the merge site no longer skews the frame the way the
+    // nearest-descriptor avatarGO DetectAuto hands in could. The referencePath is stored relative to the
+    // root the BUILD uses (the outermost), so resolving it against the nearest one reported a frame the
+    // build never mounts. Fails against the pre-A1 hand-walk, which did Find(path) on avatarGO directly.
+    [Test]
+    public void TryMaFrame_nestedDescriptor_resolvesAgainstOutermostRoot()
+    {
+        var outer = NewAvatar("LintMaNested");
+        var inner = NewChild(outer, "Inner");
+        inner.AddComponent<VRCAvatarDescriptor>(); // nested descriptor: nearest-root ≠ outermost-root
+        var mount = NewChild(inner, "Mount");
+        var outfit = NewChild(inner, "Outfit");
+        var c = AddMaMergeAnimator(outfit, NewController("MaNestedCtrl", NewClip(TmpDir, "MaNestedClip", "Bone")),
+            "Inner/Mount", null); // outermost-relative, as the build stores it
+
+        Assert.AreSame(mount, MaFrameRoot(c, inner),
+            "Get walks to the outermost root, so the outermost-relative referencePath resolves even when the caller hands in the nearest descriptor");
+    }
+
+    // The invoke tier unreachable (MA API drift) ⇒ the hand-walk fallback resolves in Get's order, LOUD,
+    // and still carries the childless-"Armature" decoy swap — the fallback is the only place that copy of
+    // the order legitimately survives, and it must not shed the swap the way the pre-W12 copy did.
+    [Test]
+    public void TryMaFrame_getUnreachable_fallsBackLoud_withDecoySwap()
+    {
+        var a = NewAvatar("LintMaFallback");
+        var body = NewChild(a, "Body");
+        NewChild(body, "Armature");                    // childless decoy, created first so Find hits it
+        var realArmature = NewChild(body, "Armature"); // the true armature
+        NewChild(realArmature, "Bone");
+        var outfit = NewChild(a, "Outfit");
+        var c = AddMaMergeAnimator(outfit, NewController("MaFallbackCtrl", NewClip(TmpDir, "MaFallbackClip", "Bone")),
+            "Body/Armature", null);
+
+        SetSeam("ResolveAorGetOverload", (Func<Type, MethodInfo>)(_ => null)); // force the invoke tier unreachable
+        LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex("relativePathRoot resolve degraded"));
+
+        Assert.AreSame(realArmature, MaFrameRoot(c, a),
+            "the degraded self-resolve keeps Get's order including the decoy swap — and says so out loud");
+    }
+
+    // A1 (C3): rewrite rules present but VRCFury's RewritePath unreachable ⇒ the frame carries the
+    // VRCF.RewritePath anchor (R-H rail) and NO rewriter — never a silent identity that would fabricate
+    // plausible-but-false binding results. Fails against the pre-A1 replication, which rewrote regardless.
+    [Test]
+    public void TryVrcfFrame_rewriteRulesWithUnreachableRewritePath_anchorsTheFrame()
+    {
+        var a = NewAvatar("LintVrcfRwDrift");
+        var prop = NewChild(a, "Prop");
+        var c = AddVrcfFullController(prop, NewController("RwDriftCtrl", NewClip(TmpDir, "RwDriftClip", "X")), prop);
+        SetVrcfRewriteBindings(c, ("From", "To", false));
+
+        SetSeam("ResolveVrcfRewritePath", (Func<MethodInfo>)(() => null)); // force the pin unreachable
+
+        var args = new object[] { c, null, null };
+        bool ok = (bool)typeof(CheckAnimator).GetMethod("TryVrcfFrame", BindingFlags.NonPublic | BindingFlags.Static)
+            .Invoke(null, args);
+        Assert.IsTrue(ok, "a present FullController is a frame");
+        var frame = args[2];
+        Assert.AreEqual("VRCF.RewritePath", frame.GetType().GetField("UnreflectedAnchor").GetValue(frame),
+            "rules-present + RewritePath unreachable must anchor the frame, not silently skip the rewrite");
+        Assert.IsNull(frame.GetType().GetField("PathRewrite").GetValue(frame),
+            "no rewriter is handed out when the vendor method is unreachable — the anchor says why");
+    }
+
     // Rider 1 (R-K symmetry): post-W9 the generic scan emits an MA-scene-ref offender for the
     // targetObject-only shape, but MaFrameUncertaintyNote returned null for it — an offender with no frame
     // line beside it, which reads as a dropped ref rather than a relocated frame. Both must be present.
@@ -705,7 +779,7 @@ public class CheckAvatarTests
         {
             AddMaObjectToggle(outfit, "Stale_wrong_path", outsider);
 
-            SetSeam("ResolveGetOverload", (Func<Type, MethodInfo>)(_ => null)); // force the degraded self-resolve
+            SetSeam("ResolveAorGetOverload", (Func<Type, MethodInfo>)(_ => null)); // force the degraded self-resolve
             var r = Inspect("LintSelfResolveOutside");
             ReadLog(r);
 
@@ -765,7 +839,7 @@ public class CheckAvatarTests
         foreach (var c in CheckAvatar.DynamicsCategories)
             AssertTypeGetter(c.typeName, c.getter);
         // pin ColliderDetail's field names on the real collider type (a rename must go red, not silently blank the detail)
-        var col = CheckSeam.FindType("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider");
+        var col = VendorReflect.FindType("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider");
         Assert.IsNotNull(col, "collider type unresolved (drift)");
         foreach (var f in new[] { "shapeType", "radius", "height" })
             Assert.IsNotNull(col.GetField(f), "collider field unresolved (drift): " + f);
@@ -773,7 +847,7 @@ public class CheckAvatarTests
 
     private static void AssertTypeGetter(string typeName, string getter)
     {
-        var t = CheckSeam.FindType(typeName);
+        var t = VendorReflect.FindType(typeName);
         Assert.IsNotNull(t, "type unresolved (drift): " + typeName);
         Assert.IsNotNull(t.GetMethod(getter, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null),
             "getter unresolved (drift): " + typeName + "." + getter);
@@ -782,7 +856,7 @@ public class CheckAvatarTests
     [Test] public void CollectDynamics_RealPhysbone_NullRoot_UsesOwnTransform()
     {
         var root = NewAvatar("PB");
-        var pbType = CheckSeam.FindType("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone");
+        var pbType = VendorReflect.FindType("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone");
         Assert.IsNotNull(pbType);
         var child = NewChild(root, "Bone");
         child.AddComponent(pbType); // rootTransform defaults null

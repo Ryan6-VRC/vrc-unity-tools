@@ -104,13 +104,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         // UNCONDITIONALLY on the resolution hot path (no test-only conditional in production); a test swaps one
         // in SetUp and restores it in TearDown to force a branch. Defaults are the real behaviour.
 
-        /// <summary>Boxes an <c>AvatarObjectReference</c> property (default <c>p.boxedValue</c>, which THROWS
-        /// for unsupported shapes — R-J). A test swaps a throwing variant to exercise the caught-and-degrade path.</summary>
-        internal static Func<SerializedProperty, object> GetBoxedValue = p => p.boxedValue;
-
-        /// <summary>Resolves the pinned <c>Get(Component)→GameObject</c> overload for a boxed reference type
-        /// (default <see cref="PinGetOverloadImpl"/>; null ⇒ unreachable/drift → self-resolve fallback).</summary>
-        internal static Func<Type, MethodInfo> ResolveGetOverload = PinGetOverloadImpl;
+        // The AOR boxing/pin seams (GetBoxedValue / ResolveAorGetOverload) live in VendorReflect — one home
+        // for the vendor-invocation plumbing this scan and CheckAnimator's frame walk both resolve through.
 
         /// <summary>Maps a discovered frame's unreflected-anchor (default identity). A test injects an anchor
         /// onto a real MA/VRCF frame to exercise the R-H fail-loud surface for a drift it can't construct live.</summary>
@@ -161,7 +156,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static void AddCategory(GameObject avatarGO, List<(Component, Transform, string, string)> result,
             string category, string typeName, string getterName, bool withShape)
         {
-            var type = CheckSeam.FindType(typeName);
+            var type = VendorReflect.FindType(typeName);
             if (type == null) return; // SDK/category absent ⇒ skip
             var getter = type.GetMethod(getterName, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
             if (getter == null)
@@ -509,29 +504,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        // Cached pinned instance overload: AvatarObjectReference.Get(Component) -> GameObject. Pinned by
-        // parameter type == Component AND return type == GameObject, so a future/other Get overload (e.g. the
-        // static Get(SerializedProperty)) can never be silently mis-bound. Sentinel _pinAttempted guards a
-        // one-time reflect; null MethodInfo ⇒ unreachable (API drift / MA absent).
-        private static bool _pinAttempted;
-        private static MethodInfo _getOverload;
-        private static MethodInfo PinGetOverloadImpl(Type aorType)
-        {
-            if (_pinAttempted) return _getOverload;
-            _pinAttempted = true;
-            try
-            {
-                foreach (var m in aorType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
-                {
-                    if (m.Name != "Get" || m.ReturnType != typeof(GameObject)) continue;
-                    var ps = m.GetParameters();
-                    if (ps.Length == 1 && ps[0].ParameterType == typeof(Component)) { _getOverload = m; break; }
-                }
-            }
-            catch { _getOverload = null; }
-            return _getOverload;
-        }
-
         // Resolve an AvatarObjectReference property. Authoritative path: box it (guarded — boxedValue THROWS
         // for unsupported shapes, R-J) and invoke the pinned Get(Component), which returns null on an empty
         // referencePath BEFORE it looks at targetObject and only then lets a live targetObject win, and only
@@ -550,12 +522,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             string reason = null;
 
             object boxed = null;
-            try { boxed = GetBoxedValue(aor); }
+            try { boxed = VendorReflect.GetBoxedValue(aor); }
             catch (Exception e) { reason = "boxedValue threw (" + e.GetType().Name + ")"; }
 
             if (reason == null && boxed != null)
             {
-                var mi = ResolveGetOverload(boxed.GetType());
+                var mi = VendorReflect.ResolveAorGetOverload(boxed.GetType());
                 if (mi == null) reason = "Get(Component) overload unreachable (MA API drift / absent)";
                 else
                 {

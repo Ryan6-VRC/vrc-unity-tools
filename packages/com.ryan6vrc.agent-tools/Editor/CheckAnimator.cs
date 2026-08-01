@@ -196,16 +196,17 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // MA MergeAnimator: pathMode 0=Relative, 1=Absolute (confirmed live). Absolute ⇒ basis is the avatar
-        // root. Relative ⇒ mount at the resolved relativePathRoot, and the resolution order is the BUILD's,
-        // not the inspector's: MergeAnimatorProcessor calls relativePathRoot.Get(avatarRootTransform) and
-        // falls back to merge.gameObject when it returns null, so this mirrors AvatarObjectReference
-        // .Get(Component) — an empty referencePath is null WHATEVER targetObject holds, then a targetObject
-        // that sits under the avatar root, then the AVATAR_ROOT sentinel, then the path — and only a null
-        // from all of that lands on the component's OWN GameObject. Reading targetObject first (the
-        // inspector's Get(SerializedProperty) order) reports a frame the build never uses; nondestructive.md
-        // owns why the two orders differ. The path branch also mirrors Get(Component)'s childless-"Armature"
-        // sibling swap (MA issue #308) — see ResolveArmatureDecoy for why silence makes that one mandatory.
-        // Returns true iff c is an MA MergeAnimator that references a controller (out via controller).
+        // root. Relative ⇒ mount at the resolved relativePathRoot, resolved by INVOKING MA's own
+        // Get(Component) on the boxed reference with the avatar root as container — the build's literal call
+        // (MergeAnimatorProcessor: relativePathRoot.Get(avatarRootTransform)) — and a null from it lands on
+        // the component's OWN GameObject, as the build's does. Invoking rather than mirroring is the point:
+        // the hand-walked copy of Get's order this method used to carry was wrong twice (the inspector's
+        // targetObject-first order, then a fresh copy missing the childless-"Armature" swap), so the order
+        // now lives only in MA; nondestructive.md owns why the two Get overloads' orders differ. The boxed
+        // copy also keeps Get's internal result cache cold and private — the live component's reference is
+        // never touched. The hand-walk survives only as the loud, explicitly-labeled drift fallback below
+        // (TryResolveSceneRef's two-tier shape). Returns true iff c is an MA MergeAnimator that references
+        // a controller (out via controller).
         internal static bool TryMaFrame(Component c, GameObject avatarGO,
             out AnimatorController controller, out FrameResult frame)
         {
@@ -245,24 +246,50 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     unreflected = unreflected ?? "MA.relativePathRoot"; // B2: field absent (drift) — anchor before the best-effort fallback
                 }
-                else
+                else if (avatarGO != null)
                 {
-                    var target = rel.FindPropertyRelative("targetObject");
-                    var refPath = rel.FindPropertyRelative("referencePath");
-                    string path = refPath != null ? refPath.stringValue : "";
-                    var tgo = target != null ? target.objectReferenceValue as GameObject : null;
-                    // Empty path ⇒ Get(Component) returns null before it ever reads targetObject; avatarGO
-                    // null (no descriptor above the merge site — DetectAuto already says so out loud) is the
-                    // build's FindAvatarTransformInParents miss, which returns null the same way. Both land
-                    // on the own-GameObject fallback below, exactly as the build does.
-                    if (!string.IsNullOrEmpty(path) && avatarGO != null)
+                    // avatarGO null (no descriptor above the merge site — DetectAuto already says so out
+                    // loud) is the build's FindAvatarTransformInParents miss: no invoke, own-GameObject
+                    // fallback below, exactly as the build. With a root in hand, Get re-derives the avatar
+                    // root internally anyway (FindAvatarTransformInParents walks to the OUTERMOST root), so
+                    // a nested descriptor above c can no longer skew the frame the way the nearest-descriptor
+                    // avatarGO handed in by DetectAuto could.
+                    string reason = null;
+                    object boxed = null;
+                    try { boxed = VendorReflect.GetBoxedValue(rel); }
+                    catch (Exception e) { reason = "boxedValue threw (" + e.GetType().Name + ")"; }
+                    if (reason == null && boxed == null) reason = "boxedValue was null";
+                    if (reason == null)
                     {
-                        if (tgo != null && tgo.transform.IsChildOf(avatarGO.transform)) root = tgo;
-                        else if (path == MaAvatarRootSentinel) root = avatarGO;
+                        var mi = VendorReflect.ResolveAorGetOverload(boxed.GetType());
+                        if (mi == null) reason = "Get(Component) overload unreachable (MA API drift / absent)";
                         else
                         {
-                            var t = ResolveArmatureDecoy(avatarGO.transform.Find(path));
-                            root = t != null ? t.gameObject : null;
+                            try { root = mi.Invoke(boxed, new object[] { avatarGO.transform }) as GameObject; }
+                            catch (Exception e) { reason = "Get(Component) invoke threw (" + e.GetType().Name + ")"; }
+                        }
+                    }
+                    if (reason != null)
+                    {
+                        // Degraded self-resolve from the serialized children, in Get(Component)'s order —
+                        // loud, because a silent degrade would hide exactly the drift the invoke tier exists
+                        // to survive. This copy of the order is fallback-only by design: while MA reflects,
+                        // it never runs, so it can no longer drift silently into the primary result.
+                        Debug.LogWarning("[CheckAnimator] MA relativePathRoot resolve degraded on " + PathOf(c.gameObject)
+                                       + " (" + reason + ") — self-resolving from serialized children (empty referencePath first, then an in-avatar targetObject, then the sentinel, then the path).");
+                        var target = rel.FindPropertyRelative("targetObject");
+                        var refPath = rel.FindPropertyRelative("referencePath");
+                        string path = refPath != null ? refPath.stringValue : "";
+                        var tgo = target != null ? target.objectReferenceValue as GameObject : null;
+                        if (!string.IsNullOrEmpty(path))
+                        {
+                            if (tgo != null && tgo.transform.IsChildOf(avatarGO.transform)) root = tgo;
+                            else if (path == MaAvatarRootSentinel) root = avatarGO;
+                            else
+                            {
+                                var t = ResolveArmatureDecoy(avatarGO.transform.Find(path));
+                                root = t != null ? t.gameObject : null;
+                            }
                         }
                     }
                 }
@@ -277,12 +304,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         // "Armature" is redirected to the same-named sibling that has children. Applies to the PATH branch
         // only — MA runs it on Find()'s result, not on a targetObject.
         //
-        // Mirroring a vendor quirk is normally the wrong instinct, and this one is mandatory anyway: skipping
-        // it moves the frame with nothing left to say so. TryResolveSceneRef invokes MA's REAL Get, so it sees
-        // the swapped object, resolves, and stays quiet — no scene-ref offender, no R-K caveat — while the
-        // walk below would mount at the decoy. The decoy is childless by construction, so every binding in
-        // the merged controller then fails against it: a flood of false clip-binding offenders under a clean
-        // Notes section. A silent wrong frame is the exact defect this walk exists to prevent.
+        // FALLBACK-ONLY since the invoke tier landed: the primary path invokes MA's real Get, which does this
+        // swap itself. The degraded self-resolve still needs it, and skipping it there is silent: the decoy is
+        // childless by construction, so mounting at it fails every binding in the merged controller — a flood
+        // of false clip-binding offenders under a clean Notes section, with nothing left to say why.
         internal static Transform ResolveArmatureDecoy(Transform resolved)
         {
             if (resolved == null || resolved.name != "Armature" || resolved.childCount != 0) return resolved;
@@ -359,82 +384,53 @@ namespace Ryan6Vrc.AgentTools.Editor
             var over = content.FindPropertyRelative("rootObjOverride");
             if (over != null && over.objectReferenceValue is GameObject go) root = go;
             if (root == null) root = c.gameObject;
+            var pathRewrite = BuildVrcfRewriter(content, ref unreflected);
             frame = new FrameResult
             {
                 Root = root, Kind = FrameKind.VRCF, IsAbsolute = false, UnreflectedAnchor = unreflected,
-                PathRewrite = BuildVrcfRewriter(content), // this component's rules only — no cross-controller bleed
+                PathRewrite = pathRewrite, // this component's rules only — no cross-controller bleed
             };
             return true;
         }
 
-        // Extract the VRCFury FullController "Path Rewrite Rules" (content.rewriteBindings: from/to/delete)
-        // and build a path transform replicating VF.Feature.FullControllerBuilder.RewritePath (+
-        // ClipRewritersService.Join). The build runs these BEFORE the nearest-match ancestor walk, so a
-        // caller resolves the rewritten path against the ancestor chain. Reads only THIS content's rules, so
-        // two FullControllers on one mount (e.g. one with rules, one without) never cross-contaminate.
+        // The VRCFury FullController "Path Rewrite Rules" (content.rewriteBindings) as a path transform. The
+        // build runs these BEFORE the nearest-match ancestor walk, so a caller resolves the rewritten path
+        // against the ancestor chain. The transform INVOKES the build's own implementation —
+        // VF.Feature.FullControllerBuilder.RewritePath(model, path), on THIS content's boxed feature model,
+        // so two FullControllers on one mount never cross-contaminate — rather than replicating it: invoked,
+        // the rule semantics can't drift, and no near-copy of VRCFury code lives in this repo (VRCFury is not
+        // FOSS-licensed — a replication is a licensing question as well as a drift hazard). RewritePath only
+        // reads model.rewriteBindings, so handing it the live managed reference mutates nothing.
         // Returns null when there are no rules (identity). The transform returns null for a path a delete
         // rule drops (that binding is removed at build — not a real break).
-        private static Func<string, string> BuildVrcfRewriter(SerializedProperty content)
+        //
+        // Rules present + RewritePath unreachable (drift) or the model unboxable ⇒ anchor via `unreflected`
+        // (the R-H fail-loud rail) and identity: resolving with a silent identity rewrite would fabricate
+        // plausible-but-false binding results with nothing left to say why, so the caveat rides the frame.
+        private static Func<string, string> BuildVrcfRewriter(SerializedProperty content, ref string unreflected)
         {
             var arr = content.FindPropertyRelative("rewriteBindings");
-            if (arr == null || !arr.isArray || arr.arraySize == 0) return null;
-            var rules = new List<(string from, string to, bool delete)>();
-            for (int i = 0; i < arr.arraySize; i++)
+            if (arr == null || !arr.isArray || arr.arraySize == 0) return null; // no rules ⇒ identity
+            object model = null;
+            try { model = content.managedReferenceValue; } catch { /* unboxable ⇒ anchored below */ }
+            var mi = VendorReflect.ResolveVrcfRewritePath();
+            if (model == null || mi == null || !mi.GetParameters()[0].ParameterType.IsInstanceOfType(model))
             {
-                var el = arr.GetArrayElementAtIndex(i);
-                var f = el.FindPropertyRelative("from");
-                var t = el.FindPropertyRelative("to");
-                var d = el.FindPropertyRelative("delete");
-                rules.Add((f != null ? f.stringValue : "", t != null ? t.stringValue : "", d != null && d.boolValue));
+                unreflected = unreflected ?? "VRCF.RewritePath";
+                return null;
             }
             return path =>
             {
-                foreach (var (rawFrom, rawTo, delete) in rules)
+                try { return (string)mi.Invoke(null, new object[] { model, path }); }
+                catch (Exception e)
                 {
-                    string from = TrimTrailingSlashes(rawFrom ?? "");
-                    string to = TrimTrailingSlashes(rawTo ?? "");
-                    if (from == "")
-                    {
-                        path = VrcfJoin(to, path);
-                        if (delete) return null;
-                    }
-                    else if (path.StartsWith(from + "/", StringComparison.Ordinal))
-                    {
-                        path = VrcfJoin(to, path.Substring(from.Length + 1));
-                        if (delete) return null;
-                    }
-                    else if (path == from)
-                    {
-                        path = to;
-                        if (delete) return null;
-                    }
+                    // A post-pin throw is a broken rule row, not API drift; leave the path un-rewritten and
+                    // say so, rather than silently fabricating a rewrite.
+                    Debug.LogWarning("[CheckAnimator] VRCFury RewritePath invoke threw (" + e.GetType().Name
+                                   + ") on '" + path + "' — path left un-rewritten.");
+                    return path;
                 }
-                return path;
             };
-        }
-
-        private static string TrimTrailingSlashes(string s)
-        {
-            while (s.EndsWith("/", StringComparison.Ordinal)) s = s.Substring(0, s.Length - 1);
-            return s;
-        }
-
-        // Replicates VF.Service.ClipRewritersService.Join (allowAdvancedOperators=true): '/'-join with a
-        // leading-'/' reset, '..' pop, and '.'/'' segments omitted.
-        private static string VrcfJoin(string a, string b)
-        {
-            var ret = new List<string>();
-            foreach (var path in new[] { a, b })
-            {
-                if (path.StartsWith("/", StringComparison.Ordinal)) ret.Clear();
-                foreach (var part in path.Split('/'))
-                {
-                    if (part == ".." && ret.Count > 0 && ret[ret.Count - 1] != "..") ret.RemoveAt(ret.Count - 1);
-                    else if (part == "." || part == "") { /* omit */ }
-                    else ret.Add(part);
-                }
-            }
-            return string.Join("/", ret);
         }
 
         private static AutoResult? ParseVrcFury(Component c, AnimatorController controller)

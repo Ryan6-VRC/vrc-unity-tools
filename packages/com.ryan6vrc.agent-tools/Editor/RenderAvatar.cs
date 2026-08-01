@@ -145,7 +145,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // (e.g. AmbiguousMatchException) at class load yields a null handle → the drift note at call time,
         // never a TypeInitializationException from a field initializer. `?.` on the Types short-circuits a
         // null declaring type before the call is even made.
-        private static readonly Type PreviewSessionType = ResolveNdmfType("nadena.dev.ndmf.preview.PreviewSession");
+        private static readonly Type PreviewSessionType = VendorReflect.FindType("nadena.dev.ndmf.preview.PreviewSession");
         private static readonly PropertyInfo PiCurrent = SafeGetProperty(PreviewSessionType, "Current",
             BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly FieldInfo FiProxySession = SafeGetField(PreviewSessionType, "_proxySession",
@@ -174,21 +174,21 @@ namespace Ryan6Vrc.AgentTools.Editor
         // appends a note — the gate still runs exactly as before, its blind spot documented in-band.
         private const string HorizonDriftNote =
             " | note=change-horizon sweep unavailable (NDMF internals drifted) — a recent scripted edit may not be visible to the settle gate";
-        private static readonly Type ObjectWatcherType = ResolveNdmfType("nadena.dev.ndmf.cs.ObjectWatcher");
+        private static readonly Type ObjectWatcherType = VendorReflect.FindType("nadena.dev.ndmf.cs.ObjectWatcher");
         private static readonly PropertyInfo PiOwInstance = SafeGetProperty(ObjectWatcherType, "Instance",
             BindingFlags.Static | BindingFlags.Public);
         private static readonly FieldInfo FiPropertyMonitor = SafeGetField(ObjectWatcherType, "PropertyMonitor",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly MethodInfo MiCheckAllObjects = SafeGetMethodNoArgs(FiPropertyMonitor?.FieldType,
             "CheckAllObjects", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        private static readonly Type SyncContextType = ResolveNdmfType("nadena.dev.ndmf.preview.NDMFSyncContext");
+        private static readonly Type SyncContextType = VendorReflect.FindType("nadena.dev.ndmf.preview.NDMFSyncContext");
         private static readonly MethodInfo MiSyncScope = SafeGetMethodNoArgs(SyncContextType, "Scope",
             BindingFlags.Static | BindingFlags.Public);
         private static readonly FieldInfo FiInternalContext = SafeGetField(SyncContextType, "InternalContext",
             BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly MethodInfo MiTurn = SafeGetMethodNoArgs(FiInternalContext?.FieldType, "Turn",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        private static readonly Type ComputeContextType = ResolveNdmfType("nadena.dev.ndmf.preview.ComputeContext");
+        private static readonly Type ComputeContextType = VendorReflect.FindType("nadena.dev.ndmf.preview.ComputeContext");
         // FlushInvalidates is overloaded — the Type.EmptyTypes lookup picks the parameterless one
         // (a bare GetMethod would throw AmbiguousMatchException and null the handle).
         private static readonly MethodInfo MiFlushInvalidates = SafeGetMethodNoArgs(ComputeContextType,
@@ -221,10 +221,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             + "handle is missing or its return type changed, so every target would resolve to no-avatar-root "
             + "and render ungated (a silent OK-stale). Re-pin the resolver handle before trusting a sheet";
         private static readonly Type PreviewSceneManagerType =
-            ResolveNdmfType("nadena.dev.ndmf.preview.NDMFPreviewSceneManager");
+            VendorReflect.FindType("nadena.dev.ndmf.preview.NDMFPreviewSceneManager");
         private static readonly MethodInfo MiIsPreviewScene = SafeGetMethod(PreviewSceneManagerType, "IsPreviewScene",
             BindingFlags.Static | BindingFlags.Public);
-        private static readonly Type NdmfPreviewType = ResolveNdmfType("nadena.dev.ndmf.preview.NDMFPreview");
+        private static readonly Type NdmfPreviewType = VendorReflect.FindType("nadena.dev.ndmf.preview.NDMFPreview");
         private static readonly MethodInfo MiGetOriginalForProxy = SafeGetMethod(NdmfPreviewType, "GetOriginalObjectForProxy",
             BindingFlags.Static | BindingFlags.Public);
 
@@ -232,7 +232,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // RuntimeUtil.FindAvatarInParents(Transform) → the OUTERMOST avatar root at/above the target,
         // using NDMF's own AllRootTypes (VRCAvatarDescriptor is registered by VRChatPlatform via
         // PlatformRegistry's InitializeOnLoad). Reflected only because this asmdef has references:[].
-        private static readonly Type RuntimeUtilType = ResolveNdmfType("nadena.dev.ndmf.runtime.RuntimeUtil");
+        private static readonly Type RuntimeUtilType = VendorReflect.FindType("nadena.dev.ndmf.runtime.RuntimeUtil");
         private static readonly MethodInfo MiFindAvatarInParents = SafeGetMethod(RuntimeUtilType,
             "FindAvatarInParents", BindingFlags.Static | BindingFlags.Public);
 
@@ -1401,17 +1401,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return byName != null ? byName.gameObject : null;
         }
 
-        // Assembly-scan for an NDMF internal type by qualified name (references:[] rules out typeof).
-        // Never throws — a scan miss or a load fault on any assembly just yields null → the drift note.
-        private static Type ResolveNdmfType(string fullName)
-        {
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                try { var t = asm.GetType(fullName); if (t != null) return t; }
-                catch { /* dynamic / unloadable assembly — skip */ }
-            }
-            return null;
-        }
+        // NDMF internal types resolve through VendorReflect.FindType (references:[] rules out typeof).
 
         // Member-handle resolution that NEVER throws — a null declaring type, a missing member, or a
         // throwing lookup (e.g. AmbiguousMatchException) all yield null → the drift note at call time. The
