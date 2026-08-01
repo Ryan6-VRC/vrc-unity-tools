@@ -340,18 +340,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static SeamResolution DefaultResolveSeam(GameObject baseGO, GameObject mergeGO)
             => ResolveMergeMap(mergeGO, baseGO);
 
-        internal static Type FindType(string fullName) =>
-            AppDomain.CurrentDomain.GetAssemblies()
-                .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
-                .FirstOrDefault(t => t.FullName == fullName);
-
         // A ModularAvatar BoneProxy is the anchor-style seam neither pair collector resolves (it maps no
         // humanoid bones), so it lands in the zero-pairs REFUSE — but it is a legitimate offset-tolerant
         // attachment, not a bare prop. Reflected by name (this asmdef has no MA reference). Null type
         // (MA absent) or no component ⇒ false ⇒ treated as bare (the honest floor when we can't confirm one).
         private static bool HasBoneProxy(GameObject mergeGO)
         {
-            var t = FindType("nadena.dev.modular_avatar.core.ModularAvatarBoneProxy");
+            var t = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarBoneProxy");
             return t != null && mergeGO.GetComponentInChildren(t, true) != null;
         }
 
@@ -360,7 +355,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Reflected by name and failing to false on an absent MA, exactly as HasBoneProxy does.
         private static bool HasMergeArmature(GameObject mergeGO)
         {
-            var t = FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
+            var t = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
             return t != null && mergeGO.GetComponentInChildren(t, true) != null;
         }
 
@@ -372,7 +367,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // reaches the same abstain by throwing on a null GetLinks; MA hands back null, so it is caught here.)
         private static void CollectMaPairs(GameObject mergeGO, SeamResolution res)
         {
-            var maType = FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
+            var maType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
             if (maType == null) return; // MA not installed ⇒ no MA seam
             var getMapping = maType.GetMethod("GetBonesMapping", BindingFlags.Public | BindingFlags.Instance);
             if (getMapping == null) throw new MissingMethodException("ModularAvatarMergeArmature.GetBonesMapping");
@@ -411,11 +406,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         // both are resolution failures (thrown → caught upstream; null → thrown here → caught upstream).
         private static void CollectVrcfPairs(GameObject mergeGO, GameObject avatarGO, SeamResolution res)
         {
-            var vrcfType = FindType("VF.Model.VRCFury");
+            var vrcfType = VendorReflect.FindType("VF.Model.VRCFury");
             if (vrcfType == null) return; // VRCFury not installed ⇒ no VRCFury seam
-            var armLinkType = FindType("VF.Model.Feature.ArmatureLink");
-            var svcType = FindType("VF.Service.ArmatureLinkService");
-            var vfGoType = FindType("VF.Utils.VFGameObject");
+            var armLinkType = VendorReflect.FindType("VF.Model.Feature.ArmatureLink");
+            var svcType = VendorReflect.FindType("VF.Service.ArmatureLinkService");
+            var vfGoType = VendorReflect.FindType("VF.Utils.VFGameObject");
             if (armLinkType == null || svcType == null || vfGoType == null)
                 throw new TypeLoadException("VRCFury ArmatureLink/Service/VFGameObject type missing");
 

@@ -144,7 +144,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Reflectively read MA ModularAvatarShapeChanger rows under `outfitRoot` and ingest the ShapeName of every
         // row whose write-target resolves to `bodyGO` (the resolved body SMR's GameObject). ChangeType is captured
         // (Delete=0, Set=1); a Delete row is ingested like any other declared shape, not dropped. This asmdef has
-        // no MA assembly reference, so everything is by-name reflection (mirrors CheckSeam.FindType).
+        // no MA assembly reference, so everything is by-name reflection (VendorReflect.FindType).
         //
         // Failure doctrine (this tool exists to catch the invisible weight-0 ShapeChangers, so a silent truncation
         // is the worst outcome): MA absent ⇒ silent no-op (the honest floor). MA PRESENT but a renamed member —
@@ -155,14 +155,14 @@ namespace Ryan6Vrc.AgentTools.Editor
         // tool exists to surface.
         private static void IngestShapeChangers(GameObject outfitRoot, GameObject bodyGO, Ingested result, Action<string> add)
         {
-            var scType = FindType("nadena.dev.modular_avatar.core.ModularAvatarShapeChanger");
+            var scType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarShapeChanger");
             if (scType == null)
             {
                 // A null type is ambiguous: MA genuinely absent (silent — the legitimate floor) vs MA installed
                 // but the type renamed/moved (or its assembly failed to load types). Probe MA presence by the
                 // runtime assembly — far more stable than any one type's FullName — so the drifted case is loud,
                 // not a silent `=> OK` with every reaction dropped (the worst outcome for this tool).
-                if (ModularAvatarInstalled())
+                if (VendorReflect.ModularAvatarInstalled())
                     Debug.LogWarning("[ReportShapeOverlap] MA is installed but ModularAvatarShapeChanger did not resolve " +
                         "(type renamed/moved, or its assembly failed to load types); reactions NOT ingested. The co-active " +
                         "set may be missing weight-0 ShapeChanger shapes.");
@@ -172,13 +172,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Member handles resolved once. Any null here means MA is installed but its API drifted from ours —
             // surface it loudly rather than return a silently-empty reaction set the agent would trust.
             var shapesProp = scType.GetProperty("Shapes", BindingFlags.Public | BindingFlags.Instance);
-            var csType = FindType("nadena.dev.modular_avatar.core.ChangedShape");
+            var csType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ChangedShape");
             var objField = csType?.GetField("Object");
             var nameField = csType?.GetField("ShapeName");
             var ctField = csType?.GetField("ChangeType");
             var valField = csType?.GetField("Value");
-            var aorType = FindType("nadena.dev.modular_avatar.core.AvatarObjectReference");
-            var getMethod = aorType?.GetMethod("Get", new[] { typeof(Component) }); // Get(Component container)
+            var aorType = VendorReflect.FindType("nadena.dev.modular_avatar.core.AvatarObjectReference");
+            var getMethod = aorType == null ? null : VendorReflect.ResolveAorGetOverload(aorType); // strict pin: Get(Component)→GameObject
             if (shapesProp == null || objField == null || nameField == null || ctField == null || valField == null || getMethod == null)
             {
                 Debug.LogWarning("[ReportShapeOverlap] MA ShapeChanger reflection drift — a member (Shapes / " +
@@ -242,27 +242,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
             }
         }
-
-        internal static Type FindType(string fullName) =>
-            AppDomain.CurrentDomain.GetAssemblies()
-                .SelectMany(SafeGetTypes)
-                .FirstOrDefault(t => t.FullName == fullName);
-
-        // ReflectionTypeLoadException carries the types that DID load in .Types (with null holes), so one
-        // unloadable type in MA's assembly can't hide ModularAvatarShapeChanger behind a whole-assembly drop.
-        private static IEnumerable<Type> SafeGetTypes(Assembly a)
-        {
-            try { return a.GetTypes(); }
-            catch (ReflectionTypeLoadException e) { return e.Types.Where(t => t != null); }
-            catch { return Array.Empty<Type>(); }
-        }
-
-        // MA-present probe independent of any single type resolving: the runtime assembly name is far more
-        // stable than a type's FullName, so `scType == null` WITH this true means the type drifted (loud),
-        // vs MA genuinely absent (silent). Assembly rename would defeat it, but that is a far larger break.
-        internal static bool ModularAvatarInstalled() =>
-            AppDomain.CurrentDomain.GetAssemblies()
-                .Any(a => a.GetName().Name == "nadena.dev.modular-avatar.core");
 
         // ── Pure core ─────────────────────────────────────────────────────────────────────────────────────
 

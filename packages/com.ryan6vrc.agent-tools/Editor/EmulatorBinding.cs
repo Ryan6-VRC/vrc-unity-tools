@@ -76,17 +76,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         public static readonly string[] ParamEntryCommonFields = { "name", "value", "synced" };
         public const string ExpressionValue = "expressionValue";
 
-        /// <summary>Resolve a type by full name across the loaded domain; null when genuinely absent.</summary>
-        public static Type ResolveType(string fullName)
-        {
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                Type t;
-                try { t = asm.GetType(fullName, false); }
-                catch { continue; }
-                if (t != null) return t;
-            }
-            return null;
-        }
+        /// <summary>Resolve a type by full name across the loaded domain; null when genuinely absent.
+        /// The public door verify.md's snippets call; the resolver itself is VendorReflect's.</summary>
+        public static Type ResolveType(string fullName) => VendorReflect.FindType(fullName);
     }
 }
