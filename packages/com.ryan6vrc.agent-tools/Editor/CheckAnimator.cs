@@ -149,7 +149,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
                 else if (fn == "VF.Model.VRCFury")
                 {
-                    var m = ParseVrcFury(c, controller);
+                    var m = ParseVrcFury(c, controller, notes);
                     if (m != null) mergeMatches.Add(m.Value);
                 }
                 else if (plainAnimator == null && c is Animator anim && anim.runtimeAnimatorController == controller)
@@ -187,7 +187,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public GameObject Root;       // the binding-basis root (mount, or avatar root for Absolute)
             public FrameKind Kind;
             public bool IsAbsolute;       // MA Absolute pathMode (basis is the avatar root, not a mount)
-            public string UnreflectedAnchor; // non-null ⇒ a required frame field failed to reflect (fail loud)
+            public string UnreflectedAnchor; // non-null ⇒ a required frame field or vendor invoke failed to reflect (fail loud)
             // VRCF only: the FullController's "Path Rewrite Rules" (rewriteBindings) as a path transform,
             // applied to each binding path BEFORE the nearest-match ancestor walk (the build applies them in
             // that order). null ⇒ identity (no rules). Returns null for a path a delete-rule drops (the
@@ -266,11 +266,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                         else
                         {
                             try { root = mi.Invoke(boxed, new object[] { avatarGO.transform }) as GameObject; }
-                            catch (Exception e) { reason = "Get(Component) invoke threw (" + e.GetType().Name + ")"; }
+                            catch (Exception e) { reason = "Get(Component) invoke threw (" + VendorReflect.DescribeInvokeError(e) + ")"; }
                         }
                     }
                     if (reason != null)
                     {
+                        unreflected = unreflected ?? "MA.Get(Component)"; // in-band caveat beside the console line
                         // Degraded self-resolve from the serialized children, in Get(Component)'s order —
                         // loud, because a silent degrade would hide exactly the drift the invoke tier exists
                         // to survive. This copy of the order is fallback-only by design: while MA reflects,
@@ -419,24 +420,37 @@ namespace Ryan6Vrc.AgentTools.Editor
                 unreflected = unreflected ?? "VRCF.RewritePath";
                 return null;
             }
+            bool warned = false; // the rewriter runs once per binding path; a broken rule row throws for ALL of them
             return path =>
             {
                 try { return (string)mi.Invoke(null, new object[] { model, path }); }
                 catch (Exception e)
                 {
                     // A post-pin throw is a broken rule row, not API drift; leave the path un-rewritten and
-                    // say so, rather than silently fabricating a rewrite.
-                    Debug.LogWarning("[CheckAnimator] VRCFury RewritePath invoke threw (" + e.GetType().Name
-                                   + ") on '" + path + "' — path left un-rewritten.");
+                    // say so ONCE — per-path repeats would flood the console on a real FX controller.
+                    if (!warned)
+                    {
+                        warned = true;
+                        Debug.LogWarning("[CheckAnimator] VRCFury RewritePath invoke threw (" + VendorReflect.DescribeInvokeError(e)
+                                       + ") on '" + path + "' — paths left un-rewritten (repeat throws for this rewriter suppressed).");
+                    }
                     return path;
                 }
             };
         }
 
-        private static AutoResult? ParseVrcFury(Component c, AnimatorController controller)
+        private static AutoResult? ParseVrcFury(Component c, AnimatorController controller, List<string> notes)
         {
             if (!TryVrcfFrame(c, out var controllers, out var frame)) return null;
             if (!controllers.Contains(controller)) return null; // not OUR controller (silent skip, as before)
+            // Rules present but the RewritePath pin unreachable is the one anchor that can ride a frame
+            // carrying OUR controller (the field-absent anchors arrive on frames the Contains check already
+            // skips), so dropping it here would run the walk with an identity rewrite and say nothing —
+            // an inflated brokenBinding count with false sample offenders. Surface it as a note.
+            if (frame.UnreflectedAnchor == "VRCF.RewritePath")
+                notes.Add("VRCFury Path Rewrite Rules on '" + PathOf(c.gameObject) + "' could not be applied " +
+                          "(RewritePath did not reflect — VRCFury API drift/absent), so brokenBinding may be " +
+                          "inflated by paths those rules would relocate.");
             return new AutoResult
             {
                 Root = frame.Root, BuildRewrite = true,

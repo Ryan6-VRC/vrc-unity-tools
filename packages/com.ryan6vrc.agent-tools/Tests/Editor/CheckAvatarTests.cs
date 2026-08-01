@@ -684,9 +684,10 @@ public class CheckAvatarTests
             "Get walks to the outermost root, so the outermost-relative referencePath resolves even when the caller hands in the nearest descriptor");
     }
 
-    // The invoke tier unreachable (MA API drift) ⇒ the hand-walk fallback resolves in Get's order, LOUD,
-    // and still carries the childless-"Armature" decoy swap — the fallback is the only place that copy of
-    // the order legitimately survives, and it must not shed the swap the way the pre-W12 copy did.
+    // The invoke tier unreachable (MA API drift) ⇒ the hand-walk fallback resolves in Get's order, LOUD
+    // both out-of-band (console) and in-band (the MA.Get(Component) anchor — the degrade can diverge from
+    // the build under a nested descriptor, so the frame must carry its own caveat) — and still applies the
+    // childless-"Armature" decoy swap the pre-W12 copy shed.
     [Test]
     public void TryMaFrame_getUnreachable_fallsBackLoud_withDecoySwap()
     {
@@ -702,8 +703,34 @@ public class CheckAvatarTests
         SetSeam("ResolveAorGetOverload", (Func<Type, MethodInfo>)(_ => null)); // force the invoke tier unreachable
         LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex("relativePathRoot resolve degraded"));
 
-        Assert.AreSame(realArmature, MaFrameRoot(c, a),
+        var args = new object[] { c, a, null, null };
+        Assert.IsTrue((bool)typeof(CheckAnimator).GetMethod("TryMaFrame", BindingFlags.NonPublic | BindingFlags.Static)
+            .Invoke(null, args), "the fixture MA MergeAnimator must be recognised as a frame");
+        var frame = args[3];
+        Assert.AreSame(realArmature, frame.GetType().GetField("Root").GetValue(frame),
             "the degraded self-resolve keeps Get's order including the decoy swap — and says so out loud");
+        Assert.AreEqual("MA.Get(Component)", frame.GetType().GetField("UnreflectedAnchor").GetValue(frame),
+            "the degraded frame carries an in-band caveat, not just a console line");
+    }
+
+    // The one anchor that can ride a frame carrying OUR controller must surface on CheckAnimator's own
+    // door: rules present + RewritePath unreachable ⇒ a Notes line, so the (possibly inflated)
+    // brokenBinding count is never presented uncaveated.
+    [Test]
+    public void Lint_rewriteRulesWithUnreachableRewritePath_notesTheInflationRisk()
+    {
+        var a = NewAvatar("LintVrcfRwNote");
+        var prop = NewChild(a, "Prop");
+        var ctrl = NewController("RwNoteCtrl", NewClip(TmpDir, "RwNoteClip", "Relocated/X"));
+        var c = AddVrcfFullController(prop, ctrl, prop);
+        SetVrcfRewriteBindings(c, ("Relocated", "", false));
+
+        SetSeam("ResolveVrcfRewritePath", (Func<MethodInfo>)(() => null)); // force the pin unreachable
+
+        var r = CheckAnimator.Lint(ctrl, "auto", mergeSite: "LintVrcfRwNote/Prop");
+        var log = ReadLog(r);
+        StringAssert.Contains("could not be applied", log,
+            "the un-applied rewrite rules must be named beside the count they may inflate: " + log);
     }
 
     // A1 (C3): rewrite rules present but VRCFury's RewritePath unreachable ⇒ the frame carries the

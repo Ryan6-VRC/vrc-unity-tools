@@ -532,7 +532,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 else
                 {
                     try { return (mi.Invoke(boxed, new object[] { host }) as GameObject) != null; }
-                    catch (Exception e) { reason = "Get(Component) invoke threw (" + e.GetType().Name + ")"; }
+                    catch (Exception e) { reason = "Get(Component) invoke threw (" + VendorReflect.DescribeInvokeError(e) + ")"; }
                 }
             }
             else if (reason == null) reason = "boxedValue was null";

@@ -57,25 +57,38 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Cached pinned instance overload: AvatarObjectReference.Get(Component) -> GameObject. Pinned by
         // parameter type == Component AND return type == GameObject, so a future/other Get overload (e.g. the
         // static Get(SerializedProperty), whose resolution order differs — nondestructive.md owns why) can
-        // never be silently mis-bound. Sentinel _aorPinAttempted guards a one-time reflect; null MethodInfo
-        // ⇒ unreachable (API drift / MA absent).
-        private static bool _aorPinAttempted;
-        private static MethodInfo _aorGetOverload;
+        // never be silently mis-bound. Memoized PER TYPE (null included): ScanSceneRefs pins the runtime
+        // type of anything AOR-*shaped* (a referencePath + targetObject child pair), so a single global slot
+        // would let whichever type arrived first answer for every later one — and a foreign first arrival
+        // would silently blind every consumer of the pin.
+        private static readonly System.Collections.Generic.Dictionary<Type, MethodInfo> _aorPins =
+            new System.Collections.Generic.Dictionary<Type, MethodInfo>();
         private static MethodInfo PinAorGetOverloadImpl(Type aorType)
         {
-            if (_aorPinAttempted) return _aorGetOverload;
-            _aorPinAttempted = true;
+            if (_aorPins.TryGetValue(aorType, out var cached)) return cached;
+            MethodInfo pin = null;
             try
             {
                 foreach (var m in aorType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
                 {
                     if (m.Name != "Get" || m.ReturnType != typeof(GameObject)) continue;
                     var ps = m.GetParameters();
-                    if (ps.Length == 1 && ps[0].ParameterType == typeof(Component)) { _aorGetOverload = m; break; }
+                    if (ps.Length == 1 && ps[0].ParameterType == typeof(Component)) { pin = m; break; }
                 }
             }
-            catch { _aorGetOverload = null; }
-            return _aorGetOverload;
+            catch { pin = null; }
+            _aorPins[aorType] = pin;
+            return pin;
+        }
+
+        /// <summary>The diagnostic name+message for a failed reflective invoke: unwraps the
+        /// <see cref="TargetInvocationException"/> shell <c>MethodInfo.Invoke</c> puts around whatever the
+        /// vendor method threw, so a reason string names the actual cause instead of always reading
+        /// "TargetInvocationException".</summary>
+        internal static string DescribeInvokeError(Exception e)
+        {
+            var inner = (e as TargetInvocationException)?.InnerException ?? e;
+            return inner.GetType().Name + ": " + inner.Message;
         }
 
         // ── VRCFury FullControllerBuilder.RewritePath(FullController, string) ────────────────────────────
