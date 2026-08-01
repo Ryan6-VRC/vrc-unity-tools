@@ -166,6 +166,12 @@ public class CheckAvatarTests
     }
 
     private Component AddMaMergeAnimator(GameObject go, AnimatorController ctrl)
+        => AddMaMergeAnimator(go, ctrl, null, null);
+
+    // Relative MergeAnimator. refPath/targetGO set the relativePathRoot's two halves INDEPENDENTLY (a null
+    // refPath leaves both untouched) — the frame walk's whole contract is which half wins when, so the
+    // fixture must be able to write the inconsistent combinations a real scene can carry.
+    private Component AddMaMergeAnimator(GameObject go, AnimatorController ctrl, string refPath, GameObject targetGO)
     {
         var t = Resolve("nadena.dev.modular_avatar.core.ModularAvatarMergeAnimator");
         Assert.IsNotNull(t, "MA MergeAnimator type must resolve");
@@ -173,6 +179,12 @@ public class CheckAvatarTests
         var so = new SerializedObject(c);
         so.FindProperty("animator").objectReferenceValue = ctrl;
         so.FindProperty("pathMode").enumValueIndex = 0; // Relative
+        if (refPath != null)
+        {
+            var rel = so.FindProperty("relativePathRoot");
+            rel.FindPropertyRelative("referencePath").stringValue = refPath;
+            rel.FindPropertyRelative("targetObject").objectReferenceValue = targetGO;
+        }
         so.ApplyModifiedPropertiesWithoutUndo();
         return c;
     }
@@ -516,6 +528,115 @@ public class CheckAvatarTests
         bool ok = (bool)typeof(CheckAnimator).GetMethod("TryMaFrame", BindingFlags.NonPublic | BindingFlags.Static)
             .Invoke(null, args);
         Assert.IsFalse(ok, "a present-but-null animator is an intentional empty, not drift — stays quiet");
+    }
+
+    // ── W12: the frame walk resolves relativePathRoot the way the BUILD does ──────────────────────────
+    //
+    // MergeAnimatorProcessor calls relativePathRoot.Get(avatarRootTransform) and falls back to
+    // merge.gameObject on null, so TryMaFrame must mirror AvatarObjectReference.Get(Component)'s order —
+    // empty path first, then an IN-AVATAR targetObject, then the AVATAR_ROOT sentinel, then the path. It read
+    // targetObject first with no empty-path guard, which is the INSPECTOR's order (nondestructive.md), so the
+    // three tests below all reported a frame the build never uses. Each fails against the pre-W12 walk.
+
+    // The frame root TryMaFrame computes for c, via the same reflective call the B2 test above uses.
+    private GameObject MaFrameRoot(Component c, GameObject avatarGO)
+    {
+        var args = new object[] { c, avatarGO, null, null };
+        bool ok = (bool)typeof(CheckAnimator).GetMethod("TryMaFrame", BindingFlags.NonPublic | BindingFlags.Static)
+            .Invoke(null, args);
+        Assert.IsTrue(ok, "the fixture MA MergeAnimator must be recognised as a frame");
+        var frame = args[3];
+        return (GameObject)frame.GetType().GetField("Root").GetValue(frame);
+    }
+
+    // Empty referencePath ⇒ Get(Component) returns null BEFORE reading targetObject ⇒ build mounts at the
+    // component's own GameObject. Pre-W12 this returned the targetObject: the wrong-frame report W12 names.
+    [Test]
+    public void TryMaFrame_emptyPathLiveTarget_usesOwnGameObject()
+    {
+        var a = NewAvatar("LintMaEmptyPath");
+        var outfit = NewChild(a, "Outfit");
+        var decoy = NewChild(a, "Decoy");
+        var c = AddMaMergeAnimator(outfit, NewController("MaEmptyCtrl", NewClip(TmpDir, "MaEmptyClip", "Bone")),
+            "", decoy); // targetObject set, referencePath left empty — the shape W9's scan started flagging
+
+        Assert.AreSame(outfit, MaFrameRoot(c, a),
+            "an empty referencePath resolves to null whatever targetObject holds, so the build mounts at the own GameObject");
+    }
+
+    // Both MA Get overloads gate targetObject on IsChildOf(avatarRoot) — one pointing outside the avatar
+    // resolves to nothing, and the non-empty path decides the frame instead.
+    [Test]
+    public void TryMaFrame_targetObjectOutsideAvatar_isIgnored()
+    {
+        var a = NewAvatar("LintMaOutside");
+        var outfit = NewChild(a, "Outfit");
+        var mount = NewChild(a, "Mount");
+        var outsider = new GameObject("OutsideTheAvatar"); // sibling of the avatar root, not under it
+        try
+        {
+            var c = AddMaMergeAnimator(outfit, NewController("MaOutsideCtrl", NewClip(TmpDir, "MaOutsideClip", "Bone")),
+                "Mount", outsider);
+
+            Assert.AreSame(mount, MaFrameRoot(c, a),
+                "a targetObject outside the avatar root resolves under neither MA overload — the path decides the frame");
+        }
+        finally { UnityEngine.Object.DestroyImmediate(outsider); }
+    }
+
+    // referencePath == AvatarObjectReference.AVATAR_ROOT is a sentinel, not a hierarchy path: Get(Component)
+    // returns the avatar root for it. Pre-W12 the walk fed it to Transform.Find, got null, and fell back to
+    // the own GameObject — a Relative merge silently reported at the wrong depth.
+    [Test]
+    public void TryMaFrame_avatarRootSentinel_mountsAtAvatarRoot()
+    {
+        var a = NewAvatar("LintMaSentinel");
+        var outfit = NewChild(a, "Outfit");
+        var c = AddMaMergeAnimator(outfit, NewController("MaSentinelCtrl", NewClip(TmpDir, "MaSentinelClip", "Bone")),
+            "$$$AVATAR_ROOT$$$", null);
+
+        Assert.AreSame(a, MaFrameRoot(c, a), "the AVATAR_ROOT sentinel resolves to the avatar root, not a child named after it");
+    }
+
+    // Rider 1 (R-K symmetry): post-W9 the generic scan emits an MA-scene-ref offender for the
+    // targetObject-only shape, but MaFrameUncertaintyNote returned null for it — an offender with no frame
+    // line beside it, which reads as a dropped ref rather than a relocated frame. Both must be present.
+    [Test]
+    public void Inspect_emptyPathLiveTarget_notesTheFrameBesideTheOffender()
+    {
+        var a = NewAvatar("LintMaFrameNote");
+        var outfit = NewChild(a, "Outfit");
+        var decoy = NewChild(a, "Decoy");
+        AddMaMergeAnimator(outfit, NewController("MaNoteCtrl", NewClip(TmpDir, "MaNoteClip", "Bone")), "", decoy);
+
+        var r = Inspect("LintMaFrameNote");
+        var log = ReadLog(r);
+
+        StringAssert.Contains("maSceneRef=1", r, "W9's scan still flags the targetObject-only ref: " + r);
+        StringAssert.Contains("frame-certain", log,
+            "the offender must carry its frame caption — the frame is the own GameObject, the REF is what is broken: " + log);
+    }
+
+    // Rider 2: the degraded self-resolve (MA API drift) accepted ANY live targetObject, skipping the
+    // IsChildOf gate both real overloads apply — a false negative on the one path that exists to survive drift.
+    [Test]
+    public void SelfResolve_targetObjectOutsideAvatar_isNotResolved()
+    {
+        var a = NewAvatar("LintSelfResolveOutside");
+        var outfit = NewChild(a, "Outfit");
+        var outsider = new GameObject("OutsideTheAvatar");
+        try
+        {
+            AddMaObjectToggle(outfit, "Stale_wrong_path", outsider);
+
+            SetSeam("ResolveGetOverload", (Func<Type, MethodInfo>)(_ => null)); // force the degraded self-resolve
+            var r = Inspect("LintSelfResolveOutside");
+            ReadLog(r);
+
+            StringAssert.Contains("maSceneRef=1", r,
+                "an out-of-avatar targetObject resolves nowhere at bake — the degraded path must flag it, not accept it: " + r);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(outsider); }
     }
 
     // ── Inspection-class: no scene dirtying, no .anim write ───────────────────────────────────────────

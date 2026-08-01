@@ -35,6 +35,11 @@ namespace Ryan6Vrc.AgentTools.Editor
     [AgentTool]
     public static class CheckAnimator
     {
+        // AvatarObjectReference.AVATAR_ROOT — the referencePath a root-targeting MA scene ref carries.
+        // Get(Component) resolves it to the avatar root, so the frame walk below must too; CheckAvatar's
+        // scene-ref scan reads the same literal from here.
+        internal const string MaAvatarRootSentinel = "$$$AVATAR_ROOT$$$";
+
         // ----- Public API ---------------------------------------------------------------------------
 
         /// <summary>Path/GUID overload: resolve <paramref name="controllerPathOrGuid"/> (an asset path or a
@@ -190,9 +195,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             public Func<string, string> PathRewrite;
         }
 
-        // MA MergeAnimator: pathMode 0=Relative, 1=Absolute (confirmed live). Relative ⇒ mount at the
-        // resolved relativePathRoot (an AvatarObjectReference: targetObject, else referencePath resolved
-        // avatar-root-relative, else the component's OWN GameObject). Absolute ⇒ basis is the avatar root.
+        // MA MergeAnimator: pathMode 0=Relative, 1=Absolute (confirmed live). Absolute ⇒ basis is the avatar
+        // root. Relative ⇒ mount at the resolved relativePathRoot, and the resolution order is the BUILD's,
+        // not the inspector's: MergeAnimatorProcessor calls relativePathRoot.Get(avatarRootTransform) and
+        // falls back to merge.gameObject when it returns null, so this mirrors AvatarObjectReference
+        // .Get(Component) — an empty referencePath is null WHATEVER targetObject holds, then a targetObject
+        // that sits under the avatar root, then the AVATAR_ROOT sentinel, then the path — and only a null
+        // from all of that lands on the component's OWN GameObject. Reading targetObject first (the
+        // inspector's Get(SerializedProperty) order) reports a frame the build never uses; nondestructive.md
+        // owns why the two orders differ. NOT mirrored: Get(Component)'s childless-"Armature" sibling swap.
         // Returns true iff c is an MA MergeAnimator that references a controller (out via controller).
         internal static bool TryMaFrame(Component c, GameObject avatarGO,
             out AnimatorController controller, out FrameResult frame)
@@ -237,14 +248,24 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     var target = rel.FindPropertyRelative("targetObject");
                     var refPath = rel.FindPropertyRelative("referencePath");
-                    if (target != null && target.objectReferenceValue is GameObject tgo) root = tgo;
-                    else if (refPath != null && !string.IsNullOrEmpty(refPath.stringValue) && avatarGO != null)
+                    string path = refPath != null ? refPath.stringValue : "";
+                    var tgo = target != null ? target.objectReferenceValue as GameObject : null;
+                    // Empty path ⇒ Get(Component) returns null before it ever reads targetObject; avatarGO
+                    // null (no descriptor above the merge site — DetectAuto already says so out loud) is the
+                    // build's FindAvatarTransformInParents miss, which returns null the same way. Both land
+                    // on the own-GameObject fallback below, exactly as the build does.
+                    if (!string.IsNullOrEmpty(path) && avatarGO != null)
                     {
-                        var t = avatarGO.transform.Find(refPath.stringValue);
-                        root = t != null ? t.gameObject : null;
+                        if (tgo != null && tgo.transform.IsChildOf(avatarGO.transform)) root = tgo;
+                        else if (path == MaAvatarRootSentinel) root = avatarGO;
+                        else
+                        {
+                            var t = avatarGO.transform.Find(path);
+                            root = t != null ? t.gameObject : null;
+                        }
                     }
                 }
-                if (root == null) root = c.gameObject; // empty/absent relativePathRoot ⇒ own GameObject best-effort
+                if (root == null) root = c.gameObject; // unresolved relativePathRoot ⇒ own GameObject, as the build
             }
             frame = new FrameResult { Root = root, Kind = FrameKind.MA, IsAbsolute = absolute, UnreflectedAnchor = unreflected };
             return true;
