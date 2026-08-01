@@ -193,6 +193,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             // that order). null ⇒ identity (no rules). Returns null for a path a delete-rule drops (the
             // binding vanishes at build — not a real break). CheckAnimator ignores it; CheckAvatar applies it.
             public Func<string, string> PathRewrite;
+            // VRCF only: the FullController's rootBindingsApplyToAvatar. When set, an EMPTY-path binding is
+            // left at the avatar root by the build's nearest-match rewriter instead of being matched onto the
+            // mount, so a resolver must not walk the mount for it.
+            public bool RootBindingsApplyToAvatar;
         }
 
         // MA MergeAnimator: pathMode 0=Relative, 1=Absolute (confirmed live). Absolute ⇒ basis is the avatar
@@ -386,10 +390,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (over != null && over.objectReferenceValue is GameObject go) root = go;
             if (root == null) root = c.gameObject;
             var pathRewrite = BuildVrcfRewriter(content, ref unreflected);
+            // CreateNearestMatchPathRewriter short-circuits on `binding.path == "" && rootBindingsApplyToAvatar`,
+            // so with the flag set a root-level binding stays at the AVATAR root instead of being matched onto
+            // the mount. A caller resolving it against the mount would read the mount as the animated node.
+            var rootToAvatar = content.FindPropertyRelative("rootBindingsApplyToAvatar");
             frame = new FrameResult
             {
                 Root = root, Kind = FrameKind.VRCF, IsAbsolute = false, UnreflectedAnchor = unreflected,
                 PathRewrite = pathRewrite, // this component's rules only — no cross-controller bleed
+                RootBindingsApplyToAvatar = rootToAvatar != null && rootToAvatar.boolValue,
             };
             return true;
         }
@@ -498,6 +507,111 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
             }
             return unresolved;
+        }
+
+        // ── Anchor seam ───────────────────────────────────────────────────────────────────────────────
+        // The cross-framework break docs/nondestructive.md §Choosing a framework rule 1 names: a clip
+        // VRCFury merged that paths through a node Modular Avatar moves is dropped from the built FX,
+        // while the reverse survives (VRCFury repaths the merged clips alongside its own moves; MA has no
+        // counterpart running late enough to return the favour). The build names the dropped binding and
+        // the emptied layer but NEVER the anchor that caused it, which is the whole of this walk's value.
+        //
+        // This asks a STATE question and nothing else: does any node on a resolved binding's path carry an
+        // MA relocator? It models no part of what the build will move — not MergeArmature's recursion
+        // boundaries, not where a proxy lands, not whether a wholesale move preserves relative structure.
+        // Anything the caller's anchor map contains is an anchor; membership is the caller's to decide.
+        // Per docs/tool-design.md §Lifting that keeps the evaluation judgment-free — it asserts a seam
+        // exists, never that the seam is wrong. Whether a given crossing is intentional is the reading
+        // agent's call, which is why CheckAvatar files this as CLASSIFY and not FAIL.
+        internal struct AnchorSeamHit
+        {
+            public AnimationClip Clip;
+            public EditorCurveBinding Binding; // the ORIGINAL binding (what the .anim holds)
+            public GameObject Anchor;          // the nearest node on the path carrying a relocator
+            public string AnchorLabel;         // that relocator's short type name(s)
+        }
+
+        // roots/pathRewrite carry the same meaning as CollectUnresolvedBindings' and are resolved
+        // identically, deliberately: the two classes must never disagree about whether a binding resolves,
+        // or one break would land in both classes (or neither). A binding that does NOT resolve is skipped
+        // here — clip-binding owns it, and a path with no scene node has no ancestry to walk.
+        internal static List<AnchorSeamHit> CollectAnchorSeamBreaks(
+            AnimatorController controller, List<GameObject> roots, GameObject avatarRoot,
+            Dictionary<GameObject, string> anchors, Func<string, string> pathRewrite = null,
+            bool rootBindingsApplyToAvatar = false)
+        {
+            var hits = new List<AnchorSeamHit>();
+            if (controller == null || roots == null || roots.Count == 0 || avatarRoot == null
+                || anchors == null || anchors.Count == 0) return hits;
+
+            foreach (var clip in AnimatorClipWalk.CollectClips(controller))
+            {
+                if (clip == null) continue;
+                var bindings = new List<EditorCurveBinding>();
+                bindings.AddRange(AnimationUtility.GetCurveBindings(clip));
+                bindings.AddRange(AnimationUtility.GetObjectReferenceCurveBindings(clip));
+                foreach (var b in bindings)
+                {
+                    if (IsHumanoidAnimatorCurve(b)) continue; // muscle/root curves have no scene object
+                    // AnimatorBindingsAlwaysTargetRoot forces path="" on EVERY Animator-typed binding, and
+                    // FullControllerBuilder applies it LAST in the combine ("we do this after rewriting paths
+                    // to ensure animator bindings all hit \"\""). So the binding lands at the avatar root and
+                    // crosses no relocator whatever its authored path said. Not a prediction about a move —
+                    // a declared, unconditional rewrite of this whole binding class. The clip-binding walk
+                    // keeps the narrower humanoid-only skip: a broken Animator binding is still a break there.
+                    if (b.type == typeof(Animator)) continue;
+                    var probe = b;
+                    if (pathRewrite != null)
+                    {
+                        string rewritten = pathRewrite(b.path);
+                        if (rewritten == null) continue; // a delete-rule drops this binding at build
+                        probe.path = rewritten;
+                    }
+                    // Walk the object the binding ACTUALLY resolves to rather than re-finding the path by
+                    // string: GetAnimatedObject is the resolver the clip-binding class already trusts, and
+                    // taking its result removes a silent-skip branch (a path Transform.Find cannot retrace).
+                    // An empty path under rootBindingsApplyToAvatar resolves against the avatar root ALONE —
+                    // the build leaves it there, so walking the mount would read the mount as the animated node.
+                    var probeRoots = (probe.path.Length == 0 && rootBindingsApplyToAvatar)
+                        ? new List<GameObject> { avatarRoot } : roots;
+                    UnityEngine.Object animated = null;
+                    foreach (var root in probeRoots)
+                    {
+                        animated = AnimationUtility.GetAnimatedObject(root, probe);
+                        if (animated != null) break;
+                    }
+                    var leaf = AsTransform(animated);
+                    if (leaf == null) continue;
+
+                    // Leaf → avatar root, INCLUSIVE at both ends, with no exemption anywhere along it. A
+                    // relocator on the leaf counts; one on the merge mount counts; one a composer placed
+                    // above the module counts. The nearest one is named because it is the innermost node a
+                    // repair has to move, and a second anchor further up does not change the repair.
+                    for (var t = leaf; t != null; t = t.parent)
+                    {
+                        if (anchors.TryGetValue(t.gameObject, out var label))
+                        {
+                            hits.Add(new AnchorSeamHit
+                            {
+                                Clip = clip, Binding = b, Anchor = t.gameObject, AnchorLabel = label,
+                            });
+                            break;
+                        }
+                        if (t.gameObject == avatarRoot) break;
+                    }
+                }
+            }
+            return hits;
+        }
+
+        // GetAnimatedObject returns the animated Object itself — a GameObject for m_IsActive, a Component
+        // (Transform, Renderer, a VRC dynamics behaviour) for everything else. Both carry the transform.
+        private static Transform AsTransform(UnityEngine.Object animated)
+        {
+            var go = animated as GameObject;
+            if (go != null) return go.transform;
+            var c = animated as Component;
+            return c != null ? c.transform : null;
         }
 
         // Skip humanoid muscle + root/IK-goal curves: they animate the Animator itself and have no scene

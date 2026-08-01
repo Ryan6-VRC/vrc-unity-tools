@@ -32,8 +32,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // A committed built .controller lives at an arbitrary --root filesystem path, not under the
     // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
     // A second RunGate pass loads each entry's prefab(s) the same way — copied into Assets/ to
-    // import — and fails any with a missing MonoBehaviour script; the coverage a Structural
-    // Module (a prefab, no controller.yaml) otherwise never gets.
+    // import — and fails any with a missing MonoBehaviour script or an anchor seam; the coverage a
+    // Structural Module (a prefab, no controller.yaml) otherwise never gets.
     public static class ControllerFixpoint
     {
         static string Decode(AnimatorController c, out string refusal)
@@ -300,6 +300,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // entry's committed GUIDs never co-import with another's. Only prefabs are asserted on; built/
         // controllers, yaml, and README ride along for GUID resolution but are never load-checked (a
         // dangling controller ref does not fail a prefab load, so widening the copy set masks nothing).
+        // The anchor-seam class (CheckAvatar) over one entry prefab, instantiated so the scan walks a real
+        // scene hierarchy rather than the asset. Gate tier is FAIL where CheckAvatar.Inspect is CLASSIFY for
+        // the same predicate, and the asymmetry is deliberate: an entry in THIS library is ours and
+        // CONVENTIONS.md forbids the shape outright, while a composed avatar carries mergeables that are not
+        // ours to rule on. An instantiation that yields nothing FAILS rather than reporting a clean prefab —
+        // an empty list is otherwise indistinguishable from "scanned, found nothing", which is exactly the
+        // silent no-op this pass exists to prevent.
+        static System.Collections.Generic.List<string> ScanAnchorSeams(GameObject prefab)
+        {
+            var inst = PrefabUtility.InstantiatePrefab(prefab) as GameObject;
+            if (inst == null)
+                return new System.Collections.Generic.List<string> {
+                    Ryan6Vrc.AgentTools.Editor.CheckAvatar.DegradedPrefix +
+                    "PrefabUtility.InstantiatePrefab returned null, so no seam scan ran on this prefab"
+                };
+            try { return Ryan6Vrc.AgentTools.Editor.CheckAvatar.ScanAnchorSeams(inst); }
+            finally { UnityEngine.Object.DestroyImmediate(inst); }
+        }
+
         static (bool ok, string msg) CheckPrefabIntegrity(string entryDir)
         {
             var scratch = "Assets/_prefab_" + Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -316,20 +335,34 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 AssetDatabase.Refresh();
 
-                int totalMissing = 0;
+                int offenderCount = 0;
                 var offenders = new System.Collections.Generic.List<string>();
                 foreach (var src in Directory.GetFiles(entryDir, "*.prefab", SearchOption.AllDirectories))
                 {
                     var rel = Path.GetFullPath(src).Substring(entryFull.Length).TrimStart('/', '\\');
                     var label = rel.Replace('\\', '/');
                     var go = AssetDatabase.LoadAssetAtPath<GameObject>(ToAssetsRelative(Path.Combine(full, rel)));
-                    if (go == null) { offenders.Add(label + " (failed to load)"); totalMissing++; continue; }
+                    if (go == null) { offenders.Add(label + " (failed to load)"); offenderCount++; continue; }
                     int missing = 0;
                     foreach (var t in go.GetComponentsInChildren<Transform>(true))
                         missing += GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(t.gameObject);
-                    if (missing > 0) { offenders.Add($"{label} ({missing} missing script(s))"); totalMissing += missing; }
+                    if (missing > 0) { offenders.Add($"{label} ({missing} missing script(s))"); offenderCount += missing; }
+
+                    foreach (var seam in ScanAnchorSeams(go))
+                    {
+                        // A scope line bounds what the scan could see; it is not a finding and must not fail
+                        // the entry, or stating a limit would be indistinguishable from breaking a rule.
+                        // It still has to reach the log, so a PASS is never read as wider than it is.
+                        if (seam.StartsWith(Ryan6Vrc.AgentTools.Editor.CheckAvatar.ScopePrefix, StringComparison.Ordinal))
+                        {
+                            Debug.LogWarning($"[gate] {label} {seam}");
+                            continue;
+                        }
+                        offenders.Add($"{label} anchor-seam: {seam}");
+                        offenderCount++;
+                    }
                 }
-                return totalMissing == 0 ? (true, "OK") : (false, string.Join(", ", offenders));
+                return offenderCount == 0 ? (true, "OK") : (false, string.Join(", ", offenders));
             }
             catch (Exception e) { return (false, e.Message); }
             finally { CleanupScratch(scratch); }
@@ -340,7 +373,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // (a multi-controller entry ships an FX + Gesture pair), each against built/<name>.controller.
         // A built controller no document claims is drift and fails the entry. Exits 0 iff all pass.
         // A second pass enumerates every non-dot dir shipping a prefab (controller.yaml or not) and
-        // asserts each imports with zero missing MonoBehaviour scripts.
+        // asserts each imports with zero missing MonoBehaviour scripts and carries no anchor seam
+        // (CheckAvatar.ScanAnchorSeams).
         public static void RunGate()
         {
             string root = null;
