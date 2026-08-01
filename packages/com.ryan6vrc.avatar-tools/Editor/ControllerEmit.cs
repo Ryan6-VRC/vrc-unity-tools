@@ -1506,6 +1506,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (string.IsNullOrEmpty(sourcePath)) return "";
             string p = sourcePath.Replace('\\', '/');
             if (!Path.IsPathRooted(p)) return p;
+            // Collapse `..` before any prefix compare: `<project>/../vrc-patterns/e/controller.yaml` starts
+            // with the project root as a STRING while living outside it, and would stamp a relative path that
+            // only reads correctly from this checkout's layout. GetFullPath throws on invalid-char paths, and
+            // an unstampable path is not worth failing a compile over — fall through to the leaf.
+            try { p = Norm(Path.GetFullPath(p)); }
+            catch (Exception) { return LeafOf(p); }
 
             // Application.dataPath is "<project>/Assets"; its parent is the root that Assets/ and Packages/
             // asset paths are relative to.
@@ -1520,6 +1526,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string rel = RelativeTo(Norm(dir), p);
                 if (rel != null) return rel;
             }
+            return LeafOf(p);
+        }
+
+        private static string LeafOf(string p)
+        {
             int slash = p.LastIndexOf('/');
             return slash >= 0 ? p.Substring(slash + 1) : p;
         }

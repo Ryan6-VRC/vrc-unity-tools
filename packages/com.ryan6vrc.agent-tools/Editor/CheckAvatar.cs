@@ -449,8 +449,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         // intentional-empty exemption (MISSING-vs-EMPTY, as CheckPackage's clean-zero) is BOTH halves empty:
         // an empty referencePath carrying a live targetObject is the silent no-op nondestructive.md names —
         // Get(Component) returns null on the empty path whatever targetObject holds, while the inspector's
-        // editor-side resolver checks targetObject first, so the ref reads correct in the UI and vanishes at
-        // bake. Exempting on the path alone hid exactly that class.
+        // editor-side resolver reads targetObject first, so the ref reads correct in the UI and is not there
+        // at bake. Exempting on the path alone hid exactly that class.
+        // What "not there" costs is the CONSUMER's business and this walk is generic, so the offender says
+        // only that no path was written: the reactive family / BlendshapeSync / Mesh Settings resolve nothing,
+        // while a MergeAnimator or MergeBlendTree relativePathRoot silently falls back to the component's own
+        // GameObject (MergeAnimatorProcessor / MergeBlendTreePass) — a relocated binding frame rather than a
+        // dropped ref, and harmless only where the author meant that fallback.
         private static void ScanSceneRefs(Component c, GameObject avatarGO, Report rep)
         {
             SerializedObject so;
@@ -479,7 +484,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // Parenthesized so the targetObject-only offender can never read as a path the agent
                     // should go looking for: the defect IS that no path was written.
                     Path = string.IsNullOrEmpty(refPath)
-                         ? "(unset referencePath; targetObject '" + targetGO.name + "' only — write the path)"
+                         ? "(unset referencePath; targetObject '" + PathOf(targetGO) + "' only — write the path)"
                          : refPath,
                     Host = c.GetType().Name + " @ " + PathOf(c.gameObject),
                 });
@@ -542,7 +547,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // ---- Guarded self-resolve from the children already located --------------------------------
             Debug.LogWarning("[CheckAvatar] scene-ref resolve degraded on " + PathOf(host.gameObject)
-                           + " (" + reason + ") — self-resolving from serialized children (targetObject-first, then referencePath).");
+                           + " (" + reason + ") — self-resolving from serialized children (empty referencePath first, then targetObject, then the path).");
 
             var targetGO = targetChild != null ? targetChild.objectReferenceValue as GameObject : null;
             if (string.IsNullOrEmpty(refPath)) return false;    // empty path ⇒ null, whatever targetObject holds

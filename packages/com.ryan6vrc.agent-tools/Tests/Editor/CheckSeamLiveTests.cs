@@ -134,6 +134,25 @@ public partial class CheckSeamLiveTests
         var body = ReadLog(r);
         StringAssert.Contains("Hips", body); // bone name is in the RunLog body, not the one-line summary
     }
+
+    // GetBonesMapping returns NULL (not an empty list) when mergeTarget resolves nothing — there is no base
+    // armature to match against. Collapsing that into the zero-match branch would prescribe a bone-naming
+    // repair for a component whose merge target is the thing that is wrong. Only the live collector can
+    // produce this: the injected-seam fixture hands CheckSeam a SeamResolution and never calls MA at all.
+    [Test]
+    public void MaMergeArmature_unresolvedMergeTarget_abstainsOnTheTarget_notTheBoneNames()
+    {
+        BuildMaFixture(out var baseGO, out var mergeGO, out _, out _);
+        var ma = mergeGO.GetComponentInChildren<ModularAvatarMergeArmature>(true);
+        ma.mergeTarget.Set(null); // the shape a rename, an unset field, or an off-avatar target leaves
+
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("resolves no merge target", r);
+        StringAssert.Contains("mergeTarget", r);              // names the repair
+        StringAssert.DoesNotContain("matched zero bones", r); // NOT the naming-mismatch diagnosis
+        StringAssert.DoesNotContain("bare prop", r);
+    }
 }
 
 public partial class CheckSeamLiveTests

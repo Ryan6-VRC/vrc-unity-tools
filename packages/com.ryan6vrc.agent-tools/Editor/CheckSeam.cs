@@ -68,16 +68,19 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // Name what it found: a MergeArmature that matched nothing, a BoneProxy (offset-tolerant
                 // anchor, verify the bake), and a genuinely bare prop (route to own-mergeable to add a seam)
                 // all yield zero scorable pairs, but the skill routes DIFFERENTLY on each — one string for
-                // several was the G26 conflation. MergeArmature is tested first: where one is present its
-                // zero match is a defect in THIS scene, which outranks any anchor sitting alongside it.
-                // A VRCFury ArmatureLink that resolves nothing does not reach here — it throws or returns
-                // null inside CollectVrcfPairs and lands in the UnresolvableReason abstain above.
+                // several was the G26 conflation. MergeArmature is tested first: where one is present, what it
+                // did with the base armature is the scene's most specific fact, and it outranks any anchor
+                // sitting alongside it. Reaching here means the merge target RESOLVED (a null one is the
+                // UnresolvableReason abstain CollectMaPairs raises above) and matching still produced nothing.
+                // A VRCFury ArmatureLink that resolves nothing lands in that same abstain, by throwing.
                 if (HasMergeArmature(mergeGO))
                     return RefuseAbstain("MergeArmature on '" + mergeableRoot +
-                        "' matched zero bones — the phantom-bone failure: no bone name lines up under the " +
-                        "merge target, so nothing zips and the mergeable skins to a private armature copy " +
-                        "the avatar never animates. Fix the prefix/suffix or the bone naming on the merge " +
-                        "component — this is not the bare-prop case and the geometry needs no work");
+                        "' resolved its merge target but matched zero bones — nothing zips. Two shapes reach " +
+                        "here and the seam cannot tell them apart: the phantom-bone failure (a prefix/suffix or " +
+                        "bone-naming mismatch, repaired on the merge component) or a mergeable whose bones are " +
+                        "all legitimately outfit-specific (nondestructive.md: an unmatched bone is kept, not a " +
+                        "defect). Read the bone names against the base before repairing. Either way this is NOT " +
+                        "the bare-prop case — the seam exists and the geometry needs no work");
                 if (HasBoneProxy(mergeGO))
                     return RefuseAbstain("bone-proxy attachment on '" + mergeableRoot +
                         "' (offset-tolerant by design) — no scorable seam; verify the baked result");
@@ -363,6 +366,10 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // MA: ModularAvatarMergeArmature.GetBonesMapping() → List<(Transform base, Transform merge)> (Item1=base).
         // Returns matched descendants only (not the root pair) — that is fine, the descendants carry the offset.
+        // NULL is a different answer from empty and must not collapse into it: GetBonesMapping returns null
+        // when `mergeTarget.Get(this)` finds nothing, i.e. there is no base to match AGAINST, and the repair is
+        // the mergeTarget — not the bone naming the zero-match REFUSE would prescribe. (VRCFury's collector
+        // reaches the same abstain by throwing on a null GetLinks; MA hands back null, so it is caught here.)
         private static void CollectMaPairs(GameObject mergeGO, SeamResolution res)
         {
             var maType = FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
@@ -374,7 +381,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                 try
                 {
                     var mapping = getMapping.Invoke(comp, null) as System.Collections.IEnumerable;
-                    if (mapping == null) continue;
+                    if (mapping == null)
+                    {
+                        if (res.UnresolvableReason == null) // first carrier wins, as in ClassifyReflect
+                            res.UnresolvableReason = "MergeArmature on '" + PathOf(comp.gameObject) +
+                                "' resolves no merge target, so there is no base armature to match against — its " +
+                                "mergeTarget is unset, points off this avatar, or was broken by a rename. Fix the " +
+                                "mergeTarget; the bone naming is not in question yet";
+                        continue;
+                    }
                     foreach (var item in mapping)
                     {
                         var tt = item.GetType();

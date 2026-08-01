@@ -861,6 +861,19 @@ layers:
     }
 
     [Test]
+    public void Provenance_Traversal_Out_Of_The_Project_Is_Not_Read_As_Under_It()
+    {
+        // `<project>/../x/controller.yaml` starts with the project root as a STRING while living outside it.
+        // Uncollapsed it would stamp `../x/controller.yaml` — readable only from this checkout's layout.
+        var projectRoot = Path.GetDirectoryName(Application.dataPath).Replace('\\', '/');
+        // Which anchor it lands on depends on where the venue sits (a worktree parent is itself a repo), so
+        // assert the invariant that matters: no traversal survives into the stamp.
+        var escaped = ControllerEmit.ProvenanceSourcePath(projectRoot + "/../sibling_9f8e/controller.yaml");
+        StringAssert.DoesNotContain("..", escaped, "the traversal is collapsed, not stamped");
+        StringAssert.EndsWith("controller.yaml", escaped);
+    }
+
+    [Test]
     public void Provenance_With_No_Anchor_Falls_Back_To_The_Leaf()
     {
         var orphan = Path.Combine(Path.GetTempPath(), "no_repo_" + System.Guid.NewGuid().ToString("N").Substring(0, 8)).Replace('\\', '/');
