@@ -333,12 +333,15 @@ public class ReportConsoleTests
             // Unfiltered: nothing to declare.
             setFlags.Invoke(null, new object[] { origFlags | 128 | 256 | 512 });
             setText.Invoke(null, new object[] { "" });
-            StringAssert.DoesNotContain("console-filter=", ReportConsole.Report(count: 1));
+            StringAssert.DoesNotContain("UNREACHED=", ReportConsole.Report(count: 1));
 
             // Log severity hidden.
             setFlags.Invoke(null, new object[] { (origFlags | 128 | 256 | 512) & ~128 });
             string hidden = ReportConsole.Report(count: 1);
-            StringAssert.Contains("console-filter=", hidden);
+            // The gap is asserted as a COUNT against GetCountsByType (which is not filtered), so the
+            // check survives a narrowing mechanism this code never enumerated. The flag name is only
+            // the appended cause.
+            StringAssert.Contains("UNREACHED=", hidden);
             StringAssert.Contains("log-hidden", hidden);
             StringAssert.Contains("FILTERED VIEW", hidden);
 
@@ -346,8 +349,10 @@ public class ReportConsoleTests
             setFlags.Invoke(null, new object[] { origFlags | 128 | 256 | 512 });
             setText.Invoke(null, new object[] { "zzz-no-such-text-zzz" });
             string searched = ReportConsole.Report(count: 1);
+            StringAssert.Contains("UNREACHED=", searched);
             StringAssert.Contains("search=\"zzz-no-such-text-zzz\"", searched);
             StringAssert.Contains("FILTERED VIEW", searched);
+            StringAssert.Contains("scanned=0", searched);   // the blackout case, now declared
         }
         finally
         {

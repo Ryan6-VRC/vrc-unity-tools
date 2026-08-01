@@ -20,7 +20,8 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// is no heuristic here to get wrong.
     ///
     /// What it does NOT hand over is the whole console: this enumerates the Console *window's* rows,
-    /// so its filters bound the read (see <see cref="ConsoleFilterNote"/>, which names that state).
+    /// so its filters bound the read. `GetCountsByType` is not filtered, so the gap is detectable
+    /// and is reported as a count (see <see cref="ConsoleFilterNote"/>).
     ///
     /// INSPECTION ONLY. It does not write to the console it reads — no door here logs, because a
     /// logging console reader pollutes its own next read (and an error it logs is indistinguishable
@@ -122,7 +123,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // clean-looking count: both are named here, so nothing this door removed is invisible.
             // The Console window's own filter state comes first because it bounds everything after
             // it — a `scanned=` computed under a search filter is a view, not the console.
-            string summary = "[ReportConsole]" + ConsoleFilterNote()
+            string summary = "[ReportConsole]" + ConsoleFilterNote(scanned)
                 + " scanned=" + scanned + " matched=" + matched + " shown=" + kept.Count
                 + BenignNote(benign) + (unreadable > 0 ? " unreadable=" + unreadable : "") + " => OK";
 
@@ -326,50 +327,79 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>
-        /// Name the Console window's own filter state when it narrows what can be read, else "".
+        /// Report how many entries the console holds that this read could not reach, else "".
         ///
-        /// This matters more than it looks. <c>StartGettingEntries</c>/<c>GetEntryInternal</c> enumerate
-        /// the Console *window's* rows, not the console's backing store, so the window's LogLevel
-        /// toggles, Collapse, and search box all bound this read. Measured on a console holding 8
-        /// entries: 6 with Log hidden, 4 with Error also hidden, and <b>0 with a search filter set</b> —
-        /// at which point an unannotated digest reads <c>scanned=0 … =&gt; OK</c>, certifying a console
-        /// full of errors as clean. That is a worse loss than the truncation this tool exists to fix, so
-        /// a narrowing state is named before any count that it bounds.
+        /// The problem: <c>StartGettingEntries</c>/<c>GetEntryInternal</c> enumerate the Console
+        /// *window's* rows, and Unity exposes no unfiltered enumerator — every row accessor indexes
+        /// that same view. So the window's LogLevel toggles, Collapse and search box all bound the
+        /// read. Measured on a console holding 8 entries: 6 with Log hidden, and <b>0 with a search
+        /// filter set</b>, at which point an unannotated digest reads <c>scanned=0 … =&gt; OK</c> and
+        /// certifies a console full of errors as clean.
         ///
-        /// Reported, never corrected: clearing the operator's filters would fight their UI and mutate
-        /// state this door has no business touching. The caller is told, and decides.
+        /// The fix: <c>GetCountsByType</c> is <b>not</b> filtered — measured, it held 4/2/2 across
+        /// every state above while the enumerable count fell 8 → 6 → 0. So the true total is readable
+        /// even when the entries are not, and the gap is reported as a NUMBER rather than inferred
+        /// from flags. That distinction is the point: this is an outcome check, so it catches any
+        /// narrowing — including a mechanism this code never enumerated — where a flag-reading check
+        /// only catches the ones it thought to look for. The flags are still appended, as the cause.
+        ///
+        /// Reported, never corrected: clearing the operator's filters would mutate UI state this door
+        /// has no business touching. When the hidden entries themselves are needed,
+        /// <c>Application.consoleLogPath</c> (Editor.log) is the unfiltered text of record — process-
+        /// wide, unstructured and cross-session, so a fallback rather than a second door.
         /// </summary>
-        public static string ConsoleFilterNote()
+        /// <param name="enumerated">How many entries this read actually saw.</param>
+        public static string ConsoleFilterNote(int enumerated)
         {
             var les = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntries");
             if (les == null) return "";
             const BindingFlags S = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
-            var getFlags = les.GetMethod("get_consoleFlags", S);
-            var getText = les.GetMethod("GetFilteringText", S);
-            if (getFlags == null || getText == null)
-                return " console-filter=[unknown: cannot read the Console window's filter state]";
+            var byType = les.GetMethod("GetCountsByType", S);
+            if (byType == null) return " console-total=[unknown: GetCountsByType missing]";
 
-            var narrowing = new List<string>();
+            int total;
             try
             {
-                int flags = (int)getFlags.Invoke(null, null);
-                string text = getText.Invoke(null, null) as string;
-                // ConsoleWindow.ConsoleFlags: Collapse=1, LogLevelLog=128, LogLevelWarning=256,
-                // LogLevelError=512. A cleared level bit hides that whole severity from the read.
-                if (!string.IsNullOrEmpty(text)) narrowing.Add("search=\"" + text + "\"");
-                if ((flags & 128) == 0) narrowing.Add("log-hidden");
-                if ((flags & 256) == 0) narrowing.Add("warning-hidden");
-                if ((flags & 512) == 0) narrowing.Add("error-hidden");
-                if ((flags & 1) != 0) narrowing.Add("collapse");
+                var args = new object[] { 0, 0, 0 };
+                byType.Invoke(null, args);
+                total = (int)args[0] + (int)args[1] + (int)args[2];
             }
             catch (Exception ex)
             {
-                return " console-filter=[unknown: " + ex.Message + "]";
+                return " console-total=[unknown: " + ex.Message + "]";
             }
 
-            if (narrowing.Count == 0) return "";
-            return " console-filter=[" + string.Join(", ", narrowing.ToArray())
-                + "] THIS READ IS A FILTERED VIEW, not the whole console";
+            if (total <= enumerated) return "";
+            return " UNREACHED=" + (total - enumerated) + "/" + total
+                + " entries are hidden from this read by the Console window"
+                + ConsoleFilterCause(les, S) + " — THIS IS A FILTERED VIEW";
+        }
+
+        /// <summary>The Console window's narrowing settings, as the likely cause of a gap. Best-effort
+        /// and never the finding itself: the count discrepancy is what is asserted, this only explains
+        /// it, so a cause this code cannot name still leaves the gap reported.</summary>
+        private static string ConsoleFilterCause(Type les, BindingFlags S)
+        {
+            try
+            {
+                var getFlags = les.GetMethod("get_consoleFlags", S);
+                var getText = les.GetMethod("GetFilteringText", S);
+                if (getFlags == null || getText == null) return "";
+                int flags = (int)getFlags.Invoke(null, null);
+                string text = getText.Invoke(null, null) as string;
+                var causes = new List<string>();
+                // ConsoleWindow.ConsoleFlags: Collapse=1, LogLevelLog=128, Warning=256, Error=512.
+                if (!string.IsNullOrEmpty(text)) causes.Add("search=\"" + text + "\"");
+                if ((flags & 128) == 0) causes.Add("log-hidden");
+                if ((flags & 256) == 0) causes.Add("warning-hidden");
+                if ((flags & 512) == 0) causes.Add("error-hidden");
+                if ((flags & 1) != 0) causes.Add("collapse");
+                return causes.Count == 0 ? "" : " [" + string.Join(", ", causes.ToArray()) + "]";
+            }
+            catch (Exception)
+            {
+                return "";
+            }
         }
 
         /// <summary>
