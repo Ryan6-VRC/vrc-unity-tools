@@ -821,7 +821,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case "param": ctl.Param = ToStr(kv.Value, $"{where}.param"); break;
                         case "value": ctl.Value = ToNumber(kv.Value, $"{where}.value"); sawValue = true; break;
                         // Every kind renders an icon, so unlike `value`/`controls` this needs no kind guard.
-                        case "icon": ctl.Icon = ToStr(kv.Value, $"{where}.icon"); break;
+                        // Trimmed, because surrounding space would otherwise slip past the absolute-path
+                        // refusal (which reads the first character) and resurface as a confusing
+                        // "not found" at emit. A valueless `icon:` is refused rather than read as absent:
+                        // YAML binds it to null, and silently meaning "no icon" would disagree with
+                        // `icon: ""`, which validation rejects — the two spellings say the same thing.
+                        case "icon":
+                            ctl.Icon = ToStr(kv.Value, $"{where}.icon")?.Trim();
+                            if (ctl.Icon == null)
+                                throw new SchemaException($"{where}: 'icon' has no value — give it a path or drop the key");
+                            break;
                         case "controls":
                             if (ctl.Kind != MenuControlKind.SubMenu)
                                 throw new SchemaException($"{where}: 'controls' is a submenu field — a {ctl.Kind.ToString().ToLowerInvariant()} has no children");

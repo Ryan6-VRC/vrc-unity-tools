@@ -86,7 +86,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // Rooted in the filesystem sense, spelled without System.IO (Path.IsPathRooted is System.IO, which
         // this file deliberately does not take): a leading '/' or '\', or a Windows drive prefix "X:".
         private static bool IsRootedIconPath(string p)
-            => p[0] == '/' || p[0] == '\\' || (p.Length >= 2 && p[1] == ':');
+            => p[0] == '/' || p[0] == '\\' || (p.Length >= 2 && p[1] == ':' && char.IsLetter(p[0]));
 
         // Rule 7 carrier: one menu page and, recursively, its sub-menus. `where` is the authored path
         // (menu / menu 'Colors' / …) so an offender in a nested page names the page it sits on.

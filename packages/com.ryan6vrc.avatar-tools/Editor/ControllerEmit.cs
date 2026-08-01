@@ -86,11 +86,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // the verbatim GUID so a compile advisory can preserve the round-trip note. A BARE broken ref (no
             // marker) is never recorded here — it still throws EmitException.
             public List<(string state, string guid)> UnresolvedRefs = new List<(string state, string guid)>();
-            // Menu icons whose file is on disk but outside this project's AssetDatabase — emitted as a null
-            // icon instead of a fail-loud throw, and recorded here for a compile advisory. This is the
-            // out-of-project compile (the vrc-patterns gate compiles an entry from an arbitrary filesystem
-            // --root into a host that never loads the entry's package), never an authoring mistake: a path
-            // that resolves to nothing at all still throws. Each entry names the control and the path tried.
+            // Menu icons the compile could not adjudicate because the DOCUMENT is not in this project's
+            // AssetDatabase — emitted as a null icon instead of a fail-loud throw, and recorded here for a
+            // compile advisory. That regime is the out-of-project compile (the vrc-patterns gate compiles an
+            // entry from an arbitrary filesystem --root into a host that never loads the entry's package),
+            // where nothing here can tell a correct icon path from a wrong one; an in-project compile
+            // adjudicates and throws instead. Each entry names the control and the path tried.
             public List<(string control, string path)> IconsOutsideProject = new List<(string control, string path)>();
         }
 
@@ -1242,40 +1243,64 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // a compile that simply cannot see the file. A missing icon being merely cosmetic (unlike a
             // missing `mask:`, which silently ships a layer animating the whole avatar) is what makes
             // degrading admissible at all here.
+            // THE BRANCH IS ON WHETHER THE DOCUMENT IS IN THE ASSETDATABASE, never on how a path is spelled.
+            // Spelling cannot carry that fact. An in-project document is routinely handed to us as an
+            // ABSOLUTE path (every interactive door does: the menu door calls Path.GetFullPath), and a
+            // package's `Packages/<name>/…` names no folder on disk at all — so a `StartsWith("Assets/")`
+            // test misroutes both, and misrouting is silent: the out-of-project branch emits a NULL icon.
+            // AssetPathUtil.ToLogicalAssetPath owns the canonicalization; this method owns what follows from it.
+            //
+            // Two regimes, and the difference is what the compiler can actually know:
+            //   IN the AssetDatabase  — resolution is AUTHORITATIVE, so anything unresolved is fatal. A typo
+            //                           must not ship a silently icon-less control.
+            //   OUTSIDE it            — the compiler cannot adjudicate an icon AT ALL: it has no database to
+            //                           ask, and a correct path is indistinguishable from a wrong one. So it
+            //                           NEVER fails here; it emits a null icon and advises. This is the
+            //                           vrc-patterns gate, which compiles every entry from a filesystem
+            //                           --root into a host that does not load the entry's package. Failing
+            //                           would make the field unauthorable by the library it exists for, and
+            //                           failing only for SOME spellings would fail the gate at random.
+            // The authoring compile is what catches a typo, and it is also what generates built/ — so the
+            // regime that can adjudicate is the one every icon passes through before it is committed.
             private Texture2D ResolveIcon(string authored, string where)
             {
-                // RESOLUTION HAPPENS IN ASSET-PATH SPACE WHENEVER IT CAN, and that is not a detail. A project
-                // asset path is NOT a filesystem path: a `file:`-mounted or registry package lives at
-                // `Packages/<name>/…` for the AssetDatabase while its bytes sit anywhere on disk. Doing this
-                // arithmetic with Path.GetFullPath sends `Packages/…` out to the real folder, which is
-                // (correctly) outside the project — so every icon in a mounted package silently took the
-                // out-of-project branch and emitted null. Measured, on the vrc-patterns package mounted into
-                // a Sandbox editor. The filesystem branch below is only for a document that is genuinely not
-                // in the AssetDatabase at all, which is the gate.
-                if (authored.StartsWith("Assets/", StringComparison.Ordinal)
-                    || authored.StartsWith("Packages/", StringComparison.Ordinal))
-                    return LoadIconAsset(authored, authored, where);
+                authored = authored.Replace('\\', '/');
+                bool projectSpelled = authored.StartsWith("Assets/", StringComparison.Ordinal)
+                                   || authored.StartsWith("Packages/", StringComparison.Ordinal);
+                var docAsset = AssetPathUtil.ToLogicalAssetPath(_doc.SourcePath);
+
+                if (docAsset != null)
+                {
+                    string iconPath;
+                    if (projectSpelled) iconPath = CollapseDotSegments(authored);
+                    else
+                    {
+                        int cut = docAsset.LastIndexOf('/');
+                        iconPath = CollapseDotSegments((cut < 0 ? "" : docAsset.Substring(0, cut + 1)) + authored);
+                    }
+                    return LoadIconAsset(iconPath, authored, where);
+                }
+
+                // Document outside the AssetDatabase. A project-spelled icon may still resolve (the package
+                // could be loaded here even though the document is not), so try before giving up.
+                if (projectSpelled)
+                {
+                    var tex = AssetDatabase.LoadAssetAtPath<Texture2D>(CollapseDotSegments(authored));
+                    if (tex != null) return tex;
+                    _result.IconsOutsideProject.Add((where, authored));
+                    return null;
+                }
 
                 if (string.IsNullOrEmpty(_doc.SourcePath))
                     throw new EmitException(
                         $"{where}: icon '{authored}' is document-relative but this document has no source path to resolve it against — write a project path (Assets/… or Packages/…) instead");
 
-                var src = _doc.SourcePath.Replace('\\', '/');
-                if (src.StartsWith("Assets/", StringComparison.Ordinal)
-                    || src.StartsWith("Packages/", StringComparison.Ordinal))
-                {
-                    int cut = src.LastIndexOf('/');
-                    var dir = cut < 0 ? "" : src.Substring(0, cut + 1);
-                    return LoadIconAsset(CollapseDotSegments(dir + authored), authored, where);
-                }
-
-                // The document is outside the AssetDatabase — filesystem arithmetic, and the icon cannot be
-                // loaded however well-formed it is. Present on disk ⇒ advisory + null icon; absent ⇒ fatal.
-                var docDir = Path.GetDirectoryName(Path.GetFullPath(src)) ?? "";
+                // Report where we looked. Presence on disk does NOT make the icon valid (nothing here can
+                // check that it is even an image — see the class contract above); it only makes the advisory
+                // specific enough to act on.
+                var docDir = Path.GetDirectoryName(Path.GetFullPath(_doc.SourcePath.Replace('\\', '/'))) ?? "";
                 var abs = Path.GetFullPath(Path.Combine(docDir, authored)).Replace('\\', '/');
-                if (!File.Exists(abs))
-                    throw new EmitException($"{where}: icon not found — '{authored}' resolved to '{abs}'");
-                _result.IconsOutsideProject.Add((where, abs));
+                _result.IconsOutsideProject.Add((where, File.Exists(abs) ? abs : abs + " (no such file)"));
                 return null;
             }
 

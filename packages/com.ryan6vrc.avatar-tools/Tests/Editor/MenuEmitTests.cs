@@ -396,9 +396,73 @@ menu:
             var msg = CompileController.Compile(yaml, OutDir);
             StringAssert.Contains("=> OK", msg);
             Assert.IsNull(Load().controls.Single().icon, "an unreachable icon emits as null, not as a failure");
-            StringAssert.Contains("outside this project's AssetDatabase", RunLogBody(msg));
+            StringAssert.Contains("not in the project's AssetDatabase", RunLogBody(msg));
         }
         finally { Directory.Delete(outside, true); }
+    }
+
+    [Test]
+    public void OutOfProjectCompile_NeverFails_WhicheverSpelling()
+    {
+        // The regime is decided by the DOCUMENT's location, so every icon spelling must degrade together.
+        // Keying on the icon's spelling instead made a project-spelled icon throw here — which would fail
+        // the whole gate run for an entry that compiles perfectly well in a project. The lowercase
+        // `assets/…` in the test above sidesteps that branch entirely, so it could not have caught it.
+        var outside = Path.Combine(Path.GetTempPath(), "f11_spell_" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
+        Directory.CreateDirectory(outside);
+        try
+        {
+            foreach (var spelling in new[] { "Assets/NotHere/Knob.png", "Packages/com.nobody.nothing/Knob.png", "assets/Absent.png" })
+            {
+                var yaml = Path.Combine(outside, "M_Fx.yaml");
+                File.WriteAllText(yaml, Head + "menu:\n  - toggle: T\n    param: Enable\n    icon: " + spelling + "\n");
+                var msg = CompileController.Compile(yaml, OutDir);
+                StringAssert.Contains("=> OK", msg, "spelling must not decide the regime: " + spelling);
+                Assert.IsNull(Load().controls.Single().icon, spelling);
+            }
+        }
+        finally { Directory.Delete(outside, true); }
+    }
+
+    [Test]
+    public void InProjectDocumentGivenAnAbsolutePath_StillResolves()
+    {
+        // Every interactive door hands Compile an ABSOLUTE path (the menu door calls Path.GetFullPath;
+        // OpenFilePanel returns absolute). Testing only the `Assets/…` spelling hid a total failure of the
+        // field there: the document read as out-of-project, and every icon silently emitted null.
+        var icon = MakeIcon(TestRoot + "/assets/Knob.png");
+        File.WriteAllText(_srcPath, Head + "menu:\n  - toggle: T\n    param: Enable\n    icon: assets/Knob.png\n");
+        var msg = CompileController.Compile(Path.GetFullPath(_srcPath), OutDir);
+        StringAssert.Contains("=> OK", msg);
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
+        StringAssert.Contains("_(none)_", RunLogBody(msg).Split(new[] { "## Compile advisory: unadjudicated menu icons" }, System.StringSplitOptions.None)[1]
+            .Split(new[] { "\n## " }, System.StringSplitOptions.None)[0]);
+    }
+
+    [Test]
+    public void BackslashSeparatorsResolve_LikeForwardOnes()
+    {
+        // A Windows-spelled path must not behave differently in-project (where it would fail an asset-space
+        // lookup) than at the gate (where Path.Combine accepts it).
+        var icon = MakeIcon(TestRoot + "/assets/Knob.png");
+        StringAssert.Contains("=> OK", Compile(@"menu:
+  - toggle: T
+    param: Enable
+    icon: assets\Knob.png
+"));
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
+    }
+
+    [Test]
+    public void DotSegmentsCollapse_InBothSpellings()
+    {
+        var icon = MakeIcon(TestRoot + "/assets/Knob.png");
+        StringAssert.Contains("=> OK", Compile("menu:\n  - toggle: T\n    param: Enable\n    icon: assets/../assets/Knob.png\n"));
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
+
+        StringAssert.Contains("=> OK", Compile("menu:\n  - toggle: T\n    param: Enable\n    icon: "
+            + TestRoot + "/assets/../assets/Knob.png\n"));
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
     }
 
     [Test]
@@ -406,7 +470,7 @@ menu:
     {
         // The section is unconditional, so a document with no icons must still read cleanly rather than
         // suggest something was skipped.
-        StringAssert.Contains("## Compile advisory: menu icons outside the project\n\n_(none)_",
+        StringAssert.Contains("## Compile advisory: unadjudicated menu icons\n\n_(none)_",
             RunLogBody(Compile("menu:\n  - toggle: T\n    param: Enable\n")));
     }
 

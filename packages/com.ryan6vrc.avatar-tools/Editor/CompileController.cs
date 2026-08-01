@@ -399,19 +399,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return lines;
         }
 
-        // ── Advisory: menu icons outside the project ─────────────────────────────────────────────────
-        // An `icon:` whose file is on disk but not reachable through the AssetDatabase — ControllerEmit
-        // emitted the control with a null icon rather than fail the compile (a path resolving to NOTHING
-        // stays fatal). Reached in practice only by an out-of-project compile, which is why the line says
-        // what to check rather than what to fix: in a real project this is a defect, at the gate it is normal.
+        // ── Advisory: unadjudicated menu icons ───────────────────────────────────────────────────────
+        // Reached only when the DOCUMENT is outside this project's AssetDatabase, where ControllerEmit
+        // cannot tell a correct icon path from a wrong one and so emits a null icon rather than guess in
+        // either direction (an in-project compile adjudicates and fails loud instead). That is the normal
+        // state of an out-of-project compile — the gate — so the line reports what was tried rather than
+        // asserting a defect; the path carries "(no such file)" when even the disk probe missed.
         private static List<string> IconAdvisories(ControllerEmit.EmitResult built)
         {
             var lines = new List<string>();
             if (built == null || built.IconsOutsideProject == null) return lines;
             foreach (var (control, path) in built.IconsOutsideProject)
-                lines.Add(control + " — icon `" + path + "` is on disk but outside this project's AssetDatabase; "
-                    + "emitted with no icon. Expected when compiling from outside the project (the gate); "
-                    + "in a project, the file's folder is not imported");
+                lines.Add(control + " — icon `" + path + "` could not be resolved: this document is not in "
+                    + "the project's AssetDatabase, so the icon was left unset. Normal when compiling from "
+                    + "outside the project; the in-project compile that regenerates the built asset is the "
+                    + "one that validates it");
             return lines;
         }
 
@@ -479,7 +481,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (unresolvedRefs.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in unresolvedRefs) sb.Append("- ").Append(l).Append('\n');
 
-            sb.Append("\n## Compile advisory: menu icons outside the project\n\n");
+            sb.Append("\n## Compile advisory: unadjudicated menu icons\n\n");
             if (outsideIcons.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in outsideIcons) sb.Append("- ").Append(l).Append('\n');
 

@@ -374,6 +374,28 @@ layers: []
     }
 
     [Test]
+    public void ValuelessIconKey_IsRefused()
+    {
+        // YAML binds a bare `icon:` to null. Reading that as "no icon" would disagree with `icon: ""`,
+        // which validation rejects — two spellings of the same authoring slip must not diverge.
+        var e = Assert.Throws<SchemaException>(() => Parse("menu:\n  - toggle: A\n    param: Enable\n    icon:\n"));
+        StringAssert.Contains("has no value", e.Message);
+    }
+
+    [Test]
+    public void IconIsTrimmed_SoSpaceCannotHideAnAbsolutePath()
+    {
+        // The absolute-path refusal reads the first character, so an untrimmed leading space would smuggle
+        // a machine path past it and resurface as a bare "not found" at emit — caught, but by the wrong
+        // rule with the wrong message.
+        Assert.AreEqual("assets/a.png", Parse("menu:\n  - toggle: A\n    param: Enable\n    icon: \"  assets/a.png  \"\n").Menu[0].Icon);
+
+        var errs = Errors("menu:\n  - toggle: A\n    param: Enable\n    icon: \" C:/Users/x/Icon.png\"\n");
+        Assert.AreEqual(1, errs.Length);
+        StringAssert.Contains("menu-icon-absolute", errs[0]);
+    }
+
+    [Test]
     public void AbsoluteIconPath_IsRefused()
     {
         // Neither a project path nor document-relative: it would resolve only on the machine that wrote it,
