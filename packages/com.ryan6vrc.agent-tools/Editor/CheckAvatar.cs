@@ -22,9 +22,10 @@ namespace Ryan6Vrc.AgentTools.Editor
     ///     FullController merged animator) that resolve to no scene object → the skill owns the vendor
     ///     <c>.anim</c> and repaths (routed by the per-offender <c>clipAssetPath</c>).
     ///   - <b>anchor-seam</b> (the cross-framework break, docs/nondestructive.md §Choosing a framework
-    ///     rule 1): a <b>VRCFury-merged</b> binding that resolves here but whose resolved path crosses a node
-    ///     carrying an MA relocator — the build moves that node, VRCFury's merged clip is not repathed with
-    ///     it, and the binding is dropped. Scoped to VRCF frames because the break is one-directional: the
+    ///     rule 1): a <b>VRCFury FullController-merged</b> binding that resolves here but whose resolved path
+    ///     crosses a node carrying an MA relocator — the shape rule 1 forbids, because where that node does
+    ///     move, VRCFury's merged clip is not repathed with it. Whether it moves in a given build is NOT
+    ///     evaluated (each relocator acts only once its target resolves). Scoped to VRCF frames because the break is one-directional: the
     ///     reverse (an MA-merged clip through a VRCFury-moved node) is repaired by VRCFury's own move
     ///     service, and VRCFury's own <c>ArmatureLink</c> is therefore never an offender. The offender names
     ///     the <b>anchor</b>, which is the one thing no build message ever names → the agent re-anchors it
@@ -112,25 +113,32 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Fires iff the inspected avatar carries any MA relocator, so a clean anchor-seam count
         /// reads as the scoped result it is rather than as whole-avatar confirmation.</summary>
         internal const string AnchorSeamScopeLine =
-            "anchor-seam is scoped to VRCFury-merged bindings and to the four MA components that reparent " +
-            "their own GameObject (BoneProxy, MergeArmature, WorldFixedObject, VisibleHeadAccessory). A zero " +
-            "count says nothing about MA-merged or descriptor-layer bindings — those the build repaths — and " +
-            "nothing about ModularAvatarReplaceObject, which relocates its target rather than itself and is " +
-            "not tracked here.";
+            "anchor-seam is scoped to VRCFury FullController-merged bindings and to the four MA components " +
+            "that reparent their own GameObject (BoneProxy, MergeArmature, WorldFixedObject, " +
+            "VisibleHeadAccessory). A zero count says nothing about: MA-merged or descriptor-layer bindings " +
+            "(the build repaths those); clips merged by VRCFury's AnimationClipAction family (Toggle, Modes, " +
+            "Apply During Upload), which take the same rewrite stack and are not enumerated here; or " +
+            "ModularAvatarReplaceObject, which relocates its target rather than itself and is not tracked.";
 
         /// <summary>Fires iff at least one anchor-seam offender exists.</summary>
         internal const string AnchorSeamNoteLine =
-            "An anchor-seam offender RESOLVES in this scene and is dropped at bake, so repathing the clip " +
-            "fixes nothing and the build's own warning names the binding but never the anchor. The repair is " +
-            "to put the move and the animation in one framework — re-anchor the named node with a VRCFury " +
-            "ArmatureLink, which relocates through VRCFury's own move service and repaths the merged clips " +
-            "with it — or to animate the node by constraint from inside the subtree instead of by path " +
+            "An anchor-seam offender is a binding path crossing a tracked MA relocator, which is a scene " +
+            "state — whether that component relocates in THIS build is not evaluated (each of the four moves " +
+            "only once its target resolves, and a bare module prefab scanned outside an avatar resolves " +
+            "none). The shape is the finding either way, because repathing the clip cannot fix it and the " +
+            "build's own warning names the binding but never the anchor. The repair is to put the move and " +
+            "the animation in one framework — re-anchor the named node with a VRCFury ArmatureLink, which " +
+            "relocates through VRCFury's own move service and repaths the merged clips with it — or to " +
+            "animate the node by constraint from inside the subtree instead of by path " +
             "(docs/nondestructive.md §Choosing a framework; docs/gimmicks.md §Packaging).";
 
-        // The MA components that unconditionally reparent the GameObject they sit on, each confirmed against
-        // MA's own Editor processor (BoneProxyProcessor, MergeArmatureHook, WorldFixedObjectProcessor,
-        // VisibleHeadAccessoryProcessor all SetParent). Membership is a type-name test and NOTHING more: no
-        // model of where a component moves its node, or of whether the move disperses children.
+        // The MA components that reparent the GameObject they sit on, each confirmed against MA's own Editor
+        // processor (BoneProxyProcessor, MergeArmatureHook, WorldFixedObjectProcessor,
+        // VisibleHeadAccessoryProcessor all SetParent). Each moves only once its target RESOLVES, and this
+        // class does not check that — deliberately: an entry is scanned as a bare prefab where no proxy
+        // target can resolve, so gating on resolution would report every module clean. The finding is the
+        // authored shape, not a predicted move. Membership is a type-name test and NOTHING more: no model of
+        // where a component moves its node, or of whether the move disperses children.
         // ModularAvatarReplaceObject is deliberately absent — it relocates its *target* rather than itself,
         // so tracking it would mean resolving an AvatarObjectReference, which is exactly the build-modeling
         // this class is defined without. Its absence is stated on every scoped run (AnchorSeamScopeLine).
@@ -146,13 +154,29 @@ namespace Ryan6Vrc.AgentTools.Editor
             "nadena.dev.modular_avatar.core.ModularAvatarVisibleHeadAccessory",
         };
 
-        // Relocators this class knowingly does NOT track. Their presence alone fires the scope note, because
-        // an avatar anchored only by one of these is the single case where a zero count is most misleading:
-        // the shape is exactly the one the class exists to catch, and it reports clean.
+        // Relocators this class knowingly does NOT track. Their presence alone fires the scope note on BOTH
+        // doors, because an avatar or module anchored only by one of these is the single case where a zero
+        // count is most misleading: the shape is exactly the one the class exists to catch, and it reports
+        // clean.
         internal static readonly string[] MaUntrackedRelocatorTypeNames =
         {
             "nadena.dev.modular_avatar.core.ModularAvatarReplaceObject",
         };
+
+        /// <summary>True iff any node under <paramref name="root"/> carries a relocator this class does not
+        /// track. Shared by both doors — a scope claim that held on only one of them was a false statement in
+        /// exactly the case it exists to cover.</summary>
+        private static bool HasUntrackedRelocator(GameObject root)
+        {
+            if (root == null) return false;
+            foreach (var c in root.GetComponentsInChildren<Component>(true))
+            {
+                if (c == null) continue;
+                foreach (var t in MaUntrackedRelocatorTypeNames)
+                    if (c.GetType().FullName == t) return true;
+            }
+            return false;
+        }
 
         // ── Injectable seams (internal) ───────────────────────────────────────────────────────────────
         // Real MA/VRCF types always reflect and MA's Get(Component) is always reachable in this Editor, and an
@@ -400,24 +424,18 @@ namespace Ryan6Vrc.AgentTools.Editor
             // move service, and a descriptor-layer binding crosses no module seam at all. Enumerating either
             // would manufacture offenders for a break that cannot occur in that direction.
             rep.AnchorsPresent = CollectAnchors(avatarGO);
-            foreach (var c in avatarGO.GetComponentsInChildren<Component>(true))
-            {
-                if (c == null) continue;
-                foreach (var t in MaUntrackedRelocatorTypeNames)
-                    if (c.GetType().FullName == t) { rep.UntrackedRelocatorPresent = true; break; }
-                if (rep.UntrackedRelocatorPresent) break;
-            }
-            var seamSeen = new HashSet<(int ctrl, int clip, string path, Type type)>();
+            rep.UntrackedRelocatorPresent = HasUntrackedRelocator(avatarGO);
+            var seamSeen = new HashSet<(int ctrl, int clip, string path, Type type, int anchor)>();
             foreach (var p in pairs)
             {
                 if (p.Kind != FrameKind.VRCF) continue;
-                foreach (var hit in CollectAnchorSeamBreaks(p.Controller, p.Roots, avatarGO, rep.AnchorsPresent, p.PathRewrite))
+                foreach (var hit in CollectAnchorSeamBreaks(p.Controller, p.Roots, avatarGO, rep.AnchorsPresent, p.PathRewrite, p.RootBindingsApplyToAvatar))
                 {
                     string clipAssetPath = AssetDatabase.GetAssetPath(hit.Clip);
                     if (IsSdkProxyClip(clipAssetPath)) continue;
-                    // Same dedup key shape as clip-binding's, for the same reason: one authored curve
-                    // expands into several component curves sharing a path and type.
-                    if (!seamSeen.Add((p.Controller.GetInstanceID(), hit.Clip.GetInstanceID(), hit.Binding.path, hit.Binding.type))) continue;
+                    // clip-binding's dedup key plus the anchor: one authored curve expands into several
+                    // component curves sharing a path and type, but two anchors on one binding are two repairs.
+                    if (!seamSeen.Add((p.Controller.GetInstanceID(), hit.Clip.GetInstanceID(), hit.Binding.path, hit.Binding.type, hit.Anchor.GetInstanceID()))) continue;
                     rep.AnchorSeams.Add(new Offender
                     {
                         Kind = "anchor-seam",
@@ -442,11 +460,17 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// a degraded line as at least as serious as a finding, never as noise to filter.</summary>
         public const string DegradedPrefix = "scan not trustworthy: ";
 
+        /// <summary>Prefix marking a line that is neither a finding nor a failure but a bound on what the scan
+        /// could see. A caller must not fold these into a pass/fail tally — surface them beside the verdict,
+        /// or a scope note becomes a spurious failure.</summary>
+        public const string ScopePrefix = "scan scope: ";
+
         /// <summary>The anchor-seam class alone, on any GameObject root — no descriptor required, so a bare
         /// module prefab can be scanned outside an avatar. Returns one rendered line per offender, plus any
-        /// fail-loud / frame-uncertainty note prefixed with <see cref="DegradedPrefix"/>. An empty list means
-        /// the scan ran and found nothing; it never means the scan was skipped, because every reason a scan
-        /// could not run lands as a degraded line rather than as silence.</summary>
+        /// fail-loud note prefixed with <see cref="DegradedPrefix"/> and any scope bound prefixed with
+        /// <see cref="ScopePrefix"/>. A list with no offender line means the scan ran and found nothing; it
+        /// never means the scan was skipped, because every reason a scan could not run lands as a degraded
+        /// line rather than as silence.</summary>
         public static List<string> ScanAnchorSeams(GameObject root)
         {
             var lines = new List<string>();
@@ -460,13 +484,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             var anchors = CollectAnchors(root);
             var pairs = EnumerateSurfaces(root, null, rep, vrcfOnly: true);
 
-            var seen = new HashSet<(int ctrl, int clip, string path, Type type)>();
+            // Keyed on the anchor too: one controller mounted on two FullControllers with different anchors is
+            // two distinct repairs, and a key without it reports only whichever was walked first.
+            var seen = new HashSet<(int ctrl, int clip, string path, Type type, int anchor)>();
             foreach (var p in pairs)
             {
-                foreach (var hit in CollectAnchorSeamBreaks(p.Controller, p.Roots, root, anchors, p.PathRewrite))
+                foreach (var hit in CollectAnchorSeamBreaks(p.Controller, p.Roots, root, anchors, p.PathRewrite, p.RootBindingsApplyToAvatar))
                 {
                     if (IsSdkProxyClip(AssetDatabase.GetAssetPath(hit.Clip))) continue;
-                    if (!seen.Add((p.Controller.GetInstanceID(), hit.Clip.GetInstanceID(), hit.Binding.path, hit.Binding.type))) continue;
+                    if (!seen.Add((p.Controller.GetInstanceID(), hit.Clip.GetInstanceID(), hit.Binding.path, hit.Binding.type, hit.Anchor.GetInstanceID()))) continue;
                     lines.Add(string.Format(CultureInfo.InvariantCulture,
                         "{0}: clip `{1}` binds `{2}`, moved by {3} @ `{4}` [{5}]",
                         p.Controller.name, hit.Clip.name, hit.Binding.path, hit.AnchorLabel, PathOf(hit.Anchor), p.Label));
@@ -474,13 +500,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             foreach (var n in rep.Notes) lines.Add(DegradedPrefix + n);
+            // R-K frame-uncertainty notes are raised on the MA branch only, which vrcfOnly skips, so this is
+            // empty today. Kept so widening the scope cannot silently drop a caveat it starts producing.
             foreach (var n in rep.FrameUncertain) lines.Add(DegradedPrefix + n);
+            if (anchors.Count > 0 || HasUntrackedRelocator(root)) lines.Add(ScopePrefix + AnchorSeamScopeLine);
             return lines;
         }
 
         // ── Surface enumeration helpers ───────────────────────────────────────────────────────────────
 
-        private struct Pair { public AnimatorController Controller; public List<GameObject> Roots; public FrameKind Kind; public string Label; public Func<string, string> PathRewrite; }
+        private struct Pair { public AnimatorController Controller; public List<GameObject> Roots; public FrameKind Kind; public string Label; public Func<string, string> PathRewrite; public bool RootBindingsApplyToAvatar; }
 
         /// <summary>Every (controller, frame) pair merged onto <paramref name="root"/>: the descriptor's own
         /// playable layers, then every MA MergeAnimator and VRCFury FullController in the subtree. Each pair
@@ -495,16 +524,19 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             var pairs = new List<Pair>();
             var seen = new HashSet<(int ctrl, int root, int kind)>();
-            void AddPair(AnimatorController c, GameObject frameRoot, List<GameObject> roots, FrameKind kind, string label, Func<string, string> rewrite)
+            void AddPair(AnimatorController c, GameObject frameRoot, List<GameObject> roots, FrameKind kind, string label, Func<string, string> rewrite, bool rootToAvatar = false)
             {
                 if (c == null) return;
                 int rootId = frameRoot != null ? frameRoot.GetInstanceID() : 0;
                 if (!seen.Add((c.GetInstanceID(), rootId, (int)kind))) return;
-                pairs.Add(new Pair { Controller = c, Roots = roots, Kind = kind, Label = label, PathRewrite = rewrite });
+                pairs.Add(new Pair { Controller = c, Roots = roots, Kind = kind, Label = label, PathRewrite = rewrite, RootBindingsApplyToAvatar = rootToAvatar });
             }
 
             // (a) Descriptor playable-layer controllers — avatar-root frame.
-            if (descriptor != null && !vrcfOnly) CollectDescriptorLayers(descriptor, root, AddPair);
+            // Adapted rather than passed directly: AddPair's rootBindingsApplyToAvatar is VRCF-only, and a
+            // descriptor layer has no such flag (its basis is always the avatar root).
+            if (descriptor != null && !vrcfOnly)
+                CollectDescriptorLayers(descriptor, root, (c, fr, rs, k, l, rw) => AddPair(c, fr, rs, k, l, rw));
 
             // (b)/(c) Every MA MergeAnimator + VRCFury FullController in the subtree.
             foreach (var c in root.GetComponentsInChildren<Component>(true))
@@ -532,7 +564,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // vrcfFrame.PathRewrite is THIS component's rewriteBindings only — applied before the
                     // ancestor walk, mirroring the build (fixes downward relocations the upward strip can't reach).
                     foreach (var vc in vrcfCtrls)
-                        AddPair(vc, mount, roots, FrameKind.VRCF, "VRCFury FullController @ " + PathOf(c.gameObject), vrcfFrame.PathRewrite);
+                        AddPair(vc, mount, roots, FrameKind.VRCF, "VRCFury FullController @ " + PathOf(c.gameObject), vrcfFrame.PathRewrite, vrcfFrame.RootBindingsApplyToAvatar);
                 }
             }
             return pairs;

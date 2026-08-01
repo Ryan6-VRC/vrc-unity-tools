@@ -1019,14 +1019,85 @@ public class CheckAvatarTests
 
     // The entry that demonstrates the repair anchors with ArmatureLink and animates straight through it.
     // A tool flagging that fails the exact shape it should be recommending.
+    //
+    // Carries a positive control that DISCRIMINATES: the ArmatureLink sits nearer the animated leaf than
+    // the tracked BoneProxy, and the walk names only the nearest anchor. So the reported anchor is `Prop`
+    // iff the link was skipped, and would be `Aim` if ArmatureLink were ever added to the tracked set.
+    // A control below the link would not discriminate (it would be nearest either way), and a bare
+    // `SeamCount == 0` passes with AddVrcfArmatureLink deleted — the could-not-fail shape this suite's
+    // header disclaims. Note the log legitimately says "ArmatureLink" regardless: it is the repair the
+    // note recommends, so absence-of-the-word is not the assertion.
     [Test]
     public void AnchorSeam_VrcfArmatureLink_NotFlagged()
     {
         var prop = NewSeamRig("AS6", out var aim, out _, out _);
-        AddVrcfArmatureLink(aim, aim);
+        var link = AddVrcfArmatureLink(aim, aim);
+        AddMaRelocator(prop, "BoneProxy"); // tracked, and FARTHER from the leaf than the link
         var clip = NewClip(TmpDir, "AsLink", "Aim/Origin/Beam");
         AddVrcfFullController(prop, NewController("AsCtrl6", clip), null);
-        Assert.AreEqual(0, SeamCount(SeamLog()));
+
+        // Assert the component was really constructed — Assert.IsNotNull on the resolved TYPE proves only
+        // that the type exists, which holds whether or not AddComponent/managedReferenceValue landed.
+        var content = new SerializedObject(link).FindProperty("content");
+        Assert.IsNotNull(content.managedReferenceValue, "ArmatureLink content must be live on the fixture");
+        Assert.AreEqual(aim, content.FindPropertyRelative("propBone").objectReferenceValue);
+
+        var log = SeamLog();
+        Assert.AreEqual(1, SeamCount(log), log);      // the control fired ⇒ the walk ran
+        StringAssert.Contains("moved-by=ModularAvatarBoneProxy @ `AS6/Prop`", log); // walked PAST the link
+    }
+
+    // VRCFury's AnimatorBindingsAlwaysTargetRoot forces path="" on every Animator-typed binding, applied
+    // LAST in FullControllerBuilder's combine, so it lands at the avatar root and crosses no relocator.
+    // Asserts clipBinding=0 alongside: a binding that still resolves is the only way this proves the SKIP
+    // rather than proving the binding failed to resolve for an unrelated reason.
+    [Test]
+    public void AnchorSeam_AnimatorTypedBinding_NotFlagged()
+    {
+        var prop = NewSeamRig("AS12", out var aim, out var beam, out _);
+        AddMaRelocator(aim, "BoneProxy");
+        beam.AddComponent<Animator>();
+        var clip = new AnimationClip { name = "AsAnimatorTyped" };
+        AnimationUtility.SetEditorCurve(clip,
+            EditorCurveBinding.FloatCurve("Aim/Origin/Beam", typeof(Animator), "SomeFloatParam"),
+            AnimationCurve.Linear(0, 0, 1, 1));
+        AssetDatabase.CreateAsset(clip, TmpDir + "/AsAnimatorTyped.anim");
+        AddVrcfFullController(prop, NewController("AsCtrl12", clip), null);
+        var log = SeamLog();
+        Assert.AreEqual(0, SeamCount(log), log);
+        StringAssert.Contains("clipBinding=0", log); // it resolves — so 0 is the skip, not a miss
+    }
+
+    // CreateNearestMatchPathRewriter short-circuits an empty-path binding when rootBindingsApplyToAvatar
+    // is set, leaving it at the avatar root instead of matching it onto the mount. Resolving it against
+    // the mount would read the mount itself as the animated node and invent a seam.
+    [Test]
+    public void AnchorSeam_EmptyPathUnderRootBindingsApplyToAvatar_NotFlagged()
+    {
+        var a = NewAvatar("AS13");
+        var prop = NewChild(a, "Prop");
+        AddMaRelocator(prop, "BoneProxy"); // the relocator is the MOUNT itself
+        var clip = NewClip(TmpDir, "AsRootBind", ""); // root-level binding
+        var vrcf = AddVrcfFullController(prop, NewController("AsCtrl13", clip), null);
+        var so = new SerializedObject(vrcf);
+        so.FindProperty("content").FindPropertyRelative("rootBindingsApplyToAvatar").boolValue = true;
+        so.ApplyModifiedPropertiesWithoutUndo();
+        var log = SeamLog();
+        Assert.AreEqual(0, SeamCount(log), log);
+    }
+
+    // The scope note must reach the GATE door too, not just Inspect — the gate is where a module anchored
+    // solely by an untracked relocator would otherwise pass with an empty list and no caveat at all.
+    [Test]
+    public void ScanAnchorSeams_UntrackedRelocator_EmitsScopeLineNotAnOffender()
+    {
+        var prop = NewSeamRig("AS14", out var aim, out _, out _);
+        AddMaRelocator(aim, "ReplaceObject");
+        AddVrcfFullController(prop, NewController("AsCtrl14", NewClip(TmpDir, "AsUntracked", "Aim/Origin/Beam")), null);
+        var lines = CheckAvatar.ScanAnchorSeams(prop);
+        Assert.AreEqual(1, lines.Count, string.Join("\n", lines));
+        StringAssert.StartsWith(CheckAvatar.ScopePrefix, lines[0]);
+        StringAssert.Contains("ModularAvatarReplaceObject", lines[0]);
     }
 
     [TestCase("BoneProxy")]
@@ -1095,8 +1166,11 @@ public class CheckAvatarTests
         AddMaRelocator(aim, "BoneProxy");
         AddVrcfFullController(prop, NewController("AsCtrl11", NewClip(TmpDir, "AsBare", "Aim/Origin/Beam")), null);
         var lines = CheckAvatar.ScanAnchorSeams(prop); // the MOUNT, not an avatar root
-        Assert.AreEqual(1, lines.Count, string.Join("\n", lines));
-        StringAssert.Contains("ModularAvatarBoneProxy", lines[0]);
+        var offenders = lines.FindAll(l => !l.StartsWith(CheckAvatar.ScopePrefix) && !l.StartsWith(CheckAvatar.DegradedPrefix));
+        Assert.AreEqual(1, offenders.Count, string.Join("\n", lines));
+        StringAssert.Contains("ModularAvatarBoneProxy", offenders[0]);
+        // A run that found a tracked anchor states its bound too, or the gate's PASS reads wider than it is.
+        Assert.IsTrue(lines.Exists(l => l.StartsWith(CheckAvatar.ScopePrefix)), string.Join("\n", lines));
     }
 
     [Test]

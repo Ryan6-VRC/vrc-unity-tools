@@ -193,6 +193,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             // that order). null ⇒ identity (no rules). Returns null for a path a delete-rule drops (the
             // binding vanishes at build — not a real break). CheckAnimator ignores it; CheckAvatar applies it.
             public Func<string, string> PathRewrite;
+            // VRCF only: the FullController's rootBindingsApplyToAvatar. When set, an EMPTY-path binding is
+            // left at the avatar root by the build's nearest-match rewriter instead of being matched onto the
+            // mount, so a resolver must not walk the mount for it.
+            public bool RootBindingsApplyToAvatar;
         }
 
         // MA MergeAnimator: pathMode 0=Relative, 1=Absolute (confirmed live). Absolute ⇒ basis is the avatar
@@ -386,10 +390,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (over != null && over.objectReferenceValue is GameObject go) root = go;
             if (root == null) root = c.gameObject;
             var pathRewrite = BuildVrcfRewriter(content, ref unreflected);
+            // CreateNearestMatchPathRewriter short-circuits on `binding.path == "" && rootBindingsApplyToAvatar`,
+            // so with the flag set a root-level binding stays at the AVATAR root instead of being matched onto
+            // the mount. A caller resolving it against the mount would read the mount as the animated node.
+            var rootToAvatar = content.FindPropertyRelative("rootBindingsApplyToAvatar");
             frame = new FrameResult
             {
                 Root = root, Kind = FrameKind.VRCF, IsAbsolute = false, UnreflectedAnchor = unreflected,
                 PathRewrite = pathRewrite, // this component's rules only — no cross-controller bleed
+                RootBindingsApplyToAvatar = rootToAvatar != null && rootToAvatar.boolValue,
             };
             return true;
         }
@@ -528,7 +537,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         // here — clip-binding owns it, and a path with no scene node has no ancestry to walk.
         internal static List<AnchorSeamHit> CollectAnchorSeamBreaks(
             AnimatorController controller, List<GameObject> roots, GameObject avatarRoot,
-            Dictionary<GameObject, string> anchors, Func<string, string> pathRewrite = null)
+            Dictionary<GameObject, string> anchors, Func<string, string> pathRewrite = null,
+            bool rootBindingsApplyToAvatar = false)
         {
             var hits = new List<AnchorSeamHit>();
             if (controller == null || roots == null || roots.Count == 0 || avatarRoot == null
@@ -543,6 +553,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var b in bindings)
                 {
                     if (IsHumanoidAnimatorCurve(b)) continue; // muscle/root curves have no scene object
+                    // AnimatorBindingsAlwaysTargetRoot forces path="" on EVERY Animator-typed binding, and
+                    // FullControllerBuilder applies it LAST in the combine ("we do this after rewriting paths
+                    // to ensure animator bindings all hit \"\""). So the binding lands at the avatar root and
+                    // crosses no relocator whatever its authored path said. Not a prediction about a move —
+                    // a declared, unconditional rewrite of this whole binding class. The clip-binding walk
+                    // keeps the narrower humanoid-only skip: a broken Animator binding is still a break there.
+                    if (b.type == typeof(Animator)) continue;
                     var probe = b;
                     if (pathRewrite != null)
                     {
@@ -553,8 +570,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // Walk the object the binding ACTUALLY resolves to rather than re-finding the path by
                     // string: GetAnimatedObject is the resolver the clip-binding class already trusts, and
                     // taking its result removes a silent-skip branch (a path Transform.Find cannot retrace).
+                    // An empty path under rootBindingsApplyToAvatar resolves against the avatar root ALONE —
+                    // the build leaves it there, so walking the mount would read the mount as the animated node.
+                    var probeRoots = (probe.path.Length == 0 && rootBindingsApplyToAvatar)
+                        ? new List<GameObject> { avatarRoot } : roots;
                     UnityEngine.Object animated = null;
-                    foreach (var root in roots)
+                    foreach (var root in probeRoots)
                     {
                         animated = AnimationUtility.GetAnimatedObject(root, probe);
                         if (animated != null) break;
