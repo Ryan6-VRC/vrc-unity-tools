@@ -35,6 +35,11 @@ namespace Ryan6Vrc.AgentTools.Editor
     [AgentTool]
     public static class CheckAnimator
     {
+        // AvatarObjectReference.AVATAR_ROOT — the referencePath a root-targeting MA scene ref carries.
+        // Get(Component) resolves it to the avatar root, so the frame walk below must too; CheckAvatar's
+        // scene-ref scan reads the same literal from here.
+        internal const string MaAvatarRootSentinel = "$$$AVATAR_ROOT$$$";
+
         // ----- Public API ---------------------------------------------------------------------------
 
         /// <summary>Path/GUID overload: resolve <paramref name="controllerPathOrGuid"/> (an asset path or a
@@ -190,9 +195,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             public Func<string, string> PathRewrite;
         }
 
-        // MA MergeAnimator: pathMode 0=Relative, 1=Absolute (confirmed live). Relative ⇒ mount at the
-        // resolved relativePathRoot (an AvatarObjectReference: targetObject, else referencePath resolved
-        // avatar-root-relative, else the component's OWN GameObject). Absolute ⇒ basis is the avatar root.
+        // MA MergeAnimator: pathMode 0=Relative, 1=Absolute (confirmed live). Absolute ⇒ basis is the avatar
+        // root. Relative ⇒ mount at the resolved relativePathRoot, and the resolution order is the BUILD's,
+        // not the inspector's: MergeAnimatorProcessor calls relativePathRoot.Get(avatarRootTransform) and
+        // falls back to merge.gameObject when it returns null, so this mirrors AvatarObjectReference
+        // .Get(Component) — an empty referencePath is null WHATEVER targetObject holds, then a targetObject
+        // that sits under the avatar root, then the AVATAR_ROOT sentinel, then the path — and only a null
+        // from all of that lands on the component's OWN GameObject. Reading targetObject first (the
+        // inspector's Get(SerializedProperty) order) reports a frame the build never uses; nondestructive.md
+        // owns why the two orders differ. The path branch also mirrors Get(Component)'s childless-"Armature"
+        // sibling swap (MA issue #308) — see ResolveArmatureDecoy for why silence makes that one mandatory.
         // Returns true iff c is an MA MergeAnimator that references a controller (out via controller).
         internal static bool TryMaFrame(Component c, GameObject avatarGO,
             out AnimatorController controller, out FrameResult frame)
@@ -237,17 +249,48 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     var target = rel.FindPropertyRelative("targetObject");
                     var refPath = rel.FindPropertyRelative("referencePath");
-                    if (target != null && target.objectReferenceValue is GameObject tgo) root = tgo;
-                    else if (refPath != null && !string.IsNullOrEmpty(refPath.stringValue) && avatarGO != null)
+                    string path = refPath != null ? refPath.stringValue : "";
+                    var tgo = target != null ? target.objectReferenceValue as GameObject : null;
+                    // Empty path ⇒ Get(Component) returns null before it ever reads targetObject; avatarGO
+                    // null (no descriptor above the merge site — DetectAuto already says so out loud) is the
+                    // build's FindAvatarTransformInParents miss, which returns null the same way. Both land
+                    // on the own-GameObject fallback below, exactly as the build does.
+                    if (!string.IsNullOrEmpty(path) && avatarGO != null)
                     {
-                        var t = avatarGO.transform.Find(refPath.stringValue);
-                        root = t != null ? t.gameObject : null;
+                        if (tgo != null && tgo.transform.IsChildOf(avatarGO.transform)) root = tgo;
+                        else if (path == MaAvatarRootSentinel) root = avatarGO;
+                        else
+                        {
+                            var t = ResolveArmatureDecoy(avatarGO.transform.Find(path));
+                            root = t != null ? t.gameObject : null;
+                        }
                     }
                 }
-                if (root == null) root = c.gameObject; // empty/absent relativePathRoot ⇒ own GameObject best-effort
+                if (root == null) root = c.gameObject; // unresolved relativePathRoot ⇒ own GameObject, as the build
             }
             frame = new FrameResult { Root = root, Kind = FrameKind.MA, IsAbsolute = absolute, UnreflectedAnchor = unreflected };
             return true;
+        }
+
+        // Get(Component)'s last step (AvatarObjectReference.cs:110-125, MA issue #308): some avatars carry a
+        // second, childless "Armature" to move the VRChat eye position, so a path landing on a childless
+        // "Armature" is redirected to the same-named sibling that has children. Applies to the PATH branch
+        // only — MA runs it on Find()'s result, not on a targetObject.
+        //
+        // Mirroring a vendor quirk is normally the wrong instinct, and this one is mandatory anyway: skipping
+        // it moves the frame with nothing left to say so. TryResolveSceneRef invokes MA's REAL Get, so it sees
+        // the swapped object, resolves, and stays quiet — no scene-ref offender, no R-K caveat — while the
+        // walk below would mount at the decoy. The decoy is childless by construction, so every binding in
+        // the merged controller then fails against it: a flood of false clip-binding offenders under a clean
+        // Notes section. A silent wrong frame is the exact defect this walk exists to prevent.
+        internal static Transform ResolveArmatureDecoy(Transform resolved)
+        {
+            if (resolved == null || resolved.name != "Armature" || resolved.childCount != 0) return resolved;
+            var parent = resolved.parent;
+            if (parent == null) return resolved;
+            foreach (Transform sibling in parent)
+                if (sibling.name == "Armature" && sibling.childCount > 0) return sibling;
+            return resolved;
         }
 
         private static AutoResult? ParseMergeAnimator(Component c, AnimatorController controller, GameObject avatarGO)

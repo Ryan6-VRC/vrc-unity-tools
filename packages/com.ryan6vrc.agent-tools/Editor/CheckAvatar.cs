@@ -53,7 +53,9 @@ namespace Ryan6Vrc.AgentTools.Editor
     public static class CheckAvatar
     {
         private const string MaObjRefTypeName = "nadena.dev.modular_avatar.core.AvatarObjectReference";
-        private const string MaAvatarRootSentinel = "$$$AVATAR_ROOT$$$"; // AvatarObjectReference.AVATAR_ROOT
+        // One literal for both resolvers: CheckAnimator's frame walk needs the same sentinel, and CheckAvatar
+        // already depends on CheckAnimator (CollectUnresolvedBindings), so it is owned there.
+        private const string MaAvatarRootSentinel = CheckAnimator.MaAvatarRootSentinel;
 
         // Standing Notes line — quoted verbatim from the spec §Excluded edge. Carried by EVERY RunLog so the
         // model's two known holes (anticipatory-authoring frames + build-time deletions) are stated-and-refused
@@ -420,10 +422,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             rep.Notes.Add(FailLoudNotePrefix + msg.Substring("[CheckAvatar] ".Length));
         }
 
-        // R-K: iff a Relative MA's relativePathRoot is SET (non-empty referencePath) yet does not resolve,
-        // TryMaFrame fell back to the component's own GameObject — the frame is a guess. Returns the
-        // frame-uncertain caveat cross-referencing the MA-scene-ref offender the generic scan will emit for
-        // that same relativePathRoot; null when the frame is confident (Absolute, or an empty/resolving root).
+        // R-K: the frame caveat that rides beside an MA MergeAnimator whose relativePathRoot did not resolve.
+        // Two shapes reach the own-GameObject fallback and BOTH get a note, because the generic scan emits an
+        // MA-scene-ref offender for both and an offender with no frame line beside it reads as a dropped ref:
+        //   - non-empty referencePath that does not resolve ⇒ the frame is a GUESS (frame-uncertain);
+        //   - empty referencePath carrying a live targetObject ⇒ the frame is CERTAIN (MA's own fallback), and
+        //     what is broken is the ref, which the inspector still shows resolved (nondestructive.md).
+        // Returns null only where there is no offender to caption: Absolute, a resolving root, or a wholly
+        // empty relativePathRoot (both halves empty — the intentional-empty the scan exempts too).
         private static string MaFrameUncertaintyNote(Component c, GameObject avatarGO, FrameResult frame)
         {
             if (frame.IsAbsolute) return null;
@@ -434,8 +440,20 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return "frame-uncertain: the MA relativePathRoot field on '" + PathOf(c.gameObject)
                      + "' did not reflect (API drift) — bindings were resolved against the fallback frame (its own GameObject).";
             var pathChild = rel.FindPropertyRelative("referencePath");
+            var targetChild = rel.FindPropertyRelative("targetObject");
             string refPath = pathChild != null ? pathChild.stringValue : "";
-            if (string.IsNullOrEmpty(refPath)) return null; // empty ⇒ own-GO by design, not a guess
+            if (string.IsNullOrEmpty(refPath))
+            {
+                // Both halves empty ⇒ the author wrote no root at all and meant the own-GO fallback: no
+                // offender, so no caption. A live targetObject ⇒ the scan DOES emit one, and this is its
+                // frame half — the frame is right, the ref is the silent no-op.
+                if (targetChild == null || targetChild.objectReferenceValue == null) return null;
+                return "frame-certain: bindings for the animator on '" + PathOf(c.gameObject)
+                     + "' were resolved against its own GameObject — the MA relativePathRoot carries a targetObject but no"
+                     + " referencePath, which is exactly what the build resolves it to. See the matching MA-scene-ref"
+                     + " offender: the ref reads resolved in the inspector and is not there at bake, so if that targetObject"
+                     + " was meant to be the frame, these bindings are counted against the wrong one.";
+            }
             if (TryResolveSceneRef(rel, c, avatarGO, out _)) return null; // resolves ⇒ confident frame
             return "frame-uncertain: bindings for the animator on '" + PathOf(c.gameObject)
                  + "' were resolved against the fallback frame (its own GameObject) because the MA relativePathRoot '"
@@ -516,10 +534,12 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // Resolve an AvatarObjectReference property. Authoritative path: box it (guarded — boxedValue THROWS
         // for unsupported shapes, R-J) and invoke the pinned Get(Component), which returns null on an empty
-        // referencePath BEFORE it looks at targetObject and only then lets a live targetObject win. (The
-        // static Get(SerializedProperty) overload the inspector uses has the opposite order and no empty-path
-        // guard — that split is the silent no-op in nondestructive.md, and mirroring the wrong one here is
-        // what made this scan blind to it.) Every reflective hop is guarded: on any failure/drift, warn loud
+        // referencePath BEFORE it looks at targetObject and only then lets a live targetObject win, and only
+        // one sitting under the avatar root. (The static Get(SerializedProperty) overload the inspector uses
+        // has the opposite order and no empty-path guard — it keeps the IsChildOf gate, which is why an
+        // out-of-avatar targetObject resolves under NEITHER overload. That split is the silent no-op
+        // nondestructive.md names, and mirroring the wrong one here is what made this scan blind to it.)
+        // Every reflective hop is guarded: on any failure/drift, warn loud
         // naming the broken anchor and self-resolve from the SerializedProperty CHILDREN in that same order.
         // Never throws.
         private static bool TryResolveSceneRef(SerializedProperty aor, Component host, GameObject avatarGO, out string refPath)
@@ -547,11 +567,15 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // ---- Guarded self-resolve from the children already located --------------------------------
             Debug.LogWarning("[CheckAvatar] scene-ref resolve degraded on " + PathOf(host.gameObject)
-                           + " (" + reason + ") — self-resolving from serialized children (empty referencePath first, then targetObject, then the path).");
+                           + " (" + reason + ") — self-resolving from serialized children (empty referencePath first, then an in-avatar targetObject, then the path).");
 
             var targetGO = targetChild != null ? targetChild.objectReferenceValue as GameObject : null;
             if (string.IsNullOrEmpty(refPath)) return false;    // empty path ⇒ null, whatever targetObject holds
-            if (targetGO != null) return true; // B3: a live targetObject wins, mirroring .Get() (hierarchy-agnostic)
+            // B3: a live targetObject wins — but only under the avatar root. BOTH MA overloads gate on
+            // IsChildOf (Get(Component) against FindAvatarTransformInParents, Get(SerializedProperty) against
+            // the same root), so a targetObject pointing outside the avatar resolves to NOTHING at bake.
+            // Accepting it here was a false negative on the one path that exists to survive MA API drift.
+            if (targetGO != null && targetGO.transform.IsChildOf(avatarGO.transform)) return true;
             if (refPath == MaAvatarRootSentinel) return true;                                       // avatar root itself
             return avatarGO.transform.Find(refPath) != null;
         }
@@ -812,7 +836,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public readonly List<Offender> SceneRefs = new List<Offender>();
             public readonly List<Offender> ClipBindings = new List<Offender>();
             public readonly List<MergeConflict> MergeConflicts = new List<MergeConflict>();
-            public readonly List<string> FrameUncertain = new List<string>(); // R-K caveats
+            public readonly List<string> FrameUncertain = new List<string>(); // R-K frame caveats (uncertain AND certain-but-captioned)
             public readonly List<string> Notes = new List<string>();          // R-H fail-loud + degrade notes
         }
     }
