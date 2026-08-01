@@ -2,101 +2,76 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
-using UnityEditor;
-using UnityEngine;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Read-only digest of the Unity Editor console — every line of every entry, including the
-    /// multi-line bodies that carry the diagnosis.
+    /// Read-only digest of the Unity Editor console — every line of every entry.
     ///
     /// This exists because the MCP <c>read_console</c> door returns only an entry's FIRST line: it
-    /// reads the whole message out of Unity and then discards lines 2..N with a
-    /// <c>message.Split('\n')[0]</c>. Unity is not the limit — <c>LogEntries.GetEntryInternal</c>
-    /// hands back the complete text, which is what this tool reads. A build warning whose payload is
-    /// a list (VRCFury's "Removed N properties from animation clips that targeted objects that do
-    /// not exist:" names each dropped path, property and source clip in its body) arrives here
-    /// intact; through <c>read_console</c> the count survives and the diagnosis does not.
+    /// reads the whole message out of Unity and then discards lines 2..N. A build warning whose
+    /// payload is a list (VRCFury names each dropped binding and its source clip in the body)
+    /// arrives there as its header alone — the count survives and the diagnosis does not.
     ///
-    /// Two behaviors deliberately differ from that door, both because they were defects:
-    ///   * TYPE comes from the entry's <c>mode</c> BITS, not from substring-matching the text.
-    ///     Matching on "Exception" mis-tags benign lines (VRCFury routes build-progress chatter
-    ///     through <c>VF.Exceptions</c>) as errors.
-    ///   * The stack trace is split off as a CONTIGUOUS TRAILING RUN of stack-frame lines, scanned
-    ///     backwards from the end. A forward scan for the first "stack-looking" line silently eats
-    ///     every payload line after it. Nothing between the header and the stack can be lost here;
-    ///     when the split is uncertain the text is kept, never dropped.
+    /// Unity hands over everything on request. <c>LogEntry.message</c> holds the body and the
+    /// callstack concatenated, and <c>LogEntry.callstackTextStartUTF16</c> is the exact index where
+    /// the callstack begins — so the two are separated by reading a number Unity already computed,
+    /// never by guessing at which lines look like stack frames. Guessing is what loses payload
+    /// lines; there is no heuristic here to get wrong.
     ///
-    /// INSPECTION ONLY — never mutates the console or project. (Clearing the console is
-    /// <c>read_console</c>'s <c>clear</c> action, deliberately not mirrored here.)
+    /// INSPECTION ONLY. It does not write to the console it reads — no door here logs, because a
+    /// logging console reader pollutes its own next read (and an error it logs is indistinguishable
+    /// from a real one to `PlayGate` and to any "console is clean" check). The return value is the
+    /// only channel. Clearing is not mirrored here; `read_console`'s `clear` action was its own.
     /// </summary>
     [AgentTool]
     public static class ReportConsole
     {
-        /// <summary>Inline character budget. Past this the digest spills to a RunLog artifact and the
-        /// summary carries its path in-band, so a noisy console can never blow out the caller's context.</summary>
+        /// <summary>Inline character budget. Past this the digest spills to a Snapshot artifact and the
+        /// summary carries its path in-band, so a noisy console cannot blow out the caller's context.</summary>
         private const int InlineBudget = 12000;
 
         // ----- Public API ---------------------------------------------------------------------
 
         /// <summary>
-        /// Digest the most recent console entries, newest last. Returns a one-line summary followed by
-        /// the entries; when the text exceeds the inline budget the entries go to a RunLog instead and
+        /// Digest the most recent console entries, oldest first. Returns a one-line summary followed by
+        /// the entries; when the text exceeds the inline budget the entries go to a Snapshot instead and
         /// the summary ends with the artifact path in-band (<c>… =&gt; OK | log=&lt;path&gt;</c>).
         /// </summary>
         /// <param name="types">Comma-separated subset of <c>error</c>/<c>warning</c>/<c>log</c>, or
-        /// <c>all</c>. Unrecognized names are a bare <c>[ReportConsole] FAIL: …</c> naming them.</param>
-        /// <param name="filterText">Keep only entries whose FULL text contains this (ordinal, case-
+        /// <c>all</c>. Anything else is a bare <c>[ReportConsole] FAIL: …</c> naming it.</param>
+        /// <param name="filterText">Keep only entries whose full text contains this (ordinal, case-
         /// sensitive) — the whole body is matched, not just the header.</param>
         /// <param name="count">Maximum entries returned, taken from the newest end. Clamped to 1..500.</param>
-        /// <param name="includeStackTrace">Append each entry's stack frames. Off by default: the frames
-        /// are usually noise, and dropping them is safe here because the payload is never inside them.</param>
-        /// <param name="stripBenign">Drop known-benign noise and name the counts in the summary — never
-        /// silent. An entry kept BECAUSE it matched <paramref name="filterText"/> is exempt: filtering
-        /// for noise by name should not then have it stripped.</param>
+        /// <param name="includeStackTrace">Include each entry's callstack. On by default: for an
+        /// exception the frames are the diagnosis, and withholding them by default would reproduce the
+        /// header-only read this tool exists to replace.</param>
         public static string Report(
             string types = "all",
             string filterText = null,
             int count = 20,
-            bool includeStackTrace = false,
-            bool stripBenign = true)
+            bool includeStackTrace = true)
         {
             int mask;
             string badTypes;
             if (!TryParseTypes(types, out mask, out badTypes))
-                return Fail("unrecognized types '" + badTypes + "' — expects a comma-separated subset of error/warning/log, or all");
+                return "[ReportConsole] FAIL: unrecognized types '" + badTypes + "' — expects a comma-separated subset of error/warning/log, or all";
 
             if (count < 1) count = 1;
             if (count > 500) count = 500;
 
             List<Entry> entries;
+            int unreadable;
             string readError;
-            if (!TryReadEntries(out entries, out readError))
-                return Fail(readError);
+            if (!TryReadEntries(out entries, out unreadable, out readError))
+                return "[ReportConsole] FAIL: " + readError;
 
             int scanned = entries.Count;
             var kept = new List<Entry>();
-            var benign = new Dictionary<string, int>();
             foreach (var e in entries)
             {
                 if ((TypeBit(e.Kind) & mask) == 0) continue;
-                bool matchedFilter = false;
-                if (!string.IsNullOrEmpty(filterText))
-                {
-                    if (e.Full.IndexOf(filterText, StringComparison.Ordinal) < 0) continue;
-                    matchedFilter = true;
-                }
-                if (stripBenign && !matchedFilter)
-                {
-                    string label = BenignLabel(e.Body, e.Stack);
-                    if (label != null)
-                    {
-                        int n;
-                        benign[label] = benign.TryGetValue(label, out n) ? n + 1 : 1;
-                        continue;
-                    }
-                }
+                if (!string.IsNullOrEmpty(filterText) && e.Full.IndexOf(filterText, StringComparison.Ordinal) < 0) continue;
                 kept.Add(e);
             }
 
@@ -107,28 +82,23 @@ namespace Ryan6Vrc.AgentTools.Editor
             for (int i = 0; i < kept.Count; i++)
                 RenderEntry(kept[i], i + 1, includeStackTrace, body);
 
-            string summary = "[ReportConsole] scanned=" + scanned + " matched=" + matched
-                + " shown=" + kept.Count + BenignNote(benign) + " => OK";
+            // An entry Unity declined to hand over is named, never absorbed into a clean-looking count.
+            string summary = "[ReportConsole] scanned=" + scanned + " matched=" + matched + " shown=" + kept.Count
+                + (unreadable > 0 ? " unreadable=" + unreadable : "") + " => OK";
 
             if (body.Length <= InlineBudget)
-            {
-                string inline = summary + "\n" + body;
-                Debug.Log(summary);
-                return inline;
-            }
+                return summary + "\n" + body;
 
-            string header = "# ReportConsole\n" + summary + "\n\n";
-            string result = RunLogFormat.WriteRunLog(
-                RunLogFormat.SnapshotDir, "report-console", summary, header + body, ".md");
-            Debug.Log(result);
-            return result;
+            return RunLogFormat.WriteRunLog(
+                RunLogFormat.SnapshotDir, "report-console", summary,
+                "# ReportConsole\n" + summary + "\n\n" + body, ".md");
         }
 
         // ----- Entry model --------------------------------------------------------------------
 
-        /// <summary>One console entry, already split. <see cref="Full"/> is Unity's verbatim text and is
-        /// what <c>filterText</c> matches; <see cref="Body"/> + <see cref="Stack"/> partition it exactly
-        /// (concatenating them reproduces <see cref="Full"/> up to the separating newline).</summary>
+        /// <summary>One console entry. <see cref="Full"/> is Unity's verbatim text and is what
+        /// <c>filterText</c> matches; <see cref="Body"/> and <see cref="Stack"/> are its two halves,
+        /// split at the index Unity reports.</summary>
         public struct Entry
         {
             public EntryKind Kind;
@@ -144,10 +114,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ----- Console read (reflection into UnityEditor.LogEntries) ---------------------------
 
         /// <summary>Read every console entry, oldest first. Returns false with a caller-facing reason when
-        /// the internal API has drifted — a rename upstream must fail loud, never read as an empty console.</summary>
-        private static bool TryReadEntries(out List<Entry> entries, out string error)
+        /// the internal API has drifted — a rename upstream must fail loud, never read as an empty console.
+        /// <paramref name="unreadable"/> counts rows Unity refused to hand over, so they can be reported
+        /// rather than silently skipped.</summary>
+        private static bool TryReadEntries(out List<Entry> entries, out int unreadable, out string error)
         {
             entries = null;
+            unreadable = 0;
             error = null;
 
             var asm = typeof(UnityEditor.Editor).Assembly;
@@ -169,27 +142,33 @@ namespace Ryan6Vrc.AgentTools.Editor
             var fMode = logEntryType.GetField("mode", Fields);
             var fFile = logEntryType.GetField("file", Fields);
             var fLine = logEntryType.GetField("line", Fields);
-            if (start == null || end == null || getEntry == null || fMessage == null || fMode == null)
+            var fStackStart = logEntryType.GetField("callstackTextStartUTF16", Fields);
+            if (start == null || end == null || getEntry == null
+                || fMessage == null || fMode == null || fFile == null || fLine == null || fStackStart == null)
             {
-                error = "console reflection failed — StartGettingEntries/EndGettingEntries/GetEntryInternal/"
-                    + "LogEntry.message must all resolve; one is missing (internal API drift)";
+                error = "console reflection failed — StartGettingEntries/EndGettingEntries/GetEntryInternal and "
+                    + "LogEntry.{message,mode,file,line,callstackTextStartUTF16} must all resolve (internal API drift)";
                 return false;
             }
 
             var list = new List<Entry>();
-            int total = (int)start.Invoke(null, null);
+            int total;
             try
             {
+                // Inside the try: a cast failure on upstream drift must still reach EndGettingEntries,
+                // or the console stays locked for the rest of the session.
+                total = (int)start.Invoke(null, null);
                 var instance = Activator.CreateInstance(logEntryType);
                 for (int i = 0; i < total; i++)
                 {
                     var args = new object[] { i, instance };
-                    if (!(bool)getEntry.Invoke(null, args)) continue;
+                    if (!(bool)getEntry.Invoke(null, args)) { unreadable++; continue; }
                     var boxed = args[1];
 
                     string full = fMessage.GetValue(boxed) as string ?? string.Empty;
-                    string stack;
-                    string bodyText = SplitStackSuffix(full, out stack);
+                    int stackStart = (int)fStackStart.GetValue(boxed);
+                    string bodyText, stack;
+                    SplitAt(full, stackStart, out bodyText, out stack);
 
                     list.Add(new Entry
                     {
@@ -197,8 +176,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                         Full = full,
                         Body = bodyText,
                         Stack = stack,
-                        File = fFile != null ? fFile.GetValue(boxed) as string ?? string.Empty : string.Empty,
-                        Line = fLine != null ? (int)fLine.GetValue(boxed) : 0,
+                        File = fFile.GetValue(boxed) as string ?? string.Empty,
+                        Line = (int)fLine.GetValue(boxed),
                     });
                 }
             }
@@ -213,8 +192,26 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Pure helpers (unit-tested directly) ---------------------------------------------
 
-        // LogEntry.mode bit flags. Classifying on these is why this tool does not inherit the
-        // substring-matching mis-tag that makes VRCFury's progress chatter read as an error.
+        /// <summary>Split <paramref name="full"/> at the callstack index Unity reported. An index of 0 or
+        /// one outside the string means Unity recorded no callstack, and the whole message is body — the
+        /// safe direction, since a body line is never discarded for looking like a frame.</summary>
+        public static void SplitAt(string full, int stackStart, out string body, out string stack)
+        {
+            full = full ?? string.Empty;
+            if (stackStart <= 0 || stackStart > full.Length)
+            {
+                body = full;
+                stack = string.Empty;
+                return;
+            }
+            body = full.Substring(0, stackStart).TrimEnd('\r', '\n');
+            stack = full.Substring(stackStart).TrimStart('\r', '\n').TrimEnd('\r', '\n');
+        }
+
+        // LogEntry.mode bit flags, mirroring UnityEditor.ConsoleWindow.Mode. This is the authoritative
+        // source for an entry's type; Unity's own console classifies the same way. (It is not a fix for
+        // VRCFury's build-progress chatter reading as an error — that really does carry kScriptingException,
+        // so it is genuinely error-typed here too. Judge build health from log text, as verify.md says.)
         private const int ModeError = 1 << 0;
         private const int ModeAssert = 1 << 1;
         private const int ModeFatal = 1 << 4;
@@ -224,106 +221,24 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const int ModeScriptingWarning = 1 << 9;
         private const int ModeScriptCompileError = 1 << 11;
         private const int ModeScriptCompileWarning = 1 << 12;
+        private const int ModeStickyError = 1 << 13;
         private const int ModeScriptingException = 1 << 17;
+        private const int ModeGraphCompileError = 1 << 20;
         private const int ModeScriptingAssertion = 1 << 21;
+        private const int ModeVisualScriptingError = 1 << 22;
 
         private const int ErrorMask = ModeError | ModeAssert | ModeFatal | ModeAssetImportError
-            | ModeScriptingError | ModeScriptCompileError | ModeScriptingException | ModeScriptingAssertion;
+            | ModeScriptingError | ModeScriptCompileError | ModeStickyError | ModeScriptingException
+            | ModeGraphCompileError | ModeScriptingAssertion | ModeVisualScriptingError;
         private const int WarningMask = ModeAssetImportWarning | ModeScriptingWarning | ModeScriptCompileWarning;
 
         /// <summary>Map a <c>LogEntry.mode</c> bitfield to its console type. Error bits win over warning
-        /// bits (an entry carrying both is an error).</summary>
+        /// bits — under-reporting severity is the dangerous direction.</summary>
         public static EntryKind ClassifyMode(int mode)
         {
             if ((mode & ErrorMask) != 0) return EntryKind.Error;
             if ((mode & WarningMask) != 0) return EntryKind.Warning;
             return EntryKind.Log;
-        }
-
-        /// <summary>
-        /// Split Unity's concatenated <c>message</c> into body and stack trace, scanning BACKWARDS from
-        /// the end for a contiguous run of stack-frame lines. Returns the body; <paramref name="stack"/>
-        /// receives the frames (empty when none are found).
-        ///
-        /// Backwards is the whole point: a forward scan for the first stack-looking line drops every
-        /// payload line that happens to follow it, which is how a list-payload warning loses its list.
-        /// Here only a true trailing run can be removed, so no interior line is reachable by the split.
-        /// A message that is entirely stack frames keeps its first line as the body — an entry always
-        /// has a header.
-        /// </summary>
-        public static string SplitStackSuffix(string full, out string stack)
-        {
-            stack = string.Empty;
-            if (string.IsNullOrEmpty(full)) return full ?? string.Empty;
-
-            string[] lines = full.Split('\n');
-            int firstFrame = lines.Length;
-            for (int i = lines.Length - 1; i >= 1; i--)
-            {
-                string line = lines[i].TrimEnd('\r');
-                if (line.Length == 0)
-                {
-                    // A blank line inside the trailing run is tolerated only if frames continue above it.
-                    if (firstFrame <= i + 1) continue;
-                    break;
-                }
-                if (!IsStackFrame(line)) break;
-                firstFrame = i;
-            }
-            if (firstFrame >= lines.Length) return full;
-
-            stack = string.Join("\n", lines, firstFrame, lines.Length - firstFrame).TrimEnd('\r', '\n');
-            return string.Join("\n", lines, 0, firstFrame).TrimEnd('\r', '\n');
-        }
-
-        /// <summary>True when a line looks like a managed stack frame. Deliberately narrow — a false
-        /// positive costs a dropped payload line, so this demands frame punctuation, not just a dot.</summary>
-        private static bool IsStackFrame(string line)
-        {
-            string t = line.Trim();
-            if (t.Length == 0) return false;
-            // "  at Foo.Bar () [0x00000] in <hash>:0" — .NET-style frame.
-            if (t.StartsWith("at ", StringComparison.Ordinal) && t.Contains("(")) return true;
-            // "Type:Method (args)" — Unity's own frame grammar, optionally " (at Assets/X.cs:12)".
-            if (t.Contains(" (at ") && t.Contains(":")) return true;
-            int paren = t.IndexOf(" (", StringComparison.Ordinal);
-            if (paren <= 0 || !t.EndsWith(")", StringComparison.Ordinal)) return false;
-            string head = t.Substring(0, paren);
-            return head.IndexOf(':') > 0 && head.IndexOf(' ') < 0;
-        }
-
-        // Known-benign console noise. Each predicate reads the entry's body and stack; the label is what
-        // the summary names when one is dropped. These are output-string heuristics against third-party
-        // and importer text, so they are re-validated by reading upstream source, never by a green run.
-        private static readonly KeyValuePair<string, Func<string, string, bool>>[] BenignPatterns =
-        {
-            Benign("MACS third-party load noise", (m, s) => m.Contains("[MACS]")),
-            Benign("DestroyBlendTreeRecursive", (m, s) => (m + s).Contains("DestroyBlendTreeRecursive")),
-            Benign("FBX importer inconsistent-result noise", (m, s) =>
-            {
-                string blob = m + s;
-                return blob.Contains("inconsistent result")
-                    && (blob.IndexOf("fbx", StringComparison.OrdinalIgnoreCase) >= 0
-                        || blob.IndexOf("import", StringComparison.OrdinalIgnoreCase) >= 0);
-            }),
-            Benign("VRCFury build-progress", (m, s) =>
-            {
-                string blob = m + s;
-                return blob.Contains("VF.Exceptions") && (blob.Contains("Progress (") || blob.Contains("Importing "));
-            }),
-        };
-
-        private static KeyValuePair<string, Func<string, string, bool>> Benign(string label, Func<string, string, bool> p)
-            => new KeyValuePair<string, Func<string, string, bool>>(label, p);
-
-        /// <summary>The benign label matching this entry, or null when it is signal.</summary>
-        public static string BenignLabel(string message, string stack)
-        {
-            string m = message ?? string.Empty;
-            string s = stack ?? string.Empty;
-            foreach (var pattern in BenignPatterns)
-                if (pattern.Value(m, s)) return pattern.Key;
-            return null;
         }
 
         /// <summary>Parse the <c>types</c> filter into a bit mask over <see cref="EntryKind"/>.</summary>
@@ -332,6 +247,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             mask = 0;
             bad = null;
             if (string.IsNullOrEmpty(types)) types = "all";
+            const int all = (1 << (int)EntryKind.Log) | (1 << (int)EntryKind.Warning) | (1 << (int)EntryKind.Error);
             var unknown = new List<string>();
             foreach (var raw in types.Split(','))
             {
@@ -339,7 +255,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (t.Length == 0) continue;
                 switch (t)
                 {
-                    case "all": mask |= TypeBit(EntryKind.Log) | TypeBit(EntryKind.Warning) | TypeBit(EntryKind.Error); break;
+                    case "all": mask |= all; break;
                     case "log": mask |= TypeBit(EntryKind.Log); break;
                     case "warning": mask |= TypeBit(EntryKind.Warning); break;
                     case "error": mask |= TypeBit(EntryKind.Error); break;
@@ -347,7 +263,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
             }
             if (unknown.Count > 0) { bad = string.Join(", ", unknown.ToArray()); return false; }
-            if (mask == 0) mask = TypeBit(EntryKind.Log) | TypeBit(EntryKind.Warning) | TypeBit(EntryKind.Error);
+            if (mask == 0) { bad = types; return false; } // "" / "," names no type; don't quietly mean `all`
             return true;
         }
 
@@ -359,26 +275,21 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             body.Append('[').Append(index).Append("] ").Append(e.Kind.ToString().ToUpperInvariant());
             if (!string.IsNullOrEmpty(e.File)) body.Append("  ").Append(e.File).Append(':').Append(e.Line);
-            body.Append('\n');
-            body.Append(e.Body).Append('\n');
-            if (includeStackTrace && !string.IsNullOrEmpty(e.Stack))
-                body.Append("--- stack ---\n").Append(e.Stack).Append('\n');
+            body.Append('\n').Append(e.Body).Append('\n');
+            if (!string.IsNullOrEmpty(e.Stack))
+            {
+                // Withheld frames are counted, never silently absent — the caller can see there is more.
+                if (includeStackTrace) body.Append("--- stack ---\n").Append(e.Stack).Append('\n');
+                else body.Append("[+").Append(CountLines(e.Stack)).Append(" stack lines]\n");
+            }
             body.Append('\n');
         }
 
-        private static string BenignNote(Dictionary<string, int> benign)
+        private static int CountLines(string s)
         {
-            if (benign.Count == 0) return "";
-            var parts = new List<string>();
-            foreach (var kv in benign) parts.Add(kv.Key + ": " + kv.Value);
-            return " benign-stripped=" + string.Join(", ", parts.ToArray());
-        }
-
-        private static string Fail(string why)
-        {
-            string err = "[ReportConsole] FAIL: " + why;
-            Debug.LogError(err);
-            return err;
+            int n = 1;
+            foreach (char c in s) if (c == '\n') n++;
+            return n;
         }
     }
 }
