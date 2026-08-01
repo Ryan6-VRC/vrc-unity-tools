@@ -300,6 +300,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // entry's committed GUIDs never co-import with another's. Only prefabs are asserted on; built/
         // controllers, yaml, and README ride along for GUID resolution but are never load-checked (a
         // dangling controller ref does not fail a prefab load, so widening the copy set masks nothing).
+        // The anchor-seam class (CheckAvatar) over one entry prefab, instantiated so the scan walks a real
+        // scene hierarchy rather than the asset. Gate tier is FAIL where CheckAvatar.Inspect is CLASSIFY for
+        // the same predicate, and the asymmetry is deliberate: an entry in THIS library is ours and
+        // CONVENTIONS.md forbids the shape outright, while a composed avatar carries mergeables that are not
+        // ours to rule on. An instantiation that yields nothing FAILS rather than reporting a clean prefab —
+        // an empty list is otherwise indistinguishable from "scanned, found nothing", which is exactly the
+        // silent no-op this pass exists to prevent.
+        static System.Collections.Generic.List<string> ScanAnchorSeams(GameObject prefab)
+        {
+            var inst = PrefabUtility.InstantiatePrefab(prefab) as GameObject;
+            if (inst == null)
+                return new System.Collections.Generic.List<string> {
+                    Ryan6Vrc.AgentTools.Editor.CheckAvatar.DegradedPrefix +
+                    "PrefabUtility.InstantiatePrefab returned null, so no seam scan ran on this prefab"
+                };
+            try { return Ryan6Vrc.AgentTools.Editor.CheckAvatar.ScanAnchorSeams(inst); }
+            finally { UnityEngine.Object.DestroyImmediate(inst); }
+        }
+
         static (bool ok, string msg) CheckPrefabIntegrity(string entryDir)
         {
             var scratch = "Assets/_prefab_" + Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -328,6 +347,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     foreach (var t in go.GetComponentsInChildren<Transform>(true))
                         missing += GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(t.gameObject);
                     if (missing > 0) { offenders.Add($"{label} ({missing} missing script(s))"); totalMissing += missing; }
+
+                    foreach (var seam in ScanAnchorSeams(go))
+                    {
+                        offenders.Add($"{label} anchor-seam: {seam}");
+                        totalMissing++;
+                    }
                 }
                 return totalMissing == 0 ? (true, "OK") : (false, string.Join(", ", offenders));
             }
