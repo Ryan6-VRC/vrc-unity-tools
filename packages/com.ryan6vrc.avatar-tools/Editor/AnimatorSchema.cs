@@ -106,6 +106,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public string Param;                    // the driven parameter; null for a bare SubMenu
         public float Value = 1f;                // Button/Toggle: the value written while active
         public List<MenuControl> Controls;      // SubMenu only; null otherwise
+        // The control's icon, as authored: either a project path (it starts `Assets/` or `Packages/`) or a
+        // path relative to THIS DOCUMENT's own directory. Document-relative is the portable form and the
+        // reason this is not a plain project path like `mask:` — a vrc-patterns entry's icon sits beside its
+        // own yaml, and that pair is compiled both from the installed package path and from an arbitrary
+        // filesystem --root, which no single project path spans. ControllerEmit.ResolveIcon owns the three
+        // outcomes (resolved / present but outside the project / not found). All four kinds may carry one.
+        public string Icon;
     }
 
     public sealed class Defaults

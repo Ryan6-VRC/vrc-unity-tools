@@ -86,12 +86,51 @@ layers: []
     [Test]
     public void UnknownControlField_FailsByName()
     {
+        // `style` stands in for the whole out-of-vocabulary set on purpose: it is the neighbouring SDK field
+        // this surface deliberately does NOT author (the SDK's own control inspector never binds it), so the
+        // refusal doubles as the guard on that decision.
         var e = Assert.Throws<SchemaException>(() => Parse(@"menu:
   - toggle: A
     param: Enable
-    icon: something
+    style: 2
 "));
-        StringAssert.Contains("icon", e.Message);
+        StringAssert.Contains("style", e.Message);
+    }
+
+    [Test]
+    public void IconParsesOnEveryKind()
+    {
+        // Every kind renders an icon, so unlike `value`/`controls` there is no kind guard to test — what
+        // matters is that none of the four rejects it.
+        var doc = Parse(@"menu:
+  - button: B
+    param: Enable
+    icon: assets/b.png
+  - toggle: T
+    param: Enable
+    icon: assets/t.png
+  - radial: R
+    param: Sat
+    icon: assets/r.png
+  - submenu: S
+    icon: assets/s.png
+    controls:
+      - toggle: Inner
+        param: Enable
+        icon: Assets/Icons/inner.png
+");
+        CollectionAssert.AreEqual(
+            new[] { "assets/b.png", "assets/t.png", "assets/r.png", "assets/s.png" },
+            doc.Menu.Select(c => c.Icon).ToArray());
+        Assert.AreEqual("Assets/Icons/inner.png", doc.Menu[3].Controls.Single().Icon);
+    }
+
+    [Test]
+    public void NoIcon_LeavesTheFieldNull()
+    {
+        // Null, not "" — emit keys off null to leave the control's icon untouched, and a document predating
+        // this surface must not acquire an empty path that then fails to resolve.
+        Assert.IsNull(Parse("menu:\n  - toggle: A\n    param: Enable\n").Menu[0].Icon);
     }
 
     [Test]
@@ -320,6 +359,53 @@ layers: []
       - toggle: A
         param: Enable
 "));
+    }
+
+    [Test]
+    public void IconShapeIsValidated_ButNotItsExistence()
+    {
+        // This validator is System.*-only and cannot reach the AssetDatabase, so a plausible path passes here
+        // and ControllerEmit owns whether the file is actually there (MenuEmitTests).
+        CollectionAssert.IsEmpty(Errors("menu:\n  - toggle: A\n    param: Enable\n    icon: assets/nope.png\n"));
+
+        var empty = Errors("menu:\n  - toggle: A\n    param: Enable\n    icon: \"\"\n");
+        Assert.AreEqual(1, empty.Length);
+        StringAssert.Contains("menu-icon-empty", empty[0]);
+    }
+
+    [Test]
+    public void ValuelessIconKey_IsRefused()
+    {
+        // YAML binds a bare `icon:` to null. Reading that as "no icon" would disagree with `icon: ""`,
+        // which validation rejects — two spellings of the same authoring slip must not diverge.
+        var e = Assert.Throws<SchemaException>(() => Parse("menu:\n  - toggle: A\n    param: Enable\n    icon:\n"));
+        StringAssert.Contains("has no value", e.Message);
+    }
+
+    [Test]
+    public void IconIsTrimmed_SoSpaceCannotHideAnAbsolutePath()
+    {
+        // The absolute-path refusal reads the first character, so an untrimmed leading space would smuggle
+        // a machine path past it and resurface as a bare "not found" at emit — caught, but by the wrong
+        // rule with the wrong message.
+        Assert.AreEqual("assets/a.png", Parse("menu:\n  - toggle: A\n    param: Enable\n    icon: \"  assets/a.png  \"\n").Menu[0].Icon);
+
+        var errs = Errors("menu:\n  - toggle: A\n    param: Enable\n    icon: \" C:/Users/x/Icon.png\"\n");
+        Assert.AreEqual(1, errs.Length);
+        StringAssert.Contains("menu-icon-absolute", errs[0]);
+    }
+
+    [Test]
+    public void AbsoluteIconPath_IsRefused()
+    {
+        // Neither a project path nor document-relative: it would resolve only on the machine that wrote it,
+        // and a committed document carrying one is the same defect as an absolute `compiled-from:` stamp.
+        foreach (var p in new[] { "C:/Users/x/Icon.png", "/mnt/x/Icon.png", @"\\server\share\Icon.png" })
+        {
+            var errs = Errors("menu:\n  - toggle: A\n    param: Enable\n    icon: \"" + p.Replace(@"\", @"\\") + "\"\n");
+            Assert.AreEqual(1, errs.Length, "expected exactly one error for " + p);
+            StringAssert.Contains("menu-icon-absolute", errs[0]);
+        }
     }
 
     [Test]

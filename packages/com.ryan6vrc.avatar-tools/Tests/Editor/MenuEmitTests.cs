@@ -275,6 +275,205 @@ menu:
         Assert.IsNull(Load());
     }
 
+    // ---------- icons ----------
+
+    // A real imported 2x2 PNG under TestRoot. Encoded rather than checked in: the emit path needs a genuine
+    // Texture2D the AssetDatabase imported, and a fixture binary would be one more thing to keep alive.
+    private string MakeIcon(string projectPath)
+    {
+        AnimatorTestHelpers.EnsureFolder(Path.GetDirectoryName(projectPath).Replace('\\', '/'));
+        var tex = new Texture2D(2, 2);
+        tex.SetPixels(new[] { Color.red, Color.green, Color.blue, Color.white });
+        tex.Apply();
+        File.WriteAllBytes(projectPath, tex.EncodeToPNG());
+        Object.DestroyImmediate(tex);
+        AssetDatabase.ImportAsset(projectPath, ImportAssetOptions.ForceSynchronousImport);
+        return projectPath;
+    }
+
+    // The RunLog body behind a compile message ("… | log=<path>"), where the advisories live.
+    private static string RunLogBody(string compileMessage)
+    {
+        int i = compileMessage.LastIndexOf("| log=", System.StringComparison.Ordinal);
+        Assert.Greater(i, -1, "compile message carries no log path: " + compileMessage);
+        return File.ReadAllText(compileMessage.Substring(i + "| log=".Length).Trim());
+    }
+
+    [Test]
+    public void DocumentRelativeIcon_Resolves()
+    {
+        // The portable form, and the one a library entry uses: the icon sits beside the yaml, named without
+        // reference to where the pair is mounted.
+        var icon = MakeIcon(TestRoot + "/assets/Knob.png");
+        StringAssert.Contains("=> OK", Compile("menu:\n  - toggle: T\n    param: Enable\n    icon: assets/Knob.png\n"));
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
+    }
+
+    [Test]
+    public void ProjectPathIcon_Resolves()
+    {
+        var icon = MakeIcon(TestRoot + "/assets/Knob.png");
+        StringAssert.Contains("=> OK", Compile("menu:\n  - toggle: T\n    param: Enable\n    icon: " + icon + "\n"));
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
+    }
+
+    [Test]
+    public void IconOnANestedControl_Resolves()
+    {
+        var icon = MakeIcon(TestRoot + "/assets/Knob.png");
+        Compile(@"menu:
+  - submenu: S
+    icon: assets/Knob.png
+    controls:
+      - toggle: Inner
+        param: Enable
+        icon: assets/Knob.png
+");
+        var outer = Load().controls.Single();
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(outer.icon));
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(outer.subMenu.controls.Single().icon));
+    }
+
+    [Test]
+    public void MissingIcon_FailsTheCompileAndWritesNothing()
+    {
+        // The authoring mistake: a path that resolves to nothing at all. Fatal, deliberately NOT degraded —
+        // there is no authored marker distinguishing an intended-dangling icon from a typo, and a silently
+        // icon-less control is exactly what the author would not notice.
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*icon not found.*=> FAIL"));
+        var msg = Compile("menu:\n  - toggle: T\n    param: Enable\n    icon: assets/Nope.png\n");
+        StringAssert.Contains("FAIL", msg);
+        StringAssert.Contains("icon not found", msg);
+        Assert.IsNull(Load());
+    }
+
+    [Test]
+    public void IconThatIsNotATexture_FailsByName()
+    {
+        // Present, in the project, imported — but not an image. Distinguished from "not found" because the
+        // repair differs: this one is a real file at a wrong path. The first compile is what makes the
+        // controller exist as an imported non-texture asset to point at.
+        StringAssert.Contains("=> OK", Compile("menu:\n  - toggle: T\n    param: Enable\n"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*did not load as a Texture2D.*=> FAIL"));
+        var msg = Compile("menu:\n  - toggle: T\n    param: Enable\n    icon: " + OutDir + "/M_Fx.controller\n");
+        StringAssert.Contains("FAIL", msg);
+        StringAssert.Contains("did not load as a Texture2D", msg);
+    }
+
+    [Test]
+    public void DocumentRelativeIconResolvesInAssetSpace_IncludingDotDot()
+    {
+        // The path arithmetic must stay in ASSET space. Doing it on the filesystem happens to work under
+        // Assets/ and silently breaks for a `file:`-mounted package, whose Packages/… path names no folder
+        // on disk — measured: every icon in a mounted vrc-patterns emitted null before this was fixed. A
+        // `..` hop is the cheapest way to assert the collapse happens without leaving that space.
+        var icon = MakeIcon(TestRoot + "/assets/Knob.png");
+        AnimatorTestHelpers.EnsureFolder(TestRoot + "/sub");
+        var nested = TestRoot + "/sub/M_Fx.yaml";
+        File.WriteAllText(nested, Head + "menu:\n  - toggle: T\n    param: Enable\n    icon: ../assets/Knob.png\n");
+        StringAssert.Contains("=> OK", CompileController.Compile(nested, OutDir));
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
+    }
+
+    [Test]
+    public void IconOutsideTheProject_EmitsNullAndAdvises()
+    {
+        // THE GATE CASE, reproduced exactly: a yaml compiled from a filesystem path outside the project,
+        // with its icon beside it, into a host whose AssetDatabase cannot see either. The compile must
+        // SUCCEED with a null icon — failing here would make `icon:` unauthorable by the vrc-patterns
+        // library, whose gate compiles every entry this way (ControllerFixpoint.CompileToTemp).
+        var outside = Path.Combine(Path.GetTempPath(), "f11_icon_" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
+        Directory.CreateDirectory(Path.Combine(outside, "assets"));
+        try
+        {
+            var tex = new Texture2D(2, 2);
+            tex.Apply();
+            File.WriteAllBytes(Path.Combine(outside, "assets", "Knob.png"), tex.EncodeToPNG());
+            Object.DestroyImmediate(tex);
+            var yaml = Path.Combine(outside, "M_Fx.yaml");
+            File.WriteAllText(yaml, Head + "menu:\n  - toggle: T\n    param: Enable\n    icon: assets/Knob.png\n");
+
+            var msg = CompileController.Compile(yaml, OutDir);
+            StringAssert.Contains("=> OK", msg);
+            Assert.IsNull(Load().controls.Single().icon, "an unreachable icon emits as null, not as a failure");
+            StringAssert.Contains("not in the project's AssetDatabase", RunLogBody(msg));
+        }
+        finally { Directory.Delete(outside, true); }
+    }
+
+    [Test]
+    public void OutOfProjectCompile_NeverFails_WhicheverSpelling()
+    {
+        // The regime is decided by the DOCUMENT's location, so every icon spelling must degrade together.
+        // Keying on the icon's spelling instead made a project-spelled icon throw here — which would fail
+        // the whole gate run for an entry that compiles perfectly well in a project. The lowercase
+        // `assets/…` in the test above sidesteps that branch entirely, so it could not have caught it.
+        var outside = Path.Combine(Path.GetTempPath(), "f11_spell_" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
+        Directory.CreateDirectory(outside);
+        try
+        {
+            foreach (var spelling in new[] { "Assets/NotHere/Knob.png", "Packages/com.nobody.nothing/Knob.png", "assets/Absent.png" })
+            {
+                var yaml = Path.Combine(outside, "M_Fx.yaml");
+                File.WriteAllText(yaml, Head + "menu:\n  - toggle: T\n    param: Enable\n    icon: " + spelling + "\n");
+                var msg = CompileController.Compile(yaml, OutDir);
+                StringAssert.Contains("=> OK", msg, "spelling must not decide the regime: " + spelling);
+                Assert.IsNull(Load().controls.Single().icon, spelling);
+            }
+        }
+        finally { Directory.Delete(outside, true); }
+    }
+
+    [Test]
+    public void InProjectDocumentGivenAnAbsolutePath_StillResolves()
+    {
+        // Every interactive door hands Compile an ABSOLUTE path (the menu door calls Path.GetFullPath;
+        // OpenFilePanel returns absolute). Testing only the `Assets/…` spelling hid a total failure of the
+        // field there: the document read as out-of-project, and every icon silently emitted null.
+        var icon = MakeIcon(TestRoot + "/assets/Knob.png");
+        File.WriteAllText(_srcPath, Head + "menu:\n  - toggle: T\n    param: Enable\n    icon: assets/Knob.png\n");
+        var msg = CompileController.Compile(Path.GetFullPath(_srcPath), OutDir);
+        StringAssert.Contains("=> OK", msg);
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
+        StringAssert.Contains("_(none)_", RunLogBody(msg).Split(new[] { "## Compile advisory: unadjudicated menu icons" }, System.StringSplitOptions.None)[1]
+            .Split(new[] { "\n## " }, System.StringSplitOptions.None)[0]);
+    }
+
+    [Test]
+    public void BackslashSeparatorsResolve_LikeForwardOnes()
+    {
+        // A Windows-spelled path must not behave differently in-project (where it would fail an asset-space
+        // lookup) than at the gate (where Path.Combine accepts it).
+        var icon = MakeIcon(TestRoot + "/assets/Knob.png");
+        StringAssert.Contains("=> OK", Compile(@"menu:
+  - toggle: T
+    param: Enable
+    icon: assets\Knob.png
+"));
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
+    }
+
+    [Test]
+    public void DotSegmentsCollapse_InBothSpellings()
+    {
+        var icon = MakeIcon(TestRoot + "/assets/Knob.png");
+        StringAssert.Contains("=> OK", Compile("menu:\n  - toggle: T\n    param: Enable\n    icon: assets/../assets/Knob.png\n"));
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
+
+        StringAssert.Contains("=> OK", Compile("menu:\n  - toggle: T\n    param: Enable\n    icon: "
+            + TestRoot + "/assets/../assets/Knob.png\n"));
+        Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
+    }
+
+    [Test]
+    public void NoIcons_AdvisorySectionReadsNone()
+    {
+        // The section is unconditional, so a document with no icons must still read cleanly rather than
+        // suggest something was skipped.
+        StringAssert.Contains("## Compile advisory: unadjudicated menu icons\n\n_(none)_",
+            RunLogBody(Compile("menu:\n  - toggle: T\n    param: Enable\n")));
+    }
+
     [Test]
     public void SdkControlCapMatchesTheEchoedConstant()
     {
