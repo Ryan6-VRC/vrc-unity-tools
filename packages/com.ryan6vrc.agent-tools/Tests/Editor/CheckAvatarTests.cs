@@ -598,6 +598,64 @@ public class CheckAvatarTests
         Assert.AreSame(a, MaFrameRoot(c, a), "the AVATAR_ROOT sentinel resolves to the avatar root, not a child named after it");
     }
 
+    // Get(Component) redirects a path landing on a CHILDLESS "Armature" to the same-named sibling that has
+    // children (MA issue #308 — avatars carrying a decoy armature to move the VRChat eye position). Skipping
+    // that swap is silent: TryResolveSceneRef invokes MA's real Get, so it sees the swapped object and emits
+    // neither a scene-ref offender nor an R-K caveat, while the frame walk mounts at the childless decoy and
+    // every binding under it fails. Asserted BOTH ways round, because the offender flood is the visible half.
+    [Test]
+    public void TryMaFrame_childlessArmatureDecoy_takesThePopulatedSibling()
+    {
+        var a = NewAvatar("LintMaArmature");
+        var body = NewChild(a, "Body");
+        NewChild(body, "Armature");                       // the childless decoy — created first, so Find hits it
+        var realArmature = NewChild(body, "Armature");    // the true armature
+        NewChild(realArmature, "Bone");
+        var outfit = NewChild(a, "Outfit");
+
+        // The clip animates the bone relative to the frame, so it resolves against the true armature only.
+        var c = AddMaMergeAnimator(outfit, NewController("MaArmatureCtrl", NewClip(TmpDir, "MaArmatureClip", "Bone")),
+            "Body/Armature", null);
+
+        Assert.AreSame(realArmature, MaFrameRoot(c, a),
+            "a path landing on the childless 'Armature' decoy must redirect to the populated sibling, as Get(Component) does");
+
+        var r = Inspect("LintMaArmature");
+        ReadLog(r);
+        StringAssert.Contains("clipBinding=0", r,
+            "mounting at the decoy would fail EVERY binding under it, with no offender or caveat to say why: " + r);
+    }
+
+    // Precedence pair nothing else pins: the sentinel loses to a live in-avatar targetObject, because
+    // Get(Component) tests targetObject BEFORE it tests AVATAR_ROOT.
+    [Test]
+    public void TryMaFrame_sentinelWithLiveTarget_prefersTheTarget()
+    {
+        var a = NewAvatar("LintMaSentinelTarget");
+        var outfit = NewChild(a, "Outfit");
+        var mount = NewChild(a, "Mount");
+        var c = AddMaMergeAnimator(outfit, NewController("MaSentTgtCtrl", NewClip(TmpDir, "MaSentTgtClip", "Bone")),
+            "$$$AVATAR_ROOT$$$", mount);
+
+        Assert.AreSame(mount, MaFrameRoot(c, a), "targetObject is tested before the AVATAR_ROOT sentinel");
+    }
+
+    // No avatar root above the merge site: the build's FindAvatarTransformInParents misses, Get(Component)
+    // returns null, and the merge lands on its own GameObject — even with a live targetObject. DetectAuto
+    // surfaces the missing descriptor separately, so the frame staying honest here is not a silent fallback.
+    [Test]
+    public void TryMaFrame_noAvatarRoot_usesOwnGameObject()
+    {
+        var a = NewAvatar("LintMaNoRoot");
+        var outfit = NewChild(a, "Outfit");
+        var mount = NewChild(a, "Mount");
+        var c = AddMaMergeAnimator(outfit, NewController("MaNoRootCtrl", NewClip(TmpDir, "MaNoRootClip", "Bone")),
+            "Mount", mount);
+
+        Assert.AreSame(outfit, MaFrameRoot(c, null),
+            "with no avatar root to resolve against, nothing resolves and the build mounts at the own GameObject");
+    }
+
     // Rider 1 (R-K symmetry): post-W9 the generic scan emits an MA-scene-ref offender for the
     // targetObject-only shape, but MaFrameUncertaintyNote returned null for it — an offender with no frame
     // line beside it, which reads as a dropped ref rather than a relocated frame. Both must be present.
@@ -615,6 +673,24 @@ public class CheckAvatarTests
         StringAssert.Contains("maSceneRef=1", r, "W9's scan still flags the targetObject-only ref: " + r);
         StringAssert.Contains("frame-certain", log,
             "the offender must carry its frame caption — the frame is the own GameObject, the REF is what is broken: " + log);
+    }
+
+    // The other side of rider 1, and the one that keeps the caption honest: a WHOLLY empty relativePathRoot
+    // (both halves) is the intentional-empty ScanSceneRefs exempts, so there is no offender — and a caption
+    // with no offender beside it is the same asymmetry rider 1 fixes, pointing the other way. The two
+    // predicates are coupled across the two methods; move either and this goes red.
+    [Test]
+    public void Inspect_whollyEmptyRelativePathRoot_getsNeitherOffenderNorCaption()
+    {
+        var a = NewAvatar("LintMaEmptyBoth");
+        var outfit = NewChild(a, "Outfit");
+        AddMaMergeAnimator(outfit, NewController("MaEmptyBothCtrl", NewClip(TmpDir, "MaEmptyBothClip", "Bone")));
+
+        var r = Inspect("LintMaEmptyBoth");
+        var log = ReadLog(r);
+
+        StringAssert.Contains("maSceneRef=0", r, "both halves empty is the intentional-empty exemption: " + r);
+        StringAssert.DoesNotContain("frame-certain", log, "no offender to caption ⇒ no caption: " + log);
     }
 
     // Rider 2: the degraded self-resolve (MA API drift) accepted ANY live targetObject, skipping the

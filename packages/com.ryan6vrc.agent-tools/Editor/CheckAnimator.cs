@@ -203,7 +203,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         // that sits under the avatar root, then the AVATAR_ROOT sentinel, then the path — and only a null
         // from all of that lands on the component's OWN GameObject. Reading targetObject first (the
         // inspector's Get(SerializedProperty) order) reports a frame the build never uses; nondestructive.md
-        // owns why the two orders differ. NOT mirrored: Get(Component)'s childless-"Armature" sibling swap.
+        // owns why the two orders differ. The path branch also mirrors Get(Component)'s childless-"Armature"
+        // sibling swap (MA issue #308) — see ResolveArmatureDecoy for why silence makes that one mandatory.
         // Returns true iff c is an MA MergeAnimator that references a controller (out via controller).
         internal static bool TryMaFrame(Component c, GameObject avatarGO,
             out AnimatorController controller, out FrameResult frame)
@@ -260,7 +261,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         else if (path == MaAvatarRootSentinel) root = avatarGO;
                         else
                         {
-                            var t = avatarGO.transform.Find(path);
+                            var t = ResolveArmatureDecoy(avatarGO.transform.Find(path));
                             root = t != null ? t.gameObject : null;
                         }
                     }
@@ -269,6 +270,27 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             frame = new FrameResult { Root = root, Kind = FrameKind.MA, IsAbsolute = absolute, UnreflectedAnchor = unreflected };
             return true;
+        }
+
+        // Get(Component)'s last step (AvatarObjectReference.cs:110-125, MA issue #308): some avatars carry a
+        // second, childless "Armature" to move the VRChat eye position, so a path landing on a childless
+        // "Armature" is redirected to the same-named sibling that has children. Applies to the PATH branch
+        // only — MA runs it on Find()'s result, not on a targetObject.
+        //
+        // Mirroring a vendor quirk is normally the wrong instinct, and this one is mandatory anyway: skipping
+        // it moves the frame with nothing left to say so. TryResolveSceneRef invokes MA's REAL Get, so it sees
+        // the swapped object, resolves, and stays quiet — no scene-ref offender, no R-K caveat — while the
+        // walk below would mount at the decoy. The decoy is childless by construction, so every binding in
+        // the merged controller then fails against it: a flood of false clip-binding offenders under a clean
+        // Notes section. A silent wrong frame is the exact defect this walk exists to prevent.
+        internal static Transform ResolveArmatureDecoy(Transform resolved)
+        {
+            if (resolved == null || resolved.name != "Armature" || resolved.childCount != 0) return resolved;
+            var parent = resolved.parent;
+            if (parent == null) return resolved;
+            foreach (Transform sibling in parent)
+                if (sibling.name == "Armature" && sibling.childCount > 0) return sibling;
+            return resolved;
         }
 
         private static AutoResult? ParseMergeAnimator(Component c, AnimatorController controller, GameObject avatarGO)
