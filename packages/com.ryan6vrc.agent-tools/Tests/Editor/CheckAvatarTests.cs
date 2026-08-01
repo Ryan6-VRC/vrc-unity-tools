@@ -265,6 +265,35 @@ public class CheckAvatarTests
         StringAssert.Contains("maSceneRef=0 clipBinding=0 mergeConflict=0 => PASS", r, r);
     }
 
+    // ── The intentional-empty exemption is BOTH halves, not the path alone ────────────────────────────
+    // An empty referencePath carrying a live targetObject is the silent no-op nondestructive.md names: the
+    // inspector's resolver checks targetObject first and shows it resolved, while the Get(Component) the
+    // build takes returns null on the empty path. Exempting on the path alone made the scan blind to it.
+
+    [Test]
+    public void EmptyPath_withLiveTargetObject_isAnOffender()
+    {
+        var a = NewAvatar("LintEmptyTarget");
+        var body = NewChild(a, "Body_Base");
+        var outfit = NewChild(a, "Outfit");
+        AddMaObjectToggle(outfit, "", body); // targetObject set, path never written
+
+        var r = Inspect("LintEmptyTarget");
+        StringAssert.Contains("maSceneRef=1", r, "the targetObject-only ref must be named, not exempted: " + r);
+        StringAssert.Contains("unset referencePath", ReadLog(r), "the offender says which half is missing");
+    }
+
+    [Test]
+    public void EmptyPath_withNoTargetObject_staysExempt()
+    {
+        var a = NewAvatar("LintEmptyBoth");
+        var outfit = NewChild(a, "Outfit");
+        AddMaObjectToggle(outfit, "", null); // both halves empty ⇒ unset by design
+
+        var r = Inspect("LintEmptyBoth");
+        StringAssert.Contains("maSceneRef=0", r, "a genuinely unset ref is not an offender: " + r);
+    }
+
     // ── Proof A + Proof B coexist ─────────────────────────────────────────────────────────────────────
 
     [Test]

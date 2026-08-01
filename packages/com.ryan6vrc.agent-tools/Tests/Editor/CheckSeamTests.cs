@@ -297,6 +297,27 @@ public class CheckSeamTests
         StringAssert.DoesNotContain("bare prop", r); // must NOT be routed out as bare
     }
 
+    // Zero pairs WITH a MergeArmature present ⇒ the seam exists and matched nothing, not a missing seam.
+    // Routing that out to own-mergeable (a geometry round-trip) sends the skill at the wrong thing entirely.
+    // The injected resolution stands in for "the collector ran and returned no pairs"; the unresolved-target
+    // case, which must NOT reach this branch, needs the live collector and is proven in CheckSeamLiveTests.
+    [Test]
+    public void ZeroPairs_withMergeArmature_namesBothZeroMatchShapes_notBareProp()
+    {
+        LogAssert.Expect(LogType.Warning, RefuseRe); // abstain ⇒ warning
+        SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
+        var maType = Resolve("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
+        Assert.IsNotNull(maType, "TestEditor must have Modular Avatar installed (setup-test-editor copies it)");
+        mergeGO.AddComponent(maType); // present, but the injected resolution matched nothing
+        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution();
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("matched zero bones", r);
+        StringAssert.Contains("prefix/suffix", r);           // the naming-mismatch shape
+        StringAssert.Contains("outfit-specific", r);         // ...and the legitimate one, unprescribed
+        StringAssert.DoesNotContain("no seam component", r); // the seam exists; this is not the bare prop
+    }
+
     [Test]
     public void SeamConflict_refuses()
     {
