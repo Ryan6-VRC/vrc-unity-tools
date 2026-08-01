@@ -117,20 +117,20 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>The FAIL's FIRST line: every offender and its fix on ONE line, <c> | </c>-separated.
-        /// This exists because the agent's console read (MCP-for-Unity <c>read_console</c>) returns only the
-        /// FIRST line of a log entry's message — a multi-line body is dropped, neither kept as message nor
-        /// recovered as stack trace (its human-readable lines match no stack-frame pattern). So the offender
-        /// detail an agent needs must live here, on line 1, not in the pretty block below it. Each offender
-        /// renders <c>[tag] message (fix: fix)</c>; the <c> | </c> join and the parenthesized fix keep the
-        /// two separators unambiguous. Pure + deterministic, the testable sibling of
+        /// Each offender renders <c>[tag] message (fix: fix)</c>; the <c> | </c> join and the parenthesized
+        /// fix keep the two separators unambiguous. Pure + deterministic, the testable sibling of
         /// <see cref="OverlaySummaryLine"/>.
+        ///
+        /// This originally existed because the agent's console read returned only an entry's first line, so
+        /// offender detail had to be crammed onto line 1 or be lost. That door is gone — `ReportConsole`
+        /// returns the whole entry — but the one-line form is kept on its own merit: it is a line grammar a
+        /// reader can scan and a log can carry intact, and the Scene-view overlay has no room for a block.
         ///
         /// The no-newline invariant is enforced HERE, not assumed of callers: every field is flattened
         /// (any whitespace run → one space) before it lands on the line. An offender's Message can carry a
-        /// multi-line value — the exception FAIL embeds a whole stack trace (<see cref="PlayGate"/>'s catch),
-        /// and read_console keeps only up to the first newline — so a raw join would put the newline back and
-        /// drop the fix + override path in exactly the case an agent is most stuck. Flattening also makes
-        /// that stack trace legible on the one line the agent sees.</summary>
+        /// multi-line value — the exception FAIL embeds a whole stack trace (<see cref="PlayGate"/>'s catch)
+        /// — so a raw join would break the one-line grammar mid-verdict. Flattening also makes that stack
+        /// trace legible on a single line.</summary>
         public static string ConsoleSummaryLine(List<Offender> offenders)
         {
             if (offenders == null || offenders.Count == 0) return "";

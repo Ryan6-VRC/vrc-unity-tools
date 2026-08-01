@@ -316,7 +316,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// On the first call it attaches to the built local avatar (isolate by IsLocal, cull-guard). Returns
         /// immediately with <c>STARTED tag=&lt;t&gt;</c>; when the settle completes it logs (and stores for
         /// <see cref="Status"/>) the verdict line <c>[RenderThumbnailPlay] &lt;tag&gt; Shoot … =&gt; OK | png=… |
-        /// moving=[…]</c>. Poll <c>read_console</c> on the tag, or call <see cref="Status"/>.
+        /// moving=[…]</c>. Poll <c>ReportConsole</c> (filterText: the tag) or call <see cref="Status"/>.
         /// </summary>
         /// <param name="pose">null =&gt; the emulator idle (a moving pose — prefer a clip); a bundled name or a
         /// clip asset path/GUID (resolved identically to edit mode).</param>
@@ -518,12 +518,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             _shootUpdate = step;
             EditorApplication.update += step;
-            return Ok("Shoot STARTED tag=" + tag + " — settling " + settleFrames + " frames; poll read_console on '"
+            return Ok("Shoot STARTED tag=" + tag + " — settling " + settleFrames + " frames; poll ReportConsole (filterText) on '"
                 + tag + "' (or Status()) for the verdict");
         }
 
         /// <summary>The last completed Shoot's verdict line (the same text logged with its tag), or a
-        /// still-settling note. Convenience alternative to polling <c>read_console</c> on the tag.</summary>
+        /// still-settling note. Convenience alternative to polling <c>ReportConsole</c> on the tag.</summary>
         public static string Status()
         {
             if (!_prepared) return "[RenderThumbnailPlay] Status => no prepared session";
