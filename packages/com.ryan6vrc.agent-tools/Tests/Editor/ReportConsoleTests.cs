@@ -10,11 +10,15 @@ using UnityEngine;
 //      computed; a missing or out-of-range one keeps the whole message as body, which is the safe
 //      direction. No line is ever discarded for looking like a stack frame.
 //   3. TYPE COMES FROM mode BITS, with error beating warning.
-//   4. NOTHING IS DROPPED SILENTLY — withheld frames are counted, and a bad filter fails loud.
+//   4. NOTHING IS DROPPED SILENTLY — withheld frames and stripped entries are counted, and a bad
+//      filter fails loud.
 //
-// Deliberately not asserted: the Snapshot spill path (RunLogFormat owns its own tests). Note this
-// fixture must not assert on console CLEANLINESS — ReportConsole writes nothing to the console, but
-// the tests around it log freely.
+// Two hazards for anyone adding a case here. This fixture must not assert on console CLEANLINESS:
+// ReportConsole writes nothing to the console, but the tests around it log freely. And it must not
+// assert on entry TEXT under a large `count` — in a full suite run the console carries enough
+// entries to push the digest past the inline budget, where the return value is a summary plus a
+// Snapshot path and the text is on disk. Keep `count` small when asserting on text; a case that
+// passes filtered and fails in the suite is this, not a real defect.
 public class ReportConsoleTests
 {
     // ----- 1. The defect: every line of a multi-line entry survives the live read -------------
@@ -153,6 +157,73 @@ public class ReportConsoleTests
         StringAssert.Contains(token + " header only", result);
         StringAssert.Contains("stack lines]", result);
         StringAssert.DoesNotContain("--- stack ---", result);
+    }
+
+    // ----- 5. The benign strip: on by default, never silent, never self-defeating ------------
+
+    [Test]
+    public void BenignLabel_namesEachKnownFamily()
+    {
+        Assert.AreEqual("MACS third-party load noise",
+            ReportConsole.BenignLabel("<color=#007076>[MACS]</color>: Applying patches"));
+        Assert.AreEqual("DestroyBlendTreeRecursive",
+            ReportConsole.BenignLabel("something\nDestroyBlendTreeRecursive at foo"));
+        Assert.AreEqual("FBX importer inconsistent-result noise",
+            ReportConsole.BenignLabel("Import of Foo.fbx gave an inconsistent result"));
+        Assert.AreEqual("VRCFury build-progress",
+            ReportConsole.BenignLabel("VF.Exceptions: Progress (3/9)"));
+    }
+
+    // The predicates must not eat a real diagnostic that merely shares a word with one of them.
+    // Each of these is one token away from a family above.
+    [Test]
+    public void BenignLabel_realDiagnosticIsSignal()
+    {
+        Assert.IsNull(ReportConsole.BenignLabel("NullReferenceException in AvatarBuilder"));
+        Assert.IsNull(ReportConsole.BenignLabel("inconsistent result"));      // no fbx/import co-token
+        Assert.IsNull(ReportConsole.BenignLabel("VF.Exceptions: real build failure"));
+        Assert.IsNull(ReportConsole.BenignLabel(null));
+    }
+
+    // Stripping must be visible in the summary. A dropped entry whose count is not reported is the
+    // silent loss this whole tool exists to end -- the text may go, the number may not.
+    [Test]
+    public void Report_stripIsNeverSilent()
+    {
+        Debug.LogWarning("[MACS] Applying patches " + System.Guid.NewGuid().ToString("N").Substring(0, 6));
+
+        // The strip counts are tallied over every matched entry before `count` trims the list, so a
+        // small count still reports the full tally -- and keeps the digest inline (see above).
+        string result = ReportConsole.Report(types: "all", count: 5);
+
+        StringAssert.Contains("benign-stripped=[", result);
+        StringAssert.Contains("MACS third-party load noise", result);
+    }
+
+    // Filtering FOR noise by name must still return it, or the filter defeats itself.
+    [Test]
+    public void Report_filterTextExemptsAnEntryFromTheBenignStrip()
+    {
+        string token = "RCMACS-" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
+        Debug.LogWarning("[MACS] Applying patches " + token);
+
+        string result = ReportConsole.Report(types: "all", filterText: token, count: 5);
+
+        StringAssert.Contains(token, result);
+        StringAssert.Contains("shown=1", result);
+    }
+
+    [Test]
+    public void Report_stripBenignOff_keepsTheNoise()
+    {
+        string token = "RCRAW-" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
+        Debug.LogWarning("[MACS] Applying patches " + token);
+
+        // count is deliberately small: a large one lets ambient console volume push the digest past
+        // the inline budget, where the return value is a summary + artifact path and the entry text
+        // is on disk instead. The entry just logged is the newest, so a small count still contains it.
+        string kept = ReportConsole.Report(types: "all", count: 5, stripBenign: false);
+        StringAssert.Contains(token, kept);
     }
 
     [Test]

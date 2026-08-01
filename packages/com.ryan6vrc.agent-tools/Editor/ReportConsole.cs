@@ -46,11 +46,22 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <param name="includeStackTrace">Include each entry's callstack. On by default: for an
         /// exception the frames are the diagnosis, and withholding them by default would reproduce the
         /// header-only read this tool exists to replace.</param>
+        /// <param name="stripBenign">Drop known-benign console noise and name the counts in the summary.
+        /// On by default, and that default is load-bearing: Unity types these entries as genuine errors
+        /// (VRCFury routes build progress through <c>VF.Exceptions</c>, which really does carry
+        /// <c>kScriptingException</c>), so no amount of faithful type-reading separates them from real
+        /// ones, and an unfiltered error read during a build buries the diagnosis it was run to find.
+        /// This is not a tidiness default — it was added because the noise repeatedly cost real sessions.
+        /// It stays honest by never being silent: the summary names every label and count it removed, so
+        /// a dropped entry is always visible as a number even when its text is gone. An entry kept
+        /// BECAUSE it matched <paramref name="filterText"/> is exempt — filtering for noise by name and
+        /// then having it stripped would defeat the filter.</param>
         public static string Report(
             string types = "all",
             string filterText = null,
             int count = 20,
-            bool includeStackTrace = true)
+            bool includeStackTrace = true,
+            bool stripBenign = true)
         {
             int mask;
             string badTypes;
@@ -68,10 +79,28 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             int scanned = entries.Count;
             var kept = new List<Entry>();
+            var benign = new Dictionary<string, int>();
             foreach (var e in entries)
             {
                 if ((TypeBit(e.Kind) & mask) == 0) continue;
-                if (!string.IsNullOrEmpty(filterText) && e.Full.IndexOf(filterText, StringComparison.Ordinal) < 0) continue;
+
+                bool matchedFilter = false;
+                if (!string.IsNullOrEmpty(filterText))
+                {
+                    if (e.Full.IndexOf(filterText, StringComparison.Ordinal) < 0) continue;
+                    matchedFilter = true;
+                }
+
+                if (stripBenign && !matchedFilter)
+                {
+                    string label = BenignLabel(e.Full);
+                    if (label != null)
+                    {
+                        int seen;
+                        benign[label] = benign.TryGetValue(label, out seen) ? seen + 1 : 1;
+                        continue;
+                    }
+                }
                 kept.Add(e);
             }
 
@@ -82,9 +111,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             for (int i = 0; i < kept.Count; i++)
                 RenderEntry(kept[i], i + 1, includeStackTrace, body);
 
-            // An entry Unity declined to hand over is named, never absorbed into a clean-looking count.
+            // Neither a stripped entry nor one Unity declined to hand over is absorbed into a
+            // clean-looking count: both are named here, so nothing this door removed is invisible.
             string summary = "[ReportConsole] scanned=" + scanned + " matched=" + matched + " shown=" + kept.Count
-                + (unreadable > 0 ? " unreadable=" + unreadable : "") + " => OK";
+                + BenignNote(benign) + (unreadable > 0 ? " unreadable=" + unreadable : "") + " => OK";
 
             if (body.Length <= InlineBudget)
                 return summary + "\n" + body;
@@ -239,6 +269,41 @@ namespace Ryan6Vrc.AgentTools.Editor
             if ((mode & ErrorMask) != 0) return EntryKind.Error;
             if ((mode & WarningMask) != 0) return EntryKind.Warning;
             return EntryKind.Log;
+        }
+
+        /// <summary>
+        /// The label of the known-benign noise family matching this entry, or null when it is signal.
+        /// <paramref name="full"/> is the entry's whole text (body and callstack) — several of these
+        /// families identify themselves in the stack, not the message.
+        ///
+        /// These are substring heuristics against third-party and importer output, so they are
+        /// re-validated by reading that source, never by a green test run. Each one is a family whose
+        /// every member is noise: none discriminates a benign instance of a real diagnostic from a
+        /// dangerous one, which is the property that makes dropping them safe.
+        /// </summary>
+        public static string BenignLabel(string full)
+        {
+            string s = full ?? string.Empty;
+            // Third-party load chatter (com.mcardellje.macs), Error-typed and Log-typed alike.
+            if (s.Contains("[MACS]")) return "MACS third-party load noise";
+            if (s.Contains("DestroyBlendTreeRecursive")) return "DestroyBlendTreeRecursive";
+            // Bare "inconsistent result" would eat unrelated errors — require an importer co-token.
+            if (s.Contains("inconsistent result")
+                && (s.IndexOf("fbx", StringComparison.OrdinalIgnoreCase) >= 0
+                    || s.IndexOf("import", StringComparison.OrdinalIgnoreCase) >= 0))
+                return "FBX importer inconsistent-result noise";
+            // VRCFury build progress routes through VF.Exceptions and is genuinely error-typed.
+            if (s.Contains("VF.Exceptions") && (s.Contains("Progress (") || s.Contains("Importing ")))
+                return "VRCFury build-progress";
+            return null;
+        }
+
+        private static string BenignNote(Dictionary<string, int> benign)
+        {
+            if (benign.Count == 0) return "";
+            var parts = new List<string>();
+            foreach (var kv in benign) parts.Add(kv.Key + ": " + kv.Value);
+            return " benign-stripped=[" + string.Join(", ", parts.ToArray()) + "]";
         }
 
         /// <summary>Parse the <c>types</c> filter into a bit mask over <see cref="EntryKind"/>.</summary>
