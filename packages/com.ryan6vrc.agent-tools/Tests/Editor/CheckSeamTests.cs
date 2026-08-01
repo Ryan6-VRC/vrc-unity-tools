@@ -297,6 +297,25 @@ public class CheckSeamTests
         StringAssert.DoesNotContain("bare prop", r); // must NOT be routed out as bare
     }
 
+    // Zero pairs WITH a MergeArmature present ⇒ the phantom-bone naming mismatch, not a missing seam. The
+    // repair is a prefix/suffix on the merge component, so routing this out to own-mergeable (a geometry
+    // round-trip) sends the skill at the wrong thing entirely.
+    [Test]
+    public void ZeroPairs_withMergeArmature_refusesAsNamingMismatch_notBareProp()
+    {
+        LogAssert.Expect(LogType.Warning, RefuseRe); // abstain ⇒ warning
+        SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
+        var maType = Resolve("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
+        Assert.IsNotNull(maType, "TestEditor must have Modular Avatar installed (setup-test-editor copies it)");
+        mergeGO.AddComponent(maType); // present, but the injected resolution matched nothing
+        CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution();
+        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
+        StringAssert.Contains("matched zero bones", r);
+        StringAssert.Contains("prefix/suffix", r);          // names the actual repair
+        StringAssert.DoesNotContain("no seam component", r); // the seam exists; only its names are wrong
+    }
+
     [Test]
     public void SeamConflict_refuses()
     {

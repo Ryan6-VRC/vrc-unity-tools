@@ -445,9 +445,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── MA scene-ref detection (D3) — never throws ────────────────────────────────────────────────
 
         // Walk serialized properties generically (precedent: RemapReferencesByPath). A property carrying both
-        // a referencePath(string) child and a targetObject(objref) child is an AvatarObjectReference. Only a
-        // SET ref (non-empty referencePath — MA treats an empty path as "unset", exactly like CheckPackage's
-        // clean-zero) is validated; unset refs are the intentional-empty case and never counted.
+        // a referencePath(string) child and a targetObject(objref) child is an AvatarObjectReference. The
+        // intentional-empty exemption (MISSING-vs-EMPTY, as CheckPackage's clean-zero) is BOTH halves empty:
+        // an empty referencePath carrying a live targetObject is the silent no-op nondestructive.md names —
+        // Get(Component) returns null on the empty path whatever targetObject holds, while the inspector's
+        // editor-side resolver checks targetObject first, so the ref reads correct in the UI and vanishes at
+        // bake. Exempting on the path alone hid exactly that class.
         private static void ScanSceneRefs(Component c, GameObject avatarGO, Report rep)
         {
             SerializedObject so;
@@ -466,13 +469,18 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 enter = false; // it's an AvatarObjectReference — don't descend into its own children
                 string refPath = pathChild.stringValue;
-                if (string.IsNullOrEmpty(refPath)) continue; // unset (MISSING-vs-EMPTY: intentional empty)
+                var targetGO = targetChild.objectReferenceValue as GameObject;
+                if (string.IsNullOrEmpty(refPath) && targetGO == null) continue; // unset by design
 
                 if (TryResolveSceneRef(it.Copy(), c, avatarGO, out _)) continue; // resolved ⇒ not an offender
                 rep.SceneRefs.Add(new Offender
                 {
                     Kind = "MA-scene-ref",
-                    Path = refPath,
+                    // Parenthesized so the targetObject-only offender can never read as a path the agent
+                    // should go looking for: the defect IS that no path was written.
+                    Path = string.IsNullOrEmpty(refPath)
+                         ? "(unset referencePath; targetObject '" + targetGO.name + "' only — write the path)"
+                         : refPath,
                     Host = c.GetType().Name + " @ " + PathOf(c.gameObject),
                 });
             }
@@ -502,10 +510,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // Resolve an AvatarObjectReference property. Authoritative path: box it (guarded — boxedValue THROWS
-        // for unsupported shapes, R-J) and invoke the pinned Get(Component) (checks targetObject before
-        // referencePath — the targetObject-wins trap). Every reflective hop is guarded: on any failure/drift,
-        // warn loud naming the broken anchor and self-resolve from the SerializedProperty CHILDREN
-        // (targetObject-first if populated+live, else referencePath against the avatar root). Never throws.
+        // for unsupported shapes, R-J) and invoke the pinned Get(Component), which returns null on an empty
+        // referencePath BEFORE it looks at targetObject and only then lets a live targetObject win. (The
+        // static Get(SerializedProperty) overload the inspector uses has the opposite order and no empty-path
+        // guard — that split is the silent no-op in nondestructive.md, and mirroring the wrong one here is
+        // what made this scan blind to it.) Every reflective hop is guarded: on any failure/drift, warn loud
+        // naming the broken anchor and self-resolve from the SerializedProperty CHILDREN in that same order.
+        // Never throws.
         private static bool TryResolveSceneRef(SerializedProperty aor, Component host, GameObject avatarGO, out string refPath)
         {
             var pathChild = aor.FindPropertyRelative("referencePath");
@@ -534,8 +545,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                            + " (" + reason + ") — self-resolving from serialized children (targetObject-first, then referencePath).");
 
             var targetGO = targetChild != null ? targetChild.objectReferenceValue as GameObject : null;
+            if (string.IsNullOrEmpty(refPath)) return false;    // empty path ⇒ null, whatever targetObject holds
             if (targetGO != null) return true; // B3: a live targetObject wins, mirroring .Get() (hierarchy-agnostic)
-            if (string.IsNullOrEmpty(refPath)) return false;                                        // unset
             if (refPath == MaAvatarRootSentinel) return true;                                       // avatar root itself
             return avatarGO.transform.Find(refPath) != null;
         }

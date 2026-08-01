@@ -65,9 +65,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (seam.ScaleBakeReason != null) return RefuseAbstain(seam.ScaleBakeReason);
             if (seam.Pairs.Count == 0)
             {
-                // Name what it found: a BoneProxy (offset-tolerant anchor, verify the bake) and a genuinely
-                // bare prop (route to own-mergeable to add a seam) both yield zero scorable pairs, but the
-                // skill routes OPPOSITELY on them — one string for both was the G26 conflation.
+                // Name what it found: a MergeArmature that matched nothing, a BoneProxy (offset-tolerant
+                // anchor, verify the bake), and a genuinely bare prop (route to own-mergeable to add a seam)
+                // all yield zero scorable pairs, but the skill routes DIFFERENTLY on each — one string for
+                // several was the G26 conflation. MergeArmature is tested first: where one is present its
+                // zero match is a defect in THIS scene, which outranks any anchor sitting alongside it.
+                // A VRCFury ArmatureLink that resolves nothing does not reach here — it throws or returns
+                // null inside CollectVrcfPairs and lands in the UnresolvableReason abstain above.
+                if (HasMergeArmature(mergeGO))
+                    return RefuseAbstain("MergeArmature on '" + mergeableRoot +
+                        "' matched zero bones — the phantom-bone failure: no bone name lines up under the " +
+                        "merge target, so nothing zips and the mergeable skins to a private armature copy " +
+                        "the avatar never animates. Fix the prefix/suffix or the bone naming on the merge " +
+                        "component — this is not the bare-prop case and the geometry needs no work");
                 if (HasBoneProxy(mergeGO))
                     return RefuseAbstain("bone-proxy attachment on '" + mergeableRoot +
                         "' (offset-tolerant by design) — no scorable seam; verify the baked result");
@@ -339,6 +349,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static bool HasBoneProxy(GameObject mergeGO)
         {
             var t = FindType("nadena.dev.modular_avatar.core.ModularAvatarBoneProxy");
+            return t != null && mergeGO.GetComponentInChildren(t, true) != null;
+        }
+
+        // The seam whose PRESENCE separates a naming mismatch from a bare prop in the zero-pairs REFUSE:
+        // CollectMaPairs already ran, so a MergeArmature here means GetBonesMapping() matched nothing.
+        // Reflected by name and failing to false on an absent MA, exactly as HasBoneProxy does.
+        private static bool HasMergeArmature(GameObject mergeGO)
+        {
+            var t = FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
             return t != null && mergeGO.GetComponentInChildren(t, true) != null;
         }
 

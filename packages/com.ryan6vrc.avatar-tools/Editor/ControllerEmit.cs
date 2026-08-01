@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -1251,7 +1252,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var importer = AssetImporter.GetAtPath(path);
                 if (importer == null) return;
                 // CompileController reads this userData to WARN before clobbering an out-of-band edit.
-                string src = _doc.SourcePath ?? "";
+                string src = ProvenanceSourcePath(_doc.SourcePath);
                 string hash = SourceHash(_sourceText);
                 importer.userData = "compiled-from:" + src + ";srchash:" + hash;
                 importer.SaveAndReimport();
@@ -1491,6 +1492,53 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 for (int i = 0; i < 8; i++) sb.Append(bytes[i].ToString("x2", CultureInfo.InvariantCulture));
                 return sb.ToString();
             }
+        }
+
+        /// <summary>The machine-independent form of a compile source, for the <c>compiled-from:</c> stamp.
+        /// A stamp lands in a <c>.controller.meta</c> that gets COMMITTED, so an absolute filesystem path
+        /// bakes one machine's layout — and a checkout name — into a public repo. Absolute paths are
+        /// normalized here rather than refused at the door: compiling from an arbitrary filesystem root is
+        /// how <c>vrc-patterns/tools/gate.ps1</c> is designed to work.
+        /// Longest-lived anchor wins: the Unity project root, else the enclosing git repo, else the bare
+        /// leaf. A path that is already relative is returned untouched — it came from an asset path.</summary>
+        internal static string ProvenanceSourcePath(string sourcePath)
+        {
+            if (string.IsNullOrEmpty(sourcePath)) return "";
+            string p = sourcePath.Replace('\\', '/');
+            if (!Path.IsPathRooted(p)) return p;
+
+            // Application.dataPath is "<project>/Assets"; its parent is the root that Assets/ and Packages/
+            // asset paths are relative to.
+            string projectRoot = Norm(Path.GetDirectoryName(Application.dataPath));
+            string under = RelativeTo(projectRoot, p);
+            if (under != null) return under;
+
+            for (var dir = Path.GetDirectoryName(p); !string.IsNullOrEmpty(dir); dir = Path.GetDirectoryName(dir))
+            {
+                // A worktree's .git is a FILE, not a directory — both are the repo root we want.
+                if (!Directory.Exists(dir + "/.git") && !File.Exists(dir + "/.git")) continue;
+                string rel = RelativeTo(Norm(dir), p);
+                if (rel != null) return rel;
+            }
+            int slash = p.LastIndexOf('/');
+            return slash >= 0 ? p.Substring(slash + 1) : p;
+        }
+
+        private static string Norm(string dir)
+        {
+            if (string.IsNullOrEmpty(dir)) return "";
+            dir = dir.Replace('\\', '/');
+            return dir.EndsWith("/", StringComparison.Ordinal) ? dir.Substring(0, dir.Length - 1) : dir;
+        }
+
+        // Non-null only when `full` sits strictly UNDER `root` — the trailing-slash test keeps a sibling
+        // whose name merely starts with the root's (…/vrc-patterns-old) from reading as a child.
+        private static string RelativeTo(string root, string full)
+        {
+            if (string.IsNullOrEmpty(root)) return null;
+            if (!full.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase)) return null;
+            string rel = full.Substring(root.Length + 1);
+            return rel.Length == 0 ? null : rel;
         }
     }
 }
