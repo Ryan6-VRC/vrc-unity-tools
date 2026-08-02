@@ -280,10 +280,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Path.Combine(projectRoot, assetFolder.Replace('/', Path.DirectorySeparatorChar));
         }
 
-        // The completed/failed/cancelled callbacks hand back the package's display name (file name
-        // without path or extension). Match case-insensitively against ours.
-        private static bool NameMatches(string callbackName, string ourName) =>
-            string.Equals(callbackName, ourName, StringComparison.OrdinalIgnoreCase);
+        // MEASURED (Unity 2022.3.22f1, live import): the completed/failed/cancelled callbacks hand back the
+        // package's FULL PATH MINUS EXTENSION — `C:\vendor\Foo` for `C:\vendor\Foo.unitypackage` — not the
+        // leaf display name this once assumed. Guarding on the leaf assumption made the comparison
+        // unsatisfiable, so `completed` was never written once across 26 imports; take the leaf of whatever
+        // arrives instead. That also accepts a bare name (a leaf is its own leaf), so a Unity version or a
+        // trio member whose shape was never provoked still matches. Leaf-keyed is the handle LogPath already
+        // uses, so this adds no collision class the tool has not already accepted.
+        internal static bool NameMatches(string callbackName, string ourName) =>
+            !string.IsNullOrEmpty(callbackName) &&
+            string.Equals(Path.GetFileName(callbackName), ourName, StringComparison.OrdinalIgnoreCase);
 
         private static string ValidatePackagePath(string packagePath, bool requireExists)
         {
