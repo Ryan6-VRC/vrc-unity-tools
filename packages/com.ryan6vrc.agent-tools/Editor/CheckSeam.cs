@@ -107,7 +107,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// Resolver-free coincidence gate: same verdict grammar as <see cref="Check"/>, but the base↔merge
         /// pairs are matched by BONE NAME and no seam component is consulted. For the pre-seam case a seam
         /// resolver cannot score — a raw refit output beside a target body, an unplaced mergeable — where
-        /// <see cref="Check"/> correctly REFUSEs because there is no mapping to reflect.
+        /// <see cref="Check"/> correctly REFUSEs because there is no mapping to reflect. Pre-seam is not
+        /// seamless: a raw refit output does carry a MergeArmature, it simply has no base to resolve against
+        /// yet, so <see cref="Check"/> lands on the mergeTarget abstain rather than the bare-prop REFUSE.
         ///
         /// <paramref name="maxOffsetMm"/> has no default on purpose. The known regimes differ by orders of
         /// magnitude — a warp solver's residue is ~0.001mm (millimetre-scale there is a wrong result, not
