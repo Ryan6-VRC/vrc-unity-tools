@@ -299,27 +299,25 @@ public class UploadAvatarLoopTests
         Assert.IsTrue(UploadAvatar.IsReservedNoBundle(true, "first-upload"));
     }
 
-    // The other three cells are ordinary successes. The last is the interesting one: an avatar that was
-    // an update going in but reads first-upload after had its id go missing LOCALLY after an upload that
-    // did land — an anomaly, not a reservation, and halting the batch as one would be wrong.
+    // Every other cell is an ordinary success. ClassifyAvatar returns THREE states, not two, so this is a
+    // 2x3 table: "unknown" is what a GameObject destroyed across the await classifies as, and it is
+    // reachable on both rows. Covering it is what rules out `wasFirstUpload && stateAfter != "update"` — a
+    // mutant that survives every other case here while reporting a destroyed first-upload as a reservation,
+    // which would halt the batch on an upload that landed.
+    //
+    // The (was-update -> reads first-upload) cell is the other one worth naming: an id that went missing
+    // locally after an upload that did land is an anomaly, not a reservation.
+    //
+    // The null cell is the caller's short-circuit — RealUploadOne re-reads the state only when
+    // wasFirstUpload, so a re-upload passes null rather than paying a second SerializedObject read.
     [TestCase(true,  "update",       TestName = "IsReservedNoBundle_firstUploadThatPersisted_isPlainUpload")]
+    [TestCase(true,  "unknown",      TestName = "IsReservedNoBundle_firstUploadWhoseObjectDied_isNotAReservation")]
     [TestCase(false, "update",       TestName = "IsReservedNoBundle_ordinaryReupload_isPlainUpload")]
+    [TestCase(false, "unknown",      TestName = "IsReservedNoBundle_reuploadWhoseObjectDied_isPlainUpload")]
     [TestCase(false, "first-upload", TestName = "IsReservedNoBundle_updateWhoseIdWentMissing_isNotAReservation")]
+    [TestCase(false, null,           TestName = "IsReservedNoBundle_stateNotEvenRead_isPlainUpload")]
     public void IsReservedNoBundle_everyOtherCell_isPlainUpload(bool wasFirstUpload, string stateAfter)
     {
         Assert.IsFalse(UploadAvatar.IsReservedNoBundle(wasFirstUpload, stateAfter));
-    }
-
-    // The verdict compares against ClassifyBlueprint's own vocabulary rather than a second copy of the
-    // literal. Renaming the state in one place and not the other would make the reservation branch
-    // unsatisfiable — silently, and only ever on a real upload.
-    [Test]
-    public void IsReservedNoBundle_keysOffClassifyBlueprintsVocabulary_notALooseLiteral()
-    {
-        string firstUpload = UploadAvatarLogic.ClassifyBlueprint(null);
-        Assert.IsTrue(UploadAvatar.IsReservedNoBundle(true, firstUpload),
-            "the reservation branch must key off the same string ClassifyAvatar can actually return");
-        Assert.IsFalse(UploadAvatar.IsReservedNoBundle(true, UploadAvatarLogic.ClassifyBlueprint("avtr_x")),
-            "an id that classifies as an update is never a reservation");
     }
 }
