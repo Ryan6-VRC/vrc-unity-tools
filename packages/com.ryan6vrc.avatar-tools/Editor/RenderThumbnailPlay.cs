@@ -194,9 +194,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 bool emuMade = EnsureEmulatorEnabled(venue);
 
                 // Did we actually change the operator's options (vs. they were already both-reload-disabled)?
-                bool optsChanged = !(_savedOptionsEnabled
-                    && (_savedOptions & EnterPlayModeOptions.DisableDomainReload) != 0
-                    && (_savedOptions & EnterPlayModeOptions.DisableSceneReload) != 0);
+                bool optsChanged = !IsBothReloadDisabled(_savedOptionsEnabled, _savedOptions);
                 // …and if they were already forced, is that the operator's own setting or an earlier session's
                 // residue? SessionState covers a domain reload but dies with the EDITOR, so a Begin followed by
                 // a close or a crash leaves the forced pair on disk (a project setting) with no record beside
@@ -276,15 +274,60 @@ namespace Ryan6Vrc.AvatarTools.Editor
             _savedOptionsEnabled = EditorSettings.enterPlayModeOptionsEnabled;
             _savedOptions = EditorSettings.enterPlayModeOptions;
             _optionsOverridden = true;
-            SessionState.SetString(OptionsKey, (_savedOptionsEnabled ? "1" : "0") + "|" + (int)_savedOptions);
+            SessionState.SetString(OptionsKey, FormatOptionsRecord(_savedOptionsEnabled, _savedOptions));
             ApplyForcedOptions();
         }
+
+        // ----- Pure record codec (unit-tested directly) ---------------------------------------------
+        //
+        // The record's only reader and only writer are a domain reload apart — the write happens in one
+        // Begin, the read in whatever Begin runs after a recompile wiped the statics. That reload cannot be
+        // provoked in the batchmode suite, so the live path can never prove the two halves agree: a writer
+        // and a parser that disagreed on the format would look exactly like "no record survived", the
+        // recoverable-looking symptom whose end state is the operator's Enter-Play-Mode Options cemented to
+        // our forced pair. Split out so the agreement is assertable without a reload — the round-trip is the
+        // proof, and it is what keeps the "no writer can emit a malformed record" claim above true.
+
+        /// <summary>Encode the operator's options pair for <see cref="OptionsKey"/>. Inverse of
+        /// <see cref="TryParseOptionsRecord"/>.</summary>
+        internal static string FormatOptionsRecord(bool enabled, EnterPlayModeOptions opts) =>
+            (enabled ? "1" : "0") + "|" + (int)opts;
+
+        /// <summary>Decode a record written by <see cref="FormatOptionsRecord"/>. False (with both outputs
+        /// left at default) for anything that is not a well-formed pair — absent, wrong arity, or a
+        /// non-integer options field. Half a settings pair is worse than none, so a malformed record is
+        /// rejected whole rather than partly applied.</summary>
+        internal static bool TryParseOptionsRecord(string raw, out bool enabled, out EnterPlayModeOptions opts)
+        {
+            enabled = false;
+            opts = default;
+            if (string.IsNullOrEmpty(raw)) return false;
+            var parts = raw.Split('|');
+            int parsed;
+            if (parts.Length != 2 || !int.TryParse(parts[1], out parsed)) return false;
+            enabled = parts[0] == "1";
+            opts = (EnterPlayModeOptions)parsed;
+            return true;
+        }
+
+        /// <summary>Is this options pair already the both-reload-disabled state <see cref="ApplyForcedOptions"/>
+        /// forces? Drives Begin's `optsChanged` — when true, Begin changed nothing and End must not claim to
+        /// restore anything.</summary>
+        internal static bool IsBothReloadDisabled(bool enabled, EnterPlayModeOptions opts) =>
+            enabled
+            && (opts & EnterPlayModeOptions.DisableDomainReload) != 0
+            && (opts & EnterPlayModeOptions.DisableSceneReload) != 0;
+
+        /// <summary>The pair Begin forces for the session. Named once so <see cref="ApplyForcedOptions"/> and
+        /// <see cref="IsBothReloadDisabled"/> cannot drift apart — were they to, every Begin would report
+        /// `playmode-reload=disabled` and then "restore" over settings it never changed.</summary>
+        internal const EnterPlayModeOptions ForcedOptions =
+            EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
 
         private static void ApplyForcedOptions()
         {
             EditorSettings.enterPlayModeOptionsEnabled = true;
-            EditorSettings.enterPlayModeOptions =
-                EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
+            EditorSettings.enterPlayModeOptions = ForcedOptions;
         }
 
         // Rehydrate _savedOptions* from SessionState. True iff a record was there and parsed; a malformed one
@@ -293,11 +336,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             var raw = SessionState.GetString(OptionsKey, "");
             if (string.IsNullOrEmpty(raw)) return false;
-            var parts = raw.Split('|');
-            int opts;
-            if (parts.Length != 2 || !int.TryParse(parts[1], out opts)) { SessionState.EraseString(OptionsKey); return false; }
-            _savedOptionsEnabled = parts[0] == "1";
-            _savedOptions = (EnterPlayModeOptions)opts;
+            bool enabled;
+            EnterPlayModeOptions opts;
+            if (!TryParseOptionsRecord(raw, out enabled, out opts)) { SessionState.EraseString(OptionsKey); return false; }
+            _savedOptionsEnabled = enabled;
+            _savedOptions = opts;
             _optionsOverridden = true;
             return true;
         }
