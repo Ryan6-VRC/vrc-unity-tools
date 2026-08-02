@@ -88,14 +88,24 @@ public class RenderThumbnailPlayOptionsRecordTests
         Assert.IsFalse(RenderThumbnailPlay.IsBothReloadDisabled(true, EnterPlayModeOptions.None));
     }
 
-    // The forced pair ApplyForcedOptions writes must be the same pair IsBothReloadDisabled recognises.
-    // If these two ever drift apart, every Begin reports `playmode-reload=disabled` and then restores
-    // over the operator's settings on a state it never actually changed.
+    // The pair ApplyForcedOptions writes must be the pair IsBothReloadDisabled recognises. Reads the
+    // production constant rather than restating it — a second copy here would keep passing after
+    // ApplyForcedOptions was narrowed to one flag, which is precisely the drift this claims to guard.
     [Test]
     public void ForcedPair_isRecognisedAsAlreadyForced()
     {
-        var forced = EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
-        Assert.IsTrue(RenderThumbnailPlay.IsBothReloadDisabled(true, forced),
+        Assert.IsTrue(RenderThumbnailPlay.IsBothReloadDisabled(true, RenderThumbnailPlay.ForcedOptions),
             "ApplyForcedOptions' pair must read back as already-forced, or optsChanged inverts");
+    }
+
+    // The round-trip proves the two halves AGREE; it cannot see a format both halves changed together.
+    // That matters because the hazard is intra-session — a recompile is what causes the reload, so build N
+    // writes the record and build N+1 reads it. Pin the wire format itself.
+    [Test]
+    public void OptionsRecord_wireFormat_isEnabledFlagPipeOptionsInt()
+    {
+        Assert.AreEqual("1|3", RenderThumbnailPlay.FormatOptionsRecord(true, RenderThumbnailPlay.ForcedOptions),
+            "DisableDomainReload(1)|DisableSceneReload(2) = 3 — a later build must still read this record");
+        Assert.AreEqual("0|0", RenderThumbnailPlay.FormatOptionsRecord(false, EnterPlayModeOptions.None));
     }
 }

@@ -318,11 +318,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             && (opts & EnterPlayModeOptions.DisableDomainReload) != 0
             && (opts & EnterPlayModeOptions.DisableSceneReload) != 0;
 
+        /// <summary>The pair Begin forces for the session. Named once so <see cref="ApplyForcedOptions"/> and
+        /// <see cref="IsBothReloadDisabled"/> cannot drift apart — were they to, every Begin would report
+        /// `playmode-reload=disabled` and then "restore" over settings it never changed.</summary>
+        internal const EnterPlayModeOptions ForcedOptions =
+            EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
+
         private static void ApplyForcedOptions()
         {
             EditorSettings.enterPlayModeOptionsEnabled = true;
-            EditorSettings.enterPlayModeOptions =
-                EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
+            EditorSettings.enterPlayModeOptions = ForcedOptions;
         }
 
         // Rehydrate _savedOptions* from SessionState. True iff a record was there and parsed; a malformed one
