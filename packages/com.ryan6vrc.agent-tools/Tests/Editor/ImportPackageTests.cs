@@ -14,10 +14,13 @@ using Ryan6Vrc.AgentTools.Editor;
 //   • RunLog shape — WriteImportLog / ReadStatus round-trip on disk at the stable, package-derived path.
 //   • Verify door — plumbing over fabricated RunLogs + temp asset folders (no import performed).
 //   • Import input validation + whatIf — bad input is a bare FAIL; whatIf writes nothing.
-// The LIVE Import+callback path (real ExportPackage→ImportPackage, async completion) is exercised
-// MANUALLY, not here: the async callbacks and their domain-reload-drop risk fit poorly with the serial
-// batchmode suite (see the "live-object-mutating tests crash" suite convention). Verify walking the
-// on-disk root is the authoritative signal the contract rests on, and that IS covered here.
+//   • NameMatches — the callback guard, pure, pinned against the argument shape Unity was MEASURED to hand
+//     back. Left unpinned, a wrong guess at that shape held every RunLog at `pending` across 26 imports.
+// The LIVE Import+callback path (real ExportPackage→ImportPackage, async completion) is still exercised
+// MANUALLY: the async callbacks and their domain-reload-drop risk fit poorly with the serial batchmode
+// suite (see the "live-object-mutating tests crash" suite convention). Verify walking the on-disk root is
+// the authoritative signal the contract rests on, and that IS covered here. What the manual half must not
+// be trusted to catch again is a guard that can never fire — hence NameMatches being pulled out as pure.
 [Category("ImportPackage")]
 public class ImportPackageTests
 {
@@ -243,6 +246,55 @@ public class ImportPackageTests
         StringAssert.StartsWith("[ImportPackage] FAIL:", r);
         StringAssert.Contains(".unitypackage", r);
         Assert.IsFalse(r.Contains("| log="), "bad input is a bare FAIL, no trailer");
+    }
+
+    // ── The callback name guard ────────────────────────────────────────────────────────────────────────
+    // The one thing the live-import path turns on, and the one thing the "exercise the contract, not a live
+    // import" split above left unpinned — so a wrong guess at the callback's argument shape shipped and held
+    // every RunLog at `pending` for 26 imports. Pure, so it costs nothing to assert here; the shape in
+    // NameMatches's comment is measured, and these cases are what "measured" has to keep meaning.
+
+    [Test]
+    public void NameMatches_fullPathMinusExtension_matches()
+    {
+        // The shape Unity actually hands back. Both separators: a caller's forward-slash path arrives back
+        // the way it was passed, and Windows treats / as an alternate separator either way.
+        Assert.IsTrue(ImportPackage.NameMatches(@"C:\vendor\Foo", "Foo"));
+        Assert.IsTrue(ImportPackage.NameMatches("C:/vendor/Foo", "Foo"));
+    }
+
+    [Test]
+    public void NameMatches_bareLeafName_matches()
+    {
+        // The shape this code once assumed. Still accepted — a leaf is its own leaf — so a Unity version or
+        // a failed/cancelled callback that does hand back a bare name is not a new stuck-pending bug.
+        Assert.IsTrue(ImportPackage.NameMatches("Foo", "Foo"));
+    }
+
+    [Test]
+    public void NameMatches_multiDotPackageName_matches()
+    {
+        // Real vendor names carry version dots (`Uruki_Final_v1.2.unitypackage`), and Import derives ourName
+        // with GetFileNameWithoutExtension — which strips only `.unitypackage`, leaving `Uruki_Final_v1.2`.
+        // The guard must take the leaf, never re-strip an extension off what arrives.
+        Assert.IsTrue(ImportPackage.NameMatches(@"C:\vendor\Uruki_Final_v1.2", "Uruki_Final_v1.2"));
+    }
+
+    [Test]
+    public void NameMatches_caseInsensitive()
+    {
+        Assert.IsTrue(ImportPackage.NameMatches(@"C:\vendor\FOO", "foo"));
+    }
+
+    [Test]
+    public void NameMatches_differentPackage_doesNotMatch()
+    {
+        // The guard still has to do its job: a concurrent import of another package is left for its own
+        // handler, and a same-named leaf under a different folder is the collision LogPath already accepts.
+        Assert.IsFalse(ImportPackage.NameMatches(@"C:\vendor\Other", "Foo"));
+        Assert.IsFalse(ImportPackage.NameMatches(@"C:\vendor\FooBar", "Foo"));
+        Assert.IsFalse(ImportPackage.NameMatches(null, "Foo"));
+        Assert.IsFalse(ImportPackage.NameMatches("", "Foo"));
     }
 
     // ── Import: input validation + whatIf ──────────────────────────────────────────────────────────────
