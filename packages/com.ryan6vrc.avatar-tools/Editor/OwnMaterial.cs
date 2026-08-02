@@ -851,7 +851,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// tag is never a lock signal; only the shader name counts. Gates both the in-place augment guard
         /// (an owned material must never be locked before this tool touches it) and the copy-to-new unlock
         /// seam below.</summary>
-        static bool IsLocked(Material m) =>
+        internal static bool IsLocked(Material m) =>
             m.shader != null && m.shader.name.StartsWith("Hidden/Locked/", StringComparison.Ordinal);
 
         static string ThryUnresolvedMessage(string reason) =>
@@ -869,7 +869,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// renamed shader leaves the tag present but unresolvable, which is exactly what makes Thry pop the
         /// modal. <paramref name="tag"/> returns whichever tag value was examined (for the refusal message).
         /// </summary>
-        static bool OriginalShaderResolves(Material m, out string tag)
+        internal static bool OriginalShaderResolves(Material m, out string tag)
         {
             string guid = m.GetTag(ThryTagOriginalShaderGuid, false, "");
             if (!string.IsNullOrEmpty(guid))
