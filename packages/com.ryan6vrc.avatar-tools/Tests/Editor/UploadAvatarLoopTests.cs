@@ -285,4 +285,41 @@ public class UploadAvatarLoopTests
         var o = UploadAvatar.FailedFromException(new System.InvalidOperationException("CAU drift"));
         Assert.AreEqual("real", o.forcedClass);   // fail-safe default, not transient
     }
+
+    // ----- id-persistence verdict (F39) ---------------------------------------------------------
+    // Loop_ReservedNoBundleIsItsOwnState above proves the LOOP routes the outcome; these prove what
+    // PRODUCES it. That decision's only caller sits behind `await CauReflect.UploadOne` — a real upload
+    // to VRChat — so before extraction no test could fail on it however wrong it got.
+
+    // The one cell that means "record reserved, no bundle landed": first-upload going in, still
+    // first-upload after SaveAssets persisted whatever CAU wrote back.
+    [Test]
+    public void IsReservedNoBundle_firstUploadWhoseIdNeverPersisted()
+    {
+        Assert.IsTrue(UploadAvatar.IsReservedNoBundle(true, "first-upload"));
+    }
+
+    // The other three cells are ordinary successes. The last is the interesting one: an avatar that was
+    // an update going in but reads first-upload after had its id go missing LOCALLY after an upload that
+    // did land — an anomaly, not a reservation, and halting the batch as one would be wrong.
+    [TestCase(true,  "update",       TestName = "IsReservedNoBundle_firstUploadThatPersisted_isPlainUpload")]
+    [TestCase(false, "update",       TestName = "IsReservedNoBundle_ordinaryReupload_isPlainUpload")]
+    [TestCase(false, "first-upload", TestName = "IsReservedNoBundle_updateWhoseIdWentMissing_isNotAReservation")]
+    public void IsReservedNoBundle_everyOtherCell_isPlainUpload(bool wasFirstUpload, string stateAfter)
+    {
+        Assert.IsFalse(UploadAvatar.IsReservedNoBundle(wasFirstUpload, stateAfter));
+    }
+
+    // The verdict compares against ClassifyBlueprint's own vocabulary rather than a second copy of the
+    // literal. Renaming the state in one place and not the other would make the reservation branch
+    // unsatisfiable — silently, and only ever on a real upload.
+    [Test]
+    public void IsReservedNoBundle_keysOffClassifyBlueprintsVocabulary_notALooseLiteral()
+    {
+        string firstUpload = UploadAvatarLogic.ClassifyBlueprint(null);
+        Assert.IsTrue(UploadAvatar.IsReservedNoBundle(true, firstUpload),
+            "the reservation branch must key off the same string ClassifyAvatar can actually return");
+        Assert.IsFalse(UploadAvatar.IsReservedNoBundle(true, UploadAvatarLogic.ClassifyBlueprint("avtr_x")),
+            "an id that classifies as an update is never a reservation");
+    }
 }
