@@ -46,8 +46,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // lives in namespace Thry.ThryEditor (not bare Thry). Tag names match ShaderOptimizer's own TAG_*
         // consts verbatim. ──
         const string ThryShaderOptimizerTypeName = "Thry.ThryEditor.ShaderOptimizer";
-        internal const string ThryTagOriginalShader = "OriginalShader";
-        internal const string ThryTagOriginalShaderGuid = "OriginalShaderGUID";
+        const string ThryTagOriginalShader = "OriginalShader";
+        const string ThryTagOriginalShaderGuid = "OriginalShaderGUID";
 
         /// <summary>
         /// Bring <paramref name="materialPath"/> into ownership and fork <paramref name="forkTextureSlots"/>
