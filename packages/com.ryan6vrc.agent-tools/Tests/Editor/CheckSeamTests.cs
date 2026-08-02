@@ -234,6 +234,10 @@ public class CheckSeamTests
     private static System.Text.RegularExpressions.Regex RefuseRe =>
         new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] REFUSE:");
 
+    // The bare door's own refusal carrier — a distinct label, so expecting one never consumes the other's.
+    private static System.Text.RegularExpressions.Regex BareRefuseRe =>
+        new System.Text.RegularExpressions.Regex(@"\[CheckSeam:bare\] REFUSE:");
+
     // ── Tests ─────────────────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -662,5 +666,322 @@ public class CheckSeamTests
         StringAssert.Contains("Dropped: 1 non-humanoid end-bones", body);
         Assert.IsFalse(body.Contains("**seam-offset**"), "context/dropped bones are never gate offenders");
         Assert.IsFalse(body.Contains("bone=`Tail_End`"), "a dropped leaf is neither offender nor context");
+    }
+
+    // ── F35: the bare door — resolver-free, name-matched, caller-supplied tolerance ──────────────────
+    // CheckBare is the pre-seam companion: no MA/VRCFury mapping to reflect, so pairs come from bone NAMES.
+    // These are the unit suite's own guard, not a supplement to one — unlike the seam door, whose reflection
+    // defaults only the live corpus (CheckSeam.md) can prove, the bare door touches no vendor package, so
+    // everything it does is reachable here.
+
+    // Base + mergeable as SIBLINGS (never nested — the shape the door exists for: a fresh refit output sitting
+    // beside a target body). Each humanoid name gets a base bone and an identically-named merge bone skinned at
+    // `weight`; both roots sit at the scene origin, so bones are coincident until a merge bone is nudged.
+    // ResolveSeam is deliberately NOT injected: the door must never consult it.
+    private void BuildBare(out GameObject baseGO, out GameObject mergeGO, string[] humanoid, float weight = 1.0f)
+    {
+        baseGO = NewChild(_root, "Base");
+        mergeGO = NewChild(_root, "Merge");
+
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        foreach (var name in humanoid) map.Bones.Add(NewChild(baseGO, name).transform);
+        CheckSeam.ResolveHumanoid = _ => map;
+
+        NewSkinnedMergeable(mergeGO, humanoid.Select(n => (n, weight)).ToArray());
+    }
+
+    // The gap this door exists to close, asserted as one fact: on a fixture with no seam component, the seam
+    // door REFUSEs and the bare door scores. If a future change lets Check score this, the door is redundant.
+    [Test]
+    public void Bare_scoresTheFixtureTheSeamDoorRefuses()
+    {
+        BuildBare(out var baseGO, out var mergeGO, new[] { "Chest", "Spine" });
+
+        // Seam door, real resolver: MA/VRCFury types resolve, but this fixture carries no seam component,
+        // so the collectors find nothing ⇒ zero pairs ⇒ the bare-prop abstain.
+        var seamResult = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        StringAssert.StartsWith("[CheckSeam] REFUSE:", seamResult);
+        StringAssert.Contains("no seam component", seamResult);
+        StringAssert.Contains("CheckBare", seamResult); // and it names the door that CAN score this
+
+        // Bare door, same scene, same instant.
+        var bareResult = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.Contains("[CheckSeam:bare]", bareResult);
+        StringAssert.Contains("weightedHumanoid=2", bareResult);
+        StringAssert.Contains("=> PASS", bareResult);
+        ReadLog(bareResult);
+    }
+
+    // Resolver-free is the load-bearing claim, so prove it by making any consultation fatal: a ResolveSeam that
+    // throws. A PASS here means the seam mapping was never reached — including the MergeArmature/BoneProxy
+    // presence probes, which sit behind the zero-pairs branch the bare door does not run.
+    [Test]
+    public void Bare_neverConsultsTheSeamResolver()
+    {
+        BuildBare(out var baseGO, out var mergeGO, new[] { "Chest", "Spine", "Hips" });
+        CheckSeam.ResolveSeam = (_, __) => throw new InvalidOperationException("the bare door consulted the seam resolver");
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.Contains("weightedHumanoid=3", r);
+        StringAssert.Contains("=> PASS", r);
+        ReadLog(r);
+    }
+
+    // The tolerance sweep, one fixture nudged three times (a second fixture would collide on the "Base"/"Merge"
+    // hierarchy path and Resolve would return the first — Gate_boundary's constraint, unchanged here).
+    // maxOffsetMm = 0.01mm: the refit regime, ~100× tighter than the seam door's ε at this SpanMm (1.05mm), so
+    // every case below would PASS under the seam door's ε. That is the point of a caller-supplied tolerance.
+    [Test]
+    public void Bare_toleranceBoundary_callerSupplied()
+    {
+        BuildBare(out var baseGO, out var mergeGO, new[] { "Chest", "Spine" });
+        var chest = FindBone(mergeGO, "Chest");
+
+        // (a) Coincident ⇒ PASS, no offender magnitude (G37 holds at the bare door too).
+        var r0 = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.Contains("=> PASS", r0);
+        StringAssert.Contains("offenders=0", r0);
+        StringAssert.Contains("context=0 dropped=0", r0); // bare pairs are humanoid-only ⇒ both always 0
+        StringAssert.DoesNotContain("maxOffset", r0);
+        StringAssert.Contains("maxWithinEps=", r0);
+        var body0 = ReadLog(r0);
+        StringAssert.Contains("_(all within ε)_", body0);
+        StringAssert.Contains("caller-supplied maxOffsetMm", body0);  // ε's provenance rides the header
+        StringAssert.Contains("matched by bone name", body0);
+
+        // (b) 0.005mm < 0.01mm ⇒ PASS. Locks the F4 precision the refit regime needs: at the seam door's F2
+        // this band prints "0.00mm" and a reader cannot tell a clean fit from a marginal one.
+        chest.localPosition = new Vector3(0.000005f, 0f, 0f);
+        var r1 = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.Contains("=> PASS", r1);
+        StringAssert.Contains("maxWithinEps=0.0050mm (median 0.0025mm)", r1);
+        ReadLog(r1);
+
+        // (c) 0.02mm > 0.01mm ⇒ NOT-PASS with the magnitude legible at F4 (at F1 it would read "0.0mm").
+        chest.localPosition = new Vector3(0.00002f, 0f, 0f);
+        var r2 = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.Contains("=> NOT-PASS", r2);
+        StringAssert.Contains("offenders=1", r2);
+        StringAssert.Contains("maxOffset=0.0200mm", r2);
+        var body2 = ReadLog(r2);
+        StringAssert.Contains("bone=`Chest`", body2);
+        StringAssert.Contains("offset=0.0200mm", body2);
+
+        // (d) The SAME scene at a millimetre tolerance PASSes — the verdict tracks the caller's tolerance,
+        // not the geometry alone. This is why the parameter has no default.
+        var r3 = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 1.0f);
+        StringAssert.Contains("=> PASS", r3);
+        ReadLog(r3);
+    }
+
+    // Worst-first ordering, and that every over-tolerance bone is named — the offender contract the skill
+    // reads to route its repair.
+    [Test]
+    public void Bare_offendersNamedWorstFirst()
+    {
+        BuildBare(out var baseGO, out var mergeGO, new[] { "Chest", "Spine", "Hips" });
+        FindBone(mergeGO, "Chest").localPosition = new Vector3(0.00005f, 0f, 0f); // 0.05mm
+        FindBone(mergeGO, "Spine").localPosition = new Vector3(0.0002f, 0f, 0f);  // 0.20mm — worst
+        // Hips stays coincident ⇒ within tolerance, not an offender.
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.Contains("=> NOT-PASS", r);
+        StringAssert.Contains("offenders=2", r);
+        StringAssert.Contains("maxOffset=0.2000mm", r); // the worst, on the one-liner
+
+        var body = ReadLog(r);
+        int spineAt = body.IndexOf("bone=`Spine`", StringComparison.Ordinal);
+        int chestAt = body.IndexOf("bone=`Chest`", StringComparison.Ordinal);
+        Assert.Greater(spineAt, -1, "the worst offender is named");
+        Assert.Greater(chestAt, -1, "the lesser offender is named too");
+        Assert.Less(spineAt, chestAt, "offenders are listed worst-first");
+        Assert.IsFalse(body.Contains("bone=`Hips`"), "a within-tolerance bone is not an offender");
+    }
+
+    // A duplicated armature copy under the mergeable makes name-matching arbitrary. Refusing beats picking:
+    // the PASS a wrong pick produces is indistinguishable from a real one.
+    [Test]
+    public void Bare_ambiguousBoneNameUnderMergeable_refuses()
+    {
+        BuildBare(out var baseGO, out var mergeGO, new[] { "Chest", "Spine" });
+        var dupeArmature = NewChild(mergeGO, "Armature.001");
+        NewChild(dupeArmature, "Chest"); // a second transform carrying a matched name
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.StartsWith("[CheckSeam:bare] REFUSE:", r);
+        StringAssert.Contains("ambiguous", r);
+        StringAssert.Contains("'Chest'", r);        // names the offending bone
+        StringAssert.Contains("Armature.001", r);   // ...and where the duplicate lives
+        StringAssert.DoesNotContain("=> PASS", r);
+    }
+
+    // Wrong roots (or a target base whose bones are named differently) must not read as a clean skeleton.
+    [Test]
+    public void Bare_noSharedBoneNames_refuses()
+    {
+        var baseGO = NewChild(_root, "Base");
+        var mergeGO = NewChild(_root, "Merge");
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        map.Bones.Add(NewChild(baseGO, "Chest").transform);
+        map.Bones.Add(NewChild(baseGO, "Spine").transform);
+        CheckSeam.ResolveHumanoid = _ => map;
+        NewSkinnedMergeable(mergeGO, new[] { ("Bust", 1.0f), ("Torso", 1.0f) }); // no name in common
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.StartsWith("[CheckSeam:bare] REFUSE:", r);
+        StringAssert.Contains("share no bone names", r);
+    }
+
+    // The ≤1 floor is shared machinery but NOT a shared meaning, so the two doors must not share the sentence.
+    // One weighted humanoid bone at the seam door is a correct hair/hat/earring — "verify the bake". At the
+    // bare door it means two whole skeletons matched on at most one skinned bone name, which is a failed
+    // transfer; sending that reader to inspect the bake points them at a result that should be rebuilt.
+    [Test]
+    public void Bare_oneWeightedHumanoid_refusesWithoutTheProxyReading()
+    {
+        BuildBare(out var baseGO, out var mergeGO, new[] { "Head" });
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.StartsWith("[CheckSeam:bare] REFUSE:", r);
+        StringAssert.Contains("shared weighted humanoid bone", r);
+        StringAssert.Contains("Head", r);
+        StringAssert.DoesNotContain("accessory/proxy", r);
+        StringAssert.DoesNotContain("verify the baked result", r);
+    }
+
+    // Name-matching pairs more bones than the seam door would: an armature carries bones no mesh skins, and a
+    // name match on one is not evidence about the geometry. The weighted-SMR filter is what excludes them — a
+    // bare-door-specific risk, because name-matching (unlike a seam mapping) has nothing else holding it back.
+    [Test]
+    public void Bare_nameMatchedButUnskinnedBone_doesNotCount()
+    {
+        var baseGO = NewChild(_root, "Base");
+        var mergeGO = NewChild(_root, "Merge");
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        foreach (var n in new[] { "Chest", "Spine", "Hips" }) map.Bones.Add(NewChild(baseGO, n).transform);
+        CheckSeam.ResolveHumanoid = _ => map;
+
+        NewSkinnedMergeable(mergeGO, new[] { ("Chest", 1.0f), ("Spine", 1.0f) });
+        // A name-matched merge bone no SMR skins. Offset far past tolerance: if it counted it would be an
+        // offender and flip the verdict, so a PASS here is the filter working, not the offset being small.
+        NewChild(mergeGO, "Hips").transform.localPosition = new Vector3(0.05f, 0f, 0f); // 50mm
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.Contains("weightedHumanoid=2", r); // Hips paired by name but never scored
+        StringAssert.Contains("offenders=0", r);
+        StringAssert.Contains("=> PASS", r);
+        Assert.IsFalse(ReadLog(r).Contains("bone=`Hips`"), "an unskinned name-match is neither offender nor context");
+    }
+
+    // A missing tolerance is misuse (error), not an abstain — and the refusal says what to supply.
+    [Test]
+    public void Bare_nonPositiveTolerance_refusesAtError()
+    {
+        BuildBare(out var baseGO, out var mergeGO, new[] { "Chest", "Spine" });
+
+        // 0/negative/NaN fail any `> 0` test. +∞ does NOT — it clears one and then makes every offset "within
+        // ε", so the door would PASS anything. Below the report's precision floor a genuine offender rounds to
+        // 0.0000mm and a NOT-PASS reads clean, which defeats the point of gating at all.
+        foreach (var bad in new[] { 0f, -1f, float.NaN, float.PositiveInfinity, 0.00001f })
+        {
+            LogAssert.Expect(LogType.Error, BareRefuseRe); // misuse ⇒ error, one per call
+            var r = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), bad);
+            StringAssert.StartsWith("[CheckSeam:bare] REFUSE:", r);
+            StringAssert.Contains("maxOffsetMm must be a finite value", r);
+        }
+    }
+
+    // The overlap that self-pairs. When the base sits INSIDE the mergeable, the merge-side name index sweeps
+    // in the base's own bones, so any bone the mergeable lacks a copy of pairs (b, b) at distance 0 — and the
+    // downstream guards all pass, because such a bone genuinely is under both roots. Left unguarded this is a
+    // clean PASS indistinguishable from a real one, off a handle an agent would plausibly type
+    // ("compare the body against the armature").
+    [Test]
+    public void Bare_baseInsideMergeable_refuses_neverSelfPairs()
+    {
+        var outerGO = NewChild(_root, "Merge");        // the mergeable root, containing everything
+        var baseGO = NewChild(outerGO, "Base");        // ...including the base
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        var baseBones = new List<Transform>();
+        foreach (var n in new[] { "Chest", "Spine", "Hips" })
+        {
+            var t = NewChild(baseGO, n).transform;
+            baseBones.Add(t);
+            map.Bones.Add(t);
+        }
+        CheckSeam.ResolveHumanoid = _ => map;
+        // The base carries its own skin, so a sweep rooted at the OUTER object finds the base's bones weighted
+        // — that is what makes the self-pairs count. The mergeable part shares no bone name with the base, so
+        // each base bone name has exactly one hit under the outer root: the base's own bone. Unguarded, that is
+        // three (b, b) pairs at distance 0 and a clean PASS. Correctly named the other way round, this fixture
+        // is the honest "share no bone names" REFUSE — the overlap is what converts a refusal into a false pass.
+        AttachSkin(baseGO, baseBones.Select(b => (b, 1.0f)).ToArray(), null);
+        NewSkinnedMergeable(outerGO, new[] { ("Skirt_01", 1.0f), ("Skirt_02", 1.0f) });
+        LogAssert.Expect(LogType.Error, BareRefuseRe);
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(outerGO), 0.01f);
+        StringAssert.StartsWith("[CheckSeam:bare] REFUSE:", r);
+        StringAssert.Contains("is inside mergeable", r);
+        StringAssert.DoesNotContain("=> PASS", r);
+    }
+
+    // The reverse nesting is legitimate and must keep scoring: a mergeable placed under the base but not yet
+    // seamed is exactly what own-mergeable stages before authoring a seam. Guarding both directions would
+    // refuse it.
+    [Test]
+    public void Bare_mergeableInsideBase_stillScores()
+    {
+        var baseGO = NewChild(_root, "Base");
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        foreach (var n in new[] { "Chest", "Spine" }) map.Bones.Add(NewChild(baseGO, n).transform);
+        CheckSeam.ResolveHumanoid = _ => map;
+        var mergeGO = NewChild(baseGO, "Merge"); // placed under the base, no seam authored
+        NewSkinnedMergeable(mergeGO, new[] { ("Chest", 1.0f), ("Spine", 1.0f) });
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.Contains("weightedHumanoid=2", r);
+        StringAssert.Contains("=> PASS", r);
+        ReadLog(r);
+    }
+
+    // Name-matching a skeleton against itself PASSes at any tolerance; that PASS certifies nothing.
+    [Test]
+    public void Bare_sameRootBothSides_refuses()
+    {
+        BuildBare(out var baseGO, out _, new[] { "Chest", "Spine" });
+        LogAssert.Expect(LogType.Error, BareRefuseRe); // misuse ⇒ error
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(baseGO), 0.01f);
+        StringAssert.StartsWith("[CheckSeam:bare] REFUSE:", r);
+        StringAssert.Contains("same object", r);
+    }
+
+    // A non-humanoid base is the seam door's abstain, and the bare door inherits it: name-matching needs a
+    // humanoid map to match FROM.
+    [Test]
+    public void Bare_noHumanoidBase_refuses()
+    {
+        BuildBare(out var baseGO, out var mergeGO, new[] { "Chest", "Spine" });
+        CheckSeam.ResolveHumanoid = _ => new CheckSeam.HumanoidMap();
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.StartsWith("[CheckSeam:bare] REFUSE:", r);
+        StringAssert.Contains("no humanoid", r);
+    }
+
+    // The two doors' RunLogs must be distinguishable on disk — a bare score read as a seam score would be
+    // read at the wrong tolerance regime.
+    [Test]
+    public void Bare_runLogIsNamedApartFromTheSeamDoor()
+    {
+        BuildBare(out var baseGO, out var mergeGO, new[] { "Chest", "Spine" });
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+        StringAssert.Contains("| log=", r);
+        int i = r.IndexOf("| log=", StringComparison.Ordinal);
+        string path = r.Substring(i + "| log=".Length).Trim();
+        _logPaths.Add(path);
+        StringAssert.Contains("checkseam-bare_", path);
+        StringAssert.Contains("# CheckSeam:bare:", File.ReadAllText(path));
     }
 }

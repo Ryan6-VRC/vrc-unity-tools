@@ -11,16 +11,22 @@ using UnityEngine.SceneManagement;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Scene-scoped SEAM gate: mechanically certify whether a mergeable's humanoid skeleton coincides with a
+    /// Scene-scoped fit gate: mechanically certify whether a mergeable's humanoid skeleton coincides with a
     /// base's before any render — <c>PASS</c> / <c>NOT-PASS</c> / bare <c>REFUSE</c>. It scores position, not
-    /// intent: it reflects the seam mapping (Modular Avatar <c>GetBonesMapping</c> / VRCFury
-    /// <c>ArmatureLinkService.GetLinks</c>), counts weighted humanoid bones, and gates on world-position
-    /// coincidence at an ε tolerance.
+    /// intent: it counts weighted humanoid bones and gates on edit-time world-position coincidence.
     ///
-    /// Pure-core + injectable seams (mirrors <see cref="CheckAvatar"/>): the door resolves two scene roots and
-    /// calls the <see cref="ResolveHumanoid"/> / <see cref="ResolveSeam"/> seams (defaults do the real
-    /// reflection; tests swap fakes) then a pure scoring core. This is the Task 1 skeleton: door + dual-root
-    /// resolve + bare refusal; the humanoid map, seam mapping, count/gate, and Emit land in later tasks.
+    /// Two doors, one gate. <see cref="Check"/> reflects the seam's own mapping (Modular Avatar
+    /// <c>GetBonesMapping</c> / VRCFury <c>ArmatureLinkService.GetLinks</c>) and derives ε from the base's
+    /// scale — the composed case. <see cref="CheckBare"/> pairs by BONE NAME and takes the tolerance from the
+    /// caller — the pre-seam case, where a mergeable sits beside a base with no mapping to reflect (a fresh
+    /// refit output, an unplaced mergeable). They differ only in where the pairs come from; the ≤1 proxy
+    /// floor, the coincidence gate, and Emit are shared. The non-humanoid context partition is the one thing
+    /// that is not: name-matching collects humanoid bones only, so it is empty by construction at the bare door.
+    ///
+    /// Pure-core + injectable seams (mirrors <see cref="CheckAvatar"/>): each door resolves two scene roots and
+    /// calls <see cref="ResolveHumanoid"/>, then collects pairs — <see cref="Check"/> through
+    /// <see cref="ResolveSeam"/>, <see cref="CheckBare"/> by name, consulting no seam at all — then a shared
+    /// pure scoring core. The seam defaults do the real reflection; tests swap fakes.
     /// </summary>
     [AgentTool]
     public static partial class CheckSeam
@@ -46,7 +52,22 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal static Func<GameObject, GameObject, SeamResolution> ResolveSeam = DefaultResolveSeam;
         internal static Func<GameObject, HumanoidMap> ResolveHumanoid = DefaultResolveHumanoid;
 
-        // ── Door ──────────────────────────────────────────────────────────────────────────────────────
+        // Emit/REFUSE label per door, so a RunLog or a refusal line is never mistaken for the other door's.
+        private const string SeamLabel = "CheckSeam";
+        private const string BareLabel = "CheckSeam:bare";
+
+        // The seam door's ε, declared once. Emit prints the formula in its body header, so a literal there
+        // would be a second home for these two numbers inside one file — the same shape that let the doc's
+        // "0.2%" drift away from the code for as long as it did.
+        private const float EpsFloorMm = 0.5f;
+        private const float EpsSpanFraction = 0.003f;
+        // Bare-door tolerance floor: BareOffsetFormat's resolution. See the guard in CheckBare.
+        private const float MinToleranceMm = 0.0001f;
+        private const string BareOffsetFormat = "F4";
+        private const string SeamOffsetFormat = "F1";
+        private const string SeamBandFormat = "F2";
+
+        // ── Doors ─────────────────────────────────────────────────────────────────────────────────────
 
         public static string Check(string baseRoot, string mergeableRoot)
         {
@@ -85,50 +106,192 @@ namespace Ryan6Vrc.AgentTools.Editor
                     return RefuseAbstain("bone-proxy attachment on '" + mergeableRoot +
                         "' (offset-tolerant by design) — no scorable seam; verify the baked result");
                 return RefuseAbstain("no seam component on '" + mergeableRoot +
-                    "' — bare prop; route to own-mergeable to add a seam");
+                    "' — bare prop; route to own-mergeable to add a seam. To score coincidence before a seam " +
+                    "exists (a fresh refit output, an unplaced mergeable), use CheckBare with an explicit " +
+                    "maxOffsetMm instead");
             }
-            foreach (var p in seam.Pairs)
+
+            // ε from the base's own scale — the seam door has no caller tolerance to take.
+            float eps = Mathf.Max(EpsFloorMm, EpsSpanFraction * human.SpanMm);
+            return Gate(baseGO, mergeGO, human, seam.Pairs, eps, false);
+        }
+
+        /// <summary>
+        /// Resolver-free coincidence gate: same verdict grammar as <see cref="Check"/>, but the base↔merge
+        /// pairs are matched by BONE NAME and no seam component is consulted. For the pre-seam case a seam
+        /// resolver cannot score — a raw refit output beside a target body, an unplaced mergeable — where
+        /// <see cref="Check"/> correctly REFUSEs because there is no mapping to reflect. Pre-seam is not
+        /// seamless: a raw refit output does carry a MergeArmature, it simply has no base to resolve against
+        /// yet, so <see cref="Check"/> lands on the mergeTarget abstain rather than the bare-prop REFUSE.
+        ///
+        /// <paramref name="maxOffsetMm"/> has no default on purpose. The known regimes differ by orders of
+        /// magnitude — a warp solver's residue is ~0.001mm (millimetre-scale there is a wrong result, not
+        /// slop) while pre-seam staging is millimetre-scale legitimately — so a default sized for one is a
+        /// silent trap for the other. The caller states the tolerance its own verification doctrine implies.
+        /// </summary>
+        public static string CheckBare(string baseRoot, string mergeableRoot, float maxOffsetMm)
+        {
+            var baseGO = Resolve(baseRoot);
+            if (baseGO == null) return RefuseMisuse("base root '" + baseRoot + "' not found in the active scene", BareLabel);
+            var mergeGO = Resolve(mergeableRoot);
+            if (mergeGO == null) return RefuseMisuse("mergeable root '" + mergeableRoot + "' not found in the active scene", BareLabel);
+            // Name-matching a skeleton against itself pairs every bone with itself at distance 0 and PASSes at
+            // any tolerance. The seam door cannot reach this (no seam maps a root onto itself); the bare door
+            // has to refuse it, and the same object is only the visible half. The dangerous half is CONTAINMENT:
+            // when the base sits INSIDE the mergeable, the merge-side name index sweeps in the base's own bones,
+            // so every bone the mergeable does not itself carry a copy of pairs (b, b) — and nothing downstream
+            // catches it, because such a bone genuinely is under both roots. The reverse nesting is fine and
+            // stays allowed: a mergeable placed under the base (not yet seamed) is a case worth scoring.
+            if (mergeGO == baseGO)
+                return RefuseMisuse("base and mergeable resolve to the same object ('" + PathOf(baseGO) +
+                    "') — name-matching it against itself PASSes at any tolerance and certifies nothing", BareLabel);
+            if (IsUnder(baseGO.transform, mergeGO))
+                return RefuseMisuse("base '" + PathOf(baseGO) + "' is inside mergeable '" + PathOf(mergeGO) +
+                    "' — name-matching would pair the base's own bones with themselves at zero offset and PASS " +
+                    "at any tolerance. Name the two roots the other way round, or narrow the mergeable root to " +
+                    "the subtree that excludes the base", BareLabel);
+            // Below MinToleranceMm the report cannot render what it gates on: offsets print at the bare door's
+            // fixed precision, so a tighter tolerance would round both ε and a genuine offender to zero and a
+            // NOT-PASS would read as clean. Infinity clears any `> 0` test and would PASS everything.
+            if (!(maxOffsetMm >= MinToleranceMm) || float.IsInfinity(maxOffsetMm))
+                return RefuseMisuse("maxOffsetMm must be a finite value >= " +
+                    MinToleranceMm.ToString("G", CultureInfo.InvariantCulture) + "mm (got " +
+                    maxOffsetMm.ToString("R", CultureInfo.InvariantCulture) +
+                    ") — state the tolerance your verification doctrine implies; there is no default", BareLabel);
+
+            var human = ResolveHumanoid(baseGO);
+            if (human.Bones.Count == 0)
+                return RefuseAbstain("base '" + baseRoot + "' has no humanoid Avatar — cannot certify fit " +
+                    "(clothes-on-a-body is the domain)", BareLabel);
+
+            var pairs = CollectByName(mergeGO, human, out string refusal);
+            if (refusal != null) return RefuseAbstain(refusal, BareLabel);
+            if (pairs.Count == 0)
+                return RefuseAbstain("no humanoid bone name on base '" + baseRoot + "' matches any transform " +
+                    "under '" + mergeableRoot + "' — the two skeletons share no bone names, so coincidence is " +
+                    "unmeasurable. Check the roots are the ones you meant (a refit output keeps its SOURCE " +
+                    "base's bone names, which a differently-named target base will not match)", BareLabel);
+
+            return Gate(baseGO, mergeGO, human, pairs, maxOffsetMm, true);
+        }
+
+        // Name-matched base↔merge pairing for the bare door. Consults NO seam component: a pair is a base
+        // humanoid bone and the transform under the mergeable root carrying the same name. Ambiguity on
+        // either side REFUSEs rather than picking arbitrarily — a refit output that carries a duplicated
+        // armature copy would otherwise be scored against whichever duplicate the walk reached first, and a
+        // PASS from that certifies nothing. Only humanoid bones are collected, so the bare door's non-humanoid
+        // context partition is empty by construction.
+        private static List<BonePair> CollectByName(GameObject mergeGO, HumanoidMap human, out string refusal)
+        {
+            refusal = null;
+            var pairs = new List<BonePair>();
+
+            var baseByName = new Dictionary<string, Transform>();
+            foreach (var b in human.Bones)
             {
-                if (p.Base == null || p.Merge == null) return RefuseAbstain("seam pair has a null bone");
-                if (!IsUnder(p.Base, baseGO) || !IsUnder(p.Merge, mergeGO))
-                    return RefuseAbstain("seam targets a different avatar (a mapped bone is not under its root)");
+                if (b == null) continue;
+                if (baseByName.TryGetValue(b.name, out var other))
+                {
+                    refusal = "base has two humanoid bones both named '" + b.name + "' (" +
+                        PathOf(other.gameObject) + " vs " + PathOf(b.gameObject) + ") — name-matching cannot " +
+                        "tell them apart. Rename one on the base, or seam the mergeable and use Check";
+                    return pairs;
+                }
+                baseByName[b.name] = b;
             }
-            // conflict: the same base bone mapped to two different merge bones (MA and VRCFury disagree)
+
+            var byName = new Dictionary<string, List<Transform>>();
+            foreach (var t in mergeGO.GetComponentsInChildren<Transform>(true))
+            {
+                if (!byName.TryGetValue(t.name, out var list)) byName[t.name] = list = new List<Transform>();
+                list.Add(t);
+            }
+
+            foreach (var kv in baseByName)
+            {
+                if (!byName.TryGetValue(kv.Key, out var hits)) continue; // mergeable lacks this bone — legitimate
+                if (hits.Count > 1)
+                {
+                    refusal = "bone name '" + kv.Key + "' is ambiguous under mergeable '" + mergeGO.name +
+                        "': " + hits.Count + " transforms carry it (" + PathOf(hits[0].gameObject) + " vs " +
+                        PathOf(hits[1].gameObject) + ") — name-matching would score an arbitrary one. The scan " +
+                        "includes INACTIVE objects, so a disabled backup armature counts: remove or rename the " +
+                        "duplicate, narrow the mergeable root past it, or seam the mergeable and use Check";
+                    return pairs;
+                }
+                pairs.Add(new BonePair { Base = kv.Value, Merge = hits[0] });
+            }
+            return pairs;
+        }
+
+        // ── Shared gate ───────────────────────────────────────────────────────────────────────────────
+        // Everything from pair validation to Emit, identical for both doors. `bare` selects the label, the
+        // RunLog name, the ε provenance note, and the decimal precision (a 0.001mm regime is invisible at the
+        // seam door's F1/F2) — never the verdict.
+        private static string Gate(GameObject baseGO, GameObject mergeGO, HumanoidMap human,
+            List<BonePair> pairs, float eps, bool bare)
+        {
+            string label = bare ? BareLabel : SeamLabel;
+            string offFmt = bare ? BareOffsetFormat : SeamOffsetFormat;
+            foreach (var p in pairs)
+            {
+                if (p.Base == null || p.Merge == null) return RefuseAbstain("bone pair has a null bone", label);
+                // A pair whose two sides are the SAME transform scores 0 and certifies nothing. CheckBare's
+                // containment guard is what should have caught this; keep the assertion here so no future
+                // collector can reintroduce a self-pair silently.
+                if (p.Base == p.Merge)
+                    return RefuseAbstain("bone '" + p.Base.name + "' (" + PathOf(p.Base.gameObject) +
+                        ") is paired with itself — the two roots overlap, so this would score 0 and certify nothing", label);
+                if (!IsUnder(p.Base, baseGO) || !IsUnder(p.Merge, mergeGO))
+                    return RefuseAbstain("pairing targets a different avatar (a mapped bone is not under its root)", label);
+            }
+            // conflict: the same base bone mapped to two different merge bones (MA and VRCFury disagree).
+            // Unreachable from the bare door, whose pairs are one-per-unique-base-bone-name by construction.
             var byBase = new Dictionary<Transform, Transform>();
-            foreach (var p in seam.Pairs)
+            foreach (var p in pairs)
             {
                 if (byBase.TryGetValue(p.Base, out var other) && other != p.Merge)
                     return RefuseAbstain("seams disagree on base bone '" + p.Base.name + "' (" +
-                        PathOf(other.gameObject) + " vs " + PathOf(p.Merge.gameObject) + ")");
+                        PathOf(other.gameObject) + " vs " + PathOf(p.Merge.gameObject) + ")", label);
                 byBase[p.Base] = p.Merge;
             }
             // MA and VRCFury can each contribute the SAME (Base,Merge) pair; the conflict loop above keeps an
             // identical duplicate (it only rejects a base mapped to two DIFFERENT merges). Dedupe by reference
             // identity so a single genuine proxy bone isn't double-counted past the ≤1 proxy REFUSE.
             var seen = new HashSet<(Transform, Transform)>();
-            seam.Pairs = seam.Pairs.Where(p => seen.Add((p.Base, p.Merge))).ToList();
+            pairs = pairs.Where(p => seen.Add((p.Base, p.Merge))).ToList();
 
             // Count weighted humanoid bones: a pair qualifies iff its BASE is humanoid and a mergeable SMR skins
             // its MERGE side at ≥ WEIGHT. Join on the merge side — SMR.bones[] reference the merge transforms.
             var maxW = MaxWeights(mergeGO);
             const float WEIGHT = 0.1f;
             var weightedHum = new List<BonePair>();
-            foreach (var p in seam.Pairs)
+            foreach (var p in pairs)
                 if (human.Bones.Contains(p.Base) && maxW.TryGetValue(p.Merge, out var wt) && wt >= WEIGHT)
                     weightedHum.Add(p);
 
-            if (weightedHum.Count <= 1) // offset-independent bone-proxy (hair/earring/hat/tail) or bare prop
+            if (weightedHum.Count <= 1)
             {
                 string bone = weightedHum.Count == 1 ? weightedHum[0].Base.name : "(none)";
                 float d = weightedHum.Count == 1
                     ? Vector3.Distance(weightedHum[0].Base.position, weightedHum[0].Merge.position) * 1000f
                     : 0f;
-                return RefuseAbstain("single humanoid attachment: " + bone + ", delta=" + d.ToString("F1", CultureInfo.InvariantCulture) +
-                    "mm — offset-tolerant accessory/proxy, verify the baked result");
+                string delta = ", delta=" + d.ToString(offFmt, CultureInfo.InvariantCulture) + "mm";
+                // Same count, opposite meanings — so the two doors must not share the sentence. At the seam
+                // door one weighted humanoid bone is what a correct hair/hat/earring looks like. At the bare
+                // door it means two whole skeletons shared at most one skinned humanoid bone NAME, which for a
+                // refit output is a failed warp or a bone-naming break, and "verify the bake" would send the
+                // reader to inspect a result that should be rebuilt.
+                if (bare)
+                    return RefuseAbstain("only " + weightedHum.Count + " shared weighted humanoid bone: " + bone + delta +
+                        " — too few to certify coincidence. Two whole skeletons matching on at most one skinned " +
+                        "bone name is a failed transfer or a bone-naming break, not a close fit: rebuild the " +
+                        "mergeable rather than inspecting this one", label);
+                return RefuseAbstain("single humanoid attachment: " + bone + delta +
+                    " — offset-tolerant accessory/proxy, verify the baked result", label);
             }
 
             // ≥2 weighted humanoid ⇒ coincidence gate: compare edit-time WORLD positions at ε tolerance.
-            float eps = Mathf.Max(0.5f, 0.003f * human.SpanMm);
             var hipsBase = HipsOf(baseGO); // fromHips anchor; null ⇒ report 0 (robust, non-load-bearing)
             // Collect EVERY weighted-humanoid offset (not just the > ε subset): the > ε ones are offenders, but
             // the sub-ε band rides through to Emit so a PASS can surface maxWithinEps for the downstream skill.
@@ -152,7 +315,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             int dropped = 0;
             var context = new List<(string bone, float mm, float fromHips)>();
-            foreach (var p in seam.Pairs)
+            foreach (var p in pairs)
             {
                 if (human.Bones.Contains(p.Base)) continue;                          // humanoid ⇒ the gate above
                 if (!maxW.TryGetValue(p.Merge, out var wt) || wt < WEIGHT) continue; // unweighted ⇒ ignore
@@ -162,7 +325,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 context.Add((p.Base.name, mm, fromHips));
             }
             context.Sort((a, b) => b.mm.CompareTo(a.mm)); // worst (largest offset) first
-            return Emit(baseGO, mergeGO, weightedHum.Count, offenders, allOffsets, context, dropped, eps);
+            return Emit(baseGO, mergeGO, weightedHum.Count, offenders, allOffsets, context, dropped, eps, bare);
         }
 
         // ── Output (mirrors CheckAvatar.Emit: summary + markdown body + WriteRunLog + severity-by-verdict) ─
@@ -172,10 +335,16 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static string Emit(GameObject baseGO, GameObject mergeGO, int weightedCount,
             List<(string bone, float mm, float fromHips)> offenders,
             List<(string bone, float mm, float fromHips)> allOffsets,
-            List<(string bone, float mm, float fromHips)> context, int dropped, float eps)
+            List<(string bone, float mm, float fromHips)> context, int dropped, float eps, bool bare)
         {
             int m = offenders.Count, k = context.Count;
             string verdict = m == 0 ? "PASS" : "NOT-PASS";
+            // Both doors share every string; only the label and the decimal precision differ. The bare door's
+            // tolerance regime can be ~0.001mm, where the seam door's F1/F2 rounds every magnitude to zero and
+            // an offender would read as clean — the precision must track the tolerance, not the tool.
+            string label = bare ? BareLabel : SeamLabel;
+            string offFmt = bare ? BareOffsetFormat : SeamOffsetFormat;  // offender + context magnitudes
+            string bandFmt = bare ? BareOffsetFormat : SeamBandFormat;   // within-ε band, and ε in the body header
 
             // NOT-PASS: maxOffset carries the worst humanoid seam-offset magnitude onto the one-liner so it
             // reads sub-mm-noise vs wrong-base at a glance (offenders sorted worst-first). PASS: widening ε
@@ -187,51 +356,71 @@ namespace Ryan6Vrc.AgentTools.Editor
             string maxTail;
             if (m > 0)
             {
-                maxTail = " maxOffset=" + offenders[0].mm.ToString("F1", CultureInfo.InvariantCulture) + "mm";
+                maxTail = " maxOffset=" + offenders[0].mm.ToString(offFmt, CultureInfo.InvariantCulture) + "mm";
             }
             else
             {
                 float maxW = allOffsets.Count > 0 ? allOffsets.Max(o => o.mm) : 0f;
                 float medW = Median(allOffsets.Select(o => o.mm));
-                withinEpsBand = "maxWithinEps=" + maxW.ToString("F2", CultureInfo.InvariantCulture)
-                    + "mm (median " + medW.ToString("F2", CultureInfo.InvariantCulture) + "mm)";
+                withinEpsBand = "maxWithinEps=" + maxW.ToString(bandFmt, CultureInfo.InvariantCulture)
+                    + "mm (median " + medW.ToString(bandFmt, CultureInfo.InvariantCulture) + "mm)";
                 maxTail = " " + withinEpsBand;
             }
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CheckSeam] {0}→{1}: weightedHumanoid={2} offenders={3}{4} context={5} dropped={6} => {7}",
-                mergeGO.name, baseGO.name, weightedCount, m, maxTail, k, dropped, verdict);
+                "[{0}] {1}→{2}: weightedHumanoid={3} offenders={4}{5} context={6} dropped={7} => {8}",
+                label, mergeGO.name, baseGO.name, weightedCount, m, maxTail, k, dropped, verdict);
 
             var sb = new StringBuilder();
-            sb.Append("# CheckSeam: ").Append(mergeGO.name).Append(" → ").Append(baseGO.name).Append('\n');
+            sb.Append("# ").Append(label).Append(": ").Append(mergeGO.name).Append(" → ").Append(baseGO.name).Append('\n');
             sb.Append("mergeable: `").Append(PathOf(mergeGO)).Append("`  \n");
             sb.Append("base: `").Append(PathOf(baseGO)).Append("`  \n\n");
-            sb.Append(summary.Substring("[CheckSeam] ".Length)).Append('\n');
+            sb.Append(summary.Substring(("[" + label + "] ").Length)).Append('\n');
 
+            // ε's provenance rides the header: the seam door derives it, the bare door was handed it. A reader
+            // of the RunLog alone must be able to tell which, because only one of them is the caller's to move.
+            string epsProvenance = bare
+                ? "caller-supplied maxOffsetMm; pairs matched by bone name"
+                : string.Format(CultureInfo.InvariantCulture, "max({0}mm, {1}%·Hips→Head span); pairs from the seam's own mapping",
+                    EpsFloorMm.ToString("G", CultureInfo.InvariantCulture),
+                    (EpsSpanFraction * 100f).ToString("G", CultureInfo.InvariantCulture));
             sb.Append("\n## Gate — weighted humanoid bones (ε=")
-              .Append(eps.ToString("F2", CultureInfo.InvariantCulture)).Append("mm)\n\n");
+              .Append(eps.ToString(bandFmt, CultureInfo.InvariantCulture))
+              .Append("mm, ").Append(epsProvenance).Append(")\n\n");
             if (offenders.Count == 0)
             {
                 sb.Append("_(all within ε)_\n");
                 if (withinEpsBand != null) sb.Append(withinEpsBand).Append('\n');
             }
             else foreach (var o in offenders)
-                sb.Append("- **seam-offset** bone=`").Append(o.bone)
-                  .Append("` offset=").Append(o.mm.ToString("F1", CultureInfo.InvariantCulture))
+                sb.Append(bare ? "- **bone-offset** bone=`" : "- **seam-offset** bone=`").Append(o.bone)
+                  .Append("` offset=").Append(o.mm.ToString(offFmt, CultureInfo.InvariantCulture))
                   .Append("mm fromHips=").Append(o.fromHips.ToString("F1", CultureInfo.InvariantCulture))
                   .Append("mm\n");
 
-            sb.Append("\n## Context — non-humanoid weighted bones (ungated; interpret in context)\n\n");
-            if (context.Count == 0) sb.Append("_(none)_\n");
-            else foreach (var c in context)
-                sb.Append("- bone=`").Append(c.bone)
-                  .Append("` offset=").Append(c.mm.ToString("F1", CultureInfo.InvariantCulture))
-                  .Append("mm fromHips=").Append(c.fromHips.ToString("F1", CultureInfo.InvariantCulture))
-                  .Append("mm\n");
+            // The bare door collects humanoid bones only, so both partitions below are empty by construction —
+            // printing "_(none)_" and "Dropped: 0" every single run would advertise an affordance that door
+            // does not have. State the reason once instead.
+            if (bare)
+            {
+                sb.Append("\nNo context partition: name-matching collects humanoid bones only, so non-humanoid " +
+                          "deltas are neither scored nor reported here. Use the seam door once the mergeable is placed.\n");
+            }
+            else
+            {
+                sb.Append("\n## Context — non-humanoid weighted bones (ungated; interpret in context)\n\n");
+                if (context.Count == 0) sb.Append("_(none)_\n");
+                else foreach (var c in context)
+                    sb.Append("- bone=`").Append(c.bone)
+                      .Append("` offset=").Append(c.mm.ToString(offFmt, CultureInfo.InvariantCulture))
+                      .Append("mm fromHips=").Append(c.fromHips.ToString("F1", CultureInfo.InvariantCulture))
+                      .Append("mm\n");
 
-            sb.Append("\nDropped: ").Append(dropped)
-              .Append(" non-humanoid end-bones (physbone/collider tuning)\n");
+                sb.Append("\nDropped: ").Append(dropped)
+                  .Append(" non-humanoid end-bones (physbone/collider tuning)\n");
+            }
 
-            var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "checkseam_" + mergeGO.name, summary, sb.ToString(), ".md");
+            var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir,
+                (bare ? "checkseam-bare_" : "checkseam_") + mergeGO.name, summary, sb.ToString(), ".md");
             if (verdict == "PASS") Debug.Log(res); else Debug.LogWarning(res);
             return res;
         }
@@ -296,9 +485,10 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // REFUSE severity split: misuse (bad input / broken environment the caller must fix) logs at ERROR;
         // valid-abstain (a legitimate scene the gate simply can't certify — no humanoid, no seam, proxy,
-        // scale-at-bake, …) logs at WARNING. Same bare "[CheckSeam] REFUSE: {why}" string either way.
-        private static string RefuseMisuse(string why) { var e = "[CheckSeam] REFUSE: " + why; Debug.LogError(e); return e; }
-        private static string RefuseAbstain(string why) { var e = "[CheckSeam] REFUSE: " + why; Debug.LogWarning(e); return e; }
+        // scale-at-bake, …) logs at WARNING. Same bare "[{label}] REFUSE: {why}" string either way; the label
+        // says which door refused, so a bare-door refusal is never read as the seam door's.
+        private static string RefuseMisuse(string why, string label = SeamLabel) { var e = "[" + label + "] REFUSE: " + why; Debug.LogError(e); return e; }
+        private static string RefuseAbstain(string why, string label = SeamLabel) { var e = "[" + label + "] REFUSE: " + why; Debug.LogWarning(e); return e; }
 
         // ── Seam defaults (real reflection lands in Tasks 2–3, 7; stubs so the field initializers compile) ─
 
@@ -382,7 +572,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                             res.UnresolvableReason = "MergeArmature on '" + PathOf(comp.gameObject) +
                                 "' resolves no merge target, so there is no base armature to match against — its " +
                                 "mergeTarget is unset, points off this avatar, or was broken by a rename. Fix the " +
-                                "mergeTarget; the bone naming is not in question yet";
+                                "mergeTarget; the bone naming is not in question yet. If the mergeable is not " +
+                                "placed on the base at all (a fresh refit output beside a target body), that is " +
+                                "the pre-seam case: score it with CheckBare and an explicit maxOffsetMm instead";
                         continue;
                     }
                     foreach (var item in mapping)

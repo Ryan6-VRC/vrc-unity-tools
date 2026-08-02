@@ -1,10 +1,12 @@
 # CheckSeam — recorded acceptance baseline
 
-`CheckSeam` is the mechanical compose-fit gate. It reflects the seam mapping (MA `GetBonesMapping` / VRCFury `GetLinks`), counts weighted humanoid bones, and gates on edit-time world-position coincidence: **≤1 weighted humanoid → REFUSE** (offset-tolerant proxy); **≥2 → PASS if all within ε, else NOT-PASS**. ε = `max(0.5mm, 0.2%·Hips→Head span)`.
+What `CheckSeam` gates and how, both doors, is `unity-tools.md`'s contract. This file records one thing that lives nowhere else: what the tool actually returned on real composed avatars.
+
+Scope: `CheckSeam.Check` only. `CheckBare` touches no vendor package, so it is owed no corpus rows — but a green suite is not the same as full coverage, and the shape that escaped it was a *scene shape*, not a branch: a fixture builder only builds what someone thought to build.
 
 ## Regression baseline (live corpus, measured 2026-07-11, a personal avatar project)
 
-The *only* validation of the MA/VRCFury reflection defaults — EditMode unit tests inject fake seams because the SDK-only `TestEditor` has no MA/VRCFury. Each row was run by driving the compiled `CheckSeam.Check(base, mergeable)` via `execute_code`, staging the mergeable as an identity child of the base in a throwaway scene. A re-run should reproduce the token + reason below; a divergence is a regression to investigate, not a baseline to silently update.
+The only validation of the reflection defaults **against authored assets**. `CheckSeamLiveTests` drives the same `CollectMaPairs`/`CollectVrcfPairs` against synthesized MA/VRCFury components and catches collector drift in CI; what it cannot prove is what a shipped outfit actually authors — the seven-anchor gimmick, the dual armature, the scaled bake. That is what these rows hold. Each row was run by driving the compiled `CheckSeam.Check(base, mergeable)` via `execute_code`, staging the mergeable as an identity child of the base in a throwaway scene. A re-run should reproduce the token + reason below; a divergence is a regression to investigate, not a baseline to silently update.
 
 | mergeable ← base | base GUID / span | mergeable GUID | seam | result |
 |---|---|---|---|---|
@@ -22,6 +24,6 @@ All four verdicts hit their expected token; the reflection defaults (`GetBonesMa
 
 ## Notes for a re-runner
 
-- `-Tag CheckSeam` is only an output label; run `-Filter CheckSeamTests` to isolate the EditMode suite (15 tests, all green as of this baseline).
+- `-Tag CheckSeam` is only an output label; run `-Filter CheckSeamTests` to isolate the EditMode suite.
 - The corpus deltas straddle ε by orders of magnitude, so the corpus is an end-to-end plumbing check, **not** the ε calibration guard — the synthetic ε±δ and 0.09/0.11-weight unit brackets are that guard.
 - Documented residuals (Rule 2, not fixed): finger-rigged handwear across non-uniform bases → advisory NOT-PASS at the fingers; Head+Neck hair on head-swaps → may NOT-PASS; a PASS certifies the humanoid skeleton coincides, not physics-cage/bust/hair/accessory placement.
