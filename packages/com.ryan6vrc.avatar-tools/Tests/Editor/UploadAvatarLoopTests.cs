@@ -285,4 +285,39 @@ public class UploadAvatarLoopTests
         var o = UploadAvatar.FailedFromException(new System.InvalidOperationException("CAU drift"));
         Assert.AreEqual("real", o.forcedClass);   // fail-safe default, not transient
     }
+
+    // ----- id-persistence verdict (F39) ---------------------------------------------------------
+    // Loop_ReservedNoBundleIsItsOwnState above proves the LOOP routes the outcome; these prove what
+    // PRODUCES it. That decision's only caller sits behind `await CauReflect.UploadOne` — a real upload
+    // to VRChat — so before extraction no test could fail on it however wrong it got.
+
+    // The one cell that means "record reserved, no bundle landed": first-upload going in, still
+    // first-upload after SaveAssets persisted whatever CAU wrote back.
+    [Test]
+    public void IsReservedNoBundle_firstUploadWhoseIdNeverPersisted()
+    {
+        Assert.IsTrue(UploadAvatar.IsReservedNoBundle(true, "first-upload"));
+    }
+
+    // Every other cell is an ordinary success. ClassifyAvatar returns THREE states, not two, so this is a
+    // 2x3 table: "unknown" is what a GameObject destroyed across the await classifies as, and it is
+    // reachable on both rows. Covering it is what rules out `wasFirstUpload && stateAfter != "update"` — a
+    // mutant that survives every other case here while reporting a destroyed first-upload as a reservation,
+    // which would halt the batch on an upload that landed.
+    //
+    // The (was-update -> reads first-upload) cell is the other one worth naming: an id that went missing
+    // locally after an upload that did land is an anomaly, not a reservation.
+    //
+    // The null cell is the caller's short-circuit — RealUploadOne re-reads the state only when
+    // wasFirstUpload, so a re-upload passes null rather than paying a second SerializedObject read.
+    [TestCase(true,  "update",       TestName = "IsReservedNoBundle_firstUploadThatPersisted_isPlainUpload")]
+    [TestCase(true,  "unknown",      TestName = "IsReservedNoBundle_firstUploadWhoseObjectDied_isNotAReservation")]
+    [TestCase(false, "update",       TestName = "IsReservedNoBundle_ordinaryReupload_isPlainUpload")]
+    [TestCase(false, "unknown",      TestName = "IsReservedNoBundle_reuploadWhoseObjectDied_isPlainUpload")]
+    [TestCase(false, "first-upload", TestName = "IsReservedNoBundle_updateWhoseIdWentMissing_isNotAReservation")]
+    [TestCase(false, null,           TestName = "IsReservedNoBundle_stateNotEvenRead_isPlainUpload")]
+    public void IsReservedNoBundle_everyOtherCell_isPlainUpload(bool wasFirstUpload, string stateAfter)
+    {
+        Assert.IsFalse(UploadAvatar.IsReservedNoBundle(wasFirstUpload, stateAfter));
+    }
 }

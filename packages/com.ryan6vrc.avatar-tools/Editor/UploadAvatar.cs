@@ -392,7 +392,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     ") reached for '" + go.name + "'", forcedClass: "real");
 
             _ledger.Record(key);
-            bool wasFirstUpload = ClassifyAvatar(go).state == "first-upload";
+            bool wasFirstUpload = ClassifyAvatar(go).state == UploadAvatarLogic.ClassifyBlueprint(null);
 
             try
             {
@@ -402,7 +402,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 await CauReflect.UploadOne(setting, builder, CancellationToken.None);
 
                 AssetDatabase.SaveAssets();
-                if (wasFirstUpload && ClassifyAvatar(go).state == "first-upload")
+                // Re-read only when the answer can depend on it — the original `&&` short-circuited here and
+                // an argument would not. No outcome changes either way (a re-upload is never a reservation),
+                // but an update has no reason to pay a second GetComponent + SerializedObject read.
+                string stateAfter = wasFirstUpload ? ClassifyAvatar(go).state : null;
+                if (IsReservedNoBundle(wasFirstUpload, stateAfter))
                     return UploadOutcome.ReservedNoBundle();
                 _ledger.Clear(key); // success resets the ceiling — it counts only consecutive failures
                 return UploadOutcome.Uploaded();
@@ -412,6 +416,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return FailedFromException(e);
             }
         }
+
+        /// <summary>The id-persistence verdict, factored pure so the whole truth table is assertable without
+        /// a real upload. Reserved-no-bundle is the ONE state that needs both readings: an avatar that was a
+        /// first-upload going in and is STILL a first-upload after <c>SaveAssets()</c> means VRChat reserved
+        /// the record but no bundle landed. Any other cell is an ordinary success — including
+        /// (was-update → reads first-upload), where the id went missing locally after an upload that did
+        /// land; that is a local-state anomaly, not a reservation, and must not halt the batch as one.
+        /// <paramref name="stateAfterUpload"/> takes any of ClassifyAvatar's THREE states — including
+        /// <c>"unknown"</c>, which a GameObject destroyed across the await returns — so the test is
+        /// membership in first-upload, never non-membership in update.
+        ///
+        /// <para>Its only caller sits behind <c>await CauReflect.UploadOne</c> — a real upload to VRChat, which
+        /// the suite cannot run — so left inline this decision had no test that could fail on it.</para></summary>
+        internal static bool IsReservedNoBundle(bool wasFirstUpload, string stateAfterUpload)
+            => wasFirstUpload && stateAfterUpload == UploadAvatarLogic.ClassifyBlueprint(null);
 
         /// <summary>Map a thrown upload exception to a classified <see cref="UploadOutcome.Failed"/>: unwrap
         /// one layer of wrapping, pull the HTTP status, flag validation (by type name) / timeout. This is the
