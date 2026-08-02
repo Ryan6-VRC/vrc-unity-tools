@@ -2,11 +2,11 @@
 
 What `CheckSeam` gates and how, both doors, is `unity-tools.md`'s contract. This file records one thing that lives nowhere else: what the tool actually returned on real composed avatars.
 
-Scope: `CheckSeam.Check` only. `CheckBare` collects pairs by bone name and touches no vendor package, so the EditMode suite reaches every path it owns and it is owed no corpus rows.
+Scope: `CheckSeam.Check` only. `CheckBare` touches no vendor package, so it is owed no corpus rows — but a green suite is not the same as full coverage, and the shape that escaped it was a *scene shape*, not a branch: a fixture builder only builds what someone thought to build.
 
 ## Regression baseline (live corpus, measured 2026-07-11, a personal avatar project)
 
-The *only* validation of the MA/VRCFury reflection defaults, because the EditMode tests inject fake seams — a test venue has no composed avatars for `GetBonesMapping`/`GetLinks` to resolve against, so only real assets exercise those paths. Each row was run by driving the compiled `CheckSeam.Check(base, mergeable)` via `execute_code`, staging the mergeable as an identity child of the base in a throwaway scene. A re-run should reproduce the token + reason below; a divergence is a regression to investigate, not a baseline to silently update.
+The only validation of the reflection defaults **against authored assets**. `CheckSeamLiveTests` drives the same `CollectMaPairs`/`CollectVrcfPairs` against synthesized MA/VRCFury components and catches collector drift in CI; what it cannot prove is what a shipped outfit actually authors — the seven-anchor gimmick, the dual armature, the scaled bake. That is what these rows hold. Each row was run by driving the compiled `CheckSeam.Check(base, mergeable)` via `execute_code`, staging the mergeable as an identity child of the base in a throwaway scene. A re-run should reproduce the token + reason below; a divergence is a regression to investigate, not a baseline to silently update.
 
 | mergeable ← base | base GUID / span | mergeable GUID | seam | result |
 |---|---|---|---|---|
