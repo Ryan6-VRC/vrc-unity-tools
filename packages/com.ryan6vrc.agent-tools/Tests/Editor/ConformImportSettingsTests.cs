@@ -114,14 +114,14 @@ public class ConformImportSettingsTests
             "whatIf must not touch the importer");
     }
 
-    // ── max-texture-size, and the honesty of the render-check disclosure ───────────────────────────────
+    // ── max-texture-size, and the honesty of the capped-below-source report ────────────────────────────
 
     [Test]
-    public void OversizeCapOnSmallSource_IsConformed_ButNotReportedAsChangingWhatShips()
+    public void OversizeCapOnSmallSource_IsConformed_AndNotReportedAsCappedBelowSource()
     {
         // The SDK's predicate is importer-only, so a 64px source with a 16384 cap is an offender whose
-        // correction is cost-free. Deriving the disclosure from the row id instead of the real dimensions
-        // would warn here, training the reader to ignore the warning that matters.
+        // correction loses nothing. Reporting it off the row id rather than the real source dimensions would
+        // fire here, and a report that fires on every hit is one nobody reads.
         var path = WritePng("smallsource.png");
         var ti = (TextureImporter)AssetImporter.GetAtPath(path);
         ti.maxTextureSize = 16384;
@@ -130,8 +130,8 @@ public class ConformImportSettingsTests
 
         var s = ConformImportSettings.RunFolder(TmpDir);
         Assert.That(s, Does.Contain("max-texture-size=1"));
-        Assert.That(s, Does.Not.Contain("CHANGES WHAT SHIPS"),
-            "a cap above a small source loses no pixels — do not claim a render check is owed");
+        Assert.That(s, Does.Not.Contain("CAPPED BELOW SOURCE"),
+            "a cap above a small source loses no pixels — reporting it would cry wolf on every hit");
         Assert.That(((TextureImporter)AssetImporter.GetAtPath(path)).maxTextureSize, Is.EqualTo(8192));
     }
 
@@ -150,7 +150,7 @@ public class ConformImportSettingsTests
         Assert.That(((ModelImporter)AssetImporter.GetAtPath(path)).isReadable, Is.True);
     }
 
-    // ── legacy-blendshape-normals, including its disclosure ────────────────────────────────────────────
+    // ── legacy-blendshape-normals ──────────────────────────────────────────────────────────────────────
 
     [Test]
     public void ModelAtCalculateWithoutLegacy_IsConformed_AndTheReflectedWriteReachesDisk()
@@ -165,21 +165,22 @@ public class ConformImportSettingsTests
         Assert.That(s, Does.Contain("legacy-blendshape-normals=1"));
         Assert.That(s, Does.Contain("=> PASS"),
             "this row writes through a reflected private member — a setter that fails to dirty the .meta lands as NOT-PASS");
+        Assert.That(s, Does.Not.Contain("CAPPED BELOW SOURCE"));
         // The only row whose write goes through reflection is the only one worth reading back through it.
         Assert.That(ReadLegacyFlag(path), Is.True, "the reflected write must reach disk, not just return");
     }
 
     [Test]
-    public void ModelWithoutBlendshapes_IsNotDisclosedAsChangingWhatShips()
+    public void LegacyNormalsRow_NeverClaimsAResolutionLossOrARenderDebt()
     {
-        // The legacy flag only alters normals on meshes that HAVE blendshapes, and every default-imported model
-        // fires this row — so a blanket claim would put "render check owed" on every model in a vendor pack and
-        // teach the reader to skip the warning that matters.
-        var path = WriteObj("noshapes.obj");
+        // Nothing to compare against: the upload is blocked without this fix, so no build carrying the old
+        // setting ever shipped, and the only alternative remedy (importBlendShapeNormals off Calculate) is a
+        // different authoring decision this door does not make. A warning here would be undischargeable.
+        WriteObj("normals-only.obj");
         var s = ConformImportSettings.RunFolder(TmpDir, whatIf: true);
-        Assert.That(s, Does.Contain("legacy-blendshape-normals=1"), "the row still fires — the SDK blocks on it either way");
-        Assert.That(s, Does.Not.Contain("CHANGES WHAT SHIPS"),
-            "a model with no blendshapes cannot have its shading changed by the legacy-normals flag");
+        Assert.That(s, Does.Contain("legacy-blendshape-normals=1"));
+        Assert.That(s, Does.Not.Contain("CAPPED BELOW SOURCE"));
+        Assert.That(s, Does.Not.Contain("render check"));
     }
 
     private static bool ReadLegacyFlag(string path)

@@ -90,15 +90,19 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 if (cap > 0 && ti.maxTextureSize > cap)
                 {
-                    // The SDK's predicate is importer-only, so a small source under a huge cap is an offender
-                    // whose correction changes nothing that ships. Deriving the disclosure from the real
-                    // dimensions instead of the row id keeps the render-check obligation honest.
+                    // The SDK's predicate is importer-only, so a small source under a huge cap is an offender whose
+                    // correction loses nothing. Deriving that from the real dimensions rather than the row id is
+                    // what keeps the report from crying wolf on every hit.
                     //
                     // It must be the SOURCE dimensions, not the imported ones: an imported Texture is already
                     // clamped by the active platform's settings, so a 16K source behind a 4K Android override
                     // reads as 4096 and would report "costless" while lowering the default cap really does
                     // downscale it everywhere that override is absent. When the source cannot be measured, the
-                    // path is disclosed rather than assumed safe — an unmeasurable dimension is not a small one.
+                    // path is reported rather than assumed safe — an unmeasurable dimension is not a small one.
+                    //
+                    // This is reported as a fact ("this texture is now capped lower than its source"), never as a
+                    // render obligation: the upload is blocked without the fix, so there is no shipped baseline
+                    // any render could be compared against.
                     int longest = SourceLongestEdge(ti, r);
                     bool downscales = longest <= 0 || longest > cap;
                     r.Add(path, RowMaxTextureSize,
@@ -118,23 +122,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (!mi.isReadable)
                     r.Add(path, RowMeshReadable, "read/write disabled", false);
 
+                // No disclosure on this row, deliberately. A "render check owed" needs a baseline to compare
+                // against and there is none: the upload is BLOCKED without this fix, so no build carrying the old
+                // setting ever shipped. The fix is also forced — the only other way to satisfy the SDK is changing
+                // importBlendShapeNormals off Calculate, which is `own-base`'s standard anyway. Flagging it would
+                // hand the reader an obligation they cannot discharge and a choice they do not have.
                 bool legacySet;
                 if (legacyProp != null
                     && mi.importBlendShapeNormals == ModelImporterNormals.Calculate
                     && TryReadLegacy(legacyProp, mi, r, path, out legacySet)
                     && !legacySet)
-                {
-                    // The legacy flag only changes normals on meshes that HAVE blendshapes, and Unity's default
-                    // is Calculate-without-legacy — so every default-imported model fires this row while most
-                    // are unaffected. Claiming "changes what ships" on all of them is the same dishonesty the
-                    // max-texture-size comment above rejects: it trains the reader to ignore the real warning.
-                    // Measured pre-write, because the reimport below invalidates every Mesh object.
-                    bool hasShapes = AssetDatabase.LoadAllAssetsAtPath(path)
-                        .OfType<Mesh>().Any(m => m.blendShapeCount > 0);
-                    r.Add(path, RowLegacyNormals,
-                        "blendshape normals = Calculate without legacy" + (hasShapes ? "" : " (no blendshapes — shading unaffected)"),
-                        hasShapes);
-                }
+                    r.Add(path, RowLegacyNormals, "blendshape normals = Calculate without legacy", false);
             }
 
             foreach (var path in PathsOfType("t:AudioClip", roots))
@@ -382,7 +380,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Path;
             public string Row;
             public string Detail;
-            public bool ChangesShipped;
+            public bool Downscales;
             public bool Persisted;
         }
 
@@ -406,9 +404,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             public bool LegacyProbed;
             public PropertyInfo LegacyProp;
 
-            public void Add(string path, string row, string detail, bool changesShipped)
+            public void Add(string path, string row, string detail, bool downscales)
             {
-                Findings.Add(new Finding { Path = path, Row = row, Detail = detail, ChangesShipped = changesShipped });
+                Findings.Add(new Finding { Path = path, Row = row, Detail = detail, Downscales = downscales });
             }
 
             public void SkipRow(string row, string why)
@@ -427,7 +425,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 .ToList();
             string rows = perRow.Count == 0 ? "none" : string.Join(" ", perRow);
 
-            var shipping = r.Findings.Where(f => f.ChangesShipped).Select(f => f.Path).Distinct().ToList();
+            var downscaled = r.Findings.Where(f => f.Downscales).Select(f => f.Path).Distinct().ToList();
             var notPersisted = r.WhatIf
                 ? new List<Finding>()
                 : r.Findings.Where(f => !f.Persisted).ToList();
@@ -442,10 +440,10 @@ namespace Ryan6Vrc.AgentTools.Editor
               .Append(": ").Append(r.Scanned).Append(" scanned");
             if (r.Skipped > 0) sb.Append(", ").Append(r.Skipped).Append(" not importer-typed");
             sb.Append(" | ").Append(verb).Append(": ").Append(rows);
-            if (shipping.Count > 0)
-                sb.Append(" | CHANGES WHAT SHIPS on ").Append(shipping.Count)
-                  .Append(" path(s) — render check owed: ").Append(string.Join(", ", shipping.Take(5)))
-                  .Append(shipping.Count > 5 ? ", …" : "");
+            if (downscaled.Count > 0)
+                sb.Append(" | CAPPED BELOW SOURCE on ").Append(downscaled.Count).Append(" path(s): ")
+                  .Append(string.Join(", ", downscaled.Take(5)))
+                  .Append(downscaled.Count > 5 ? ", …" : "");
             if (notPersisted.Count > 0)
                 sb.Append(" | NOT PERSISTED: ")
                   .Append(string.Join(", ", notPersisted.Select(f => f.Row + "@" + f.Path).Take(5)))
@@ -496,7 +494,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append("    { \"row\": ").Append(RunLogFormat.Q(f.Row))
                   .Append(", \"path\": ").Append(RunLogFormat.Q(f.Path))
                   .Append(", \"detail\": ").Append(RunLogFormat.Q(f.Detail))
-                  .Append(", \"changesWhatShips\": ").Append(f.ChangesShipped ? "true" : "false")
+                  .Append(", \"cappedBelowSource\": ").Append(f.Downscales ? "true" : "false")
                   .Append(", \"written\": ").Append(r.WhatIf ? "false" : (r.Unwritten.Contains(f.Path) ? "false" : "true"))
                   .Append(", \"persisted\": ").Append(r.WhatIf ? "null" : (f.Persisted ? "true" : "false"))
                   .Append(" }").Append(i + 1 < r.Findings.Count ? "," : "").Append("\n");
