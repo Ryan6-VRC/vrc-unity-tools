@@ -12,10 +12,9 @@ public class AnimatorSchemaYamlTests
     // a parameter in any clip hands it to the animation system so nothing else can write it. This document
     // must stay clean under RuleNonFloatParamCurve — it is compiled for real by several tests.
     //
-    // The Idle driver is load-bearing, not decoration, and is why this const carries BOTH of the fixture's
-    // drivers rather than only Active's: now that no clip binds `Debounced`, the parameter is genuinely
-    // writable, so without a reset on the way back to Idle the output would LATCH true after release. It
-    // read false before this repair only because the clip curve was pinning it.
+    // Both of the fixture's drivers are here, and the Idle one is load-bearing: no clip binds `Debounced`,
+    // so the parameter is writable, and without a reset on the way back to Idle the output would LATCH true
+    // after release.
     public const string DebounceDoc = @"schema: 1
 controller: Debounce_Fx
 basis: avatar-root

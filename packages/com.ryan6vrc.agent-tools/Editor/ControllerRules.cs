@@ -203,15 +203,14 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // ----- Rule 3b: nonFloatParamCurve (error) --------------------------------------------------
-        // An animator-parameter curve whose parameter is declared Bool or Int. Measured (stock Unity, no
-        // emulator): the curve is emitted correctly and is INERT — a clip writing a bool and an int left
-        // both at their declared defaults while the same clip's float write took. It is worse than inert,
-        // because the curve still BINDS the parameter, and a bound parameter is owned by the animation
-        // system: nothing outside it can write that parameter, at any writeDefaults setting or layer
-        // weight. So the curve does nothing AND it silences every other writer of that parameter.
+        // An animator-parameter curve whose parameter is declared Bool or Int. The curve emits correctly and
+        // is inert (measured, stock Unity), and it still BINDS the parameter — which hands the parameter to
+        // the animation system and locks out every writer outside it, at any writeDefaults setting and any
+        // layer weight. So the curve does nothing and silences everything else. runtime.md §Animator is the
+        // canon, including which of the locked-out writers are measured and which are reported.
         //
-        // Sibling of RuleNonFloatBlendParam one level over: a blend tree evaluates only Float parameters,
-        // and so do parameter curves.
+        // RuleNonFloatBlendParam one level over: a blend tree evaluates only Float parameters, and so do
+        // parameter curves.
         private static void RuleNonFloatParamCurve(AnimatorController controller, LintResult rep)
         {
             var types = new Dictionary<string, AnimatorControllerParameterType>();
@@ -244,14 +243,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                         Kind = "nonFloatParamCurve",
                         Where = "clip `" + clip.name + "`",
                         Detail = "animates parameter `" + b.propertyName + "`, which is declared " + t +
-                                 " — a parameter curve writes only Float parameters, so this curve sets nothing; " +
-                                 "worse, it still binds the parameter, and a clip-bound parameter is owned by the " +
-                                 "animation system, so a parameter driver and a plain script write are measured " +
-                                 "unable to change it either (expression-menu controls, contact receivers and " +
-                                 "PhysBones are reported the same, not measured here — runtime.md). Drive this " +
-                                 "parameter from a parameter driver and let no clip animate it, which clears both " +
-                                 "this rule and the driver-on-a-bound-parameter one; declaring it Float instead " +
-                                 "silences only this rule"
+                                 " — a parameter curve writes only Float parameters, so this curve sets nothing. " +
+                                 "It still binds the parameter, which hands it to the animation system and locks " +
+                                 "out every writer outside it: driver, expression menu, contact, script " +
+                                 "(runtime.md). Drive this parameter from a parameter driver and let no clip " +
+                                 "animate it; declaring it Float instead leaves it bound"
                     });
                 }
             }

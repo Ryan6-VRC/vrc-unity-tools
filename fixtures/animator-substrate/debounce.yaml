@@ -5,12 +5,11 @@
 # feed a small timer state machine ... exitTime as the dwell"). Keep raw (RawInput) and debounced
 # (Debounced) parameters distinct.
 #
-# The output is a DRIVER-written bool and no clip animates it — that split is the point, not an accident.
-# A clip cannot write a bool at all (a parameter curve applies only to Float parameters), and merely
-# binding a parameter in a clip hands ownership to the animation system, after which nothing else — menu,
-# contact, driver, script — can change it. `hold_on` therefore holds a float AAP (`Level`) while Active,
-# and the bool output stays the drivers' alone. `runtime.md` has the ownership rule; `RuleNonFloatParamCurve`
-# refuses the mistake this fixture used to make.
+# The output is a DRIVER-written bool that no clip animates, and that split is the point of the example.
+# A parameter curve writes only Float parameters, and binding a parameter in any clip hands it to the
+# animation system, after which nothing else — menu, contact, driver, script — can change it. So `hold_on`
+# holds a float AAP (`Level`) while Active and the bool output belongs to the drivers alone; `runtime.md`
+# §Animator has the ownership rule, and `RuleNonFloatParamCurve` refuses the alternative.
 #
 # Compiles with CompileController; CheckAnimator PASS (basis=explicit); emulator-verified (dwell → Active
 # with Debounced true, release → Idle with Debounced false, read off the FX playable).
