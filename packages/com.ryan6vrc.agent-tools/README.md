@@ -8,7 +8,7 @@ The package is gated on the VRChat Avatars SDK (`VRC_SDK_VRCSDK3`) — it only c
 
 This package also owns the cross-package agent-tool conventions: the canonical `[AgentTool]` marker and the `RunLogFormat` text helpers (JSON escape, filename sanitize, path leaf) that sibling packages delegate to.
 
-The package's callables — inspection snapshots, import verification, and the read-only animator/gimmick/render digests — are indexed in the meta-repo `TOOLS.md` (an `[AgentTool]`-tagged class is what puts a row there); behavioral detail lives in the meta-repo's `docs/unity.md`. Beyond the tagged tools, `AgentSelfTest` (headless via `RunHeadless()` — see its docstring for the invocation) smoke-tests the observe→modify→verify loop.
+The package's callables — inspection snapshots, import verification, and the read-only animator/gimmick/render digests — are indexed in the meta-repo `TOOLS.md` (an `[AgentTool]`-tagged class is what puts a row there); per-tool contracts live in the meta-repo's `docs/unity-tools.md` (the animator/clip digests in `docs/animator.md`). Beyond the tagged tools, `AgentSelfTest` (headless via `RunHeadless()` — see its docstring for the invocation) smoke-tests the observe→modify→verify loop.
 
 ## Install
 
