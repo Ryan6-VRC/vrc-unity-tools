@@ -191,6 +191,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ===== Capture core =====
 
+        /// <summary>The thumbnail resolution, declared once for every front-end. Both venues must ship the same
+        /// pixel size — an edit-mode and a play-mode shot of one avatar are compared and used interchangeably —
+        /// so this is a property of the shared spine, not a per-front-end choice, and `Capture` takes no size
+        /// parameter to stop a second copy appearing at a call site. Any doc stating the resolution echoes here.</summary>
+        internal const int CaptureWidth = 1200;
+        internal const int CaptureHeight = 900;
+
         /// <summary>The outcome of a <see cref="Capture"/>: whether anything drew, the PNG bytes (null when
         /// nothing drew — the front-end fails loud rather than writing a blank), and where the view point
         /// landed in the frame (reported, not gated — a bad crop is visible in the PNG).</summary>
@@ -202,15 +209,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Render an already-positioned, already-culled <paramref name="cam"/> to a fixed W×H sRGB target and
+        /// Render an already-positioned, already-culled <paramref name="cam"/> to a sRGB target at
+        /// <see cref="CaptureWidth"/>×<see cref="CaptureHeight"/> and
         /// read it back: optional gradient backdrop, off-screen render, empty-frame guard, PNG encode. Owns the
         /// full lifecycle of the RT/readback texture/gradient ramp/command buffer so a throw mid-capture leaks
         /// nothing. The front-end configures the camera (clear, background = <paramref name="bgTop"/>,
         /// cullingMask, fov, scene) and supplies the view point to project; everything from the render down is
         /// identical across venues.
         /// </summary>
-        internal static CaptureResult Capture(Camera cam, Color bgTop, Color bgBottom, Vector3 viewpoint, int W, int H)
+        internal static CaptureResult Capture(Camera cam, Color bgTop, Color bgBottom, Vector3 viewpoint)
         {
+            const int W = CaptureWidth, H = CaptureHeight;
             RenderTexture rt = null;
             Texture2D tex = null;
             Texture2D ramp = null;
