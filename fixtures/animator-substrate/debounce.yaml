@@ -5,7 +5,14 @@
 # feed a small timer state machine ... exitTime as the dwell"). Keep raw (RawInput) and debounced
 # (Debounced) parameters distinct.
 #
-# Compiles with CompileController; CheckAnimator PASS (basis=explicit); emulator-verified.
+# The output is a DRIVER-written bool that no clip animates, and that split is the point of the example.
+# A parameter curve writes only Float parameters, and binding a parameter in any clip hands it to the
+# animation system, after which nothing else — menu, contact, driver, script — can change it. So `hold_on`
+# holds a float AAP (`Level`) while Active and the bool output belongs to the drivers alone; `runtime.md`
+# §Animator has the ownership rule, and `RuleNonFloatParamCurve` refuses the alternative.
+#
+# Compiles with CompileController; CheckAnimator PASS (basis=explicit); emulator-verified (dwell → Active
+# with Debounced true, release → Idle with Debounced false, read off the FX playable).
 
 schema: 1
 controller: Debounce_Fx
@@ -17,8 +24,10 @@ defaults:
   transition: { duration: 0, exitTime: none, interruption: none }
 
 parameters:
-  RawInput:  bool    # the raw, un-debounced input (driven externally / by a contact)
-  Debounced: bool    # the debounced output (what downstream logic reads)
+  RawInput:  bool                        # the raw, un-debounced input (driven externally / by a contact)
+  Debounced: bool                        # the debounced output (what downstream logic reads) — DRIVER-written
+  Level:     { type: float, aap: true }  # what the Active clip holds; a float, because only floats can be
+                                         #   clip-written, and it must not be the output (see the header)
 
 layers:
   - name: Debounce
@@ -46,4 +55,4 @@ layers:
 
 clips:
   timer:   { seconds: 0.2 }                     # the dwell; only content is its length
-  hold_on: { set: { Debounced: 1 } }            # holds the output while Active (bare param id → animator curve)
+  hold_on: { set: { Level: 1.0 } }              # a float AAP held while Active (bare param id → animator curve)

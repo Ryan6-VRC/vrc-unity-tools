@@ -7,6 +7,14 @@ using Ryan6Vrc.AvatarTools.Editor;
 public class AnimatorSchemaYamlTests
 {
     // The canonical debounce document. Later tasks reference AnimatorSchemaYamlTests.DebounceDoc verbatim.
+    // Kept in step with fixtures/animator-substrate/debounce.yaml, including WHY the Active clip holds a
+    // float `Level` rather than the bool output: a parameter curve writes only Float parameters, and binding
+    // a parameter in any clip hands it to the animation system so nothing else can write it. This document
+    // must stay clean under RuleNonFloatParamCurve — it is compiled for real by several tests.
+    //
+    // Both of the fixture's drivers are here, and the Idle one is load-bearing: no clip binds `Debounced`,
+    // so the parameter is writable, and without a reset on the way back to Idle the output would LATCH true
+    // after release.
     public const string DebounceDoc = @"schema: 1
 controller: Debounce_Fx
 basis: avatar-root
@@ -17,11 +25,14 @@ defaults:
 parameters:
   RawInput: bool
   Debounced: bool
+  Level: { type: float, aap: true }
 layers:
   - name: Debounce
     states:
       Idle:
         motion: ~
+        behaviours:
+          - driver: { set: { Debounced: 0 } }
         transitions:
           - { to: Pending, when: [ RawInput is true ] }
       Pending:
@@ -38,7 +49,7 @@ layers:
     default: Idle
 clips:
   timer:   { seconds: 0.2 }
-  hold_on: { set: { Debounced: 1 } }
+  hold_on: { set: { Level: 1.0 } }
 _notes: { source: hand-authored }
 ";
 
@@ -60,7 +71,7 @@ _notes: { source: hand-authored }
         Assert.AreEqual(TransitionInterruption.None, doc.Defaults.Interruption);
 
         // parameters (shorthand)
-        Assert.AreEqual(2, doc.Parameters.Count);
+        Assert.AreEqual(3, doc.Parameters.Count);
         Assert.AreEqual("RawInput", doc.Parameters[0].Name);
         Assert.AreEqual(AnimParamType.Bool, doc.Parameters[0].Type);
         Assert.IsNull(doc.Parameters[0].Vrc);
@@ -111,7 +122,7 @@ _notes: { source: hand-authored }
         Assert.AreEqual(0.2f, timer.Seconds.Value, 1e-6f);
         var hold = doc.Clips.Find(c => c.Name == "hold_on");
         Assert.IsNotNull(hold);
-        Assert.AreEqual(1f, hold.Sets["Debounced"]);
+        Assert.AreEqual(1f, hold.Sets["Level"]);   // a float AAP, not the bool output — see DebounceDoc
 
         // reserved note (underscore-prefixed) never becomes a typed field
         Assert.IsTrue(doc.ReservedNotes.ContainsKey("_notes"));

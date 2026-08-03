@@ -76,7 +76,7 @@ public class CheckAnimatorRefactorTests
             "exactly one unresolved binding (Ghost) must survive; Resolvable must resolve under the basis root: " + result);
         StringAssert.Contains("=> FAIL", result,
             "explicit basis keeps broken-binding at error-tier, so one broken binding is a FAIL: " + result);
-        StringAssert.Contains("missingMotion=0 undeclaredParam=0 nonFloatBlendParam=0 entryShadow=0", result,
+        StringAssert.Contains("missingMotion=0 undeclaredParam=0 nonFloatBlendParam=0 nonFloatParamCurve=0 entryShadow=0", result,
             "no other rule should fire: " + result);
     }
 
@@ -108,6 +108,37 @@ public class CheckAnimatorRefactorTests
             "the firing rule's count must be visible in the summary, not only in the offender body: " + result);
         StringAssert.Contains("=> FAIL", result,
             "a non-float blend parameter is an error-tier defect: " + result);
+    }
+
+    // The Lint door is the OTHER half of the error-tier wiring: its verdict and its summary format string each
+    // enumerate the counters by name, so a rule can be correct inside ControllerRules and still report PASS
+    // here. CompileController's door has its own guard per rule; this is Lint's.
+    [Test]
+    public void ExplicitBasis_nonFloatParamCurve_showsCountInSummary_andFails()
+    {
+        if (!AssetDatabase.IsValidFolder(TmpDir))
+            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+        var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
+        controller.AddParameter("Flag", AnimatorControllerParameterType.Bool);
+
+        // A parameter curve on the declared Bool: emitted, inert, and it binds the parameter.
+        var clip = new AnimationClip { name = "WritesFlag" };
+        AnimationUtility.SetEditorCurve(clip,
+            EditorCurveBinding.FloatCurve("", typeof(Animator), "Flag"),
+            AnimationCurve.Constant(0f, 1f / 60f, 1f));
+        AssetDatabase.AddObjectToAsset(clip, controller);
+        controller.layers[0].stateMachine.AddState("S").motion = clip;
+        EditorUtility.SetDirty(controller);
+        AssetDatabase.SaveAssets();
+
+        LogAssert.ignoreFailingMessages = true;   // Emit logs the FAIL verdict via Debug.LogError.
+        var result = CheckAnimator.Lint(controller, "explicit", null, null, null);
+        _logPath = ExtractLogPath(result);
+
+        StringAssert.Contains("nonFloatParamCurve=1", result,
+            "the firing rule's count must reach the summary, not only the offender body: " + result);
+        StringAssert.Contains("=> FAIL", result,
+            "a parameter curve on a Bool is an error-tier defect at the Lint door too: " + result);
     }
 
     // basis=auto BUG-FIX (not merely visibility): under a VRCFury FullController with rewriteBindings,
