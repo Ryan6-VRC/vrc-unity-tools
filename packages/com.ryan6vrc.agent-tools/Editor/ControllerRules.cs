@@ -87,7 +87,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // animates as a parameter curve. Walked once here rather than per rule.
             var curveWritten = ParamCurveWrites(controller);
             RuleNonFloatParamCurve(controller, curveWritten, rep);
-            RuleDriverOnAnimatedParam(states, machines, curveWritten, rep);
+            RuleDriverOnAnimatedParam(controller, states, machines, curveWritten, rep);
             RuleEntryShadow(machines, rep);
             RuleDeadTransition(states, rep);
             RuleBrokenBinding(controller, roots, pathRewrite, rep);
@@ -283,8 +283,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         // writeDefaults and layer weight), so a driver READ yields the parameter's declared default rather
         // than the value the clip is producing, and a driver WRITE never reaches any animator reader.
         // This cost a real gimmick a full design round: a sender-side angle quantised by driver walk read 0.
-        private static void RuleDriverOnAnimatedParam(List<StateCtx> states, List<SmCtx> machines,
-            Dictionary<string, string> curveWritten, LintResult rep)
+        private static void RuleDriverOnAnimatedParam(AnimatorController controller, List<StateCtx> states,
+            List<SmCtx> machines, Dictionary<string, string> curveWritten, LintResult rep)
         {
             if (curveWritten.Count == 0) return;
 
@@ -305,13 +305,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                              "`, which clip `" + clip + "` animates as a parameter curve — the animation system " +
                              "owns a clip-bound parameter, so " + (isSource
                                  ? "this read yields the parameter's declared default, never the value the clip is " +
-                                   "producing (a transition condition is the only reader that sees the animated value)"
-                                 : "this write reaches no animator reader — no clip, blend tree, transition or script " +
-                                   "read observes it (the expression-parameter copy does still move, so a synced, " +
-                                   "OSC or saved consumer may)") +
-                             ". Ownership holds at any writeDefaults setting and any layer weight, so there is no " +
-                             "state in which this op does what it looks like (runtime.md). Use a parameter no clip " +
-                             "animates, or move the value across with a blend tree instead of a driver"
+                                   "producing. A blend tree or a transition condition CAN read that animated value; " +
+                                   "a driver cannot"
+                                 : "no animator reader ever observes this write — not a clip, a blend tree, a " +
+                                   "transition condition or a script read. The expression-parameter copy is " +
+                                   "inferred to still move, so if the intended consumer is off-animator (an " +
+                                   "OSC-out signal, a saved value) the write is not pointless — but give it a " +
+                                   "parameter no clip in this controller binds") +
+                             ". Ownership holds at any writeDefaults setting and any layer weight (runtime.md). " +
+                             "Use a parameter no clip animates, or move the value across with a blend tree"
                 });
             };
 
@@ -321,6 +323,36 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var s in states)
                 if (s.State != null && s.State.behaviours != null)
                     foreach (var b in s.State.behaviours) DriverOps(b, s.Path + " (driver)", visit);
+
+            // Synced layers are absent from `states`/`machines` by construction (Run skips them — they re-skin
+            // their source layer's states), but a synced layer carries its OWN per-state behaviour overrides,
+            // and a driver installed there is as dead as any other. Walking only the collected topology would
+            // reproduce on the driver side exactly the hole `ParamCurveWrites` closes on the clip side.
+            var layers = controller.layers;
+            for (int li = 0; li < layers.Length; li++)
+            {
+                var layer = layers[li];
+                if (layer.syncedLayerIndex < 0 || layer.syncedLayerIndex >= layers.Length) continue;
+                var src = layers[layer.syncedLayerIndex].stateMachine;
+                if (src == null) continue;
+                WalkSyncedOverrideDrivers(src, layer, layer.name ?? ("layer " + li), visit);
+            }
+        }
+
+        private static void WalkSyncedOverrideDrivers(AnimatorStateMachine sm, AnimatorControllerLayer layer,
+            string layerName, Action<string, string, bool> visit)
+        {
+            if (sm == null) return;
+            foreach (var cs in sm.states)
+            {
+                if (cs.state == null) continue;
+                var ov = layer.GetOverrideBehaviours(cs.state);
+                if (ov == null) continue;
+                foreach (var b in ov)
+                    DriverOps(b, "synced layer '" + layerName + "' state '" + cs.state.name + "' (override driver)", visit);
+            }
+            foreach (var child in sm.stateMachines)
+                if (child.stateMachine != null) WalkSyncedOverrideDrivers(child.stateMachine, layer, layerName, visit);
         }
 
         /// <summary>Every DECLARED parameter some reachable clip writes as an animator parameter curve, mapped to

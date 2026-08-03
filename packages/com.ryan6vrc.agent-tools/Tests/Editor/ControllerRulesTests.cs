@@ -342,4 +342,51 @@ public class ControllerRulesTests
         Assert.AreEqual(0, r.DriverOnAnimatedParam, "a blend tree may read a clip-written float — that is the AAP idiom");
         Assert.AreEqual(0, r.NonFloatBlendParam, "and the parameter is a Float, so the blend-param rule is silent too");
     }
+
+    [Test]
+    public void DriverOnAnimatedParam_Fires_On_A_Synced_Layer_Override_Driver()
+    {
+        // Run() excludes synced layers from the state/machine topology, so a rule walking only that topology
+        // cannot see a driver installed as a synced layer's per-state BEHAVIOUR override — though such a driver
+        // is as dead as any other. The clip side of this hole is closed by reading clips through
+        // AnimatorClipWalk (which walks override MOTIONS); this pins the driver side.
+        _controller = new AnimatorController();
+        _controller.AddParameter("Held", AnimatorControllerParameterType.Float);
+        _controller.AddLayer("Base");
+        var sm = _controller.layers[0].stateMachine;
+
+        var clip = new AnimationClip { name = "holds_Held" };
+        UnityEditor.AnimationUtility.SetEditorCurve(
+            clip,
+            UnityEditor.EditorCurveBinding.FloatCurve("", typeof(Animator), "Held"),
+            AnimationCurve.Constant(0f, 1f / 60f, 1f));
+        var srcState = sm.AddState("Holds");
+        srcState.motion = clip;
+
+        var drv = ScriptableObject.CreateInstance<VRC.SDK3.Avatars.Components.VRCAvatarParameterDriver>();
+        drv.parameters = new System.Collections.Generic.List<VRC.SDKBase.VRC_AvatarParameterDriver.Parameter>
+        {
+            new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter
+            {
+                type = VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Set, name = "Held", value = 1f
+            }
+        };
+
+        // A second layer synced to layer 0, carrying its own behaviour override on that shared state. Both
+        // writes go through the SAME array instance that is assigned back: `controller.layers` hands out fresh
+        // wrapper objects each call, so mutating `controller.layers[1]` inline would write to a throwaway.
+        _controller.AddLayer("Synced");
+        var layers = _controller.layers;
+        layers[1].syncedLayerIndex = 0;
+        layers[1].SetOverrideBehaviours(srcState, new StateMachineBehaviour[] { drv });
+        _controller.layers = layers;
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+
+        Assert.AreEqual(1, r.DriverOnAnimatedParam,
+            "a driver installed as a synced-layer behaviour override is not exempt");
+        var o = r.Errors.FirstOrDefault(e => e.Kind == "driverOnAnimatedParam");
+        Assert.IsNotNull(o);
+        StringAssert.Contains("synced layer", o.Where, "the offender names the synced layer as its site");
+    }
 }
