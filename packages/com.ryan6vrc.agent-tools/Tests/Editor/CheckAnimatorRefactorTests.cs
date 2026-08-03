@@ -76,7 +76,7 @@ public class CheckAnimatorRefactorTests
             "exactly one unresolved binding (Ghost) must survive; Resolvable must resolve under the basis root: " + result);
         StringAssert.Contains("=> FAIL", result,
             "explicit basis keeps broken-binding at error-tier, so one broken binding is a FAIL: " + result);
-        StringAssert.Contains("missingMotion=0 undeclaredParam=0 nonFloatBlendParam=0 nonFloatParamCurve=0 entryShadow=0", result,
+        StringAssert.Contains("missingMotion=0 undeclaredParam=0 nonFloatBlendParam=0 nonFloatParamCurve=0 driverOnAnimatedParam=0 entryShadow=0", result,
             "no other rule should fire: " + result);
     }
 
@@ -139,6 +139,45 @@ public class CheckAnimatorRefactorTests
             "the firing rule's count must reach the summary, not only the offender body: " + result);
         StringAssert.Contains("=> FAIL", result,
             "a parameter curve on a Bool is an error-tier defect at the Lint door too: " + result);
+    }
+
+    [Test]
+    public void ExplicitBasis_driverOnAnimatedParam_showsCountInSummary_andFails()
+    {
+        if (!AssetDatabase.IsValidFolder(TmpDir))
+            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+        var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
+        controller.AddParameter("Held", AnimatorControllerParameterType.Float);
+
+        // A float parameter curve on one state, and a driver writing that same parameter on another.
+        var clip = new AnimationClip { name = "HoldsHeld" };
+        AnimationUtility.SetEditorCurve(clip,
+            EditorCurveBinding.FloatCurve("", typeof(Animator), "Held"),
+            AnimationCurve.Constant(0f, 1f / 60f, 1f));
+        AssetDatabase.AddObjectToAsset(clip, controller);
+        var sm = controller.layers[0].stateMachine;
+        sm.AddState("Holds").motion = clip;
+
+        var drvState = sm.AddState("Drives");
+        var drv = drvState.AddStateMachineBehaviour<VRC.SDK3.Avatars.Components.VRCAvatarParameterDriver>();
+        drv.parameters = new System.Collections.Generic.List<VRC.SDKBase.VRC_AvatarParameterDriver.Parameter>
+        {
+            new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter
+            {
+                type = VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Set, name = "Held", value = 1f
+            }
+        };
+        EditorUtility.SetDirty(controller);
+        AssetDatabase.SaveAssets();
+
+        LogAssert.ignoreFailingMessages = true;   // Emit logs the FAIL verdict via Debug.LogError.
+        var result = CheckAnimator.Lint(controller, "explicit", null, null, null);
+        _logPath = ExtractLogPath(result);
+
+        StringAssert.Contains("driverOnAnimatedParam=1", result,
+            "the firing rule's count must reach the summary, not only the offender body: " + result);
+        StringAssert.Contains("=> FAIL", result,
+            "a driver op on a clip-bound parameter is an error-tier defect at the Lint door too: " + result);
     }
 
     // basis=auto BUG-FIX (not merely visibility): under a VRCFury FullController with rewriteBindings,

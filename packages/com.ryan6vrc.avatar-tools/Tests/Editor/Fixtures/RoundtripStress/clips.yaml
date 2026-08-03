@@ -43,4 +43,4 @@ clips:
       "Hat/MeshRenderer.material._Color.r": 0.5
   fade:
     length: 0.5
-    curves: { "Head/Light.intensity": [ [0, 0], [0.5, 3] ] }
+    curves: { "Head/Light.m_Intensity": [ [0, 0], [0.5, 3] ] }

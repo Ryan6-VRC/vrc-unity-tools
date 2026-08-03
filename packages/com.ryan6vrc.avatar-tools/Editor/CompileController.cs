@@ -38,8 +38,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
     ///
     /// <para>The RunLog body carries the compile-only advisories — they never fail the compile: the
     /// per-layer FRAME-LATENCY of the longest conditional-transition chain (one transition per frame — the
-    /// cost of a multi-hop codec) and the DRIVER-ISOLATION conflicts (a VRCAvatarParameterDriver Set/Add
-    /// targeting a param a clip also writes — runtime.md: a driver cannot set a clip-written/AAP param).</para>
+    /// cost of a multi-hop codec), unresolved motion refs, unadjudicated menu icons, and OSC-unsafe parameter
+    /// names. Parameter-write defects are not advisories — a clip curve on a non-Float parameter and a driver
+    /// op on a clip-bound one are <c>ControllerRules</c> error-tier rules, so they fail the compile at the
+    /// graph-lint stage above (runtime.md §Animator has the mechanism).</para>
     /// </summary>
     [AgentTool]
     public static class CompileController
@@ -125,7 +127,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // would let a lint failure delete or overwrite a pre-existing side asset it cannot restore —
             // CleanupAfterLint can only remove what this run created. Nothing written on failure means nothing.
             var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
-            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.NonFloatParamCurve > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
+            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.NonFloatParamCurve > 0 || lint.DriverOnAnimatedParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
             {
                 CleanupAfterLint(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders);
                 string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
@@ -195,7 +197,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ── 6. Compile-only advisories (into the RunLog body; never fail the compile) ────────────
             var frameLatency = FrameLatencyAdvisories(doc);
-            var driverIsolation = DriverIsolationAdvisories(doc);
             var unresolvedRefs = UnresolvedRefAdvisories(built);
             var oscUnsafeNames = OscUnsafeNameAdvisories(doc);
             var outsideIcons = IconAdvisories(built);
@@ -209,7 +210,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 "[CompileController] {0}: layers={1} states={2} params={3}{4} => OK{5}",
                 name, doc.Layers.Count, states, doc.Parameters.Count, menuPart, whatIf ? " (whatIf)" : "");
 
-            string body = BuildBody(doc, finalPath, lint, frameLatency, driverIsolation, unresolvedRefs, oscUnsafeNames, outsideIcons, whatIf);
+            string body = BuildBody(doc, finalPath, lint, frameLatency, unresolvedRefs, oscUnsafeNames, outsideIcons, whatIf);
 
             // ── 7/8. Finalize: whatIf sweeps the temp; a real compile saves the asset ────────────────
             if (whatIf) { if (tempFolder != null) AssetDatabase.DeleteAsset(tempFolder); }
@@ -333,57 +334,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return overBudget ? (null, "transition graph too dense to bound cheaply") : (best, null);
         }
 
-        // ── Advisory: AAP / driver isolation ─────────────────────────────────────────────────────────
-        // A VRCAvatarParameterDriver Set/Add cannot durably set a parameter a clip also writes: the clip's
-        // animator curve overwrites it every frame it is active (runtime.md). Flag every driver target that
-        // collides with a clip-written (declared) parameter.
-        private static List<string> DriverIsolationAdvisories(AnimDocument doc)
-        {
-            var paramNames = new HashSet<string>(doc.Parameters.Select(p => p.Name));
-            var written = new Dictionary<string, string>(); // param -> first clip that writes it
-            foreach (var c in doc.Clips)
-            {
-                foreach (var k in c.Sets.Keys)
-                    if (paramNames.Contains(k) && !written.ContainsKey(k)) written[k] = c.Name;
-                foreach (var cs in c.Curves)
-                    if (cs.Binding != null && paramNames.Contains(cs.Binding) && !written.ContainsKey(cs.Binding)) written[cs.Binding] = c.Name;
-            }
-
-            var lines = new List<string>();
-            if (written.Count == 0) return lines;
-            foreach (var layer in doc.Layers)
-                WalkDrivers(layer.Root, layer.Name ?? "(unnamed)", written, lines);
-            return lines;
-        }
-
-        private static void WalkDrivers(StateMachine sm, string layer, Dictionary<string, string> written, List<string> lines)
-        {
-            if (sm == null) return;
-            foreach (var b in sm.Behaviours) DriverConflicts(b, "layer '" + layer + "' (SM behaviour)", written, lines);
-            foreach (var s in sm.States)
-            {
-                if (s == null) continue;
-                foreach (var b in s.Behaviours) DriverConflicts(b, "layer '" + layer + "' state '" + s.Name + "'", written, lines);
-            }
-            foreach (var sub in sm.Machines)
-                if (sub != null && sub.Machine != null) WalkDrivers(sub.Machine, layer, written, lines);
-        }
-
-        private static void DriverConflicts(Behaviour b, string where, Dictionary<string, string> written, List<string> lines)
-        {
-            if (b == null || b.Kind != "driver" || b.Fields == null) return;
-            // Every driver op whose map KEY is the destination param collides identically with a clip that
-            // writes that param — set/add and equally copy/random (their dest is the map key too).
-            foreach (var key in new[] { "set", "add", "copy", "random" })
-            {
-                if (!b.Fields.TryGetValue(key, out var val) || !(val is Dictionary<string, object> map)) continue;
-                foreach (var e in map)
-                    if (written.TryGetValue(e.Key, out var clip))
-                        lines.Add("driver `" + key + "` at " + where + " targets `" + e.Key
-                            + "` which clip `" + clip + "` also writes — a driver cannot set a clip-written (AAP) param (runtime.md)");
-            }
-        }
-
         // ── Advisory: unresolved motion refs ───────────────────────────────────────────────────────────
         // A motion ref flagged `unresolved: true` whose GUID did not resolve in this project — ControllerEmit
         // left the state's motion slot null rather than fail the compile (a BARE broken ref stays fatal). The
@@ -448,7 +398,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── RunLog body ──────────────────────────────────────────────────────────────────────────────
         private static string BuildBody(AnimDocument doc, string finalPath, LintResult lint,
-            List<string> frameLatency, List<string> driverIsolation, List<string> unresolvedRefs,
+            List<string> frameLatency, List<string> unresolvedRefs,
             List<string> oscUnsafeNames, List<string> outsideIcons, bool whatIf)
         {
             var sb = new StringBuilder();
@@ -472,10 +422,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("\n## Compile advisory: frame latency\n\n");
             if (frameLatency.Count == 0) sb.Append("_(none — no multi-hop conditional chain)_\n");
             else foreach (var l in frameLatency) sb.Append("- ").Append(l).Append('\n');
-
-            sb.Append("\n## Compile advisory: driver isolation (AAP)\n\n");
-            if (driverIsolation.Count == 0) sb.Append("_(none)_\n");
-            else foreach (var l in driverIsolation) sb.Append("- ").Append(l).Append('\n');
 
             sb.Append("\n## Compile advisory: unresolved motion refs\n\n");
             if (unresolvedRefs.Count == 0) sb.Append("_(none)_\n");
@@ -535,7 +481,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             try
             {
                 var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
-                if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.NonFloatParamCurve > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
+                if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.NonFloatParamCurve > 0 || lint.DriverOnAnimatedParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
                     return "post-emit graph lint (" + lint.Errors.Count + "): "
                          + string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
                 return null;

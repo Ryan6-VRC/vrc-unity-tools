@@ -83,7 +83,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             RuleMissingMotion(states, dangling, rep);
             RuleUndeclaredParam(controller, states, machines, rep);
             RuleNonFloatBlendParam(controller, states, rep);
-            RuleNonFloatParamCurve(controller, rep);
+            // Both parameter-write rules read the same set: which declared parameters some reachable clip
+            // animates as a parameter curve. Walked once here rather than per rule.
+            var curveWritten = ParamCurveWrites(controller);
+            RuleNonFloatParamCurve(controller, curveWritten, rep);
+            RuleDriverOnAnimatedParam(controller, states, machines, curveWritten, rep);
             RuleEntryShadow(machines, rep);
             RuleDeadTransition(states, rep);
             RuleBrokenBinding(controller, roots, pathRewrite, rep);
@@ -211,45 +215,33 @@ namespace Ryan6Vrc.AgentTools.Editor
         //
         // RuleNonFloatBlendParam one level over: a blend tree evaluates only Float parameters, and so do
         // parameter curves.
-        private static void RuleNonFloatParamCurve(AnimatorController controller, LintResult rep)
+        private static void RuleNonFloatParamCurve(AnimatorController controller,
+            Dictionary<string, string> curveWritten, LintResult rep)
         {
+            if (curveWritten.Count == 0) return;
             var types = new Dictionary<string, AnimatorControllerParameterType>();
             foreach (var p in controller.parameters) if (!types.ContainsKey(p.name)) types[p.name] = p.type;
-            if (types.Count == 0) return;
 
-            // CollectClips, not the `states` list: Run() skips synced layers (a synced layer re-skins its
-            // source layer's states), but a synced layer's per-state OVERRIDE motions are real clips that
-            // bind real parameters. CollectClips walks those, plus blend-tree children and external .anims.
-            var reported = new HashSet<string>(); // first offending clip per parameter, like Rule 2
-            foreach (var clip in AnimatorClipWalk.CollectClips(controller))
+            foreach (var kv in curveWritten)
             {
-                if (clip == null) continue;
-                foreach (var b in AnimationUtility.GetCurveBindings(clip))
-                {
-                    // A parameter curve is the path-less Animator binding whose property names a DECLARED
-                    // parameter. The same binding shape carries humanoid muscle/TDOF curves, which name no
-                    // parameter — so this test excludes them without needing a muscle allowlist.
-                    if (b.type != typeof(Animator) || !string.IsNullOrEmpty(b.path)) continue;
-                    if (!types.TryGetValue(b.propertyName, out var t)) continue;
-                    // Bool and Int are the measured cases. Trigger falls in here too on the same reasoning
-                    // (a curve writes only Float) but was not measured — refusing it costs nothing, since a
-                    // curve on a Trigger is no working idiom either way.
-                    if (t == AnimatorControllerParameterType.Float) continue;
-                    if (!reported.Add(b.propertyName)) continue;
+                if (!types.TryGetValue(kv.Key, out var t)) continue;
+                // Bool and Int are the measured cases. Trigger falls in here too on the same reasoning
+                // (a curve writes only Float) but was not measured — refusing it costs nothing, since a
+                // curve on a Trigger is no working idiom either way.
+                if (t == AnimatorControllerParameterType.Float) continue;
 
-                    rep.NonFloatParamCurve++;
-                    rep.Errors.Add(new LintOffender
-                    {
-                        Kind = "nonFloatParamCurve",
-                        Where = "clip `" + clip.name + "`",
-                        Detail = "animates parameter `" + b.propertyName + "`, which is declared " + t +
-                                 " — a parameter curve writes only Float parameters, so this curve sets nothing. " +
-                                 "It still binds the parameter, which hands it to the animation system and locks " +
-                                 "out every writer outside it: driver, expression menu, contact, script " +
-                                 "(runtime.md). Drive this parameter from a parameter driver and let no clip " +
-                                 "animate it; declaring it Float instead leaves it bound"
-                    });
-                }
+                rep.NonFloatParamCurve++;
+                rep.Errors.Add(new LintOffender
+                {
+                    Kind = "nonFloatParamCurve",
+                    Where = "clip `" + kv.Value + "`",
+                    Detail = "animates parameter `" + kv.Key + "`, which is declared " + t +
+                             " — a parameter curve writes only Float parameters, so this curve sets nothing. " +
+                             "It still binds the parameter, which hands it to the animation system and locks " +
+                             "out every writer outside it: driver, expression menu, contact, script " +
+                             "(runtime.md). Drive this parameter from a parameter driver and let no clip " +
+                             "animate it; declaring it Float instead leaves it bound"
+                });
             }
         }
 
@@ -269,13 +261,123 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         private static void DriverParams(StateMachineBehaviour b, string where, Action<string, string> reff)
+            => DriverOps(b, where, (name, w, isSource) => reff(name, isSource ? w + " (source)" : w));
+
+        /// <summary>Every parameter a driver behaviour touches, with the direction: <c>isSource</c> is true for
+        /// a <c>Copy</c>'s READ side and false for the op's write destination (set/add/copy/random all key their
+        /// destination the same way). <see cref="DriverParams"/> is the direction-blind view of this, kept so the
+        /// undeclared-param rule's offender strings are unchanged.</summary>
+        private static void DriverOps(StateMachineBehaviour b, string where, Action<string, string, bool> visit)
         {
             if (!(b is VRC.SDKBase.VRC_AvatarParameterDriver drv) || drv.parameters == null) return;
             foreach (var p in drv.parameters)
             {
-                reff(p.name, where);
-                if (p.type == VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Copy) reff(p.source, where + " (source)");
+                visit(p.name, where, false);
+                if (p.type == VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Copy) visit(p.source, where, true);
             }
+        }
+
+        // ----- Rule 3c: driverOnAnimatedParam (error) -----------------------------------------------
+        // A driver op — either direction — on a parameter some clip param-curve-writes. Measured: the
+        // animation system owns a bound parameter unconditionally (no clip-inactive window, independent of
+        // writeDefaults and layer weight), so a driver READ yields the parameter's declared default rather
+        // than the value the clip is producing, and a driver WRITE never reaches any animator reader.
+        // Both directions matter: a dead `copy` FROM a bound parameter is the harder one to spot, because the
+        // destination looks innocent and only the source is bound.
+        private static void RuleDriverOnAnimatedParam(AnimatorController controller, List<StateCtx> states,
+            List<SmCtx> machines, Dictionary<string, string> curveWritten, LintResult rep)
+        {
+            if (curveWritten.Count == 0) return;
+
+            // One offender per (parameter, direction): the same dead copy repeated across a ladder of states
+            // is one thing to fix, and the first site is the handle — Rule 2's convention.
+            var reported = new HashSet<string>();
+            Action<string, string, bool> visit = (name, where, isSource) =>
+            {
+                if (string.IsNullOrEmpty(name)) return;
+                if (!curveWritten.TryGetValue(name, out var clip)) return;
+                if (!reported.Add((isSource ? "r:" : "w:") + name)) return;
+
+                rep.DriverOnAnimatedParam++;
+                rep.Errors.Add(new LintOffender
+                {
+                    Kind = "driverOnAnimatedParam", Where = where,
+                    Detail = "driver " + (isSource ? "reads" : "writes") + " parameter `" + name +
+                             "`, which clip `" + clip + "` animates as a parameter curve — the animation system " +
+                             "owns a clip-bound parameter (runtime.md), so " + (isSource
+                                 ? "this read yields the parameter's declared default, never what the clip is " +
+                                   "producing. To read that animated value, use a blend tree or a transition " +
+                                   "condition"
+                                 : "no animator reader observes this write. If the intended consumer is outside " +
+                                   "the animator (an OSC-out signal, a saved value) the write is misdirected " +
+                                   "rather than pointless") +
+                             ". Give the driver a parameter no clip in this controller animates"
+                });
+            };
+
+            foreach (var m in machines)
+                if (m.Sm.behaviours != null)
+                    foreach (var b in m.Sm.behaviours) DriverOps(b, m.Path + " (SM behaviour)", visit);
+            foreach (var s in states)
+                if (s.State != null && s.State.behaviours != null)
+                    foreach (var b in s.State.behaviours) DriverOps(b, s.Path + " (driver)", visit);
+
+            // Synced layers are absent from `states`/`machines` by construction (Run skips them — they re-skin
+            // their source layer's states), but a synced layer carries its OWN per-state behaviour overrides,
+            // and a driver installed there is as dead as any other. Walking only the collected topology would
+            // reproduce on the driver side exactly the hole `ParamCurveWrites` closes on the clip side.
+            var layers = controller.layers;
+            for (int li = 0; li < layers.Length; li++)
+            {
+                var layer = layers[li];
+                if (layer.syncedLayerIndex < 0 || layer.syncedLayerIndex >= layers.Length) continue;
+                var src = layers[layer.syncedLayerIndex].stateMachine;
+                if (src == null) continue;
+                WalkSyncedOverrideDrivers(src, layer, layer.name ?? ("layer " + li), visit);
+            }
+        }
+
+        private static void WalkSyncedOverrideDrivers(AnimatorStateMachine sm, AnimatorControllerLayer layer,
+            string layerName, Action<string, string, bool> visit)
+        {
+            if (sm == null) return;
+            foreach (var cs in sm.states)
+            {
+                if (cs.state == null) continue;
+                var ov = layer.GetOverrideBehaviours(cs.state);
+                if (ov == null) continue;
+                foreach (var b in ov)
+                    DriverOps(b, "synced layer '" + layerName + "' state '" + cs.state.name + "' (override driver)", visit);
+            }
+            foreach (var child in sm.stateMachines)
+                if (child.stateMachine != null) WalkSyncedOverrideDrivers(child.stateMachine, layer, layerName, visit);
+        }
+
+        /// <summary>Every DECLARED parameter some reachable clip writes as an animator parameter curve, mapped to
+        /// the first clip that does — the shared input to the two parameter-write rules. Reads its clips from
+        /// <see cref="AnimatorClipWalk.CollectClips"/> rather than the caller's state list because
+        /// <see cref="Run"/> skips synced layers, whose per-state override motions bind real parameters.
+        /// A parameter curve is the path-less <c>Animator</c> binding whose property names a declared parameter;
+        /// humanoid muscle and TDOF curves share that binding shape but name no parameter, so they fall out here
+        /// with no muscle allowlist to maintain.</summary>
+        private static Dictionary<string, string> ParamCurveWrites(AnimatorController controller)
+        {
+            var written = new Dictionary<string, string>();
+            var declared = new HashSet<string>();
+            foreach (var p in controller.parameters) declared.Add(p.name);
+            if (declared.Count == 0) return written;
+
+            foreach (var clip in AnimatorClipWalk.CollectClips(controller))
+            {
+                if (clip == null) continue;
+                foreach (var b in AnimationUtility.GetCurveBindings(clip))
+                {
+                    if (b.type != typeof(Animator) || !string.IsNullOrEmpty(b.path)) continue;
+                    if (!declared.Contains(b.propertyName)) continue;
+                    if (!written.ContainsKey(b.propertyName)) written[b.propertyName] = clip.name;
+                }
+            }
+            return written;
         }
 
         // ----- Rule 3: entryShadow (error, deterministic) -------------------------------------------
@@ -614,7 +716,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// the broken-binding rule ran at, so the caller can fold it into the verdict.</summary>
     public sealed class LintResult
     {
-        public int MissingMotion, UndeclaredParam, NonFloatBlendParam, NonFloatParamCurve, EntryShadow, BrokenBinding, DeadTransition;
+        public int MissingMotion, UndeclaredParam, NonFloatBlendParam, NonFloatParamCurve, DriverOnAnimatedParam, EntryShadow, BrokenBinding, DeadTransition;
         public bool BrokenBindingIsError;
         public readonly List<LintOffender> Errors = new List<LintOffender>();
         public readonly List<LintOffender> Advisories = new List<LintOffender>();

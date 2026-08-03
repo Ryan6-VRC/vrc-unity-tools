@@ -234,4 +234,159 @@ public class ControllerRulesTests
 
         Assert.AreEqual(1, r.NonFloatParamCurve, "one offending parameter ⇒ one offender, however many clips write it");
     }
+
+    // ----- driverOnAnimatedParam ---------------------------------------------------------------------
+    // The animation system owns a clip-bound parameter unconditionally, so a driver op on one is dead in
+    // both directions: a READ yields the parameter's declared default rather than the animated value, and a
+    // WRITE reaches no animator reader. Measured; see docs/runtime.md.
+
+    /// <summary>A controller with a float parameter curve-written by a clip on one state, plus a driver on a
+    /// second state performing <paramref name="opType"/> against <paramref name="driverParam"/> (as the Copy
+    /// SOURCE when <paramref name="asCopySource"/>, else as the destination).</summary>
+    private static AnimatorController WithCurveAndDriver(string curveParam, string driverParam,
+        VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType opType, bool asCopySource)
+    {
+        var c = new AnimatorController();
+        c.AddParameter(curveParam, AnimatorControllerParameterType.Float);
+        if (driverParam != curveParam) c.AddParameter(driverParam, AnimatorControllerParameterType.Float);
+        c.AddParameter("Other", AnimatorControllerParameterType.Float);
+        c.AddLayer("Base");
+        var sm = c.layers[0].stateMachine;
+
+        var clip = new AnimationClip { name = "holds_" + curveParam };
+        UnityEditor.AnimationUtility.SetEditorCurve(
+            clip,
+            UnityEditor.EditorCurveBinding.FloatCurve("", typeof(Animator), curveParam),
+            AnimationCurve.Constant(0f, 1f / 60f, 1f));
+        sm.AddState("Holds").motion = clip;
+
+        var drvState = sm.AddState("Drives");
+        // CreateInstance + assign, not AddStateMachineBehaviour<T>(): the latter goes through asset/undo
+        // machinery that has no asset to work with on an unsaved controller.
+        var drv = ScriptableObject.CreateInstance<VRC.SDK3.Avatars.Components.VRCAvatarParameterDriver>();
+        drvState.behaviours = new StateMachineBehaviour[] { drv };
+        drv.parameters = new System.Collections.Generic.List<VRC.SDKBase.VRC_AvatarParameterDriver.Parameter>
+        {
+            asCopySource
+                ? new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { type = opType, name = "Other", source = driverParam }
+                : new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { type = opType, name = driverParam, value = 1f }
+        };
+        return c;
+    }
+
+    [Test]
+    public void DriverOnAnimatedParam_Fires_On_A_Driver_Write()
+    {
+        _controller = WithCurveAndDriver("Held", "Held",
+            VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Set, asCopySource: false);
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+
+        Assert.AreEqual(1, r.DriverOnAnimatedParam, "a driver Set on a clip-bound parameter is an error-tier defect");
+        var o = r.Errors.FirstOrDefault(e => e.Kind == "driverOnAnimatedParam");
+        Assert.IsNotNull(o);
+        StringAssert.Contains("writes", o.Detail, "the offender states the direction");
+    }
+
+    [Test]
+    public void DriverOnAnimatedParam_Fires_On_A_Copy_Source_Read()
+    {
+        // The read direction, which is the easy one to leave uncovered: a rule that inspects only an op's
+        // destination passes a dead `Copy` FROM a bound parameter, because the destination is innocent.
+        _controller = WithCurveAndDriver("Held", "Held",
+            VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Copy, asCopySource: true);
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+
+        Assert.AreEqual(1, r.DriverOnAnimatedParam, "a driver Copy whose SOURCE is clip-bound is equally dead");
+        var o = r.Errors.FirstOrDefault(e => e.Kind == "driverOnAnimatedParam");
+        Assert.IsNotNull(o);
+        StringAssert.Contains("reads", o.Detail, "the offender states the direction");
+    }
+
+    [Test]
+    public void DriverOnAnimatedParam_Ignores_A_Driver_On_A_Param_No_Clip_Binds()
+    {
+        // The legal shape, and the repair every offender is pointed at: drive a parameter nothing animates.
+        _controller = WithCurveAndDriver("Held", "Free",
+            VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Set, asCopySource: false);
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+
+        Assert.AreEqual(0, r.DriverOnAnimatedParam, "a driver on a parameter no clip animates is the correct idiom");
+    }
+
+    [Test]
+    public void DriverOnAnimatedParam_Ignores_A_BlendTree_Read_Of_The_Same_Param()
+    {
+        // Load-bearing negative control: a blend tree reading a clip-written float is the assemble idiom the
+        // whole AAP surface exists for. If this ever fires, the rule is breaking what it exists to protect.
+        _controller = new AnimatorController();
+        _controller.AddParameter("Held", AnimatorControllerParameterType.Float);
+        _controller.AddLayer("Base");
+        var sm = _controller.layers[0].stateMachine;
+
+        var clip = new AnimationClip { name = "holds_Held" };
+        UnityEditor.AnimationUtility.SetEditorCurve(
+            clip,
+            UnityEditor.EditorCurveBinding.FloatCurve("", typeof(Animator), "Held"),
+            AnimationCurve.Constant(0f, 1f / 60f, 1f));
+        sm.AddState("Holds").motion = clip;
+
+        var tree = new BlendTree { name = "ReadsHeld", blendType = BlendTreeType.Simple1D, blendParameter = "Held" };
+        tree.children = new[] { new ChildMotion { motion = clip, threshold = 0f, timeScale = 1f } };
+        sm.AddState("Reads").motion = tree;
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+
+        Assert.AreEqual(0, r.DriverOnAnimatedParam, "a blend tree may read a clip-written float — that is the AAP idiom");
+        Assert.AreEqual(0, r.NonFloatBlendParam, "and the parameter is a Float, so the blend-param rule is silent too");
+    }
+
+    [Test]
+    public void DriverOnAnimatedParam_Fires_On_A_Synced_Layer_Override_Driver()
+    {
+        // Run() excludes synced layers from the state/machine topology, so a rule walking only that topology
+        // cannot see a driver installed as a synced layer's per-state BEHAVIOUR override — though such a driver
+        // is as dead as any other. The clip side of this hole is closed by reading clips through
+        // AnimatorClipWalk (which walks override MOTIONS); this pins the driver side.
+        _controller = new AnimatorController();
+        _controller.AddParameter("Held", AnimatorControllerParameterType.Float);
+        _controller.AddLayer("Base");
+        var sm = _controller.layers[0].stateMachine;
+
+        var clip = new AnimationClip { name = "holds_Held" };
+        UnityEditor.AnimationUtility.SetEditorCurve(
+            clip,
+            UnityEditor.EditorCurveBinding.FloatCurve("", typeof(Animator), "Held"),
+            AnimationCurve.Constant(0f, 1f / 60f, 1f));
+        var srcState = sm.AddState("Holds");
+        srcState.motion = clip;
+
+        var drv = ScriptableObject.CreateInstance<VRC.SDK3.Avatars.Components.VRCAvatarParameterDriver>();
+        drv.parameters = new System.Collections.Generic.List<VRC.SDKBase.VRC_AvatarParameterDriver.Parameter>
+        {
+            new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter
+            {
+                type = VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Set, name = "Held", value = 1f
+            }
+        };
+
+        // A second layer synced to layer 0, carrying its own behaviour override on that shared state. Both
+        // writes go through the SAME array instance that is assigned back: `controller.layers` hands out fresh
+        // wrapper objects each call, so mutating `controller.layers[1]` inline would write to a throwaway.
+        _controller.AddLayer("Synced");
+        var layers = _controller.layers;
+        layers[1].syncedLayerIndex = 0;
+        layers[1].SetOverrideBehaviours(srcState, new StateMachineBehaviour[] { drv });
+        _controller.layers = layers;
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+
+        Assert.AreEqual(1, r.DriverOnAnimatedParam,
+            "a driver installed as a synced-layer behaviour override is not exempt");
+        var o = r.Errors.FirstOrDefault(e => e.Kind == "driverOnAnimatedParam");
+        Assert.IsNotNull(o);
+        StringAssert.Contains("synced layer", o.Where, "the offender names the synced layer as its site");
+    }
 }
