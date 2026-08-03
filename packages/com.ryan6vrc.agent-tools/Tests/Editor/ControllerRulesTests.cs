@@ -291,8 +291,8 @@ public class ControllerRulesTests
     [Test]
     public void DriverOnAnimatedParam_Fires_On_A_Copy_Source_Read()
     {
-        // The direction the retired advisory could not see: it only ever inspected an op's destination, so a
-        // dead Copy FROM an AAP shipped silently. That is the defect that cost a real gimmick a design round.
+        // The read direction, which is the easy one to leave uncovered: a rule that inspects only an op's
+        // destination passes a dead `Copy` FROM a bound parameter, because the destination is innocent.
         _controller = WithCurveAndDriver("Held", "Held",
             VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Copy, asCopySource: true);
 

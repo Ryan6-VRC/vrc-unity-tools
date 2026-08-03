@@ -1,10 +1,9 @@
 # covers: the cross-cluster whole-graph witness — a blend tree on a state deep in a nested, cross-
 #         referenced sub-machine, reached by an absolute ref out of depth and returning by a bare local ref.
 #
-# This fixture used to also stage "a driver-set AAP racing a clip AAP on one state". That construct is dead
-# in every measured configuration — the animation system owns a clip-bound parameter — so it is now an
-# error-tier refusal (`driverOnAnimatedParam`) and cannot appear in a fixture that must compile. Driver
-# round-tripping is covered whole by behaviours.yaml, which animates nothing and so keeps its drivers live.
+# Do not add a driver op on `Out` (or any parameter a clip here binds) to widen this fixture: that is an
+# error-tier refusal (`driverOnAnimatedParam`) and this fixture must compile. Driver round-tripping is
+# covered whole by behaviours.yaml, which animates nothing and so keeps its drivers live.
 schema: 1
 controller: Integration_Fx
 basis: avatar-root

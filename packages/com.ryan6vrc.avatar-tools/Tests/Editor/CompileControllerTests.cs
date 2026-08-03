@@ -96,8 +96,8 @@ public class CompileControllerTests
     public void DriverOnAnimatedParam_Fails_The_Compile_Door()
     {
         // Wiring test, as above: pointing the debounce driver at `Level` — which `hold_on` animates as a
-        // parameter curve — makes the driver write dead, and must refuse rather than emit an advisory. This
-        // shape used to compile OK with a RunLog advisory nobody acted on, which is why it is now error-tier.
+        // parameter curve — makes the driver write dead. The door must REFUSE it; an advisory is not enough,
+        // because a compile that returns OK is one a caller proceeds from.
         string badSrc = TestRoot + "/DriverOnAap.yaml";
         File.WriteAllText(badSrc, AnimatorSchemaYamlTests.DebounceDoc
             .Replace("- driver: { set: { Debounced: 1 } }", "- driver: { set: { Level: 1.0 } }"));

@@ -39,9 +39,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <para>The RunLog body carries the compile-only advisories — they never fail the compile: the
     /// per-layer FRAME-LATENCY of the longest conditional-transition chain (one transition per frame — the
     /// cost of a multi-hop codec), unresolved motion refs, unadjudicated menu icons, and OSC-unsafe parameter
-    /// names. A driver op on a clip-written parameter used to sit here as an advisory; it is now
-    /// <c>ControllerRules</c>' error-tier <c>driverOnAnimatedParam</c>, because the construct is dead in
-    /// every measured configuration and an advisory did not stop it shipping (runtime.md).</para>
+    /// names. Parameter-write defects are not advisories — a clip curve on a non-Float parameter and a driver
+    /// op on a clip-bound one are <c>ControllerRules</c> error-tier rules, so they fail the compile at the
+    /// graph-lint stage above (runtime.md §Animator has the mechanism).</para>
     /// </summary>
     [AgentTool]
     public static class CompileController

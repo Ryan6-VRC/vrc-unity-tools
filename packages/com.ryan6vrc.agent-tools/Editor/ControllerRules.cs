@@ -282,7 +282,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         // animation system owns a bound parameter unconditionally (no clip-inactive window, independent of
         // writeDefaults and layer weight), so a driver READ yields the parameter's declared default rather
         // than the value the clip is producing, and a driver WRITE never reaches any animator reader.
-        // This cost a real gimmick a full design round: a sender-side angle quantised by driver walk read 0.
+        // Both directions matter: a dead `copy` FROM a bound parameter is the harder one to spot, because the
+        // destination looks innocent and only the source is bound.
         private static void RuleDriverOnAnimatedParam(AnimatorController controller, List<StateCtx> states,
             List<SmCtx> machines, Dictionary<string, string> curveWritten, LintResult rep)
         {
@@ -303,17 +304,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                     Kind = "driverOnAnimatedParam", Where = where,
                     Detail = "driver " + (isSource ? "reads" : "writes") + " parameter `" + name +
                              "`, which clip `" + clip + "` animates as a parameter curve — the animation system " +
-                             "owns a clip-bound parameter, so " + (isSource
-                                 ? "this read yields the parameter's declared default, never the value the clip is " +
-                                   "producing. A blend tree or a transition condition CAN read that animated value; " +
-                                   "a driver cannot"
-                                 : "no animator reader ever observes this write — not a clip, a blend tree, a " +
-                                   "transition condition or a script read. The expression-parameter copy is " +
-                                   "inferred to still move, so if the intended consumer is off-animator (an " +
-                                   "OSC-out signal, a saved value) the write is not pointless — but give it a " +
-                                   "parameter no clip in this controller binds") +
-                             ". Ownership holds at any writeDefaults setting and any layer weight (runtime.md). " +
-                             "Use a parameter no clip animates, or move the value across with a blend tree"
+                             "owns a clip-bound parameter (runtime.md), so " + (isSource
+                                 ? "this read yields the parameter's declared default, never what the clip is " +
+                                   "producing. To read that animated value, use a blend tree or a transition " +
+                                   "condition"
+                                 : "no animator reader observes this write. If the intended consumer is outside " +
+                                   "the animator (an OSC-out signal, a saved value) the write is misdirected " +
+                                   "rather than pointless") +
+                             ". Give the driver a parameter no clip in this controller animates"
                 });
             };
 
