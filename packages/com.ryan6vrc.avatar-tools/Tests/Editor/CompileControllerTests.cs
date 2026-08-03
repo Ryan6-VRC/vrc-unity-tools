@@ -73,9 +73,15 @@ public class CompileControllerTests
         // WIRING: every compile/lint verdict site enumerates the error counters BY NAME rather than testing
         // Errors.Count, so a new rule that only populates Errors would let the door report OK. That failure
         // is invisible to a unit test on Run — it can only be caught here, at the door.
+        //
+        // The bad document must trip THIS RULE AND NOTHING ELSE, or the test stops guarding what it exists
+        // for: a second firing rule would keep the verdict FAIL, and the offender string is built from
+        // lint.Errors (populated regardless of wiring), so both assertions would still pass with this rule's
+        // counter unwired. Retyping `Level` to bool leaves the clip curve as the single defect — no driver
+        // touches Level, so the driver-on-bound-param rule stays silent.
         string badSrc = TestRoot + "/BoolCurve.yaml";
         File.WriteAllText(badSrc, AnimatorSchemaYamlTests.DebounceDoc
-            .Replace("hold_on: { set: { Level: 1.0 } }", "hold_on: { set: { Debounced: 1 } }"));
+            .Replace("Level: { type: float, aap: true }", "Level: bool"));
 
         string outDir = TestRoot + "/out_boolcurve";
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*post-emit graph lint.*=> FAIL"));

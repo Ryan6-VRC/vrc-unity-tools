@@ -232,6 +232,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // parameter — so this test excludes them without needing a muscle allowlist.
                     if (b.type != typeof(Animator) || !string.IsNullOrEmpty(b.path)) continue;
                     if (!types.TryGetValue(b.propertyName, out var t)) continue;
+                    // Bool and Int are the measured cases. Trigger falls in here too on the same reasoning
+                    // (a curve writes only Float) but was not measured — refusing it costs nothing, since a
+                    // curve on a Trigger is no working idiom either way.
                     if (t == AnimatorControllerParameterType.Float) continue;
                     if (!reported.Add(b.propertyName)) continue;
 
@@ -243,10 +246,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                         Detail = "animates parameter `" + b.propertyName + "`, which is declared " + t +
                                  " — a parameter curve writes only Float parameters, so this curve sets nothing; " +
                                  "worse, it still binds the parameter, and a clip-bound parameter is owned by the " +
-                                 "animation system, so expression-menu controls, contact receivers, PhysBones, OSC " +
-                                 "input, parameter drivers and script writes can no longer change it either " +
-                                 "(runtime.md). Declare the parameter Float, or drive this one from a parameter " +
-                                 "driver and let no clip animate it"
+                                 "animation system, so a parameter driver and a plain script write are measured " +
+                                 "unable to change it either (expression-menu controls, contact receivers and " +
+                                 "PhysBones are reported the same, not measured here — runtime.md). Drive this " +
+                                 "parameter from a parameter driver and let no clip animate it, which clears both " +
+                                 "this rule and the driver-on-a-bound-parameter one; declaring it Float instead " +
+                                 "silences only this rule"
                     });
                 }
             }
