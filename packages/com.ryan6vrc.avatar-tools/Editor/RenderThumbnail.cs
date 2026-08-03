@@ -12,7 +12,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// Renders a baked-avatar thumbnail via a dedicated off-screen camera rather than RenderAvatar's
     /// Scene-View window-grab, because baking (the VRC SDK preprocess chain,
     /// <c>VRCBuildPipelineCallbacks.OnPreprocessAvatar</c>) gives real resolved meshes that a fixed-size
-    /// off-screen camera can render at a guaranteed 1200×900 — RenderAvatar never bakes, so it must
+    /// off-screen camera can render at a guaranteed fixed resolution — RenderAvatar never bakes, so it must
     /// composite through the Scene View instead, capped to the pane's size and showing NDMF preview
     /// proxies. The bake is the FULL SDK chain, not NDMF alone, so the portrait shows the avatar that
     /// actually uploads (optimizers included).
@@ -56,7 +56,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
 
         /// <summary>
-        /// Render a 1200×900 portrait PNG of the baked <paramref name="target"/> avatar and return a
+        /// Render a portrait PNG of the baked <paramref name="target"/> avatar at
+        /// <see cref="RenderThumbnailCore.CaptureWidth"/>×<see cref="RenderThumbnailCore.CaptureHeight"/> and return a
         /// one-line verdict whose <c>png=</c> trailer is the written path. <paramref name="whatIf"/>
         /// preflights (resolve target, assert a VRC_AvatarDescriptor, resolve <paramref name="pose"/>)
         /// and returns without baking or touching the project.
@@ -369,8 +370,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 lightHolder.transform.rotation = solution.LightHolderRotation;
                 float camYaw = solution.CamYaw;
 
-                const int W = 1200, H = 900;
-                var capture = RenderThumbnailCore.Capture(cam, bgTop, bgBottom, viewpoint, W, H);
+                var capture = RenderThumbnailCore.Capture(cam, bgTop, bgBottom, viewpoint);
                 Vector3 headViewport = capture.HeadViewport;
                 bool nothingDrew = capture.Drawn == 0;
 

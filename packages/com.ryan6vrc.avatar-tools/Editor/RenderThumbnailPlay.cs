@@ -65,7 +65,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // is reported "still moving" at capture. ~0.3 mm — below it is solver noise; above it the operator sees
         // named chains and decides. NOT a settle assertion — the shot is taken regardless.
         private const float MovingLeafDeltaM = 0.0003f;
-        private const int CaptureW = 1200, CaptureH = 900;
         // If Time.frameCount does not advance for this long, the player loop has stalled (a paused editor keeps
         // firing EditorApplication.update but freezes frameCount) — fail the shot rather than spin forever with
         // _shootUpdate stuck non-null (which would refuse every later Shoot/End).
@@ -526,7 +525,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         cam.renderingPath = RenderingPath.Forward;
                         cam.transform.position = sol.Position;
                         cam.transform.rotation = sol.Rotation;
-                        cap = RenderThumbnailCore.Capture(cam, bgTop, bgBottom, vp, CaptureW, CaptureH);
+                        cap = RenderThumbnailCore.Capture(cam, bgTop, bgBottom, vp);
                     }
                     finally { UnityEngine.Object.DestroyImmediate(camGO); }
 
