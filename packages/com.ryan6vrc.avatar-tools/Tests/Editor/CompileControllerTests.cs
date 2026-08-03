@@ -93,6 +93,25 @@ public class CompileControllerTests
     }
 
     [Test]
+    public void DriverOnAnimatedParam_Fails_The_Compile_Door()
+    {
+        // Wiring test, as above: pointing the debounce driver at `Level` — which `hold_on` animates as a
+        // parameter curve — makes the driver write dead, and must refuse rather than emit an advisory. This
+        // shape used to compile OK with a RunLog advisory nobody acted on, which is why it is now error-tier.
+        string badSrc = TestRoot + "/DriverOnAap.yaml";
+        File.WriteAllText(badSrc, AnimatorSchemaYamlTests.DebounceDoc
+            .Replace("- driver: { set: { Debounced: 1 } }", "- driver: { set: { Level: 1.0 } }"));
+
+        string outDir = TestRoot + "/out_driveraap";
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*post-emit graph lint.*=> FAIL"));
+        string result = CompileController.Compile(badSrc, outDir, whatIf: false);
+
+        StringAssert.Contains("FAIL", result, "a driver op on a clip-bound param must fail the compile");
+        StringAssert.Contains("driverOnAnimatedParam", result, "the refusal names the rule");
+        Assert.IsFalse(File.Exists(outDir + "/Debounce_Fx.controller"), "nothing persists on a lint refusal");
+    }
+
+    [Test]
     public void Failing_Recompile_Leaves_Prior_Controller_Intact()
     {
         string outDir = TestRoot + "/out_proof";
