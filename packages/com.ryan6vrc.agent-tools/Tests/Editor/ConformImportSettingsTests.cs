@@ -56,6 +56,25 @@ public class ConformImportSettingsTests
         Assert.That(ConformImportSettings.RunFolder(""), Does.StartWith("[ConformImportSettings] FAIL:"));
     }
 
+    [Test]
+    public void OverBroadRoots_AreRefusedByName()
+    {
+        // The folder string is the only bound on a write that is partly lossy, so the roots are the one input
+        // that must not be trusted: `Assets` would clamp every oversize cap in the project, and a `Packages`
+        // write is discarded by the next `vrc-get resolve` anyway.
+        // `Packages` alone is not a valid asset folder, so it is refused one guard earlier with the
+        // invalid-folder message — refused either way, which is what matters.
+        foreach (var root in new[] { "Assets", "Assets/", "Packages", "Packages/com.vrchat.avatars" })
+        {
+            var s = ConformImportSettings.RunFolder(root);
+            Assert.That(s, Does.StartWith("[ConformImportSettings] FAIL:"), "root not refused: " + root);
+            Assert.That(s, Does.Not.Contain("| log="), "a refusal must not claim a RunLog: " + root);
+        }
+        foreach (var root in new[] { "Assets", "Packages/com.vrchat.avatars" })
+            Assert.That(ConformImportSettings.RunFolder(root), Does.Contain("pass the specific"),
+                "a refusal on a real folder must name the fix: " + root);
+    }
+
     // ── Clean folder: PASS, nothing to do ──────────────────────────────────────────────────────────────
 
     [Test]
@@ -134,19 +153,43 @@ public class ConformImportSettingsTests
     // ── legacy-blendshape-normals, including its disclosure ────────────────────────────────────────────
 
     [Test]
-    public void ModelAtCalculateWithoutLegacy_IsConformed_AndDisclosedAsChangingWhatShips()
+    public void ModelAtCalculateWithoutLegacy_IsConformed_AndTheReflectedWriteReachesDisk()
     {
         var path = WriteObj("normals.obj");
         var mi = (ModelImporter)AssetImporter.GetAtPath(path);
-        mi.importBlendShapeNormals = ModelImporterNormals.Calculate;
-        AssetDatabase.WriteImportSettingsIfDirty(path);
-        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
+        Assert.That(mi.importBlendShapeNormals, Is.EqualTo(ModelImporterNormals.Calculate),
+            "fixture premise: Unity's default is Calculate, which is what makes this row fire at all");
+        Assert.That(ReadLegacyFlag(path), Is.False, "fixture premise: legacy off by default");
 
         var s = ConformImportSettings.RunFolder(TmpDir);
         Assert.That(s, Does.Contain("legacy-blendshape-normals=1"));
-        Assert.That(s, Does.Contain("CHANGES WHAT SHIPS"),
-            "recomputing normals shifts shading — the disclosure is the whole obligation for this row");
-        Assert.That(s, Does.Contain(path));
+        Assert.That(s, Does.Contain("=> PASS"),
+            "this row writes through a reflected private member — a setter that fails to dirty the .meta lands as NOT-PASS");
+        // The only row whose write goes through reflection is the only one worth reading back through it.
+        Assert.That(ReadLegacyFlag(path), Is.True, "the reflected write must reach disk, not just return");
+    }
+
+    [Test]
+    public void ModelWithoutBlendshapes_IsNotDisclosedAsChangingWhatShips()
+    {
+        // The legacy flag only alters normals on meshes that HAVE blendshapes, and every default-imported model
+        // fires this row — so a blanket claim would put "render check owed" on every model in a vendor pack and
+        // teach the reader to skip the warning that matters.
+        var path = WriteObj("noshapes.obj");
+        var s = ConformImportSettings.RunFolder(TmpDir, whatIf: true);
+        Assert.That(s, Does.Contain("legacy-blendshape-normals=1"), "the row still fires — the SDK blocks on it either way");
+        Assert.That(s, Does.Not.Contain("CHANGES WHAT SHIPS"),
+            "a model with no blendshapes cannot have its shading changed by the legacy-normals flag");
+    }
+
+    private static bool ReadLegacyFlag(string path)
+    {
+        var mi = (ModelImporter)AssetImporter.GetAtPath(path);
+        var p = typeof(ModelImporter).GetProperty(
+            "legacyComputeAllNormalsFromSmoothingGroupsWhenMeshHasBlendShapes",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        Assert.That(p, Is.Not.Null, "fixture premise: the pinned member exists on this Unity");
+        return (bool)p.GetValue(mi, null);
     }
 
     [Test]

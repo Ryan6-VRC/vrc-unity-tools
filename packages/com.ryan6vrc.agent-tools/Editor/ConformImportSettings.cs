@@ -12,34 +12,18 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// <summary>
     /// Corrects the import settings that hard-fail a driven VRChat upload.
     ///
-    /// The VRCSDK's blocking validations read the <b>on-disk importer</b>, not the asset — e.g.
-    /// <c>importer.mipmapEnabled &amp;&amp; !importer.streamingMipmaps</c> — so nothing that rewrites the avatar at
-    /// build time can satisfy them. NDMF reports the mip case at <c>ErrorSeverity.NonFatal</c> (it does not
-    /// block); VRCFury ships a fix but gates its whole builder on a VRCFury component existing, so an
-    /// MA-only avatar never gets it, and it works by cloning the texture into the build rather than
-    /// correcting anything. The SDK's own remedy is an Auto Fix button no driven build can press. That
-    /// leaves a <c>.meta</c> write as the only remedy, which is why this door exists.
+    /// The VRCSDK's blocking validations read the <b>on-disk importer</b>, not the asset, so no build pass can
+    /// correct them and no universally-present pass can be relied on to mask them (VRCFury's texture clone does
+    /// mask the mip check, but gates on a VRCFury component existing). A <c>.meta</c> write is the only remedy.
+    /// Which settings and why that write is sanctioned under <c>Assets/Vendor/</c>: `docs/LAYOUT.md` §Vendor
+    /// mutation, and the contract is `docs/unity-tools.md`. Adding a row needs both halves of the rule there —
+    /// it blocks, and the asset alone decides whether it is an offender.
     ///
-    /// SCOPE RULE: this owns every blocking importer validation whose offender status is <b>intrinsic to the
-    /// asset</b>. Two SDK validations are therefore out, permanently and for different reasons — the
-    /// expression-menu icon rule (a texture is an offender only because a menu control points at it; nothing
-    /// on the asset says so, and its fix clamps to 256px, so applying it by asset type would wreck a
-    /// package) and Box→Kaiser mip filtering (reported at <c>OnGUIInformation</c> — advisory, so not ours to
-    /// force). Adding a row needs both halves: it blocks, and the asset alone decides.
-    ///
-    /// Two rows can change what ships — <c>max-texture-size</c> when the source genuinely exceeds the cap,
-    /// and <c>legacy-blendshape-normals</c>, which recomputes normals from smoothing groups. They are
-    /// applied rather than withheld because they <i>block</i>: withholding leaves an upload that cannot be
-    /// made and a fix the operator must apply by hand anyway. The obligation is that no such change is
-    /// silent — every affected path is named in the summary and the RunLog.
-    ///
-    /// There is deliberately NO <c>force</c> parameter. Elsewhere in the kit a vendor write demands
-    /// <c>force=true</c> and records the breach loudly (<c>TransplantCore.IsWritableAsset</c>); here the whole
-    /// door is the sanction — its scope is exactly the sanctioned class, and every written path is logged.
-    /// A <c>force</c> flag would imply an unsanctioned mode that does not exist. Do not add one.
-    ///
-    /// Writes <c>.meta</c> files only. Source bytes are never touched and every change is revertible;
-    /// `docs/LAYOUT.md` §Vendor mutation owns whether that write is permitted under `Assets/Vendor/`.
+    /// There is deliberately NO <c>force</c> parameter, and that is an instruction to whoever maintains this next.
+    /// Elsewhere a vendor write takes <c>force=true</c> to override a real per-asset writable decision
+    /// (<c>TransplantCore.IsWritableAsset</c>, 11 sites). Here the folder argument <i>is</i> the scope decision and
+    /// there is no second class of asset a flag could unlock — so a <c>force</c> flag would be unfalsifiable, and
+    /// the guard that actually matters is the refusal of over-broad roots below. Do not add one.
     /// </summary>
     [AgentTool]
     public static class ConformImportSettings
@@ -57,7 +41,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             RowMipStreaming, RowMaxTextureSize, RowMeshReadable, RowLegacyNormals, RowAudioBackgroundLoad
         };
 
-        private const string ScopeNote = "scope=t:Texture,t:Model,t:AudioClip under this folder only";
+        private const string ScopeNote = "scope=t:Texture,t:Model,t:AudioClip under this folder only, 5 rows (menu-icon + mip-filter validations excluded — still the operator's)";
 
         // ----- Public API (callable from execute_code / the import skill) ---------------------
 
@@ -69,6 +53,14 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             if (string.IsNullOrEmpty(assetFolderPath) || !AssetDatabase.IsValidFolder(assetFolderPath))
                 return "[ConformImportSettings] FAIL: not a valid asset folder: " + assetFolderPath;
+
+            // The folder argument is the only bound on a write that is partly lossy, so the roots are refused by
+            // name rather than trusted. `Assets` would clamp every oversize cap in the project; a `Packages` tree
+            // is rewritten by `vrc-get resolve` anyway, so a write there is discarded rather than sanctioned.
+            var norm = assetFolderPath.Replace('\\', '/').TrimEnd('/');
+            if (norm == "Assets" || norm == "Packages" || norm.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
+                return "[ConformImportSettings] FAIL: refusing an over-broad or non-durable root (" + assetFolderPath
+                     + "): pass the specific vendor or owned folder to conform, e.g. Assets/Vendor/Outfits/<Name>.";
 
             var r = new Report { Target = assetFolderPath, WhatIf = whatIf };
             Scan(assetFolderPath, r);
@@ -98,14 +90,20 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 if (cap > 0 && ti.maxTextureSize > cap)
                 {
-                    // The SDK's predicate is importer-only, so a 512px source with a 16384 cap is an
-                    // offender whose correction changes nothing that ships. Deriving the disclosure from
-                    // the real dimensions instead of the row id keeps the render-check obligation honest.
-                    var tex = AssetDatabase.LoadAssetAtPath<Texture>(path);
-                    int longest = tex == null ? 0 : Math.Max(tex.width, tex.height);
-                    bool downscales = longest > cap;
+                    // The SDK's predicate is importer-only, so a small source under a huge cap is an offender
+                    // whose correction changes nothing that ships. Deriving the disclosure from the real
+                    // dimensions instead of the row id keeps the render-check obligation honest.
+                    //
+                    // It must be the SOURCE dimensions, not the imported ones: an imported Texture is already
+                    // clamped by the active platform's settings, so a 16K source behind a 4K Android override
+                    // reads as 4096 and would report "costless" while lowering the default cap really does
+                    // downscale it everywhere that override is absent. When the source cannot be measured, the
+                    // path is disclosed rather than assumed safe — an unmeasurable dimension is not a small one.
+                    int longest = SourceLongestEdge(ti, r);
+                    bool downscales = longest <= 0 || longest > cap;
                     r.Add(path, RowMaxTextureSize,
-                        "cap=" + ti.maxTextureSize + " > " + cap + ", longest edge=" + (tex == null ? "unknown" : longest.ToString(CultureInfo.InvariantCulture)),
+                        "cap=" + ti.maxTextureSize + " > " + cap + ", source longest edge="
+                        + (longest > 0 ? longest.ToString(CultureInfo.InvariantCulture) : "unmeasurable"),
                         downscales);
                 }
             }
@@ -120,23 +118,36 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (!mi.isReadable)
                     r.Add(path, RowMeshReadable, "read/write disabled", false);
 
+                bool legacySet;
                 if (legacyProp != null
                     && mi.importBlendShapeNormals == ModelImporterNormals.Calculate
-                    && !ReadLegacy(legacyProp, mi))
-                    r.Add(path, RowLegacyNormals, "blendshape normals = Calculate without legacy", true);
+                    && TryReadLegacy(legacyProp, mi, r, path, out legacySet)
+                    && !legacySet)
+                {
+                    // The legacy flag only changes normals on meshes that HAVE blendshapes, and Unity's default
+                    // is Calculate-without-legacy — so every default-imported model fires this row while most
+                    // are unaffected. Claiming "changes what ships" on all of them is the same dishonesty the
+                    // max-texture-size comment above rejects: it trains the reader to ignore the real warning.
+                    // Measured pre-write, because the reimport below invalidates every Mesh object.
+                    bool hasShapes = AssetDatabase.LoadAllAssetsAtPath(path)
+                        .OfType<Mesh>().Any(m => m.blendShapeCount > 0);
+                    r.Add(path, RowLegacyNormals,
+                        "blendshape normals = Calculate without legacy" + (hasShapes ? "" : " (no blendshapes — shading unaffected)"),
+                        hasShapes);
+                }
             }
 
             foreach (var path in PathsOfType("t:AudioClip", roots))
             {
                 var ai = AssetImporter.GetAtPath(path) as AudioImporter;
                 if (ai == null) { r.Skipped++; continue; }
-                r.Scanned++;
 
                 // The SDK tests the CLIP, not the importer (`clip.loadType` / `clip.loadInBackground`) —
                 // reading `AudioImporter.defaultSampleSettings` instead diverges wherever a per-platform
                 // override exists. The importer is only where the write lands.
                 var clip = AssetDatabase.LoadAssetAtPath<AudioClip>(path);
-                if (clip == null) { r.Skipped++; continue; }
+                if (clip == null) { r.ClipLoadFailures++; continue; }
+                r.Scanned++;
                 if (clip.loadType == AudioClipLoadType.DecompressOnLoad && !clip.loadInBackground)
                     r.Add(path, RowAudioBackgroundLoad, "DecompressOnLoad without load-in-background", false);
             }
@@ -169,26 +180,37 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var importer = AssetImporter.GetAtPath(group.Key);
                 if (importer == null) continue;
 
-                foreach (var f in group)
+                // One path's write must never take the run down: earlier paths already have .meta writes on disk,
+                // and an escaping exception would skip Finish entirely — no summary, no RunLog, i.e. a vendor
+                // mutation with nothing recording it. Record the path, keep going, let the verdict report it.
+                try
                 {
-                    switch (f.Row)
+                    foreach (var f in group)
                     {
-                        case RowMipStreaming:
-                            ((TextureImporter)importer).streamingMipmaps = true;
-                            break;
-                        case RowMaxTextureSize:
-                            ((TextureImporter)importer).maxTextureSize = cap;
-                            break;
-                        case RowMeshReadable:
-                            ((ModelImporter)importer).isReadable = true;
-                            break;
-                        case RowLegacyNormals:
-                            if (legacyProp != null) legacyProp.SetValue(importer, true, null);
-                            break;
-                        case RowAudioBackgroundLoad:
-                            ((AudioImporter)importer).loadInBackground = true;
-                            break;
+                        switch (f.Row)
+                        {
+                            case RowMipStreaming:
+                                ((TextureImporter)importer).streamingMipmaps = true;
+                                break;
+                            case RowMaxTextureSize:
+                                ((TextureImporter)importer).maxTextureSize = cap;
+                                break;
+                            case RowMeshReadable:
+                                ((ModelImporter)importer).isReadable = true;
+                                break;
+                            case RowLegacyNormals:
+                                if (legacyProp != null) legacyProp.SetValue(importer, true, null);
+                                break;
+                            case RowAudioBackgroundLoad:
+                                ((AudioImporter)importer).loadInBackground = true;
+                                break;
+                        }
                     }
+                }
+                catch (Exception e)
+                {
+                    r.WriteErrors.Add(group.Key + ": " + e.GetType().Name + " " + e.Message);
+                    continue;
                 }
 
                 // Gate on the .meta write rather than firing and assuming. A false means the flag never
@@ -242,7 +264,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     var mi = importer as ModelImporter;
                     if (mi == null || legacyProp == null) return true;
-                    return mi.importBlendShapeNormals == ModelImporterNormals.Calculate && !ReadLegacy(legacyProp, mi);
+                    if (mi.importBlendShapeNormals != ModelImporterNormals.Calculate) return false;
+                    // An unreadable flag cannot verify the write, so it counts as still offending rather than
+                    // as satisfied — this is the post-condition the reported count is built from.
+                    bool set;
+                    try { set = (bool)legacyProp.GetValue(mi, null); }
+                    catch (Exception) { return true; }
+                    return !set;
                 }
                 case RowAudioBackgroundLoad:
                 {
@@ -250,7 +278,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     return clip == null || (clip.loadType == AudioClipLoadType.DecompressOnLoad && !clip.loadInBackground);
                 }
             }
-            return false;
+            return true; // unknown row ⇒ never claim it persisted
         }
 
         // ----- Vendor pins: one row each, fail loud, never a whole-run failure -----------------
@@ -276,24 +304,75 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Unity's private <c>ModelImporter.legacyComputeAllNormalsFromSmoothingGroupsWhenMeshHasBlendShapes</c>
         /// — the same member the SDK reflects for the same reason, and it guards the identical way. A Unity
-        /// internal rather than vendor plumbing, so the pin lives here rather than stretching
-        /// <see cref="VendorReflect"/>'s stated MA/VRCFury/NDMF charter. Null skips only its own row.</summary>
+        /// internal rather than vendor plumbing, which is why this pin is local — the SDK cap above does go through
+        /// <see cref="VendorReflect"/>, whose docblock names the VRCSDK alongside MA/VRCFury/NDMF. Skips only its own row.</summary>
         private static PropertyInfo LegacyNormalsProperty(Report r)
         {
             if (r.LegacyProbed) return r.LegacyProp;
             r.LegacyProbed = true;
-            r.LegacyProp = typeof(ModelImporter).GetProperty(
+            var p = typeof(ModelImporter).GetProperty(
                 "legacyComputeAllNormalsFromSmoothingGroupsWhenMeshHasBlendShapes",
                 BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-            if (r.LegacyProp == null)
-                r.SkipRow(RowLegacyNormals, "ModelImporter.legacyComputeAllNormalsFromSmoothingGroupsWhenMeshHasBlendShapes did not resolve");
+            // Resolving is not enough to write through: a member turned get-only, or retyped, still resolves,
+            // and the row would then fire and throw mid-apply. Pin the shape we actually need, or skip the row.
+            if (p == null || !p.CanWrite || p.PropertyType != typeof(bool))
+                r.SkipRow(RowLegacyNormals, "ModelImporter.legacyComputeAllNormalsFromSmoothingGroupsWhenMeshHasBlendShapes is absent or not a writable bool");
+            else
+                r.LegacyProp = p;
             return r.LegacyProp;
         }
 
-        private static bool ReadLegacy(PropertyInfo prop, ModelImporter mi)
+        /// <summary>The <b>source</b> file's longest edge, or 0 when it cannot be measured. Unity exposes this only
+        /// internally and has renamed it across versions, so both known names are probed; an unresolvable pin means
+        /// the caller discloses the path instead of assuming it costless. Never use the imported
+        /// <see cref="Texture"/>'s dimensions here — those are already clamped by the active platform's settings.</summary>
+        private static int SourceLongestEdge(TextureImporter ti, Report r)
         {
-            try { return (bool)prop.GetValue(mi, null); }
-            catch (Exception) { return true; } // unreadable ⇒ treat as satisfied; never flag on a broken read
+            if (!r.SourceDimProbed)
+            {
+                r.SourceDimProbed = true;
+                var t = typeof(TextureImporter);
+                r.SourceDimMethod = t.GetMethod("GetSourceTextureWidthAndHeight", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                                 ?? t.GetMethod("GetWidthAndHeight", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                if (r.SourceDimMethod == null)
+                    r.Note("source texture dimensions unmeasurable (no GetSourceTextureWidthAndHeight/GetWidthAndHeight) — max-texture-size paths disclosed conservatively");
+            }
+            if (r.SourceDimMethod == null) return 0;
+            try
+            {
+                var args = new object[] { 0, 0 };
+                r.SourceDimMethod.Invoke(ti, args);
+                return Math.Max(Convert.ToInt32(args[0], CultureInfo.InvariantCulture),
+                                Convert.ToInt32(args[1], CultureInfo.InvariantCulture));
+            }
+            catch (Exception) { return 0; }
+        }
+
+        /// <summary>Which VRChat SDK the rows' <c>OnGUIError</c> severity was taken against — the thing that makes
+        /// the write sanctioned, and the thing an SDK upgrade obliges a re-check of.</summary>
+        private static string SdkVersions()
+        {
+            var parts = new List<string>();
+            foreach (var id in new[] { "com.vrchat.avatars", "com.vrchat.base" })
+            {
+                var pi = UnityEditor.PackageManager.PackageInfo.FindForAssetPath("Packages/" + id + "/package.json");
+                parts.Add(id + "=" + (pi == null ? "absent" : pi.version));
+            }
+            return string.Join(" ", parts);
+        }
+
+        /// <summary>Reads the legacy flag. A failed read must <b>skip the row loudly</b>, never be swallowed into
+        /// "already satisfied" — that would silently narrow the predicate set under a <c>PASS</c>, which is the one
+        /// thing the scope note cannot express.</summary>
+        private static bool TryReadLegacy(PropertyInfo prop, ModelImporter mi, Report r, string path, out bool value)
+        {
+            try { value = (bool)prop.GetValue(mi, null); return true; }
+            catch (Exception e)
+            {
+                value = false;
+                r.SkipRow(RowLegacyNormals, "unreadable on " + path + ": " + e.GetType().Name);
+                return false;
+            }
         }
 
         // ----- Reporting ----------------------------------------------------------------------
@@ -315,6 +394,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             public int Skipped;
             public readonly List<Finding> Findings = new List<Finding>();
             public readonly List<string> Unwritten = new List<string>();
+            public readonly List<string> WriteErrors = new List<string>();
+            public int ClipLoadFailures;
+            public bool SourceDimProbed;
+            public System.Reflection.MethodInfo SourceDimMethod;
+            public readonly List<string> Notes = new List<string>();
+
+            public void Note(string n) { if (!Notes.Contains(n)) Notes.Add(n); }
             public readonly List<string> SkippedRows = new List<string>();
             public int? CapCache;
             public bool LegacyProbed;
@@ -346,7 +432,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 ? new List<Finding>()
                 : r.Findings.Where(f => !f.Persisted).ToList();
 
-            bool pass = notPersisted.Count == 0 && r.Unwritten.Count == 0;
+            bool pass = notPersisted.Count == 0 && r.Unwritten.Count == 0 && r.WriteErrors.Count == 0;
             string result = r.WhatIf ? "PASS" : (pass ? "PASS" : "NOT-PASS");
 
             string verb = r.WhatIf ? "would conform" : "conformed";
@@ -364,8 +450,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append(" | NOT PERSISTED: ")
                   .Append(string.Join(", ", notPersisted.Select(f => f.Row + "@" + f.Path).Take(5)))
                   .Append(notPersisted.Count > 5 ? ", …" : "");
+            if (r.WriteErrors.Count > 0)
+                sb.Append(" | WRITE FAILED: ").Append(string.Join("; ", r.WriteErrors.Take(3)))
+                  .Append(r.WriteErrors.Count > 3 ? ", …" : "");
+            if (r.ClipLoadFailures > 0)
+                sb.Append(" | ").Append(r.ClipLoadFailures).Append(" audio clip(s) would not load");
             if (r.SkippedRows.Count > 0)
                 sb.Append(" | ROWS SKIPPED: ").Append(string.Join("; ", r.SkippedRows));
+            if (r.Notes.Count > 0)
+                sb.Append(" | NOTE: ").Append(string.Join("; ", r.Notes));
             sb.Append(" | ").Append(ScopeNote);
             sb.Append(" => ").Append(result);
 
@@ -380,11 +473,18 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("{\n");
             sb.Append("  \"kind\": \"conform-import-settings\",\n");
             sb.Append("  \"unityVersion\": ").Append(RunLogFormat.Q(Application.unityVersion)).Append(",\n");
+            // The rows are sanctioned because THIS SDK reports them at OnGUIError. A future SDK could demote one
+            // to an advisory, at which point writing a vendor .meta for it is no longer sanctioned — so the log
+            // records which SDK the sanction was taken against, and an upgrade owes a severity re-check.
+            sb.Append("  \"vrchatSdk\": ").Append(RunLogFormat.Q(SdkVersions())).Append(",\n");
             sb.Append("  \"target\": ").Append(RunLogFormat.Q(r.Target)).Append(",\n");
             sb.Append("  \"label\": ").Append(RunLogFormat.Q(label)).Append(",\n");
             sb.Append("  \"whatIf\": ").Append(r.WhatIf ? "true" : "false").Append(",\n");
             sb.Append("  \"scanned\": ").Append(r.Scanned).Append(",\n");
             sb.Append("  \"notImporterTyped\": ").Append(r.Skipped).Append(",\n");
+            sb.Append("  \"clipLoadFailures\": ").Append(r.ClipLoadFailures).Append(",\n");
+            sb.Append("  \"writeErrors\": [").Append(string.Join(", ", r.WriteErrors.Select(RunLogFormat.Q))).Append("],\n");
+            sb.Append("  \"notes\": [").Append(string.Join(", ", r.Notes.Select(RunLogFormat.Q))).Append("],\n");
             sb.Append("  \"scope\": ").Append(RunLogFormat.Q(ScopeNote)).Append(",\n");
             sb.Append("  \"rowsSkipped\": [");
             sb.Append(string.Join(", ", r.SkippedRows.Select(RunLogFormat.Q)));
