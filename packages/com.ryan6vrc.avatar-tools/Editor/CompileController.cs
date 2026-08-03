@@ -125,7 +125,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // would let a lint failure delete or overwrite a pre-existing side asset it cannot restore —
             // CleanupAfterLint can only remove what this run created. Nothing written on failure means nothing.
             var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
-            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
+            if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.NonFloatParamCurve > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
             {
                 CleanupAfterLint(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders);
                 string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
@@ -535,7 +535,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             try
             {
                 var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
-                if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
+                if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.NonFloatParamCurve > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
                     return "post-emit graph lint (" + lint.Errors.Count + "): "
                          + string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
                 return null;

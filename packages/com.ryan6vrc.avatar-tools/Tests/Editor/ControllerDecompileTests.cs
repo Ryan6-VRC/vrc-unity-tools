@@ -79,7 +79,7 @@ public class ControllerDecompileTests
         Assert.AreEqual(0f, timer.Sets.Count + timer.Curves.Count, "timer is duration-only");
         Assert.AreEqual(0.2f, timer.Seconds.Value, 1e-3f);
         var hold = w.Doc.Clips.First(c => c.Name == "hold_on");
-        Assert.AreEqual(1f, hold.Sets["Debounced"], 1e-6f);
+        Assert.AreEqual(1f, hold.Sets["Level"], 1e-6f);   // a float AAP, not the bool output — see DebounceDoc
     }
 
     // ---- Round-trip: nesting + a non-driver behaviour ---------------------------------------------

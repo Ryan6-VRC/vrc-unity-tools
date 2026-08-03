@@ -83,6 +83,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             RuleMissingMotion(states, dangling, rep);
             RuleUndeclaredParam(controller, states, machines, rep);
             RuleNonFloatBlendParam(controller, states, rep);
+            RuleNonFloatParamCurve(controller, rep);
             RuleEntryShadow(machines, rep);
             RuleDeadTransition(states, rep);
             RuleBrokenBinding(controller, roots, pathRewrite, rep);
@@ -198,6 +199,56 @@ namespace Ryan6Vrc.AgentTools.Editor
                                  " — a blend tree evaluates only Float parameters, so this input reads 0 and cannot respond to the parameter; declare it Float (or blend on a Float copy)"
                     });
                 });
+            }
+        }
+
+        // ----- Rule 3b: nonFloatParamCurve (error) --------------------------------------------------
+        // An animator-parameter curve whose parameter is declared Bool or Int. Measured (stock Unity, no
+        // emulator): the curve is emitted correctly and is INERT — a clip writing a bool and an int left
+        // both at their declared defaults while the same clip's float write took. It is worse than inert,
+        // because the curve still BINDS the parameter, and a bound parameter is owned by the animation
+        // system: nothing outside it can write that parameter, at any writeDefaults setting or layer
+        // weight. So the curve does nothing AND it silences every other writer of that parameter.
+        //
+        // Sibling of RuleNonFloatBlendParam one level over: a blend tree evaluates only Float parameters,
+        // and so do parameter curves.
+        private static void RuleNonFloatParamCurve(AnimatorController controller, LintResult rep)
+        {
+            var types = new Dictionary<string, AnimatorControllerParameterType>();
+            foreach (var p in controller.parameters) if (!types.ContainsKey(p.name)) types[p.name] = p.type;
+            if (types.Count == 0) return;
+
+            // CollectClips, not the `states` list: Run() skips synced layers (a synced layer re-skins its
+            // source layer's states), but a synced layer's per-state OVERRIDE motions are real clips that
+            // bind real parameters. CollectClips walks those, plus blend-tree children and external .anims.
+            var reported = new HashSet<string>(); // first offending clip per parameter, like Rule 2
+            foreach (var clip in AnimatorClipWalk.CollectClips(controller))
+            {
+                if (clip == null) continue;
+                foreach (var b in AnimationUtility.GetCurveBindings(clip))
+                {
+                    // A parameter curve is the path-less Animator binding whose property names a DECLARED
+                    // parameter. The same binding shape carries humanoid muscle/TDOF curves, which name no
+                    // parameter — so this test excludes them without needing a muscle allowlist.
+                    if (b.type != typeof(Animator) || !string.IsNullOrEmpty(b.path)) continue;
+                    if (!types.TryGetValue(b.propertyName, out var t)) continue;
+                    if (t == AnimatorControllerParameterType.Float) continue;
+                    if (!reported.Add(b.propertyName)) continue;
+
+                    rep.NonFloatParamCurve++;
+                    rep.Errors.Add(new LintOffender
+                    {
+                        Kind = "nonFloatParamCurve",
+                        Where = "clip `" + clip.name + "`",
+                        Detail = "animates parameter `" + b.propertyName + "`, which is declared " + t +
+                                 " — a parameter curve writes only Float parameters, so this curve sets nothing; " +
+                                 "worse, it still binds the parameter, and a clip-bound parameter is owned by the " +
+                                 "animation system, so expression-menu controls, contact receivers, PhysBones, OSC " +
+                                 "input, parameter drivers and script writes can no longer change it either " +
+                                 "(runtime.md). Declare the parameter Float, or drive this one from a parameter " +
+                                 "driver and let no clip animate it"
+                    });
+                }
             }
         }
 
@@ -562,7 +613,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// the broken-binding rule ran at, so the caller can fold it into the verdict.</summary>
     public sealed class LintResult
     {
-        public int MissingMotion, UndeclaredParam, NonFloatBlendParam, EntryShadow, BrokenBinding, DeadTransition;
+        public int MissingMotion, UndeclaredParam, NonFloatBlendParam, NonFloatParamCurve, EntryShadow, BrokenBinding, DeadTransition;
         public bool BrokenBindingIsError;
         public readonly List<LintOffender> Errors = new List<LintOffender>();
         public readonly List<LintOffender> Advisories = new List<LintOffender>();

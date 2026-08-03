@@ -67,6 +67,26 @@ public class CompileControllerTests
     }
 
     [Test]
+    public void NonFloatParamCurve_Fails_The_Compile_Door()
+    {
+        // ControllerRules owns the detection and ControllerRulesTests pins it. This test exists for the
+        // WIRING: every compile/lint verdict site enumerates the error counters BY NAME rather than testing
+        // Errors.Count, so a new rule that only populates Errors would let the door report OK. That failure
+        // is invisible to a unit test on Run — it can only be caught here, at the door.
+        string badSrc = TestRoot + "/BoolCurve.yaml";
+        File.WriteAllText(badSrc, AnimatorSchemaYamlTests.DebounceDoc
+            .Replace("hold_on: { set: { Level: 1.0 } }", "hold_on: { set: { Debounced: 1 } }"));
+
+        string outDir = TestRoot + "/out_boolcurve";
+        LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*post-emit graph lint.*=> FAIL"));
+        string result = CompileController.Compile(badSrc, outDir, whatIf: false);
+
+        StringAssert.Contains("FAIL", result, "a bool parameter curve must fail the compile, not warn");
+        StringAssert.Contains("nonFloatParamCurve", result, "the refusal names the rule");
+        Assert.IsFalse(File.Exists(outDir + "/Debounce_Fx.controller"), "nothing persists on a lint refusal");
+    }
+
+    [Test]
     public void Failing_Recompile_Leaves_Prior_Controller_Intact()
     {
         string outDir = TestRoot + "/out_proof";

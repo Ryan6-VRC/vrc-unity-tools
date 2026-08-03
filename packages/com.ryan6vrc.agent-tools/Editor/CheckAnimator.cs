@@ -642,6 +642,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static string Emit(AnimatorController controller, LintResult rep, string detection, List<string> notes)
         {
             bool errorTierFired = rep.MissingMotion > 0 || rep.UndeclaredParam > 0 || rep.NonFloatBlendParam > 0
+                                  || rep.NonFloatParamCurve > 0
                                   || rep.EntryShadow > 0 || rep.DeadTransition > 0
                                   || (rep.BrokenBindingIsError && rep.BrokenBinding > 0);
             string result = errorTierFired ? "FAIL" : "PASS";
@@ -651,8 +652,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             int advisories = rep.Advisories.Count;
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CheckAnimator] {0}: missingMotion={1} undeclaredParam={2} nonFloatBlendParam={3} entryShadow={4} deadTransition={5} brokenBinding={6} advisories={7} => {8}",
-                controller.name, rep.MissingMotion, rep.UndeclaredParam, rep.NonFloatBlendParam, rep.EntryShadow, rep.DeadTransition, rep.BrokenBinding, advisories, result);
+                "[CheckAnimator] {0}: missingMotion={1} undeclaredParam={2} nonFloatBlendParam={3} nonFloatParamCurve={4} entryShadow={5} deadTransition={6} brokenBinding={7} advisories={8} => {9}",
+                controller.name, rep.MissingMotion, rep.UndeclaredParam, rep.NonFloatBlendParam, rep.NonFloatParamCurve, rep.EntryShadow, rep.DeadTransition, rep.BrokenBinding, advisories, result);
 
             var sb = new StringBuilder();
             sb.Append("# CheckAnimator: ").Append(controller.name).Append('\n');

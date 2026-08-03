@@ -131,4 +131,107 @@ public class ControllerRulesTests
         Assert.IsFalse(r.Advisories.Any(o => o.Kind.StartsWith("deadTransition")),
             "the motionless exit-time timer idiom must not be flagged at all");
     }
+
+    // ----- nonFloatParamCurve -----------------------------------------------------------------------
+    // A parameter curve writes only Float parameters: measured, a clip curve on a Bool or Int leaves the
+    // parameter at its declared default while still BINDING it — which hands the parameter to the animation
+    // system and locks out every other writer (menu, contact, driver, script). See docs/runtime.md.
+
+    /// <summary>A controller whose single state plays a clip carrying one animator-parameter curve on
+    /// <paramref name="param"/>, declared as <paramref name="type"/>.</summary>
+    private static AnimatorController WithParamCurve(string param, AnimatorControllerParameterType type)
+    {
+        var c = new AnimatorController();
+        c.AddParameter(param, type);
+        c.AddLayer("Base");
+        var st = c.layers[0].stateMachine.AddState("Play");
+
+        var clip = new AnimationClip { name = "writes_" + param };
+        // The path-less Animator binding whose property names a declared parameter IS the parameter curve.
+        UnityEditor.AnimationUtility.SetEditorCurve(
+            clip,
+            UnityEditor.EditorCurveBinding.FloatCurve("", typeof(Animator), param),
+            AnimationCurve.Constant(0f, 1f / 60f, 1f));
+        st.motion = clip;
+        return c;
+    }
+
+    [Test]
+    public void NonFloatParamCurve_Fires_On_A_Bool_Parameter_Curve()
+    {
+        _controller = WithParamCurve("Flag", AnimatorControllerParameterType.Bool);
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+
+        Assert.AreEqual(1, r.NonFloatParamCurve, "a clip curve on a Bool parameter is an error-tier defect");
+        var o = r.Errors.FirstOrDefault(e => e.Kind == "nonFloatParamCurve");
+        Assert.IsNotNull(o, "the offender is reported at error tier");
+        StringAssert.Contains("Flag", o.Detail, "the offender names the parameter");
+    }
+
+    [Test]
+    public void NonFloatParamCurve_Fires_On_An_Int_Parameter_Curve()
+    {
+        _controller = WithParamCurve("Count", AnimatorControllerParameterType.Int);
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+
+        Assert.AreEqual(1, r.NonFloatParamCurve, "a clip curve on an Int parameter is the same defect");
+    }
+
+    [Test]
+    public void NonFloatParamCurve_Ignores_A_Float_Parameter_Curve()
+    {
+        // The legal AAP idiom, and the reason the parameter-curve surface exists at all. If this fires, the
+        // rule is refusing the construct it exists to protect.
+        _controller = WithParamCurve("Smoothed", AnimatorControllerParameterType.Float);
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+
+        Assert.AreEqual(0, r.NonFloatParamCurve, "a Float parameter curve is the legal AAP idiom");
+        Assert.IsFalse(r.Errors.Any(o => o.Kind == "nonFloatParamCurve"));
+    }
+
+    [Test]
+    public void NonFloatParamCurve_Ignores_Humanoid_Muscle_And_Tdof_Curves()
+    {
+        // Muscle and TDOF curves use the SAME path-less Animator binding shape as a parameter curve. The
+        // discriminator is that their property names no declared parameter, so a rig full of them stays
+        // silent with no muscle allowlist. A Bool parameter is declared alongside to prove the rule was
+        // armed and simply found nothing to say.
+        _controller = new AnimatorController();
+        _controller.AddParameter("Flag", AnimatorControllerParameterType.Bool);
+        _controller.AddLayer("Base");
+        var st = _controller.layers[0].stateMachine.AddState("Pose");
+
+        var clip = new AnimationClip { name = "muscle" };
+        foreach (var prop in new[] { "LeftHand.Index.1 Stretched", "SpineTDOF.x", "RootT.y" })
+            UnityEditor.AnimationUtility.SetEditorCurve(
+                clip,
+                UnityEditor.EditorCurveBinding.FloatCurve("", typeof(Animator), prop),
+                AnimationCurve.Constant(0f, 1f / 60f, 0.5f));
+        st.motion = clip;
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+
+        Assert.AreEqual(0, r.NonFloatParamCurve, "muscle and TDOF curves name no parameter and are not this defect");
+    }
+
+    [Test]
+    public void NonFloatParamCurve_Reports_Each_Parameter_Once()
+    {
+        // Two clips writing one offending parameter is a single defect to fix — the first-site-per-parameter
+        // convention Rule 2 already uses.
+        _controller = WithParamCurve("Flag", AnimatorControllerParameterType.Bool);
+        var second = new AnimationClip { name = "writes_Flag_again" };
+        UnityEditor.AnimationUtility.SetEditorCurve(
+            second,
+            UnityEditor.EditorCurveBinding.FloatCurve("", typeof(Animator), "Flag"),
+            AnimationCurve.Constant(0f, 1f / 60f, 1f));
+        _controller.layers[0].stateMachine.AddState("Play2").motion = second;
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
+
+        Assert.AreEqual(1, r.NonFloatParamCurve, "one offending parameter ⇒ one offender, however many clips write it");
+    }
 }
