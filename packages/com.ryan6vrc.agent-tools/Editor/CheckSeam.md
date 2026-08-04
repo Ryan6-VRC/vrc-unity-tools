@@ -25,5 +25,5 @@ All four verdicts hit their expected token; the reflection defaults (`GetBonesMa
 ## Notes for a re-runner
 
 - `-Tag CheckSeam` is only an output label; run `-Filter CheckSeamTests` to isolate the EditMode suite.
-- The corpus deltas straddle ε by orders of magnitude, so the corpus is an end-to-end plumbing check, **not** the ε calibration guard — the synthetic ε±δ and 0.09/0.11-weight unit brackets are that guard.
+- The corpus deltas straddle ε by orders of magnitude, so the corpus is an end-to-end plumbing check, **not** the calibration guard — that is the pair of synthetic unit brackets, `Gate_boundary` (ε±δ) and `WeightThreshold_flipsTheCount` (either side of the weighted-bone threshold). Each brackets whatever values `CheckSeam.cs` declares, so read the thresholds in force out of it.
 - Documented residuals (Rule 2, not fixed): finger-rigged handwear across non-uniform bases → advisory NOT-PASS at the fingers; Head+Neck hair on head-swaps → may NOT-PASS; a PASS certifies the humanoid skeleton coincides, not physics-cage/bust/hair/accessory placement.
