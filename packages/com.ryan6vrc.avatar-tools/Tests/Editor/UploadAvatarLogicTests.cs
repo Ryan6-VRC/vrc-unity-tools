@@ -1,3 +1,5 @@
+using System;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using Ryan6Vrc.AvatarTools.Editor;
 
@@ -49,5 +51,172 @@ public class UploadAvatarLogicTests
         Assert.AreEqual("first-upload", UploadAvatarLogic.ClassifyBlueprint(null));
         Assert.AreEqual("first-upload", UploadAvatarLogic.ClassifyBlueprint(""));
         Assert.AreEqual("update", UploadAvatarLogic.ClassifyBlueprint("avtr_x"));
+    }
+
+    // ── Login self-heal ─────────────────────────────────────────────────────────────────────────
+    //
+    // Two layers, and the second is the one that matters. LoginRefusal is a table, and a table test only
+    // proves the table. The self-heal CLAIM — "the door kicks the restore itself, and a REFUSE you re-run
+    // clears" — is a claim about a SEQUENCE of calls, so the LoginLatch tests below drive Evaluate() more
+    // than once against a controllable restore. That is where a real bug would live: kicking on every call
+    // (hammering a live account), never clearing the latch, or never converging.
+
+    // A restore the test drives by hand, standing in for CAU's Uploader.TryLogin().
+    sealed class FakeRestore
+    {
+        internal readonly TaskCompletionSource<bool> Tcs = new TaskCompletionSource<bool>();
+        internal int Kicks;
+        internal bool LoggedIn;
+        internal double Now;
+        internal Func<(Task<bool>, string)> Fail;   // when set, the kick itself fails (CAU absent/drift)
+        internal Action OnKick;                     // the restore's side effect, e.g. signing in synchronously
+
+        internal UploadAvatarLogic.LoginLatch Latch() =>
+            new UploadAvatarLogic.LoginLatch(
+                () => { Kicks++; OnKick?.Invoke(); return Fail != null ? Fail() : (Tcs.Task, (string)null); },
+                () => LoggedIn, () => Now);
+    }
+
+    [Test] public void Refusal_InFlightSaysReRun_DeadlineSaysSignIn()
+    {
+        var waiting = UploadAvatarLogic.LoginRefusal(UploadAvatarLogic.LoginRestore.InFlight, false, false, true, null);
+        StringAssert.Contains("re-run", waiting);
+        var expired = UploadAvatarLogic.LoginRefusal(UploadAvatarLogic.LoginRestore.InFlight, false, true, true, null);
+        StringAssert.Contains("sign in", expired);
+        StringAssert.DoesNotContain("re-run this call", expired);   // the opposite instruction, not a variant
+    }
+
+    [Test] public void Refusal_NoSavedCredentialsIsTheOperatorBoundary()
+    {
+        var r = UploadAvatarLogic.LoginRefusal(UploadAvatarLogic.LoginRestore.Succeeded, restoreReturnedFalse: true,
+                                               deadlineExpired: false, retriesRemain: true, failReason: null);
+        StringAssert.Contains("no saved credentials", r);
+        StringAssert.Contains("sign in", r);
+        StringAssert.DoesNotContain("re-run", r);   // repeating a restore cannot invent credentials
+    }
+
+    // Succeeded-but-still-signed-out and Failed are NOT interchangeable: one suspects version drift, the
+    // other reports a fault. A reader who cannot tell them apart cannot tell a stuck door from a broken
+    // login. Both are shown here in their EXHAUSTED form — the retries-remain form is asserted below.
+    [Test] public void Refusal_SucceededButSignedOutIsNotTheFailedText()
+    {
+        var mismatch = UploadAvatarLogic.LoginRefusal(UploadAvatarLogic.LoginRestore.Succeeded, false, false, false, null);
+        StringAssert.Contains("will not help", mismatch);
+        var failed = UploadAvatarLogic.LoginRefusal(UploadAvatarLogic.LoginRestore.Failed, false, false, false, "socket closed");
+        StringAssert.Contains("socket closed", failed);
+        Assert.AreNotEqual(mismatch, failed);
+    }
+
+    // The text must not tell a caller that re-running is pointless while the latch will in fact retry on
+    // the next call — the live venue produced exactly that contradiction before retriesRemain existed.
+    [Test] public void Refusal_SameStateSaysReRunWhileAnAttemptRemains()
+    {
+        var willRetry = UploadAvatarLogic.LoginRefusal(UploadAvatarLogic.LoginRestore.Succeeded, false, false,
+                                                       retriesRemain: true, failReason: null);
+        StringAssert.Contains("re-run", willRetry);
+        StringAssert.DoesNotContain("will not help", willRetry);
+
+        var failedRetryable = UploadAvatarLogic.LoginRefusal(UploadAvatarLogic.LoginRestore.Failed, false, false,
+                                                             retriesRemain: true, failReason: "socket closed");
+        StringAssert.Contains("re-run", failedRetryable);
+    }
+
+    [Test] public void Latch_LoggedInPassesAndNeverKicks()
+    {
+        var f = new FakeRestore { LoggedIn = true };
+        var latch = f.Latch();
+        Assert.IsNull(latch.Evaluate());
+        Assert.IsNull(latch.Evaluate());
+        Assert.AreEqual(0, f.Kicks);
+    }
+
+    // The measured common case: TryLogin signed in and completed DURING the kick, so the door passes in
+    // the same call. This is the test the re-inspect exists for — without it Evaluate would refuse on a
+    // restore that had already succeeded, and every caller would pay a re-run. Note the login must flip as
+    // the kick's side effect: pre-setting it would pass at the first check without ever kicking, testing
+    // nothing (that was this test's own first version, and it caught itself).
+    [Test] public void Latch_SynchronousRestorePassesOnTheFirstCall()
+    {
+        var f = new FakeRestore();
+        f.OnKick = () => { f.Tcs.SetResult(true); f.LoggedIn = true; };
+        var latch = f.Latch();
+        Assert.IsNull(latch.Evaluate());
+        Assert.AreEqual(1, f.Kicks);
+    }
+
+    [Test] public void Latch_SlowRestoreRefusesThenConverges_KickingOnlyOnce()
+    {
+        var f = new FakeRestore();
+        var latch = f.Latch();
+        StringAssert.Contains("re-run", latch.Evaluate());
+        StringAssert.Contains("re-run", latch.Evaluate());   // still in flight
+        Assert.AreEqual(1, f.Kicks, "an in-flight restore must not be re-kicked on every call");
+        f.Tcs.SetResult(true); f.LoggedIn = true;
+        Assert.IsNull(latch.Evaluate());
+        Assert.AreEqual(1, f.Kicks);
+    }
+
+    [Test] public void Latch_InFlightPastDeadlineStopsSayingReRun()
+    {
+        var f = new FakeRestore();
+        var latch = f.Latch();
+        StringAssert.Contains("re-run", latch.Evaluate());
+        f.Now += UploadAvatarLogic.RestoreDeadlineSeconds + 1;
+        StringAssert.Contains("sign in", latch.Evaluate());
+    }
+
+    // Bounded re-kick: a transient fault must not poison the door until the next recompile (the environment
+    // is racy by measurement), but the retry is capped so a live account never sees an unbounded loop.
+    [Test] public void Latch_FailedRestoreIsReKickedOnce_ThenRefusesWithTheReason()
+    {
+        var f = new FakeRestore();
+        var latch = f.Latch();
+        latch.Evaluate();
+        f.Tcs.SetException(new InvalidOperationException("transient socket failure"));
+        var second = latch.Evaluate();          // re-kicks; the fake hands back the same faulted task
+        Assert.AreEqual(UploadAvatarLogic.LoginLatch.MaxKicks, f.Kicks);
+        latch.Evaluate();
+        Assert.AreEqual(UploadAvatarLogic.LoginLatch.MaxKicks, f.Kicks, "the re-kick must be bounded");
+        StringAssert.Contains("transient socket failure", second);
+    }
+
+    // Found in the live venue, not by a fake: a login lost AFTER a successful restore leaves the latch
+    // holding a completed-true task, and the door declared CAU/SDK drift — telling the caller re-running
+    // would not help, when a fresh kick is precisely what fixes it. A stale record is re-kicked.
+    [Test] public void Latch_LoginLostAfterASuccessfulRestoreIsReKickedNotDeclaredDrift()
+    {
+        var f = new FakeRestore();
+        var latch = f.Latch();
+        StringAssert.Contains("re-run", latch.Evaluate());   // kick 1, still in flight
+        f.Tcs.SetResult(true);                               // the restore completes true...
+        Assert.AreEqual(1, f.Kicks);                         // ...but the login is lost before the next call
+        f.OnKick = () => f.LoggedIn = true;                  // a fresh kick is what recovers it
+        Assert.IsNull(latch.Evaluate(), "a stale Succeeded latch must be re-kicked, not declared drift");
+        Assert.AreEqual(2, f.Kicks);
+    }
+
+    [Test] public void Latch_LoginClearsTheLatchSoALaterSignOutGetsAFullBudget()
+    {
+        var f = new FakeRestore();
+        var latch = f.Latch();
+        latch.Evaluate();
+        f.Tcs.SetResult(true); f.LoggedIn = true;
+        Assert.IsNull(latch.Evaluate());
+        f.LoggedIn = false;                     // a domain reload clears the login; credentials survive
+        latch.Evaluate();
+        Assert.AreEqual(2, f.Kicks, "a cleared latch must kick again rather than stay exhausted");
+    }
+
+    // A CAU-less venue must never latch: the kick fails, the refusal names why, and the next call is free
+    // to try again rather than being stuck behind a spent attempt budget.
+    [Test] public void Latch_KickFailureNamesTheReasonAndDoesNotLatch()
+    {
+        var f = new FakeRestore { Fail = () => (null, "CAU TryLogin not resolved (CAU absent, or CAU drift)") };
+        var latch = f.Latch();
+        var r = latch.Evaluate();
+        StringAssert.Contains("CAU", r);
+        StringAssert.Contains("sign in", r);
+        latch.Evaluate();
+        Assert.AreEqual(2, f.Kicks, "a failed kick must leave the latch empty, not spend the budget");
     }
 }
