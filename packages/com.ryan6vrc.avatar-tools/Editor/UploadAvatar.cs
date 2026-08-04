@@ -513,14 +513,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             if (EditorApplication.isPlaying)
                 return "in Play mode — exit Play mode before uploading";
+            // Build target BEFORE the login: an enum compare, and no login can fix it. Left below, an
+            // operator on Android would spend a network round-trip and a re-run only to be told the real
+            // blocker on the second call. The latch stays above TryGetBuilder, which does depend on being
+            // signed in — so "cheap-to-costly" is preserved among the checks that are actually independent.
+            if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.StandaloneWindows64)
+                return "build target is " + EditorUserBuildSettings.activeBuildTarget +
+                       "; switch to Windows (StandaloneWindows64)";
             var notLoggedIn = CauReflect.LoginLatch.Evaluate();
             if (notLoggedIn != null)
                 return notLoggedIn;
             if (!CauReflect.TryGetBuilder(out _, out var why))
                 return why;
-            if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.StandaloneWindows64)
-                return "build target is " + EditorUserBuildSettings.activeBuildTarget +
-                       "; switch to Windows (StandaloneWindows64)";
             return null;
         }
 

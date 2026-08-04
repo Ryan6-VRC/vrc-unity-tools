@@ -94,19 +94,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// testable without CAU or a live SDK login — a headless venue has neither, which is why the door's
         /// own preflight cannot cover this.
         ///
-        /// It NEVER awaits. The SDK's InitialFetchCurrentUser callback can require the editor update loop
+        /// It NEVER awaits. The SDK's InitialFetchCurrentUser callback requires the editor update loop
         /// (measured: with the main thread blocked 3s the callback landed only ~8ms after the block
         /// released), so blocking on the restore would hang the editor — the same hazard UploadAvatar.Run
-        /// already names for the batch itself. Instead: kick, re-inspect in the same call (the restore often
-        /// completes synchronously, so the common path costs no re-run at all), and otherwise refuse with
-        /// an instruction to re-run.
+        /// already names for the batch itself. So the normal cost of a cold door is ONE re-run: the kick
+        /// returns WaitingForActivation (measured, from a forced-cold editor), this call refuses with
+        /// "re-run in a moment", and the next one passes.
         ///
-        /// A failed restore is re-kicked once (<see cref="MaxKicks"/> total). The environment is genuinely
-        /// racy — a domain reload clears APIUser.IsLoggedIn while saved credentials survive, and whichever
-        /// editor window repaints first may restore it — so one transient fault must not poison the door
-        /// until the next recompile. The bound is what keeps that from becoming an unbounded retry against
-        /// a live account. Because a failure is re-kicked while attempts remain, a <c>Failed</c> state that
-        /// reaches a refusal has by construction exhausted them.</summary>
+        /// The re-inspect after the kick is not that path — it catches the login being restored by someone
+        /// else. The environment is genuinely racy: a domain reload clears APIUser.IsLoggedIn while saved
+        /// credentials survive, and whichever SDK/CAU window repaints first may restore it, so the state can
+        /// change under us between the entry check and the kick returning. Re-reading is free; skipping it
+        /// would refuse on a door that is already open.
+        ///
+        /// A stale restore is re-kicked while attempts remain (<see cref="MaxKicks"/> total) so one
+        /// transient fault cannot poison the door until the next recompile, bounded so a live account never
+        /// sees an unbounded retry.</summary>
         internal sealed class LoginLatch
         {
             internal const int MaxKicks = 2;
@@ -118,7 +121,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Task<bool> _task;
             double _kickedAt;
             int _kicks;
-            string _failReason;
+            // Written by Observe's continuation, which ExecuteSynchronously only HINTS will run inline —
+            // read on the main thread. volatile so a captured reason cannot be lost to a missed publication,
+            // degrading a named refusal to "no reason reported".
+            volatile string _failReason;
 
             internal LoginLatch(Func<(Task<bool>, string)> kick, Func<bool> isLoggedIn, Func<double> now)
             {
@@ -141,14 +147,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
             internal bool DeadlineExpired =>
                 _task != null && !_task.IsCompleted && _now() - _kickedAt > RestoreDeadlineSeconds;
 
-            // A spent latch is re-kicked while attempts remain. Two states qualify, for the same reason —
-            // the latch's record has gone stale relative to the SDK: a failed restore (transient), and a
-            // restore that succeeded while we are signed out anyway (the login was lost afterwards — a
-            // sign-out in the panel — which a fresh kick fixes). A restore that returned FALSE is not
-            // re-kicked: that is "no saved credentials", and repeating it cannot change the answer.
+            // A spent latch is re-kicked while attempts remain. Three states qualify, for the same reason —
+            // the latch's record has gone stale relative to the SDK: a failed restore (transient); one that
+            // succeeded while we are signed out anyway (the login was lost afterwards — a sign-out in the
+            // panel — which a fresh kick fixes); and one still unfinished past the deadline, whose task CAU
+            // gave no timeout and no cancellation, so it may never complete at all. Abandoning that stale
+            // task is safe: its Observe continuation still holds it, so nothing is left unobserved.
+            // A restore that returned FALSE is not re-kicked: that is "no saved credentials", and repeating
+            // it cannot change the answer.
             bool MayKick => _task == null ||
                             (_kicks < MaxKicks &&
                              (State == LoginRestore.Failed ||
+                              (State == LoginRestore.InFlight && DeadlineExpired) ||
                               (State == LoginRestore.Succeeded && !ReturnedFalse)));
 
             /// <summary>Null when the door may proceed, otherwise the refusal.</summary>
@@ -167,7 +177,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     Observe(task);
                 }
 
-                // Re-inspect: the restore frequently completes synchronously, and then this call passes.
+                // Re-inspect: the kick normally leaves the restore pending, but the login may have been
+                // restored by another editor surface while we were in here — then this call passes.
                 if (_isLoggedIn()) { Clear(); return null; }
 
                 return LoginRefusal(State, ReturnedFalse, DeadlineExpired, _kicks < MaxKicks, _failReason);
@@ -178,9 +189,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             /// unrelated GC — and clearing the latch on a later success would drop the last reference
             /// before anything read it. Caches a redacted string so the door never touches the Task's
             /// exception itself. Runs on whatever thread completed the task: string assignment only,
-            /// no Unity API.</summary>
+            /// no Unity API.
+            ///
+            /// The ReferenceEquals guard keeps an ABANDONED task quiet: a re-kick replaces _task, and the
+            /// old task's continuation may land afterwards — without the guard it would overwrite the live
+            /// attempt's reason (or repopulate one the re-kick had just cleared) with a stale one.</summary>
             void Observe(Task<bool> task) => task.ContinueWith(t =>
             {
+                if (!ReferenceEquals(_task, t)) return;
                 if (t.IsFaulted)
                     _failReason = RedactIds((t.Exception?.GetBaseException())?.Message ?? "unknown error");
                 else if (t.IsCanceled)

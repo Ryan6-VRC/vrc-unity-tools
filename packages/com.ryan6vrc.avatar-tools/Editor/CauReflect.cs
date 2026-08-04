@@ -49,7 +49,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>Kick CAU's <c>Uploader.TryLogin()</c> — which restores saved credentials — and hand back
-        /// the running Task. Does NOT await it: TryLogin's fetch callback can require the editor update loop,
+        /// the running Task. Does NOT await it: TryLogin's fetch callback requires the editor update loop,
         /// so blocking here would hang the editor (<see cref="UploadAvatarLogic.LoginLatch"/> carries the
         /// measurement and owns the resulting state machine). A missing member returns a null task plus a
         /// named reason — never a throw — and leaves the caller's latch untouched, so a CAU-less venue can
@@ -58,9 +58,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             var m = Uploader?.GetMethod("TryLogin", BindingFlags.Public | BindingFlags.Static);
             if (m == null) return (null, "CAU TryLogin not resolved (CAU absent, or CAU drift)");
-            try { return (m.Invoke(null, null) as Task<bool>, null); }
+            object raw;
+            try { raw = m.Invoke(null, null); }
             catch (TargetInvocationException tie) { return (null, (tie.InnerException ?? tie).Message); }
             catch (Exception e) { return (null, e.Message); }
+            if (raw is Task<bool> t) return (t, null);
+            // Drift in the RETURN type, which an `as` cast would report as an unnamed null — indistinguishable
+            // from "could not be started" even though the restore just RAN. The caller must hear that, both
+            // because the reason is its only fix and because a silent null leaves its latch empty, re-firing
+            // a live-account restore on every call.
+            return (null, "CAU TryLogin returned " + (raw?.GetType().Name ?? "null") +
+                          ", not Task<bool> (CAU drift) — the restore may have run unobserved");
         }
 
         /// <summary>The door's login self-heal, wired to the live SDK + CAU. Editor-lifetime static: a

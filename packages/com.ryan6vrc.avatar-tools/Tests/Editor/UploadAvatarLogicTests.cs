@@ -130,12 +130,13 @@ public class UploadAvatarLogicTests
         Assert.AreEqual(0, f.Kicks);
     }
 
-    // The measured common case: TryLogin signed in and completed DURING the kick, so the door passes in
-    // the same call. This is the test the re-inspect exists for — without it Evaluate would refuse on a
-    // restore that had already succeeded, and every caller would pay a re-run. Note the login must flip as
-    // the kick's side effect: pre-setting it would pass at the first check without ever kicking, testing
-    // nothing (that was this test's own first version, and it caught itself).
-    [Test] public void Latch_SynchronousRestorePassesOnTheFirstCall()
+    // Why the re-inspect exists — and it is NOT "TryLogin usually finishes synchronously": measured from a
+    // forced-cold editor, the kick returns WaitingForActivation, so the normal cold cost is one re-run.
+    // What this covers is the racy case: the login gets restored by another editor surface while we are
+    // inside Evaluate, and re-reading is free, so the door should pass rather than refuse on an open door.
+    // Note the login must flip as the kick's side effect: pre-setting it would pass at the first check
+    // without ever kicking, testing nothing (that was this test's own first version, and it caught itself).
+    [Test] public void Latch_LoginRestoredDuringTheKickPassesWithoutARerun()
     {
         var f = new FakeRestore();
         f.OnKick = () => { f.Tcs.SetResult(true); f.LoggedIn = true; };
@@ -156,10 +157,34 @@ public class UploadAvatarLogicTests
         Assert.AreEqual(1, f.Kicks);
     }
 
-    [Test] public void Latch_InFlightPastDeadlineStopsSayingReRun()
+    // The deadline must spend the reserved attempt, not merely change the sentence. CAU's TryLogin has no
+    // timeout and no cancellation, so a fetch that invokes neither callback pends forever; if the expired
+    // cell could not re-kick, the second attempt would sit unreachable and the only escape from a wedged
+    // restore would be a recompile — which is exactly what the deadline exists to avoid.
+    [Test] public void Latch_InFlightPastDeadlineReKicksAndCanRecover()
     {
         var f = new FakeRestore();
         var latch = f.Latch();
+        StringAssert.Contains("re-run", latch.Evaluate());
+        Assert.AreEqual(1, f.Kicks);
+
+        f.Now += UploadAvatarLogic.RestoreDeadlineSeconds + 1;   // the restore has wedged
+        f.OnKick = () => f.LoggedIn = true;                      // a fresh kick gets through
+        Assert.IsNull(latch.Evaluate(), "an expired restore must be re-kicked, not just re-worded");
+        Assert.AreEqual(2, f.Kicks);
+    }
+
+    [Test] public void Latch_InFlightPastDeadlineWithNoAttemptsLeftNamesTheOperatorBoundary()
+    {
+        var f = new FakeRestore();
+        var latch = f.Latch();
+        latch.Evaluate();
+        f.Now += UploadAvatarLogic.RestoreDeadlineSeconds + 1;
+        latch.Evaluate();                                        // spends the last attempt, still wedged
+        Assert.AreEqual(UploadAvatarLogic.LoginLatch.MaxKicks, f.Kicks);
+
+        // The re-kick re-stamps the clock, so the fresh attempt gets its own full deadline before this
+        // escalates — a re-kick that inherited the old stamp would escalate instantly.
         StringAssert.Contains("re-run", latch.Evaluate());
         f.Now += UploadAvatarLogic.RestoreDeadlineSeconds + 1;
         StringAssert.Contains("sign in", latch.Evaluate());
