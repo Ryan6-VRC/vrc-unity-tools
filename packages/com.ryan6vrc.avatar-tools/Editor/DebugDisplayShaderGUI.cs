@@ -25,14 +25,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// label is merely unreadable as a packed integer, and Unity logs one "Could not create a custom UI"
     /// warning per inspect.</para>
     ///
-    /// <para><b>Layout borrows lilToon's shape, not its code.</b> The section header bar, the boxed body,
-    /// and a collapsed row that still shows its own key control are all patterns from
-    /// <c>lilEditorGUI.Foldout</c> / <c>DrawSimpleFoldout</c>. They are reimplemented here in a few lines
-    /// against built-in styles: <c>avatar-tools</c> referencing <c>jp.lilxyzw.liltoon</c> to draw a
-    /// foldout would put a shader package in the dependency graph of an entry whose only dependency is an
-    /// MA <c>BoneProxy</c>.</para>
+    /// <para><b>The shell, the rim, the section chrome and the mode bar are not here.</b> They live in
+    /// <see cref="CrystalShellShaderGUI"/>, shared with the rest of the <c>debug-shaders</c> family; this
+    /// class is the display's own half — the entry table and the arithmetic around it. The mode bar is the
+    /// base's generic <c>[KeywordEnum]</c> control, configured by the four overrides below.</para>
     /// </summary>
-    public class DebugDisplayShaderGUI : ShaderGUI
+    public class DebugDisplayShaderGUI : CrystalShellShaderGUI
     {
         static readonly string[] SourceNames = Enum.GetNames(typeof(DisplayGlyphs.ValueSource));
 
@@ -56,24 +54,31 @@ namespace Ryan6Vrc.AvatarTools.Editor
         static readonly string[] PaletteLabels = { "Color 0", "Color 1", "Color 2", "Color 3" };
         // Drawn by hand rather than through ShaderProperty — the mode as a button bar, the width per
         // column — but still shader properties this GUI is responsible for covering.
-        static readonly string[] HandDrawnProps = { "_Display_Mode", "_Total_Width" };
-        static readonly string[] ShellToggleProps = { "_Shell_Enabled" };
-        static readonly string[] ShellProps =
-            { "_Shell_ReflectionCube", "_Shell_Reflection_Color", "_Shell_Reflection_Strength",
-              "_Shell_Reflection_Smoothness", "_Shell_Reflection_BlurMaxMip" };
-        static readonly string[] RimProps =
-            { "_Shell_Rim_Color", "_Shell_Rim_Strength", "_Shell_Rim_Border", "_Shell_Rim_Blur",
-              "_Shell_Rim_FresnelPower", "_Shell_Rim_VRParallaxStrength" };
+        static readonly string[] HandDrawnProps = { "_Total_Width" };
 
-        static readonly HashSet<string> AllSectionProps = new HashSet<string>(
-            LayoutProps.Concat(TextMetricProps).Concat(PaletteProps).Concat(HandDrawnProps)
-                       .Concat(ShellToggleProps).Concat(ShellProps).Concat(RimProps));
+        protected override IEnumerable<string> ClaimedProperties
+        {
+            get
+            {
+                return base.ClaimedProperties
+                    .Concat(LayoutProps).Concat(TextMetricProps).Concat(PaletteProps)
+                    .Concat(HandDrawnProps);
+            }
+        }
 
         // The three display modes, in the order the shader's [KeywordEnum] declares them — the float value
         // IS the index, so this array's order is a wire contract, not a presentation choice.
-        static readonly string[] ModeNames = { "Billboard", "Object", "UV" };
-        static readonly string[] ModeKeywords =
-            { "_DISPLAY_MODE_BILLBOARD", "_DISPLAY_MODE_OBJECT", "_DISPLAY_MODE_UV" };
+        protected override string ModeProperty { get { return "_Display_Mode"; } }
+        protected override string ModeLabel { get { return "Display Mode"; } }
+        protected override string[] ModeNames { get { return new[] { "Billboard", "Object", "UV" }; } }
+
+        protected override string[] ModeKeywords
+        {
+            get
+            {
+                return new[] { "_DISPLAY_MODE_BILLBOARD", "_DISPLAY_MODE_OBJECT", "_DISPLAY_MODE_UV" };
+            }
+        }
 
         // Static, not per-instance: Unity builds a fresh ShaderGUI on every selection change, so instance
         // fields collapse every section each time you click away and back. lilToon keeps the equivalent
@@ -81,11 +86,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // enough for a view preference.
         static bool _showLayout = true;
         static bool _showText = true;
-        static bool _showShell;
-        static bool _showRendering;
         static readonly bool[] _showEntry = new bool[DisplayGlyphs.MaxEntries];
-
-        static GUIStyle _headerStyle;
 
         // Sample magnitudes per source, so a computed entry's alignment and width are checkable before it
         // is ever rendered. Chosen to be representative rather than pretty: the far plane really is four
@@ -139,7 +140,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var scan = Scan(mat, cols, rows, cellAdv, visible);
 
             DrawSummary(scan, cols, rows, cellAdv);
-            DrawDisplayModeBar(mat);
+            DrawModeBar(mat);
 
             if (Section("Layout", "The grid the entries land in, and how wide a column is", ref _showLayout))
                 using (Body())
@@ -157,22 +158,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     DrawNamed(materialEditor, properties, PaletteProps, PaletteLabels);
                 }
 
-            if (Section("Crystal shell", "The reflective outer pass, and the rim light inside it",
-                        ref _showShell))
-                using (Body())
-                {
-                    DrawNamed(materialEditor, properties, ShellToggleProps);
-                    // The rim light lives in the same pass behind the same _SHELL_ON keyword, so with the
-                    // shell off neither group does anything. Nesting says that; two sibling sections
-                    // implied the rim was independently live.
-                    if (GetFloat(mat, "_Shell_Enabled", 1f) != 0f)
-                    {
-                        DrawNamed(materialEditor, properties, ShellProps);
-                        Line();
-                        EditorGUILayout.LabelField("Rim light", EditorStyles.boldLabel);
-                        DrawNamed(materialEditor, properties, RimProps);
-                    }
-                }
+            DrawShellSection(materialEditor, properties, mat);
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Entries", EditorStyles.boldLabel);
@@ -209,49 +195,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     "Entries outside the " + visible + "-cell grid with nothing configured. Add grid " +
                     "columns or rows to reach them."));
 
-            EditorGUILayout.Space();
-            EditorGUILayout.LabelField("Advanced", EditorStyles.boldLabel);
-            if (Section("Rendering", "Unity's own per-material render settings", ref _showRendering))
-                using (Body())
-                {
-                    materialEditor.RenderQueueField();
-                    materialEditor.DoubleSidedGIField();
-                    materialEditor.EnableInstancingField();
-                }
+            DrawRenderingSection(materialEditor);
 
-            DrawUnclaimed(properties);
+            // Entry properties are edited through their packed form rather than as raw properties, so the
+            // base's coverage check has to know to skip them.
+            DrawUnclaimed(properties, EntryProperty.IsMatch);
         }
 
         // ── Hand-drawn controls ─────────────────────────────────────────────────────────────────────
-
-        /// <summary>
-        /// The mode as a button bar at the top of the inspector, where lilToon puts its editor-mode row.
-        /// Three mutually exclusive modes read as three buttons; as a popup they read as a list to open.
-        /// </summary>
-        static void DrawDisplayModeBar(Material mat)
-        {
-            EditorGUILayout.LabelField("Display Mode", EditorStyles.boldLabel);
-
-            // Guarded like DrawColumnWidth: a hand-drawn control skips DrawNamed, so it gets no
-            // shader-lacks-this-property error box unless it raises its own.
-            if (!mat.HasProperty("_Display_Mode"))
-            {
-                EditorGUILayout.HelpBox("shader has no property '_Display_Mode' — inspector and shader " +
-                                        "have drifted", MessageType.Error);
-                return;
-            }
-
-            int cur = Mathf.Clamp(Mathf.RoundToInt(GetFloat(mat, "_Display_Mode", 0f)), 0, ModeNames.Length - 1);
-            DrawModeKeywordMismatch(mat, cur);
-
-            EditorGUI.BeginChangeCheck();
-            int next = GUILayout.Toolbar(cur, ModeNames, GUILayout.Height(22f));
-            // Written even when next == cur: re-picking the shown mode is how an operator repairs a
-            // mismatch without reaching for the Fix button, and a no-op guard would make that click do
-            // nothing on exactly the material that needs it.
-            if (EditorGUI.EndChangeCheck()) WriteMode(mat, next);
-            EditorGUILayout.Space();
-        }
 
         /// <summary>
         /// The entry's palette slot as four clickable swatches showing the palette's own colours. An
@@ -305,60 +256,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 EditorGUIUtility.AddCursorRect(swatch, MouseCursor.Link);
             }
             return picked;
-        }
-
-        /// <summary>
-        /// Reports a material whose <c>_Display_Mode</c> float and <c>_DISPLAY_MODE_*</c> keyword disagree,
-        /// and offers to repair it. The float is what the bar reads, the keyword is what the shader
-        /// branches on, so a mismatch renders one mode while the bar shows another — the exact silent
-        /// wrongness this inspector exists to refuse.
-        ///
-        /// <para>The bar's own write keeps the two in step, so this is about materials that arrive already
-        /// split: <c>new Material(shader)</c> enables no keyword at all, so a scripted
-        /// <c>SetFloat("_Display_Mode", 2)</c> leaves <c>multi_compile</c>'s first variant (Billboard) in
-        /// force while the float says UV. Pasted material properties and applied presets can do the same.
-        /// Detected, never repaired behind the operator's back: a write during <c>OnGUI</c> would dirty a
-        /// material just for being looked at.</para>
-        /// </summary>
-        static void DrawModeKeywordMismatch(Material mat, int cur)
-        {
-            int enabled = -1, enabledCount = 0;
-            for (int k = 0; k < ModeKeywords.Length; k++)
-                if (mat.IsKeywordEnabled(ModeKeywords[k])) { enabled = k; enabledCount++; }
-
-            // Exactly one keyword, matching the float, is the only correct state.
-            if (enabledCount == 1 && enabled == cur) return;
-
-            string keywordSays = enabledCount == 0
-                ? "no mode keyword is enabled, so the shader falls back to " + ModeNames[0]
-                : enabledCount > 1
-                    ? enabledCount + " mode keywords are enabled at once"
-                    : "the keyword says " + ModeNames[enabled];
-
-            EditorGUILayout.HelpBox(
-                "Display mode is inconsistent: the float says " + ModeNames[cur] + " but " + keywordSays +
-                ". The shader branches on the keyword, so what renders is not what this bar shows. " +
-                "Re-pick the mode below, or press Fix.", MessageType.Error);
-
-            if (GUILayout.Button("Fix — set the keyword to " + ModeNames[cur]))
-                WriteMode(mat, cur);
-        }
-
-        /// <summary>
-        /// The float and the keywords, written together. <c>[KeywordEnum]</c> is what normally keeps them
-        /// in step and only <see cref="MaterialEditor.ShaderProperty"/> honours it, so every hand-drawn
-        /// path has to come through here.
-        /// </summary>
-        static void WriteMode(Material mat, int mode)
-        {
-            Undo.RecordObject(mat, "Change display mode");
-            mat.SetFloat("_Display_Mode", mode);
-            for (int k = 0; k < ModeKeywords.Length; k++)
-            {
-                if (k == mode) mat.EnableKeyword(ModeKeywords[k]);
-                else mat.DisableKeyword(ModeKeywords[k]);
-            }
-            EditorUtility.SetDirty(mat);
         }
 
         /// <summary>
@@ -645,103 +542,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
             EditorUtility.SetDirty(mat);
-        }
-
-        // ── Section chrome (our own, shaped after lilEditorGUI) ─────────────────────────────────────
-
-        static void EnsureStyles()
-        {
-            // Built during OnGUI, never in a field initializer: a GUIStyle derived from a named built-in
-            // style needs GUI.skin, which does not exist at static-init time.
-            if (_headerStyle != null) return;
-            _headerStyle = new GUIStyle("ShurikenModuleTitle")
-            {
-                font = EditorStyles.label.font,
-                fontSize = EditorStyles.label.fontSize,
-                fontStyle = FontStyle.Bold,
-                border = new RectOffset(15, 7, 4, 4),
-                contentOffset = new Vector2(20f, -2f),
-                fixedHeight = 22
-            };
-        }
-
-        /// <summary>A full-width header bar whose whole surface toggles the section, as lilToon's is.</summary>
-        static bool Section(string title, string tooltip, ref bool display)
-        {
-            var rect = GUILayoutUtility.GetRect(16f, 22f, _headerStyle);
-            rect.width += 8f;
-            rect.x -= 8f;
-            GUI.Box(rect, new GUIContent(title, tooltip), _headerStyle);
-
-            var e = Event.current;
-            if (e.type == EventType.Repaint)
-                EditorStyles.foldout.Draw(new Rect(rect.x + 4f, rect.y + 3f, 13f, 13f),
-                                          false, false, display, false);
-            // Left button only. The bar is deliberately 8px wider than the content rect, so swallowing
-            // every button would suppress the context menu over a band beyond the section itself.
-            if (e.type == EventType.MouseDown && e.button == 0 && rect.Contains(e.mousePosition))
-            {
-                display = !display;
-                e.Use();
-            }
-            return display;
-        }
-
-        static EditorGUILayout.VerticalScope Body()
-            => new EditorGUILayout.VerticalScope(EditorStyles.helpBox);
-
-        static void Line()
-            => EditorGUI.DrawRect(EditorGUI.IndentedRect(EditorGUILayout.GetControlRect(false, 1)),
-                                  new Color(0.5f, 0.5f, 0.5f, 0.4f));
-
-        // ── Property helpers ────────────────────────────────────────────────────────────────────────
-
-        static float GetFloat(Material mat, string name, float fallback)
-            => mat.HasProperty(name) ? mat.GetFloat(name) : fallback;
-
-        /// <summary>
-        /// Draws the named properties in the order given. A name the shader lacks gets an explicit error
-        /// box rather than being silently omitted, so shader/GUI drift is loud — one forgotten control is
-        /// an invisible control, and <c>_Font_Scale_Relative</c> governs whether text renders at all.
-        /// </summary>
-        void DrawNamed(MaterialEditor editor, MaterialProperty[] properties, string[] names,
-                       string[] labels = null)
-        {
-            for (int n = 0; n < names.Length; n++)
-            {
-                var name = names[n];
-                var prop = properties.FirstOrDefault(p => p.name == name);
-                if (prop == null)
-                {
-                    EditorGUILayout.HelpBox("shader has no property '" + name +
-                                            "' — inspector and shader have drifted", MessageType.Error);
-                    continue;
-                }
-                editor.ShaderProperty(prop, labels != null ? labels[n] : prop.displayName);
-            }
-        }
-
-        /// <summary>
-        /// The other direction of the same drift check: a property the shader has and no section claims
-        /// would otherwise be silently unreachable through this GUI, which is exactly the failure
-        /// <see cref="DrawNamed"/>'s error box exists to prevent. Entry properties are excluded because
-        /// they are edited through their packed form, and <c>[HideInInspector]</c> ones because being
-        /// undrawn is what that flag asks for.
-        /// </summary>
-        static void DrawUnclaimed(MaterialProperty[] properties)
-        {
-            var orphans = properties
-                .Where(p => (p.flags & MaterialProperty.PropFlags.HideInInspector) == 0)
-                .Where(p => !EntryProperty.IsMatch(p.name))
-                .Where(p => !AllSectionProps.Contains(p.name))
-                .Select(p => p.name)
-                .ToArray();
-
-            if (orphans.Length > 0)
-                EditorGUILayout.HelpBox(
-                    "The shader declares " + orphans.Length + " property(s) no section of this " +
-                    "inspector draws, so they are unreachable here: " + string.Join(", ", orphans) +
-                    ". Add them to a section in DebugDisplayShaderGUI.", MessageType.Error);
         }
     }
 }

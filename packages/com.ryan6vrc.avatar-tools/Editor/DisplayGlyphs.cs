@@ -9,7 +9,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// author-time string→float label packing, and the per-entry format bitfield. This type is the
     /// CANON for all three — the MSDF atlas is generated from <see cref="Charset"/> (never from a
     /// committed copy of it), the shader's HLSL unpack mirrors <see cref="TryEncodeLabel"/>, and the
-    /// <c>vrc-patterns/debug-display</c> README quotes the arithmetic. Pure math, no Unity asset access,
+    /// <c>vrc-patterns/debug-shaders</c> README quotes the arithmetic. Pure math, no Unity asset access,
     /// so it is the NUnit-tested core the two doors (<see cref="SetDisplayEntry"/>,
     /// <see cref="ReportDisplay"/>) and the material inspector all sit on.
     ///

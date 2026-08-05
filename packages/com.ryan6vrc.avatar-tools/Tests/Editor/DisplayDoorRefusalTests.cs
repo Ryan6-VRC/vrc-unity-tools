@@ -52,10 +52,10 @@ public class DisplayDoorRefusalTests
     public void Set_Refuses_A_Packages_Target_Naming_The_Copy_Fix()
     {
         LogAssert.Expect(LogType.Error, new Regex(@"\[set-display-entry\].*=> FAIL"));
-        // The shipped preset lives at Packages/com.ryan6vrc.patterns/debug-display/assets/WorldCoords.mat.
+        // The shipped preset lives at Packages/com.ryan6vrc.patterns/debug-shaders/assets/WorldCoords.mat.
         // LAYOUT.md makes that read-only, so the door must refuse and say what to do instead.
         var summary = SetDisplayEntry.Run(
-            "Packages/com.ryan6vrc.patterns/debug-display/assets/WorldCoords.mat", 0, "POS X:");
+            "Packages/com.ryan6vrc.patterns/debug-shaders/assets/WorldCoords.mat", 0, "POS X:");
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("read-only", summary);
         StringAssert.Contains("TEMPLATE", summary);
