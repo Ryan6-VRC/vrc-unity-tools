@@ -40,25 +40,45 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── The charset (canon) ─────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// The 64-slot glyph table. Index IS the glyph ID; the MSDF atlas is generated from this string
-        /// in this order, so reordering it invalidates every committed label and the atlas together.
+        /// The 63 atlas glyphs. Index IS the glyph ID, so reordering this string invalidates every
+        /// committed label and the atlas together. ID 63 is <see cref="Space"/>, which is deliberately
+        /// NOT in the table — see below.
         ///
-        /// <para><b>IDs 0–12 are inherited from the Lereldarion ancestor verbatim</b> (<c>+ - .</c> then
-        /// the ten digits), because <c>format_coord</c>'s numeric formatting indexes them directly —
-        /// <c>Zero + (v % 10)</c> only works while the digits are contiguous from 3. Everything from 13
-        /// up is ours. The ancestor's 14/15/16 were <c>X</c>/<c>Y</c>/<c>Z</c> only because it
-        /// hard-coded axis prefixes, which author-time labels replace; its 13/17–19/21 were decorative
-        /// HUD glyphs (arrows, a degree sign) this entry has no use for.</para>
+        /// <para><b>The order is codepoint-ascending because msdf-atlas-gen lays a uniform grid out in
+        /// codepoint order, not in charset-file order.</b> Measured, not assumed: a first atlas generated
+        /// from a hand-ordered table came back with <c>! # $ % &amp; ( ) *</c> in row 0 and
+        /// <c>+ , - . / 0 1 2</c> in row 1 regardless of the order requested, which would have rendered
+        /// every glyph as a different character. So the table follows the generator rather than fighting
+        /// it, and <see cref="Charset_Is_Strictly_Codepoint_Ascending"/> is the machine guard against
+        /// someone later "tidying" it back into a human-pleasing grouping.</para>
+        ///
+        /// <para><b>What the ancestor actually constrains is the arithmetic, not the IDs.</b> An earlier
+        /// draft claimed IDs 0–12 were inherited verbatim. They are not, and they need not be:
+        /// <c>format_coord</c> only requires that the ten digits be CONTIGUOUS (which ASCII guarantees
+        /// under any codepoint sort) and that each named glyph have some known ID. Both hold here with
+        /// the digits at 13–22. The ancestor's own 14/15/16 were <c>X</c>/<c>Y</c>/<c>Z</c> solely
+        /// because it hard-coded axis prefixes, which author-time labels replace.</para>
+        ///
+        /// <para><b>Space has no cell.</b> <c>Font::sdf()</c> early-returns on the sentinel and never
+        /// samples the atlas for it, so spending a cell would be waste — and it could not have one
+        /// anyway: U+0020 is the lowest codepoint in the set, so a codepoint sort would drag it to ID 0
+        /// where it would collide with a real glyph. Excluding it is what lets the sentinel stay at 63.</para>
         ///
         /// <para>Uppercase only, and MONOSPACE is a hard requirement rather than a preference: the
         /// fixed-cell atlas grid and every advance in the layout arithmetic assume one advance width
         /// for all glyphs.</para>
         /// </summary>
         public const string Charset =
-            "+-.0123456789:" +               // 0–13   sign, point, digits, label separator
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +   // 14–39  letters
-            "%/#*=<>()[]_,?!@&^~|$°" +  // 40–61  punctuation (61 = degree)
-            "∞ ";                       // 62–63  overflow sentinel, then space
+            "!#$%&()*" +                     //  0–7   punctuation below '+'
+            "+,-./" +                        //  8–12  sign, comma, minus, point, slash
+            "0123456789" +                   // 13–22  digits — contiguous, which is all the arithmetic needs
+            ":" +                            // 23     the label separator
+            "<=>?@" +                        // 24–28
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +   // 29–54  letters
+            "[]^_" +                         // 55–58
+            "|~" +                           // 59–60
+            "°" +                            // 61
+            "∞";                             // 62     the overflow sentinel
 
         /// <summary>Bits per glyph. 6 → 64 slots, which is what the regenerated atlas holds.</summary>
         public const int Bits = 6;
@@ -68,7 +88,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// as blank rather than as a glyph.</summary>
         public const int Mask = (1 << Bits) - 1;
 
-        /// <summary>Space sentinel. <c>Font::sdf()</c> early-returns on it, so a space costs no sample.</summary>
+        /// <summary>Space sentinel, and the only ID with no atlas cell. <c>Font::sdf()</c> early-returns
+        /// on it, so a space costs no sample.</summary>
         public const int Space = Mask;
 
         /// <summary>The glyph the shader emits when a value cannot be printed — magnitude past the
@@ -76,9 +97,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// the spec dropped it while keeping the constant; it is wired here so that cannot recur.</summary>
         public const int Infinity = 62;
 
-        /// <summary>Glyph IDs the shader names directly. Kept as constants rather than
-        /// <c>Charset.IndexOf</c> calls so the HLSL side has an explicit list to mirror.</summary>
-        public const int Plus = 0, Minus = 1, Dot = 2, Zero = 3, Colon = 13, LetterA = 14;
+        /// <summary>Glyph IDs the shader names directly, and the ONLY thing the HLSL side needs from this
+        /// table — it never sees the alphabetic half, because labels arrive pre-encoded. Positions follow
+        /// from the codepoint order (<see cref="Charset"/>) rather than being chosen; the tests pin them
+        /// so a charset edit that moves one fails loudly instead of silently reprinting every number in
+        /// the wrong glyphs.</summary>
+        public const int Plus = 8, Minus = 10, Dot = 11, Zero = 13, Colon = 23, LetterA = 29;
 
         // ── Label packing ───────────────────────────────────────────────────────────────────────────
 
@@ -133,7 +157,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             for (int i = 0; i < upper.Length; i++)
             {
-                int id = Charset.IndexOf(upper[i]);
+                // Space is the sentinel and has no atlas cell, so it resolves ahead of the table lookup
+                // rather than through it. An interior space in a label is legitimate ("A B") and must
+                // survive; only trailing ones are indistinguishable from unused slots.
+                int id = upper[i] == ' ' ? Space : Charset.IndexOf(upper[i]);
                 if (id < 0)
                 {
                     error = "char '" + upper[i] + "' (index " + i + " of '" + upper +
@@ -169,7 +196,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 for (int k = 0; k < CharsPerComponent; k++)
                 {
                     int id = (acc >> (k * Bits)) & Mask;
-                    sb.Append(id == Space ? ' ' : Charset[id]);
+                    // ID 63 is the sentinel; anything else past the table is a corrupt component (a
+                    // hand-typed property, or a label that survived a lossy serialization round-trip).
+                    // Both read as blank rather than throwing — a report door must survive bad input.
+                    sb.Append(id < Charset.Length ? Charset[id] : ' ');
                 }
             }
             return sb.ToString().TrimEnd(' ');

@@ -19,36 +19,66 @@ public class DisplayGlyphsTests
     // ── Charset shape ───────────────────────────────────────────────────────────────────────────────
 
     [Test]
-    public void Charset_Has_Exactly_64_Distinct_Slots()
+    public void Charset_Has_Exactly_63_Distinct_Atlas_Glyphs()
     {
-        Assert.AreEqual(64, DisplayGlyphs.Charset.Length,
-            "6-bit IDs mean exactly 64 slots; the atlas grid is generated at this count");
+        // 6-bit IDs give 64 values, but ID 63 is the space sentinel and has no atlas cell, so the table
+        // is 63 long. The generated grid is 8x8 = 64 cells with the last one empty.
+        Assert.AreEqual(63, DisplayGlyphs.Charset.Length,
+            "63 atlas glyphs + the space sentinel at 63 fills the 6-bit ID space exactly");
+        Assert.AreEqual(63, DisplayGlyphs.Space);
+        Assert.AreEqual(DisplayGlyphs.Charset.Length, DisplayGlyphs.Space,
+            "the sentinel must sit immediately past the table, or an ID either collides or is unreachable");
+
         var dupes = DisplayGlyphs.Charset.GroupBy(c => c).Where(g => g.Count() > 1)
                                  .Select(g => g.Key.ToString()).ToArray();
         CollectionAssert.IsEmpty(dupes,
             "a duplicated glyph makes IndexOf ambiguous, so one of the two IDs can never be encoded: "
             + string.Join(",", dupes));
+        Assert.IsFalse(DisplayGlyphs.Charset.Contains(' '),
+            "space must NOT be in the table: it has no cell, and U+0020 would sort to ID 0 under the "
+            + "codepoint order the atlas generator imposes");
     }
 
     [Test]
-    public void Charset_Ids_0_Through_12_Match_The_Ancestor()
+    public void Charset_Is_Strictly_Codepoint_Ascending()
     {
-        // format_coord indexes these directly (Zero + v % 10), so they are the one inherited run.
+        // THE load-bearing charset invariant. msdf-atlas-gen lays a uniform grid out in codepoint order
+        // regardless of the order the charset file requests (measured: a hand-ordered table produced
+        // '!#$%&()*' in row 0 and '+,-./012' in row 1). If this table ever stops matching that order,
+        // every glyph renders as a different character — labels become mojibake and numbers become
+        // wrong digits, with nothing failing loudly. This test is the only thing standing between that
+        // and someone regrouping the string to read more nicely.
+        for (int i = 1; i < DisplayGlyphs.Charset.Length; i++)
+            Assert.Less(DisplayGlyphs.Charset[i - 1], DisplayGlyphs.Charset[i],
+                "charset must be strictly codepoint-ascending; '" + DisplayGlyphs.Charset[i - 1] +
+                "' at " + (i - 1) + " is not below '" + DisplayGlyphs.Charset[i] + "' at " + i);
+    }
+
+    [Test]
+    public void Named_Glyph_Ids_Point_At_The_Glyphs_They_Name()
+    {
+        // The shader hard-codes these five numbers. Their VALUES follow from the codepoint order rather
+        // than being chosen, so they are pinned here: a charset edit that shifts one silently reprints
+        // every number in the wrong glyphs.
         Assert.AreEqual('+', DisplayGlyphs.Charset[DisplayGlyphs.Plus]);
         Assert.AreEqual('-', DisplayGlyphs.Charset[DisplayGlyphs.Minus]);
         Assert.AreEqual('.', DisplayGlyphs.Charset[DisplayGlyphs.Dot]);
-        for (int d = 0; d <= 9; d++)
-            Assert.AreEqual((char)('0' + d), DisplayGlyphs.Charset[DisplayGlyphs.Zero + d],
-                "digits must stay contiguous from Zero or the shader's digit arithmetic breaks");
+        Assert.AreEqual('0', DisplayGlyphs.Charset[DisplayGlyphs.Zero]);
+        Assert.AreEqual(':', DisplayGlyphs.Charset[DisplayGlyphs.Colon]);
+        Assert.AreEqual('A', DisplayGlyphs.Charset[DisplayGlyphs.LetterA]);
+        Assert.AreEqual('∞', DisplayGlyphs.Charset[DisplayGlyphs.Infinity],
+            "the overflow escape needs a glyph wired to it, not just a constant");
     }
 
     [Test]
-    public void Charset_Sentinels_And_Letters_Are_Where_The_Shader_Expects()
+    public void Digits_And_Letters_Are_Contiguous_Runs()
     {
-        Assert.AreEqual(63, DisplayGlyphs.Space, "space coincides with the mask by design");
-        Assert.AreEqual(' ', DisplayGlyphs.Charset[DisplayGlyphs.Space]);
-        Assert.AreEqual('∞', DisplayGlyphs.Charset[DisplayGlyphs.Infinity],
-            "the overflow escape needs a glyph wired to it, not just a constant");
+        // Contiguity is the ONLY thing format_coord's arithmetic needs (Zero + v % 10) — not any
+        // particular starting ID. ASCII guarantees it under a codepoint sort; asserted so a charset
+        // that inserted a glyph mid-run would fail here rather than in a render.
+        for (int d = 0; d <= 9; d++)
+            Assert.AreEqual((char)('0' + d), DisplayGlyphs.Charset[DisplayGlyphs.Zero + d],
+                "digits must stay contiguous from Zero or the shader's digit arithmetic breaks");
         for (int i = 0; i < 26; i++)
             Assert.AreEqual((char)('A' + i), DisplayGlyphs.Charset[DisplayGlyphs.LetterA + i]);
     }
