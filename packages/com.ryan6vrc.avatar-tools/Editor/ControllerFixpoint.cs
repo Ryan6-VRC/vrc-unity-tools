@@ -362,10 +362,78 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         offenderCount++;
                     }
                 }
+                CheckAssetIntegrity(entryDir, entryFull, full, offenders, ref offenderCount);
+
                 return offenderCount == 0 ? (true, "OK") : (false, string.Join(", ", offenders));
             }
             catch (Exception e) { return (false, e.Message); }
             finally { CleanupScratch(scratch); }
+        }
+
+        // Shader/material integrity, asserted in the scratch import the prefab pass already performs.
+        //
+        // WHY THIS IS HERE AND NOT ONLY IN A VERIFICATION LADDER. An entry whose behaviour lives in a
+        // shader has no `built/` and so no decompile-equality — without this the gate would reduce to
+        // "the prefab has no missing scripts" and be blind to everything the entry actually is. All
+        // three failures below are QUIET: they render something plausible rather than erroring, which is
+        // precisely the class a one-time PR check cannot be trusted to keep catching.
+        //
+        // Deliberately general — nothing here knows about any particular entry. The one judgement call is
+        // the texture-dependency rule: a vrc-patterns material's texture pointing into another package is
+        // the exact defect measured on the ancestor's Poiyomi cubemaps (a consumer without that package
+        // got a null cubemap and silently wrong reflection, never a pink material), and no current entry
+        // legitimately does it. If one ever needs to, soften it then rather than pre-weakening it now.
+        static void CheckAssetIntegrity(string entryDir, string entryFull, string scratchFull,
+                                        System.Collections.Generic.List<string> offenders, ref int offenderCount)
+        {
+            foreach (var src in Directory.GetFiles(entryDir, "*.shader", SearchOption.AllDirectories))
+            {
+                var rel = Path.GetFullPath(src).Substring(entryFull.Length).TrimStart('/', '\\');
+                var label = rel.Replace('\\', '/');
+                var assetPath = ToAssetsRelative(Path.Combine(scratchFull, rel));
+                var shader = AssetDatabase.LoadAssetAtPath<Shader>(assetPath);
+                if (shader == null) { offenders.Add(label + " (shader failed to load)"); offenderCount++; continue; }
+                if (ShaderUtil.ShaderHasError(shader))
+                {
+                    var msgs = ShaderUtil.GetShaderMessages(shader)
+                        .Where(m => m.severity == UnityEditor.Rendering.ShaderCompilerMessageSeverity.Error)
+                        .Select(m => "line " + m.line + ": " + m.message);
+                    offenders.Add(label + " (shader errors: " + string.Join("; ", msgs) + ")");
+                    offenderCount++;
+                }
+            }
+
+            foreach (var src in Directory.GetFiles(entryDir, "*.mat", SearchOption.AllDirectories))
+            {
+                var rel = Path.GetFullPath(src).Substring(entryFull.Length).TrimStart('/', '\\');
+                var label = rel.Replace('\\', '/');
+                var assetPath = ToAssetsRelative(Path.Combine(scratchFull, rel));
+                var mat = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
+                if (mat == null) { offenders.Add(label + " (material failed to load)"); offenderCount++; continue; }
+
+                // A null shader, or Unity's error shader, means the material's shader reference did not
+                // resolve — a stale GUID, or a shader that stopped compiling. Renders magenta at best and
+                // resolves to a fallback at worst.
+                if (mat.shader == null || mat.shader.name == "Hidden/InternalErrorShader")
+                {
+                    offenders.Add(label + " (shader reference did not resolve)");
+                    offenderCount++;
+                    continue;
+                }
+
+                foreach (var dep in AssetDatabase.GetDependencies(assetPath, true))
+                {
+                    if (!dep.StartsWith("Packages/", StringComparison.Ordinal)) continue;
+                    // The entry's own shader/textures live in the scratch copy under Assets/, so anything
+                    // still resolving under Packages/ is an outbound dependency on a package the entry
+                    // does not ship.
+                    var ext = Path.GetExtension(dep).ToLowerInvariant();
+                    if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".tga" &&
+                        ext != ".psd" && ext != ".exr" && ext != ".tif" && ext != ".tiff") continue;
+                    offenders.Add(label + " (texture dependency outside the entry: " + dep + ")");
+                    offenderCount++;
+                }
+            }
         }
 
         // -executeMethod entrypoint. Args after `--`: --root <dir>. An entry is a non-dot <dir>/* folder
