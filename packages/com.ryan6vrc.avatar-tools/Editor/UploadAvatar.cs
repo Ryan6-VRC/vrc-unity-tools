@@ -196,7 +196,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             if (whatIf)
             {
-                // Per-avatar read-only classification. Uploads nothing, dirties nothing.
+                // Per-avatar read-only classification. Uploads nothing, dirties no asset — but note the
+                // preconditions above have already run, so the first whatIf of a domain may have issued a
+                // NETWORK request (the saved-credential restore) and changed in-memory SDK auth state.
+                // "Read-only" here means read-only about your avatars, not free of side effects.
                 int n = avatars != null ? avatars.Length : 0;
                 var rows = new StringBuilder();
                 for (int i = 0; i < n; i++)
@@ -495,18 +498,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>The upload REFUSE register: returns the first unmet precondition (with its named fix) or
-        /// null when the environment is upload-ready. Order is cheap-to-costly.</summary>
-        static string CheckPreconditions()
+        /// null when the environment is upload-ready. Order is cheap-to-costly.
+        ///
+        /// The login check SELF-HEALS rather than refusing on sight. <c>APIUser.IsLoggedIn</c> is cleared by
+        /// every domain reload while the saved credentials survive on disk, so a bare check refuses for a
+        /// reason that usually isn't real — and refuses NON-DETERMINISTICALLY, since whichever SDK/CAU window
+        /// repaints first may restore the login before the door looks. The latch kicks the same restore CAU
+        /// runs per batch and re-inspects in this call; only a restore that cannot help (no saved credentials
+        /// — the operator's interactive sign-in is the real boundary) still refuses.
+        ///
+        /// Internal, not private, so the two-call self-heal SEQUENCE has a test seam: the refusal table alone
+        /// proves nothing about kicking once, clearing the latch, or converging.</summary>
+        internal static string CheckPreconditions()
         {
             if (EditorApplication.isPlaying)
                 return "in Play mode — exit Play mode before uploading";
-            if (!APIUser.IsLoggedIn)
-                return "not logged into the VRChat SDK — open the Control Panel and sign in";
-            if (!CauReflect.TryGetBuilder(out _, out var why))
-                return why;
+            // Build target BEFORE the login: an enum compare, and no login can fix it. Left below, an
+            // operator on Android would spend a network round-trip and a re-run only to be told the real
+            // blocker on the second call. The latch stays above TryGetBuilder, which does depend on being
+            // signed in — so "cheap-to-costly" is preserved among the checks that are actually independent.
             if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.StandaloneWindows64)
                 return "build target is " + EditorUserBuildSettings.activeBuildTarget +
                        "; switch to Windows (StandaloneWindows64)";
+            var notLoggedIn = CauReflect.LoginLatch.Evaluate();
+            if (notLoggedIn != null)
+                return notLoggedIn;
+            if (!CauReflect.TryGetBuilder(out _, out var why))
+                return why;
             return null;
         }
 

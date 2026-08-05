@@ -1,3 +1,4 @@
+using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
@@ -77,6 +78,20 @@ public class UploadAvatarLoopTests
             StringAssert.Contains("null descriptor", whyNull);
         }
         finally { Object.DestroyImmediate(go); }
+    }
+
+    // The login self-heal's reflection half. Its state machine is covered in UploadAvatarLogicTests over an
+    // injected fake; what can only be checked here is that a CAU-less venue gets a named null instead of a
+    // throw — and that the reason names CAU, since "no saved credentials, go sign in" would be a wrong and
+    // expensive instruction to give an operator whose credentials are fine.
+    [Test]
+    public void CauReflect_LoginKickAbsentIsNamedNotThrowing()
+    {
+        Task<bool> task = null; string why = null;
+        Assert.DoesNotThrow(() => (task, why) = CauReflect.TryLoginKick(),
+                            "a missing CAU must be a named null task, never a class-load throw");
+        Assert.IsNull(task, "CAU is absent in this venue, so no restore can be in flight");
+        StringAssert.Contains("CAU", why, "the reason must name CAU — the caller's fix is not 'sign in'");
     }
 
     // ── RunCore loop semantics (fake delegate — the real SDK call is live-gated to Task 8) ──────
