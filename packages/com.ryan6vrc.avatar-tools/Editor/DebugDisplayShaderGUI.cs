@@ -48,6 +48,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             { "_MSDF_Glyph_Atlas", "_Font_Size", "_Font_Scale_Relative", "_Text_Depth_Offset" };
         static readonly string[] PaletteProps =
             { "_Palette_0", "_Palette_1", "_Palette_2", "_Palette_3" };
+        // Relabelled here, not in the shader. "Color N" is what the operator wants to read, but the shader
+        // display name is also what the FALLBACK GUI shows: with avatar-tools absent there are no section
+        // headings, so four bare "Color N" fields would sit in a flat list beside the shell's own
+        // "Color / Mask" and "Color / Alpha" with nothing saying which is text. "Palette N" is
+        // self-describing without a heading, so the shader keeps it and the override lives here.
+        static readonly string[] PaletteLabels = { "Color 0", "Color 1", "Color 2", "Color 3" };
         // Drawn by hand rather than through ShaderProperty — the mode as a button bar, the width per
         // column — but still shader properties this GUI is responsible for covering.
         static readonly string[] HandDrawnProps = { "_Display_Mode", "_Total_Width" };
@@ -148,7 +154,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     DrawNamed(materialEditor, properties, TextMetricProps);
                     Line();
-                    DrawNamed(materialEditor, properties, PaletteProps);
+                    DrawNamed(materialEditor, properties, PaletteProps, PaletteLabels);
                 }
 
             if (Section("Crystal shell", "The reflective outer pass, and the rim light inside it",
@@ -175,9 +181,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // Each entry is its own accordion at the top level. One outer fold over all twelve meant
             // reaching any entry cost two clicks and shutting the group hid every label at once.
-            int hidden = 0;
+            int hidden = 0, missing = 0;
             for (int i = 0; i < DisplayGlyphs.MaxEntries; i++)
-                if (!DrawEntry(mat, scan[i])) hidden++;
+            {
+                if (!scan[i].Exists) missing++;
+                else if (!DrawEntry(mat, scan[i])) hidden++;
+            }
+
+            // Counted apart from the hidden slots, and reported in DrawNamed's voice. Folding the two
+            // together told an operator to "add grid columns or rows to reach them" about entries the
+            // shader does not declare, which growing the grid can never reach — a soothing lie in the one
+            // place nothing else objects: the gate's asset check is deliberately entry-agnostic and never
+            // looks at MaxEntries.
+            if (missing > 0)
+                EditorGUILayout.HelpBox(
+                    "The shader declares " + (DisplayGlyphs.MaxEntries - missing) + " of the " +
+                    DisplayGlyphs.MaxEntries + " entries DisplayGlyphs defines — inspector and shader " +
+                    "have drifted.", MessageType.Error);
 
             // A slot outside the grid with nothing configured is not a control, it is an absence — so it
             // is hidden rather than drawn as a dim row. Counted rather than silent: the slots still exist,
@@ -211,25 +231,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
         static void DrawDisplayModeBar(Material mat)
         {
             EditorGUILayout.LabelField("Display Mode", EditorStyles.boldLabel);
+
+            // Guarded like DrawColumnWidth: a hand-drawn control skips DrawNamed, so it gets no
+            // shader-lacks-this-property error box unless it raises its own.
+            if (!mat.HasProperty("_Display_Mode"))
+            {
+                EditorGUILayout.HelpBox("shader has no property '_Display_Mode' — inspector and shader " +
+                                        "have drifted", MessageType.Error);
+                return;
+            }
+
             int cur = Mathf.Clamp(Mathf.RoundToInt(GetFloat(mat, "_Display_Mode", 0f)), 0, ModeNames.Length - 1);
+            DrawModeKeywordMismatch(mat, cur);
 
             EditorGUI.BeginChangeCheck();
             int next = GUILayout.Toolbar(cur, ModeNames, GUILayout.Height(22f));
-            if (EditorGUI.EndChangeCheck() && next != cur)
-            {
-                // TWO writes, not one. [KeywordEnum] is what normally keeps the float and the keyword in
-                // step, and MaterialEditor.ShaderProperty is what honours it — a hand-drawn control has to
-                // do it itself. A material whose float says UV while its keyword still says Billboard
-                // renders the billboard, silently and with the inspector showing UV.
-                Undo.RecordObject(mat, "Change display mode");
-                mat.SetFloat("_Display_Mode", next);
-                for (int k = 0; k < ModeKeywords.Length; k++)
-                {
-                    if (k == next) mat.EnableKeyword(ModeKeywords[k]);
-                    else mat.DisableKeyword(ModeKeywords[k]);
-                }
-                EditorUtility.SetDirty(mat);
-            }
+            // Written even when next == cur: re-picking the shown mode is how an operator repairs a
+            // mismatch without reaching for the Fix button, and a no-op guard would make that click do
+            // nothing on exactly the material that needs it.
+            if (EditorGUI.EndChangeCheck()) WriteMode(mat, next);
             EditorGUILayout.Space();
         }
 
@@ -275,16 +295,70 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var e = Event.current;
                 if (e.type == EventType.MouseDown && e.button == 0 && swatch.Contains(e.mousePosition))
                 {
-                    picked = p;
-                    // A hand-drawn control does not set GUI.changed on its own, and the caller's
-                    // BeginChangeCheck is what commits the format word — without this the click paints a
-                    // new selection that is never written.
-                    GUI.changed = true;
+                    // Only a real move sets GUI.changed. A hand-drawn control does not set it on its own
+                    // and the caller's BeginChangeCheck is what commits the format word, so without it a
+                    // click paints a selection that is never written — but setting it unconditionally
+                    // would push an undo step and dirty the material for re-clicking the current colour.
+                    if (p != palette) { picked = p; GUI.changed = true; }
                     e.Use();
                 }
                 EditorGUIUtility.AddCursorRect(swatch, MouseCursor.Link);
             }
             return picked;
+        }
+
+        /// <summary>
+        /// Reports a material whose <c>_Display_Mode</c> float and <c>_DISPLAY_MODE_*</c> keyword disagree,
+        /// and offers to repair it. The float is what the bar reads, the keyword is what the shader
+        /// branches on, so a mismatch renders one mode while the bar shows another — the exact silent
+        /// wrongness this inspector exists to refuse.
+        ///
+        /// <para>The bar's own write keeps the two in step, so this is about materials that arrive already
+        /// split: <c>new Material(shader)</c> enables no keyword at all, so a scripted
+        /// <c>SetFloat("_Display_Mode", 2)</c> leaves <c>multi_compile</c>'s first variant (Billboard) in
+        /// force while the float says UV. Pasted material properties and applied presets can do the same.
+        /// Detected, never repaired behind the operator's back: a write during <c>OnGUI</c> would dirty a
+        /// material just for being looked at.</para>
+        /// </summary>
+        static void DrawModeKeywordMismatch(Material mat, int cur)
+        {
+            int enabled = -1, enabledCount = 0;
+            for (int k = 0; k < ModeKeywords.Length; k++)
+                if (mat.IsKeywordEnabled(ModeKeywords[k])) { enabled = k; enabledCount++; }
+
+            // Exactly one keyword, matching the float, is the only correct state.
+            if (enabledCount == 1 && enabled == cur) return;
+
+            string keywordSays = enabledCount == 0
+                ? "no mode keyword is enabled, so the shader falls back to " + ModeNames[0]
+                : enabledCount > 1
+                    ? enabledCount + " mode keywords are enabled at once"
+                    : "the keyword says " + ModeNames[enabled];
+
+            EditorGUILayout.HelpBox(
+                "Display mode is inconsistent: the float says " + ModeNames[cur] + " but " + keywordSays +
+                ". The shader branches on the keyword, so what renders is not what this bar shows. " +
+                "Re-pick the mode below, or press Fix.", MessageType.Error);
+
+            if (GUILayout.Button("Fix — set the keyword to " + ModeNames[cur]))
+                WriteMode(mat, cur);
+        }
+
+        /// <summary>
+        /// The float and the keywords, written together. <c>[KeywordEnum]</c> is what normally keeps them
+        /// in step and only <see cref="MaterialEditor.ShaderProperty"/> honours it, so every hand-drawn
+        /// path has to come through here.
+        /// </summary>
+        static void WriteMode(Material mat, int mode)
+        {
+            Undo.RecordObject(mat, "Change display mode");
+            mat.SetFloat("_Display_Mode", mode);
+            for (int k = 0; k < ModeKeywords.Length; k++)
+            {
+                if (k == mode) mat.EnableKeyword(ModeKeywords[k]);
+                else mat.DisableKeyword(ModeKeywords[k]);
+            }
+            EditorUtility.SetDirty(mat);
         }
 
         /// <summary>
@@ -435,7 +509,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <returns><c>false</c> if the entry was skipped as an unused slot, so the caller can count it.</returns>
         bool DrawEntry(Material mat, EntryState st)
         {
-            if (!st.Exists) return false;
+            // The caller filters !Exists out before this point, so a false return here means one thing:
+            // an unused slot.
             int i = st.Index;
 
             // Outside the grid AND unconfigured: nothing to show and nothing at risk. A configured entry
@@ -602,7 +677,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (e.type == EventType.Repaint)
                 EditorStyles.foldout.Draw(new Rect(rect.x + 4f, rect.y + 3f, 13f, 13f),
                                           false, false, display, false);
-            if (e.type == EventType.MouseDown && rect.Contains(e.mousePosition))
+            // Left button only. The bar is deliberately 8px wider than the content rect, so swallowing
+            // every button would suppress the context menu over a band beyond the section itself.
+            if (e.type == EventType.MouseDown && e.button == 0 && rect.Contains(e.mousePosition))
             {
                 display = !display;
                 e.Use();
@@ -627,10 +704,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// box rather than being silently omitted, so shader/GUI drift is loud — one forgotten control is
         /// an invisible control, and <c>_Font_Scale_Relative</c> governs whether text renders at all.
         /// </summary>
-        void DrawNamed(MaterialEditor editor, MaterialProperty[] properties, params string[] names)
+        void DrawNamed(MaterialEditor editor, MaterialProperty[] properties, string[] names,
+                       string[] labels = null)
         {
-            foreach (var name in names)
+            for (int n = 0; n < names.Length; n++)
             {
+                var name = names[n];
                 var prop = properties.FirstOrDefault(p => p.name == name);
                 if (prop == null)
                 {
@@ -638,7 +717,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                             "' — inspector and shader have drifted", MessageType.Error);
                     continue;
                 }
-                editor.ShaderProperty(prop, prop.displayName);
+                editor.ShaderProperty(prop, labels != null ? labels[n] : prop.displayName);
             }
         }
 
