@@ -130,25 +130,25 @@ public class DisplayDoorRefusalTests
     [Test]
     public void Report_Refuses_A_Missing_Asset()
     {
-        LogAssert.Expect(LogType.Error, new Regex(@"\[report-display\].*=> FAIL"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[report-display\].*=> ERROR"));
         var summary = ReportDisplay.Run(ScratchFolder + "/NoSuchThing.mat");
-        StringAssert.Contains("=> FAIL", summary);
+        StringAssert.Contains("=> ERROR", summary);
         StringAssert.Contains("no Material", summary);
     }
 
     [Test]
     public void Report_Refuses_A_Material_On_Another_Shader()
     {
-        LogAssert.Expect(LogType.Error, new Regex(@"\[report-display\].*=> FAIL"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[report-display\].*=> ERROR"));
         var summary = ReportDisplay.Run(_matPath);
-        StringAssert.Contains("=> FAIL", summary);
+        StringAssert.Contains("=> ERROR", summary);
         StringAssert.Contains(DisplayGlyphs.ShaderName, summary);
     }
 
     [Test]
     public void Report_Reads_A_Packages_Path_Without_Refusing_On_Policy()
     {
-        LogAssert.Expect(LogType.Error, new Regex(@"\[report-display\].*=> FAIL"));
+        LogAssert.Expect(LogType.Error, new Regex(@"\[report-display\].*=> ERROR"));
         // Reading a shipped template is legitimate — the read-only policy governs writes only. This one
         // fails on the missing asset, which is the correct reason, and proves the write-guard was not
         // copy-pasted onto the read door.

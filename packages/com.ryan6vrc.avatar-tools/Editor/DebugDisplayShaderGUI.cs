@@ -229,9 +229,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     else Debug.LogWarning("[DebugDisplay] E" + i + " format rejected: " + error);
                 }
 
-                if (rpad > maxUsable)
+                if (newRpad > maxUsable)
                     EditorGUILayout.HelpBox(
-                        "Right pad " + rpad + " exceeds " + maxUsable + " for a " +
+                        "Right pad " + newRpad + " exceeds " + maxUsable + " for a " +
                         cellAdv.ToString("0.##") + "-advance cell. The value slides off the left of its " +
                         "cell and vanishes with no on-screen diagnostic.", MessageType.Error);
 
@@ -239,8 +239,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // rpad knows nothing about the label, so the shader clips and the preview is what catches
                 // it — this names it in words as well.
                 int cellW = Mathf.Max(1, (int)Mathf.Floor(cellAdv));
-                int valueWidth = PreviewSample((DisplayGlyphs.ValueSource)newSource, 0f)
-                                     .ToString("F" + newDecimals).Length;
+                int valueWidth = DisplayGlyphs
+                    .FormatValue(PreviewSample((DisplayGlyphs.ValueSource)newSource, 0f), newDecimals)
+                    .TrimStart(' ').Length;
                 int valueStart = cellW - newRpad - valueWidth;
                 if (newText.Length > valueStart)
                     EditorGUILayout.HelpBox(
@@ -360,7 +361,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             float animatorValue = mat.HasProperty(DisplayGlyphs.ValueProperty(i))
                 ? mat.GetFloat(DisplayGlyphs.ValueProperty(i)) : 0f;
-            string value = PreviewSample(source, animatorValue).ToString("F" + decimals);
+            // Formatted through the shader's OWN arithmetic, not ToString("F<n>"). A separate
+            // implementation here would be a third copy that can disagree with what gets drawn — and it
+            // did: it showed an over-wide negative in full while the shader dropped the sign, so the
+            // preview reported the very case it exists to catch as correct.
+            string value = DisplayGlyphs.FormatValue(PreviewSample(source, animatorValue), decimals)
+                                        .TrimStart(' ');
 
             var cell = new char[cellW];
             for (int k = 0; k < cellW; k++) cell[k] = ' ';

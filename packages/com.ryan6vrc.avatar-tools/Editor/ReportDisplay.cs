@@ -21,7 +21,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <c>_Grid_Columns × _Grid_Rows</c> product places it past the visible cells, or past the 12-entry
     /// shader cap), and an rpad past what the cell width can carry.</para>
     ///
-    /// Always <c>=&gt; OK</c> on a readable material; a bare FAIL on a missing asset or the wrong shader.
+    /// Always <c>=&gt; OK</c> on a readable material; <c>=&gt; ERROR</c> on bad input (a missing asset or the
+    /// wrong shader) — never a content verdict, per the <c>Report</c> grammar in <c>unity-tools.md</c>.
     /// RunLog kind <c>report-display</c>.
     /// </summary>
     [AgentTool]
@@ -40,14 +41,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 : AssetDatabase.LoadAssetAtPath<Material>(materialPath);
             if (mat == null)
             {
-                log.result = "FAIL";
+                log.result = "ERROR";
                 log.error  = "no Material at '" + (materialPath ?? "<null>") + "'";
                 log.Offender(log.error);
                 return TransplantCore.Finish(log, logLabel);
             }
             if (mat.shader == null || mat.shader.name != DisplayGlyphs.ShaderName)
             {
-                log.result = "FAIL";
+                log.result = "ERROR";
                 log.error  = "material shader is '" +
                              (mat.shader == null ? "<null>" : mat.shader.name) +
                              "', expected '" + DisplayGlyphs.ShaderName + "'";
@@ -95,8 +96,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                            out decimals, out palette, out rpad, out source);
                 float value = mat.HasProperty(valueProp) ? mat.GetFloat(valueProp) : 0f;
 
+                // A nonzero value alone makes an entry live: with a blank label and default format it
+                // still DRAWS the number (the value region fills, the label falls through to space), so
+                // omitting the row would hide a rendering entry from the door whose whole justification
+                // is observe-before-change.
                 bool blank = text.Length == 0 && source == DisplayGlyphs.ValueSource.Animator
-                             && decimals == 0 && rpad == 0 && palette == 0;
+                             && decimals == 0 && rpad == 0 && palette == 0 && value == 0f;
                 if (blank) continue;
                 populated++;
 
@@ -115,9 +120,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string rpadCell = rpad.ToString();
                 if (cellAdv > 0f && rpad > maxUsable) { rpadCell = rpad + " (>" + maxUsable + ")"; overPadded++; }
 
-                body.AppendLine("| " + i + " | " + cell + " | " + TransplantCore.Q(text) + " | " +
+                // '|' is a legal charset glyph, so an unescaped label breaks the markdown row the
+                // reading agent parses.
+                string labelCell = TransplantCore.Q(text).Replace("|", "\\|");
+                // A computed source's _E{i}_Value is dormant; printing it under a "value" header would
+                // read as the current number. Say where the number comes from instead.
+                string valueCell = source == DisplayGlyphs.ValueSource.Animator
+                    ? value.ToString("0.#####")
+                    : "(computed at render)";
+                body.AppendLine("| " + i + " | " + cell + " | " + labelCell + " | " +
                                 decimals + " | " + rpadCell + " | " + palette + " | " +
-                                source + " | " + value.ToString("0.#####") + " |");
+                                source + " | " + valueCell + " |");
             }
 
             log.Count("populated", populated);

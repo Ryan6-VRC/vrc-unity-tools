@@ -223,6 +223,104 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>Value glyphs the shader reserves per entry.</summary>
         public const int ValueGlyphs = 10;
 
+        // ── Value formatting (the shader's arithmetic, in C# so it can be tested) ────────────────────
+
+        /// <summary>
+        /// Powers of ten, bounded at 10^9 — the largest that fits a <c>uint</c> (10^10 exceeds 2^32).
+        /// The bound is load-bearing: an earlier version stopped at 10^6, which made
+        /// <see cref="DigitCount"/> score four spurious increments for any value ≥ 10^6
+        /// (<c>DigitCount(1234567)</c> returned 10) and made every place value at index ≥ 6 read the
+        /// millions digit, so 1234567 printed as 1111234567.
+        /// </summary>
+        public static uint Pow10(int k)
+        {
+            uint r = 1u;
+            for (int i = 0; i < 9; i++) { if (i < k) r *= 10u; }
+            return r;
+        }
+
+        /// <summary>Decimal digit count of <paramref name="v"/>, minimum 1 (zero has one digit).</summary>
+        public static uint DigitCount(uint v)
+        {
+            uint d = 1u;
+            for (int i = 0; i < 9; i++) { if (v >= Pow10(i + 1)) d++; }
+            return d;
+        }
+
+        /// <summary>
+        /// The glyph ID for column <paramref name="n"/> of the value field, counted from the RIGHT
+        /// (0 = rightmost). This is the canonical implementation; the shader's
+        /// <c>dd_value_glyph_at</c> and the inspector's preview both mirror it, and
+        /// <c>DisplayValueFormatTests</c> is what keeps all three honest — the HLSL is otherwise
+        /// unreachable by any test, and both bugs the bound above describes lived there.
+        ///
+        /// <para><b>Width is checked, not just magnitude.</b> A value whose rendered form needs more
+        /// than <see cref="ValueGlyphs"/> columns returns the overflow glyph rather than being
+        /// truncated. That guard is why the minus sign cannot go missing: the sign is emitted LAST
+        /// (at <c>m == digits</c>), so without it an over-wide negative dropped its sign and printed a
+        /// confident positive — <c>-1234.5</c> at 5 decimals rendered <c>1234.50000</c>.</para>
+        /// </summary>
+        public static uint ValueGlyphAt(float value, int decimals, int n)
+        {
+            float a = Math.Abs(value);
+            bool neg = value < 0f;
+
+            // Phrased !(a < ceiling) so NaN lands here too: every comparison against NaN is false, so a
+            // NaN would otherwise reach the cast as 0 and print a confident "0.00".
+            if (!(a < 16777216.0f)) return OverflowGlyph(neg, n);
+
+            // The format field is 3 bits so it decodes 0..7, but only 0..5 is exact and
+            // TryPackFormat refuses above 5. A hand-edited or debug-inspector write can still land 6 or
+            // 7 here, so clamp to the same ceiling rather than computing digits we cannot represent.
+            // The shader clamps identically.
+            if (decimals > MaxDecimals) decimals = MaxDecimals;
+            if (decimals < 0) decimals = 0;
+
+            uint mult = Pow10(decimals);
+            uint ip = (uint)Math.Floor(a);
+            uint fp = (uint)Math.Floor((a - Math.Floor(a)) * mult + 0.5f);
+            if (fp >= mult) { fp -= mult; ip += 1u; }   // rounding can carry: 1.999 at 2dp is 2.00
+
+            uint digits = DigitCount(ip);
+            uint needed = digits + (decimals > 0 ? (uint)decimals + 1u : 0u) + (neg ? 1u : 0u);
+            if (needed > (uint)ValueGlyphs) return OverflowGlyph(neg, n);
+
+            if (decimals > 0)
+            {
+                if (n < decimals) return (uint)Zero + ((fp / Pow10(n)) % 10u);
+                if (n == decimals) return Dot;
+            }
+
+            int m = n - decimals - (decimals > 0 ? 1 : 0);   // m == 0 is the units digit
+            if (m < 0) return (uint)Space;
+            if (m < (int)digits) return (uint)Zero + ((ip / Pow10(m)) % 10u);
+            if (m == (int)digits && neg) return Minus;
+            return (uint)Space;
+        }
+
+        static uint OverflowGlyph(bool neg, int n)
+        {
+            if (n == 0) return Infinity;
+            if (n == 1 && neg) return Minus;
+            return Space;
+        }
+
+        /// <summary>
+        /// The value field rendered left-to-right as text, exactly as the shader draws it — including
+        /// the overflow glyph and the leading spaces. What the inspector previews and what the tests
+        /// compare against <c>string.Format</c>, so the preview cannot disagree with the shader.
+        /// </summary>
+        public static string FormatValue(float value, int decimals)
+        {
+            var sb = new StringBuilder(ValueGlyphs);
+            for (int n = ValueGlyphs - 1; n >= 0; n--)
+            {
+                uint id = ValueGlyphAt(value, decimals, n);
+                sb.Append(id == Space ? ' ' : Charset[(int)id]);
+            }
+            return sb.ToString();
+        }
+
         /// <summary>
         /// The largest rpad that leaves the value inside its own cell, given a cell width in glyph
         /// advances. The value's left edge sits at <c>cell_w_adv − rpad − ValueGlyphs</c>, so past this

@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
@@ -393,12 +394,43 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var assetPath = ToAssetsRelative(Path.Combine(scratchFull, rel));
                 var shader = AssetDatabase.LoadAssetAtPath<Shader>(assetPath);
                 if (shader == null) { offenders.Add(label + " (shader failed to load)"); offenderCount++; continue; }
+
+                // ShaderHasError after a plain load reflects IMPORT-time compilation only, and keyword
+                // variants (multi_compile_local / shader_feature_local) compile lazily — so the check
+                // would be strictly weaker than a one-time PR check on exactly the surface that carries
+                // the risk. Warm every declared local keyword combination first so the standing guard is
+                // not the weaker one.
+                WarmShaderVariants(shader);
+
                 if (ShaderUtil.ShaderHasError(shader))
                 {
                     var msgs = ShaderUtil.GetShaderMessages(shader)
                         .Where(m => m.severity == UnityEditor.Rendering.ShaderCompilerMessageSeverity.Error)
                         .Select(m => "line " + m.line + ": " + m.message);
                     offenders.Add(label + " (shader errors: " + string.Join("; ", msgs) + ")");
+                    offenderCount++;
+                }
+            }
+
+            // An MSDF atlas is a second copy of its charset, in image form. Where an entry commits the
+            // digest of the table it was generated from, hold the two together: without it, a charset slot
+            // pinned only by ordinal rank can be swapped for another character of the same rank with every
+            // test still green and the shader still compiling, while the packer encodes an ID the atlas
+            // draws as something else. Entries that ship no digest are unaffected.
+            foreach (var digestFile in Directory.GetFiles(entryDir, "*.charset.sha256", SearchOption.AllDirectories))
+            {
+                var rel = Path.GetFullPath(digestFile).Substring(entryFull.Length).TrimStart('/', '\\');
+                var label = rel.Replace('\\', '/');
+                var committed = File.ReadAllText(digestFile).Trim();
+                string actual;
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                    actual = string.Concat(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(DisplayGlyphs.Charset))
+                                              .Select(b => b.ToString("x2")));
+                if (!string.Equals(committed, actual, StringComparison.OrdinalIgnoreCase))
+                {
+                    offenders.Add(label + " (atlas was generated from a different charset: committed " +
+                                  committed.Substring(0, Math.Min(12, committed.Length)) + "…, current " +
+                                  actual.Substring(0, 12) + "… — regenerate the atlas)");
                     offenderCount++;
                 }
             }
@@ -411,28 +443,122 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var mat = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
                 if (mat == null) { offenders.Add(label + " (material failed to load)"); offenderCount++; continue; }
 
-                // A null shader, or Unity's error shader, means the material's shader reference did not
-                // resolve — a stale GUID, or a shader that stopped compiling. Renders magenta at best and
-                // resolves to a fallback at worst.
+                // A shader that will not resolve is only a DEFECT when the material names none. An
+                // assigned-but-unresolvable GUID is an environment fact — the venue lacks the package the
+                // shader lives in — and reporting it as a broken entry is how a gate starts failing work
+                // it has no business judging. Measured: selective-animation's beam material names a
+                // shader from a package the test venue does not carry, and an earlier version of this
+                // check failed that entry.
+                //
+                // So read the assignment out of the YAML rather than inferring it from the loaded object,
+                // and split the two cases. The scope line still has to reach the log, so a PASS is never
+                // read as wider than it is — the same discipline the anchor-seam scan uses.
                 if (mat.shader == null || mat.shader.name == "Hidden/InternalErrorShader")
                 {
-                    offenders.Add(label + " (shader reference did not resolve)");
-                    offenderCount++;
-                    continue;
+                    var shaderGuid = Regex.Match(File.ReadAllText(src),
+                        @"m_Shader:\s*\{fileID:\s*\d+,\s*guid:\s*([0-9a-fA-F]{32})");
+                    if (shaderGuid.Success)
+                    {
+                        Debug.LogWarning("[gate] " + label + " scope: shader guid " +
+                                         shaderGuid.Groups[1].Value + " does not resolve in this venue, " +
+                                         "so whether it compiles was NOT checked. Assignment itself is intact.");
+                    }
+                    else
+                    {
+                        offenders.Add(label + " (no shader assigned)");
+                        offenderCount++;
+                        continue;
+                    }
                 }
 
-                foreach (var dep in AssetDatabase.GetDependencies(assetPath, true))
+                CheckMaterialTextureGuids(src, label, entryFull, offenders, ref offenderCount);
+            }
+        }
+
+        // Force every local keyword the shader declares to actually compile, so ShaderHasError above sees
+        // the variants and not just the default one. Enumerated from the shader's own keyword space
+        // rather than a hard-coded list, so this stays honest for any entry's shader.
+        //
+        // Each keyword is warmed on its own (plus the no-keyword baseline) rather than warming the full
+        // cross product: the product is exponential and a per-keyword pass already reaches every #if
+        // branch, which is what a compile check needs. A ShaderVariant the shader does not declare throws
+        // from its constructor, so unknown combinations are skipped rather than reported as failures.
+        static void WarmShaderVariants(Shader shader)
+        {
+            ShaderVariantCollection svc = null;
+            try
+            {
+                svc = new ShaderVariantCollection();
+                var keywords = new System.Collections.Generic.List<string[]> { new string[0] };
+                foreach (var kw in shader.keywordSpace.keywordNames) keywords.Add(new[] { kw });
+
+                foreach (var combo in keywords)
                 {
-                    if (!dep.StartsWith("Packages/", StringComparison.Ordinal)) continue;
-                    // The entry's own shader/textures live in the scratch copy under Assets/, so anything
-                    // still resolving under Packages/ is an outbound dependency on a package the entry
-                    // does not ship.
-                    var ext = Path.GetExtension(dep).ToLowerInvariant();
-                    if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".tga" &&
-                        ext != ".psd" && ext != ".exr" && ext != ".tif" && ext != ".tiff") continue;
-                    offenders.Add(label + " (texture dependency outside the entry: " + dep + ")");
-                    offenderCount++;
+                    foreach (UnityEngine.Rendering.PassType pass in new[]
+                    {
+                        UnityEngine.Rendering.PassType.Normal,
+                        UnityEngine.Rendering.PassType.ForwardBase,
+                    })
+                    {
+                        try { svc.Add(new ShaderVariantCollection.ShaderVariant(shader, pass, combo)); }
+                        catch { /* not a declared variant of this pass — nothing to warm */ }
+                    }
                 }
+                if (svc.variantCount > 0) svc.WarmUp();
+            }
+            catch (Exception e) { Debug.LogWarning("[gate] variant warm-up skipped for " + shader.name + ": " + e.Message); }
+            finally { if (svc != null) UnityEngine.Object.DestroyImmediate(svc); }
+        }
+
+        // Outbound texture references, read as GUIDs out of the .mat YAML rather than through
+        // AssetDatabase.GetDependencies.
+        //
+        // GetDependencies returns only RESOLVABLE paths, so a GUID pointing into a package the editor
+        // does not have resolves to nothing, never appears, and never becomes an offender. The gate runs
+        // in a venue carrying the SDK plus our own two packages -- not Poiyomi -- so a dependency-based
+        // check could only fire where the dependency resolves, i.e. where it is harmless, and stayed
+        // silent in the one environment it actually runs in. That is the Poiyomi-cubemap defect this
+        // check was written for, passing clean. Comparing raw GUIDs is resolution-independent,
+        // path-independent, and extension-independent, which also closes the .hdr / .cubemap /
+        // .renderTexture gap an allowlist left open.
+        //
+        // Scoped to m_TexEnvs deliberately: a material's SHADER may legitimately live in another package
+        // (anti-cull references a VRChat Mobile shader on purpose, documented in its own README), so
+        // widening this to every reference would fail a merged entry.
+        static void CheckMaterialTextureGuids(string matFile, string label, string entryFull,
+                                              System.Collections.Generic.List<string> offenders,
+                                              ref int offenderCount)
+        {
+            string yaml;
+            try { yaml = File.ReadAllText(matFile); }
+            catch (Exception e) { offenders.Add(label + " (unreadable: " + e.Message + ")"); offenderCount++; return; }
+
+            // The GUIDs the entry itself owns, from its committed .meta files.
+            var owned = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var meta in Directory.GetFiles(entryFull, "*.meta", SearchOption.AllDirectories))
+            {
+                var m = Regex.Match(File.ReadAllText(meta), @"^guid:\s*([0-9a-fA-F]{32})\s*$", RegexOptions.Multiline);
+                if (m.Success) owned.Add(m.Groups[1].Value);
+            }
+
+            // Only the texture-slot block; m_Floats/m_Colors carry no references and m_Shader is exempt.
+            int texStart = yaml.IndexOf("m_TexEnvs:", StringComparison.Ordinal);
+            if (texStart < 0) return;
+            int texEnd = yaml.IndexOf("m_Ints:", StringComparison.Ordinal);
+            if (texEnd < 0) texEnd = yaml.IndexOf("m_Floats:", StringComparison.Ordinal);
+            if (texEnd < 0 || texEnd < texStart) texEnd = yaml.Length;
+            var texBlock = yaml.Substring(texStart, texEnd - texStart);
+
+            foreach (Match m in Regex.Matches(texBlock, @"guid:\s*([0-9a-fA-F]{32})"))
+            {
+                var guid = m.Groups[1].Value;
+                if (owned.Contains(guid)) continue;
+                // Name where it resolves when it does; an unresolvable GUID is the more dangerous case
+                // and must still be reported, so absence of a path is not absence of a finding.
+                var resolved = AssetDatabase.GUIDToAssetPath(guid);
+                offenders.Add(label + " (texture GUID outside the entry: " + guid +
+                              (string.IsNullOrEmpty(resolved) ? " — unresolvable in this venue)" : " → " + resolved + ")"));
+                offenderCount++;
             }
         }
 
