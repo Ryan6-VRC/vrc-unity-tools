@@ -74,7 +74,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             DrawNamed(materialEditor, properties, "Layout",
-                      "_Display_Mode", "_Font_Size", "_Total_Width", "_Grid_Columns", "_Grid_Rows",
+                      "_Display_Mode", "_Font_Size", "_Font_Scale_Relative", "_Total_Width",
+                      "_Grid_Columns", "_Grid_Rows",
                       "_Text_Depth_Offset", "_MSDF_Glyph_Atlas");
 
             DrawNamed(materialEditor, properties, "Text palette",
