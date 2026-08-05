@@ -43,11 +43,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // Every section's property list, declared once. DrawUnclaimed checks the shader against the union
         // of these rather than against what actually got drawn: a collapsed section draws nothing, and a
         // coverage check keyed on drawing would call all of its properties orphans.
-        static readonly string[] LayoutProps =
-            { "_Display_Mode", "_Grid_Columns", "_Grid_Rows", "_Total_Width", "_Text_Depth_Offset" };
-        static readonly string[] TextProps =
-            { "_MSDF_Glyph_Atlas", "_Font_Size", "_Font_Scale_Relative",
-              "_Palette_0", "_Palette_1", "_Palette_2", "_Palette_3" };
+        static readonly string[] LayoutProps = { "_Grid_Columns", "_Grid_Rows" };
+        static readonly string[] TextMetricProps =
+            { "_MSDF_Glyph_Atlas", "_Font_Size", "_Font_Scale_Relative", "_Text_Depth_Offset" };
+        static readonly string[] PaletteProps =
+            { "_Palette_0", "_Palette_1", "_Palette_2", "_Palette_3" };
+        // Drawn by hand rather than through ShaderProperty — the mode as a button bar, the width per
+        // column — but still shader properties this GUI is responsible for covering.
+        static readonly string[] HandDrawnProps = { "_Display_Mode", "_Total_Width" };
         static readonly string[] ShellToggleProps = { "_Shell_Enabled" };
         static readonly string[] ShellProps =
             { "_Shell_ReflectionCube", "_Shell_Reflection_Color", "_Shell_Reflection_Strength",
@@ -57,7 +60,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
               "_Shell_Rim_FresnelPower", "_Shell_Rim_VRParallaxStrength" };
 
         static readonly HashSet<string> AllSectionProps = new HashSet<string>(
-            LayoutProps.Concat(TextProps).Concat(ShellToggleProps).Concat(ShellProps).Concat(RimProps));
+            LayoutProps.Concat(TextMetricProps).Concat(PaletteProps).Concat(HandDrawnProps)
+                       .Concat(ShellToggleProps).Concat(ShellProps).Concat(RimProps));
+
+        // The three display modes, in the order the shader's [KeywordEnum] declares them — the float value
+        // IS the index, so this array's order is a wire contract, not a presentation choice.
+        static readonly string[] ModeNames = { "Billboard", "Object", "UV" };
+        static readonly string[] ModeKeywords =
+            { "_DISPLAY_MODE_BILLBOARD", "_DISPLAY_MODE_OBJECT", "_DISPLAY_MODE_UV" };
 
         // Static, not per-instance: Unity builds a fresh ShaderGUI on every selection change, so instance
         // fields collapse every section each time you click away and back. lilToon keeps the equivalent
@@ -65,7 +75,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // enough for a view preference.
         static bool _showLayout = true;
         static bool _showText = true;
-        static bool _showEntries = true;
         static bool _showShell;
         static bool _showRendering;
         static readonly bool[] _showEntry = new bool[DisplayGlyphs.MaxEntries];
@@ -124,32 +133,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var scan = Scan(mat, cols, rows, cellAdv, visible);
 
             DrawSummary(scan, cols, rows, cellAdv);
+            DrawDisplayModeBar(mat);
 
-            if (Section("Layout", "Display mode and the grid the entries land in", ref _showLayout))
+            if (Section("Layout", "The grid the entries land in, and how wide a column is", ref _showLayout))
                 using (Body())
                 {
                     DrawNamed(materialEditor, properties, LayoutProps);
-                    EditorGUILayout.LabelField(
-                        cols + " x " + rows + " = " + (cols * rows) + " cells, " +
-                        cellAdv.ToString("0.##") + " advances per cell (" +
-                        DisplayGlyphs.MaxLabelChars + " label + " + DisplayGlyphs.ValueGlyphs +
-                        " value = " + (DisplayGlyphs.MaxLabelChars + DisplayGlyphs.ValueGlyphs) +
-                        " needed to avoid overlap)", EditorStyles.miniLabel);
+                    DrawColumnWidth(mat, cols, cellAdv);
                 }
 
-            if (Section("Text", "Glyph size, the atlas it is rasterized from, and the four palettes",
+            if (Section("Text", "Glyph size and depth, the atlas they are rasterized from, and the palettes",
                         ref _showText))
                 using (Body())
-                    DrawNamed(materialEditor, properties, TextProps);
-
-            if (Section("Entries", "One row per shader entry; the collapsed row carries its label and source",
-                        ref _showEntries))
-                using (Body())
                 {
-                    if (GUILayout.Button("Auto-align decimal points (per grid column)"))
-                        AutoAlign(mat, cols, rows, cellAdv);
-                    for (int i = 0; i < DisplayGlyphs.MaxEntries; i++)
-                        DrawEntry(mat, scan[i]);
+                    DrawNamed(materialEditor, properties, TextMetricProps);
+                    Line();
+                    DrawNamed(materialEditor, properties, PaletteProps);
                 }
 
             if (Section("Crystal shell", "The reflective outer pass, and the rim light inside it",
@@ -164,11 +163,34 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         DrawNamed(materialEditor, properties, ShellProps);
                         Line();
-                        EditorGUILayout.LabelField("Rim light", EditorStyles.miniBoldLabel);
+                        EditorGUILayout.LabelField("Rim light", EditorStyles.boldLabel);
                         DrawNamed(materialEditor, properties, RimProps);
                     }
                 }
 
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Entries", EditorStyles.boldLabel);
+            if (GUILayout.Button("Auto-align decimal points (per grid column)"))
+                AutoAlign(mat, cols, rows, cellAdv);
+
+            // Each entry is its own accordion at the top level. One outer fold over all twelve meant
+            // reaching any entry cost two clicks and shutting the group hid every label at once.
+            int hidden = 0;
+            for (int i = 0; i < DisplayGlyphs.MaxEntries; i++)
+                if (!DrawEntry(mat, scan[i])) hidden++;
+
+            // A slot outside the grid with nothing configured is not a control, it is an absence — so it
+            // is hidden rather than drawn as a dim row. Counted rather than silent: the slots still exist,
+            // and growing the grid is what brings them back. Short enough not to be cut at any inspector
+            // width; the tooltip carries the why.
+            if (hidden > 0)
+                EditorGUILayout.LabelField(new GUIContent(
+                    hidden == 1 ? "1 unused slot hidden" : hidden + " unused slots hidden",
+                    "Entries outside the " + visible + "-cell grid with nothing configured. Add grid " +
+                    "columns or rows to reach them."));
+
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Advanced", EditorStyles.boldLabel);
             if (Section("Rendering", "Unity's own per-material render settings", ref _showRendering))
                 using (Body())
                 {
@@ -178,6 +200,124 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
 
             DrawUnclaimed(properties);
+        }
+
+        // ── Hand-drawn controls ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// The mode as a button bar at the top of the inspector, where lilToon puts its editor-mode row.
+        /// Three mutually exclusive modes read as three buttons; as a popup they read as a list to open.
+        /// </summary>
+        static void DrawDisplayModeBar(Material mat)
+        {
+            EditorGUILayout.LabelField("Display Mode", EditorStyles.boldLabel);
+            int cur = Mathf.Clamp(Mathf.RoundToInt(GetFloat(mat, "_Display_Mode", 0f)), 0, ModeNames.Length - 1);
+
+            EditorGUI.BeginChangeCheck();
+            int next = GUILayout.Toolbar(cur, ModeNames, GUILayout.Height(22f));
+            if (EditorGUI.EndChangeCheck() && next != cur)
+            {
+                // TWO writes, not one. [KeywordEnum] is what normally keeps the float and the keyword in
+                // step, and MaterialEditor.ShaderProperty is what honours it — a hand-drawn control has to
+                // do it itself. A material whose float says UV while its keyword still says Billboard
+                // renders the billboard, silently and with the inspector showing UV.
+                Undo.RecordObject(mat, "Change display mode");
+                mat.SetFloat("_Display_Mode", next);
+                for (int k = 0; k < ModeKeywords.Length; k++)
+                {
+                    if (k == next) mat.EnableKeyword(ModeKeywords[k]);
+                    else mat.DisableKeyword(ModeKeywords[k]);
+                }
+                EditorUtility.SetDirty(mat);
+            }
+            EditorGUILayout.Space();
+        }
+
+        /// <summary>
+        /// The entry's palette slot as four clickable swatches showing the palette's own colours. An
+        /// IntSlider 0..3 named the index without showing what it selects — the whole question an author
+        /// has here is "which colour", and four numbers cannot answer it.
+        ///
+        /// <para>Labelled <b>Color</b> for the operator; the underlying field is the format bitfield's
+        /// <c>palette</c>, which is what <see cref="SetDisplayEntry"/>, the README and the shader all call
+        /// it. The tooltip carries that name so the two vocabularies stay connected.</para>
+        /// </summary>
+        static int DrawColorSwatches(Material mat, int palette)
+        {
+            var rect = EditorGUILayout.GetControlRect();
+            var field = EditorGUI.PrefixLabel(rect, new GUIContent(
+                "Color",
+                "Which of the four text palettes this entry draws in — the format bitfield's palette " +
+                "index, 0-3, as SetDisplayEntry and the README name it."));
+
+            const float Gap = 3f;
+            float w = Mathf.Min(46f, (field.width - Gap * 3f) / 4f);
+            int picked = palette;
+
+            for (int p = 0; p < 4; p++)
+            {
+                var swatch = new Rect(field.x + p * (w + Gap), field.y + 1f, w, field.height - 2f);
+
+                // The palettes are [HDR], so a component can exceed 1 and a raw DrawRect of it reads as
+                // flat white. Clamped for display only; the shader still gets the authored intensity.
+                var c = mat.HasProperty("_Palette_" + p) ? mat.GetColor("_Palette_" + p) : Color.grey;
+                var shown = new Color(Mathf.Clamp01(c.r), Mathf.Clamp01(c.g), Mathf.Clamp01(c.b), 1f);
+
+                if (p == palette)
+                {
+                    // Selection reads as a frame around the swatch rather than a tint of it, so the colour
+                    // shown stays the colour the entry will draw in.
+                    EditorGUI.DrawRect(new Rect(swatch.x - 2f, swatch.y - 2f, swatch.width + 4f, swatch.height + 4f),
+                                       EditorGUIUtility.isProSkin ? Color.white : Color.black);
+                }
+                EditorGUI.DrawRect(swatch, shown);
+
+                var e = Event.current;
+                if (e.type == EventType.MouseDown && e.button == 0 && swatch.Contains(e.mousePosition))
+                {
+                    picked = p;
+                    // A hand-drawn control does not set GUI.changed on its own, and the caller's
+                    // BeginChangeCheck is what commits the format word — without this the click paints a
+                    // new selection that is never written.
+                    GUI.changed = true;
+                    e.Use();
+                }
+                EditorGUIUtility.AddCursorRect(swatch, MouseCursor.Link);
+            }
+            return picked;
+        }
+
+        /// <summary>
+        /// Column width, which is what an author reasons in, over a material that stores the total across
+        /// all columns because that is what the layout math wants. One multiply each way; the alternative
+        /// was a summary line restating the division, which said the same thing without being editable.
+        /// </summary>
+        static void DrawColumnWidth(Material mat, int cols, float cellAdv)
+        {
+            if (!mat.HasProperty("_Total_Width"))
+            {
+                EditorGUILayout.HelpBox("shader has no property '_Total_Width' — inspector and shader " +
+                                        "have drifted", MessageType.Error);
+                return;
+            }
+
+            int needed = DisplayGlyphs.MaxLabelChars + DisplayGlyphs.ValueGlyphs;
+            var label = new GUIContent(
+                "Column width",
+                "Glyph advances per grid column. A column needs " + DisplayGlyphs.MaxLabelChars +
+                " (label) + " + DisplayGlyphs.ValueGlyphs + " (value) = " + needed + " for a full-width " +
+                "label to stay clear of its value. Stored on the material as the total across all " +
+                cols + " column(s).");
+
+            EditorGUI.BeginChangeCheck();
+            // Ranged so the product stays inside the shader's own Range(10, 200) at any column count.
+            float newCell = EditorGUILayout.Slider(label, cellAdv, Mathf.Max(1f, 10f / cols), 200f / cols);
+            if (EditorGUI.EndChangeCheck())
+            {
+                Undo.RecordObject(mat, "Edit column width");
+                mat.SetFloat("_Total_Width", newCell * cols);
+                EditorUtility.SetDirty(mat);
+            }
         }
 
         // ── Diagnostics ─────────────────────────────────────────────────────────────────────────────
@@ -288,90 +428,65 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── Entry row ───────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// One entry as a foldout whose collapsed header still carries the two fields you scan for —
-        /// the label and the source — plus a fault icon, so a collapsed row can hide detail but not a
-        /// problem. lilToon's texture-slot-in-the-header foldout is the pattern.
+        /// One entry as an ordinary fold — the same header bar every section uses — with every control
+        /// inside it. Nothing lives in the header but the entry's name, its label and whether it is at
+        /// fault, so the twelve of them read as one list.
         /// </summary>
-        void DrawEntry(Material mat, EntryState st)
+        /// <returns><c>false</c> if the entry was skipped as an unused slot, so the caller can count it.</returns>
+        bool DrawEntry(Material mat, EntryState st)
         {
-            if (!st.Exists) return;
+            if (!st.Exists) return false;
             int i = st.Index;
+
+            // Outside the grid AND unconfigured: nothing to show and nothing at risk. A configured entry
+            // outside the grid still draws — it carries a warning, and hiding it would hide the warning.
+            if (st.Unreachable && !st.Configured) return false;
+
             string valueProp = DisplayGlyphs.ValueProperty(i);
-
-            if (st.Unreachable && !st.Configured)
-            {
-                // An unused slot outside the grid: one dim line, no controls, no fold.
-                EditorGUILayout.LabelField("E" + i, "unused, outside the grid", EditorStyles.miniLabel);
-                return;
-            }
-
             int decimals = st.Decimals, palette = st.Palette, rpad = st.Rpad;
             var source = st.Source;
 
-            // One row: fold arrow, grid position, label field, source popup, fault icon. Laid out in
-            // explicit rects rather than a HorizontalScope so the label field takes the slack and the
-            // popup keeps a fixed width no matter how narrow the inspector gets.
-            var row = EditorGUILayout.GetControlRect();
-            float iconW = (st.Error ?? st.Warning) != null ? 20f : 0f;
-            const float SourceW = 104f;
-            var foldRect = new Rect(row.x, row.y, 13f, row.height);
-            var posRect = new Rect(row.x + 13f, row.y, 52f, row.height);
-            float labelX = posRect.xMax + 2f;
-            var labelRect = new Rect(labelX, row.y,
-                                     Mathf.Max(40f, row.xMax - labelX - SourceW - iconW - 6f), row.height);
-            var sourceRect = new Rect(labelRect.xMax + 3f, row.y, SourceW, row.height);
-            var iconRect = new Rect(sourceRect.xMax + 3f, row.y, iconW, row.height);
+            // The label rides in the title because it is the only way to tell twelve otherwise identical
+            // folds apart; the fault mark rides there because a shut fold must not hide one.
+            string title = "E" + i;
+            if (st.Label.Length > 0) title += "   " + st.Label;
+            if (st.Error != null) title += "   (!)";
+            else if (st.Warning != null) title += "   (?)";
 
-            _showEntry[i] = EditorGUI.Foldout(foldRect, _showEntry[i], GUIContent.none);
-            EditorGUI.LabelField(posRect,
-                                 st.Unreachable ? "E" + i + " ·—" : "E" + i + " ·" + st.Row + "," + st.Col,
-                                 EditorStyles.miniLabel);
+            string tip = st.Error ?? st.Warning ??
+                         (st.Unreachable ? "Outside the grid" : "Row " + st.Row + ", column " + st.Col);
 
-            // Delayed, so an in-progress label is not encoded on every keystroke: TryEncodeLabel refuses
-            // an out-of-charset character rather than mangling it, and a live field would log that refusal
-            // per character typed on the way to a valid string.
-            EditorGUI.BeginChangeCheck();
-            string newText = EditorGUI.DelayedTextField(labelRect, st.Label);
-            if (EditorGUI.EndChangeCheck() && newText != st.Label)
+            if (!Section(title, tip, ref _showEntry[i])) return true;
+
+            using (Body())
             {
-                Vector4 newPacked;
-                string error, note;
-                if (DisplayGlyphs.TryEncodeLabel(newText, out newPacked, out error, out note))
-                {
-                    Undo.RecordObject(mat, "Edit display label");
-                    mat.SetVector(DisplayGlyphs.LabelProperty(i), newPacked);
-                    EditorUtility.SetDirty(mat);
-                }
-                else
-                {
-                    // Refused, not silently mangled — the same contract as the write door.
-                    Debug.LogWarning("[DebugDisplay] E" + i + " label rejected: " + error);
-                }
-            }
-
-            EditorGUI.BeginChangeCheck();
-            int newSource = EditorGUI.Popup(sourceRect, (int)source, SourceNames);
-            if (EditorGUI.EndChangeCheck())
-            {
-                source = (DisplayGlyphs.ValueSource)newSource;
-                WriteFormat(mat, i, decimals, palette, rpad, source);
-            }
-
-            if (iconW > 0f)
-            {
-                var icon = EditorGUIUtility.IconContent(
-                    st.Error != null ? "console.erroricon.sml" : "console.warnicon.sml");
-                EditorGUI.LabelField(iconRect, new GUIContent(icon.image, st.Error ?? st.Warning));
-            }
-
-            if (!_showEntry[i]) return;
-
-            using (new EditorGUI.IndentLevelScope())
-            {
+                // Delayed, so an in-progress label is not encoded on every keystroke: TryEncodeLabel
+                // refuses an out-of-charset character rather than mangling it, and a live field would log
+                // that refusal per character typed on the way to a valid string.
                 EditorGUI.BeginChangeCheck();
+                string newText = EditorGUILayout.DelayedTextField("Label", st.Label);
+                if (EditorGUI.EndChangeCheck() && newText != st.Label)
+                {
+                    Vector4 newPacked;
+                    string error, note;
+                    if (DisplayGlyphs.TryEncodeLabel(newText, out newPacked, out error, out note))
+                    {
+                        Undo.RecordObject(mat, "Edit display label");
+                        mat.SetVector(DisplayGlyphs.LabelProperty(i), newPacked);
+                        EditorUtility.SetDirty(mat);
+                    }
+                    else
+                    {
+                        // Refused, not silently mangled — the same contract as the write door.
+                        Debug.LogWarning("[DebugDisplay] E" + i + " label rejected: " + error);
+                    }
+                }
+
+                EditorGUI.BeginChangeCheck();
+                source = (DisplayGlyphs.ValueSource)EditorGUILayout.Popup("Source", (int)source, SourceNames);
                 decimals = EditorGUILayout.IntSlider("Decimals", decimals, 0, DisplayGlyphs.MaxDecimals);
                 rpad = EditorGUILayout.IntSlider("Right pad", rpad, 0, DisplayGlyphs.MaxRpad);
-                palette = EditorGUILayout.IntSlider("Palette", palette, 0, 3);
+                palette = DrawColorSwatches(mat, palette);
                 if (EditorGUI.EndChangeCheck())
                     WriteFormat(mat, i, decimals, palette, rpad, source);
 
@@ -388,21 +503,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                     using (new EditorGUILayout.HorizontalScope())
                     {
-                        EditorGUILayout.LabelField("Binding", "material." + valueProp,
-                                                   EditorStyles.miniLabel);
+                        EditorGUILayout.LabelField("Binding", "material." + valueProp);
                         if (GUILayout.Button("Copy", EditorStyles.miniButton, GUILayout.Width(46)))
                             EditorGUIUtility.systemCopyBuffer = "material." + valueProp;
                     }
                 }
                 else
                 {
-                    EditorGUILayout.LabelField("Value", "computed in-shader from " + source,
-                                               EditorStyles.miniLabel);
+                    EditorGUILayout.LabelField("Value", "computed in-shader from " + source);
                 }
 
                 if (st.Error != null) EditorGUILayout.HelpBox(st.Error, MessageType.Error);
                 else if (st.Warning != null) EditorGUILayout.HelpBox(st.Warning, MessageType.Warning);
             }
+            return true;
         }
 
         void WriteFormat(Material mat, int i, int decimals, int palette, int rpad,
