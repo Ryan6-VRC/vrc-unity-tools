@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using UnityEditor;
@@ -158,11 +159,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var committedMenuPath = MenuBeside(builtControllerPath);
                     bool committedExists = File.Exists(committedMenuPath);
 
-                    if (freshMenu == null && committedExists)
-                        return (false, "built/ ships a menu asset the yaml no longer emits — delete it or restore the menu: block");
-                    if (freshMenu != null && !committedExists)
-                        return (false, "yaml emits a menu but built/ has none — regenerate built/");
-                    if (freshMenu != null)
+                    var (pass, presenceMsg) = MenuPresence(freshMenu != null, committedExists);
+                    if (pass == MenuPass.Fail) return (false, presenceMsg);
+                    if (pass == MenuPass.Compare)
                     {
                         var imported = ImportCommittedMenu(committedMenuPath, scratch + "/menu");
                         if (imported == null) return (false, "committed menu asset failed to import");
@@ -176,9 +175,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
             finally { CleanupScratch(scratch); }
         }
 
+        internal enum MenuPass { Skip, Compare, Fail }
+
+        // Which of the three things Check does about a menu, decided from presence alone: neither side has
+        // one (Skip), both do (Compare the trees), or exactly one does (Fail). Extracted from Check so the
+        // decision is reachable without an AssetDatabase — MenuDiff being correct is worth nothing if the
+        // caller can stop invoking it, and a comparator at full branch coverage cannot see that happen.
+        //
+        // The two refusal strings live HERE rather than at the old call site because the message is part of
+        // the decision: which of the two asymmetric cases fired is exactly what a test must be able to
+        // distinguish, and a helper returning a bare bool would let the pair be swapped undetected.
+        internal static (MenuPass pass, string msg) MenuPresence(bool freshEmits, bool committedExists)
+        {
+            if (!freshEmits && committedExists)
+                return (MenuPass.Fail, "built/ ships a menu asset the yaml no longer emits — delete it or restore the menu: block");
+            if (freshEmits && !committedExists)
+                return (MenuPass.Fail, "yaml emits a menu but built/ has none — regenerate built/");
+            return (freshEmits ? MenuPass.Compare : MenuPass.Skip, null);
+        }
+
         // The menu asset CompileController writes beside a controller, by the same formula it uses:
         // "<dir>/<name>_Menu.asset". Path arithmetic only — the file need not exist.
-        static string MenuBeside(string controllerPath)
+        //
+        // This RE-DERIVES CompileController's formula (CompileController.cs: emitDir + "/" + name +
+        // "_Menu.asset") rather than sharing it — two copies of one convention, coupled by nothing, and this
+        // copy feeds both the File.Exists presence check and the LoadAssetAtPath above. Its own tests are
+        // what keep the copies in step.
+        internal static string MenuBeside(string controllerPath)
         {
             var dir = Path.GetDirectoryName(controllerPath) ?? "";
             return Path.Combine(dir, Path.GetFileNameWithoutExtension(controllerPath) + "_Menu.asset")
@@ -218,8 +241,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // icon lives in that entry's assets/ — which the gate host does not load, so both sides resolve to
         // null and any real difference between them is invisible here. Closing it means importing the entry
         // dir before the compile pass, the way the prefab pass already does. Deliberately not done: it is a
-        // gate change, and no library entry authors an icon yet.
-        static string MenuDiff(VRCExpressionsMenu a, VRCExpressionsMenu b, string where)
+        // gate change, and no library entry authors an icon yet. ControllerFixpointTests does exercise the
+        // branch against real imported assets, which keeps the comparison itself honest — it does not close
+        // the gate hole above, and the two must not be confused.
+        internal static string MenuDiff(VRCExpressionsMenu a, VRCExpressionsMenu b, string where)
         {
             if (a.name != b.name)
                 return $"{where}: page name '{a.name}' vs '{b.name}'";
@@ -274,7 +299,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // Reads the `controller:` name off a schema document without compiling it. Null when the file
         // carries no such key (e.g. a CompileClips document) — the caller decides what that means.
-        static string ParseControllerName(string yamlPath)
+        internal static string ParseControllerName(string yamlPath)
         {
             foreach (var line in File.ReadLines(yamlPath))
             {
@@ -368,6 +393,46 @@ namespace Ryan6Vrc.AvatarTools.Editor
             finally { CleanupScratch(scratch); }
         }
 
+        // Tier is derived from files present; a GUID-consumer shape (a prefab, a non-empty assets/, or a
+        // built/ dir) MUST ship a built .controller per document. Without this, a Module/Asset-bound entry
+        // whose built controller went missing would silently pass as a Pattern.
+        //
+        // Throws DirectoryNotFoundException on an entryDir that does not exist — RunGate only ever passes a
+        // directory it just enumerated, so the guard stays at that caller rather than being swallowed here.
+        internal static bool IsGuidConsumer(string entryDir)
+        {
+            var builtDir = Path.Combine(entryDir, "built");
+            var assetsDir = Path.Combine(entryDir, "assets");
+            return Directory.GetFiles(entryDir, "*.prefab").Length > 0
+                || Directory.Exists(builtDir)
+                || (Directory.Exists(assetsDir) && Directory.GetFiles(assetsDir)
+                        .Any(f => !f.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)));
+        }
+
+        // Committed built controllers no yaml document claims. `claimed` arrives as a plain sequence and the
+        // ORDINAL comparer is applied here, not at the caller: a test that supplied its own pre-built
+        // HashSet would be asserting against its own comparer choice and would stay green if this one
+        // changed. Case matters — `Fx` does not claim `FX.controller`.
+        //
+        // Both orphan helpers throw DirectoryNotFoundException on a missing builtDir; RunGate keeps its
+        // Directory.Exists guard, since "no built/ at all" is a legal Pattern shape and not drift.
+        internal static IEnumerable<string> OrphanControllers(string builtDir, IEnumerable<string> claimed)
+        {
+            var set = new HashSet<string>(claimed, StringComparer.Ordinal);
+            return Directory.GetFiles(builtDir, "*.controller")
+                .Select(Path.GetFileNameWithoutExtension).Where(n => !set.Contains(n));
+        }
+
+        // Same rule for a committed menu: it is named off its controller ("<name>_Menu.asset"), so one whose
+        // controller no document claims is the same drift.
+        internal static IEnumerable<string> OrphanMenus(string builtDir, IEnumerable<string> claimed)
+        {
+            var set = new HashSet<string>(claimed, StringComparer.Ordinal);
+            return Directory.GetFiles(builtDir, "*_Menu.asset")
+                .Select(Path.GetFileNameWithoutExtension)
+                .Where(n => !set.Contains(n.Substring(0, n.Length - "_Menu".Length)));
+        }
+
         // -executeMethod entrypoint. Args after `--`: --root <dir>. An entry is a non-dot <dir>/* folder
         // containing controller.yaml; EVERY top-level *.yaml in it with a `controller:` key is gated
         // (a multi-controller entry ships an FX + Gesture pair), each against built/<name>.controller.
@@ -397,16 +462,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 bool entryFailed = false;
                 var builtDir = Path.Combine(dir, "built");
 
-                // Tier is derived from files present; a GUID-consumer shape (a prefab, a non-empty assets/,
-                // or a built/ dir) MUST ship a built .controller per document. Without this, a Module/
-                // Asset-bound entry whose built controller went missing would silently pass as a Pattern.
-                var assetsDir = Path.Combine(dir, "assets");
-                bool guidConsumer = Directory.GetFiles(dir, "*.prefab").Length > 0
-                    || Directory.Exists(builtDir)
-                    || (Directory.Exists(assetsDir) && Directory.GetFiles(assetsDir)
-                            .Any(f => !f.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)));
+                bool guidConsumer = IsGuidConsumer(dir);
 
-                var claimed = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+                var claimed = new List<string>();
                 foreach (var yaml in Directory.GetFiles(dir, "*.yaml").OrderBy(f => f, StringComparer.Ordinal))
                 {
                     var doc = $"{entry}/{Path.GetFileName(yaml)}";
@@ -435,8 +493,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // A committed controller no document claims is drift (a renamed/deleted yaml left its
                 // built form behind) — the silent-skip this multi-yaml gate exists to prevent.
                 if (Directory.Exists(builtDir))
-                    foreach (var orphan in Directory.GetFiles(builtDir, "*.controller")
-                        .Select(Path.GetFileNameWithoutExtension).Where(n => !claimed.Contains(n)))
+                    foreach (var orphan in OrphanControllers(builtDir, claimed))
                     {
                         Debug.Log($"[gate] FAIL {entry}: built/{orphan}.controller matches no yaml document (drift)");
                         entryFailed = true;
@@ -446,9 +503,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // no document claims is the same drift. Check() catches a menu the yaml stopped emitting;
                 // this catches the case where the whole document went away and took the check with it.
                 if (Directory.Exists(builtDir))
-                    foreach (var orphan in Directory.GetFiles(builtDir, "*_Menu.asset")
-                        .Select(Path.GetFileNameWithoutExtension)
-                        .Where(n => !claimed.Contains(n.Substring(0, n.Length - "_Menu".Length))))
+                    foreach (var orphan in OrphanMenus(builtDir, claimed))
                     {
                         Debug.Log($"[gate] FAIL {entry}: built/{orphan}.asset matches no yaml document (drift)");
                         entryFailed = true;
