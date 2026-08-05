@@ -159,7 +159,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var committedMenuPath = MenuBeside(builtControllerPath);
                     bool committedExists = File.Exists(committedMenuPath);
 
-                    var (pass, presenceMsg) = MenuPresence(freshMenu != null, committedExists);
+                    var (pass, presenceMsg) = MenuPresence(freshMenu, committedExists);
                     if (pass == MenuPass.Fail) return (false, presenceMsg);
                     if (pass == MenuPass.Compare)
                     {
@@ -184,9 +184,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
         //
         // The two refusal strings live HERE rather than at the old call site because the message is part of
         // the decision: which of the two asymmetric cases fired is exactly what a test must be able to
-        // distinguish, and a helper returning a bare bool would let the pair be swapped undetected.
-        internal static (MenuPass pass, string msg) MenuPresence(bool freshEmits, bool committedExists)
+        // distinguish, and a helper returning a bare bool could not tell them apart at all.
+        //
+        // TAKES THE MENU, NOT A BOOL, and that is the whole reason for the signature. Two same-typed bool
+        // parameters would let a caller swap them: it compiles, it inverts which refusal fires — telling an
+        // author to "delete or restore" when the fix is "regenerate" — and no test here would catch it,
+        // because nothing in this file's suite invokes Check. Inline code had no argument order to get wrong,
+        // so extracting created that hazard; differing the types is what removes it, at compile time rather
+        // than by a test that does not exist.
+        internal static (MenuPass pass, string msg) MenuPresence(VRCExpressionsMenu freshMenu, bool committedExists)
         {
+            bool freshEmits = freshMenu != null;
             if (!freshEmits && committedExists)
                 return (MenuPass.Fail, "built/ ships a menu asset the yaml no longer emits — delete it or restore the menu: block");
             if (freshEmits && !committedExists)
@@ -199,8 +207,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         //
         // This RE-DERIVES CompileController's formula (CompileController.cs: emitDir + "/" + name +
         // "_Menu.asset") rather than sharing it — two copies of one convention, coupled by nothing, and this
-        // copy feeds both the File.Exists presence check and the LoadAssetAtPath above. Its own tests are
-        // what keep the copies in step.
+        // copy feeds both the File.Exists presence check and the LoadAssetAtPath above.
+        //
+        // What keeps the copies in step is the PAIR of suites, not this side alone: ControllerFixpointTests
+        // pins this formula against literals, and MenuEmitTests pins the compiler's against its own
+        // (MenuPath => OutDir + "/M_Fx_Menu.asset", asserted on the emitted asset's name). Drift in either
+        // goes red. Sharing one helper would make the second suite unnecessary; until then both are load-bearing.
         internal static string MenuBeside(string controllerPath)
         {
             var dir = Path.GetDirectoryName(controllerPath) ?? "";
@@ -433,6 +445,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 .Where(n => !set.Contains(n.Substring(0, n.Length - "_Menu".Length)));
         }
 
+        // The gate's whole contract with gate.ps1: 0 iff nothing failed in either pass. Every FAIL this tool
+        // logs is worthless if this expression says 0 anyway, and it is the one line where a mistake makes a
+        // broken gate look like a passing one, so it is lifted out of RunGate for the same reason as the rest.
+        internal static int GateExit(int failedEntries, int prefabFailed) =>
+            (failedEntries == 0 && prefabFailed == 0) ? 0 : 1;
+
         // -executeMethod entrypoint. Args after `--`: --root <dir>. An entry is a non-dot <dir>/* folder
         // containing controller.yaml; EVERY top-level *.yaml in it with a `controller:` key is gated
         // (a multi-controller entry ships an FX + Gesture pair), each against built/<name>.controller.
@@ -532,7 +550,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             SweepScratch(); // authoritative cleanup: all Check refs are out of scope now, no Refresh follows
 
-            EditorApplication.Exit((failedEntries == 0 && prefabFailed == 0) ? 0 : 1);
+            EditorApplication.Exit(GateExit(failedEntries, prefabFailed));
         }
     }
 }

@@ -14,12 +14,17 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 //
 // WHAT THIS FILE DOES NOT COVER, stated because a suite that looks uniform is read as uniform:
 //
-// RunGate's own composition is untested and NOT unit-testable — it ends in EditorApplication.Exit, so the
-// wiring that turns a FAIL into a nonzero exit (entryFailed, failedEntries, prefabFailed, the exit
-// expression) has no unit door. The extraction that made the helpers below testable moved the *computing*
-// half out and left the *failing* half behind, so that gap widened rather than closed. It is covered by an
-// end-to-end gate run against a scratch copy of vrc-patterns with injected drift, recorded in the PR that
-// added this file, not by anything here. Do not read a green run as "the gate fails when it should".
+// RunGate's own composition is only partly covered. The exit expression itself is pinned (GateExit), but the
+// wiring that FEEDS it — `entryFailed = true` at each of its three sites, and the failedEntries/prefabFailed
+// counters — stays inside RunGate, which ends in EditorApplication.Exit and so has no unit door short of
+// lifting the loop bodies too. That was declined as more surgery than the coverage is worth, not judged
+// impossible. The extraction below moved the *computing* half out and left that *failing* half behind, so
+// deleting any one `entryFailed = true` still logs FAIL and exits 0 with this whole suite green.
+//
+// What covers it instead is an end-to-end gate run against a scratch copy of vrc-patterns with injected
+// drift (baseline exit 0; a renamed state, a deleted built menu, and an unclaimed built controller each exit
+// 1 with a named FAIL line), recorded in the PR that added this file. Do not read a green run here as "the
+// gate fails when it should".
 //
 // Check(), CompileToTemp, ImportCommitted(Menu), Decode, and CheckPrefabIntegrity are boundary-bound
 // (AssetDatabase, a real compile) and stay out. Decode's fixpoint property is owned next door by
@@ -56,13 +61,23 @@ public class ControllerFixpointTests
         Directory.CreateDirectory(_tmp);
     }
 
+    // The destroy loop is in a finally because the recursive delete above it CAN throw — a transient lock or
+    // AV scan on Windows raises IOException/UnauthorizedAccessException. Ordered the other way, one flaky
+    // temp delete would skip the destroy and leak the whole case's menus, reproducing the 48-failure cascade
+    // described on _made. A bad delete must cost this one test, not the suites downstream of it.
     [TearDown]
     public void TearDown()
     {
-        if (_tmp != null && Directory.Exists(_tmp)) Directory.Delete(_tmp, true);
-        _tmp = null;
-        foreach (var o in _made) if (o != null) UnityEngine.Object.DestroyImmediate(o);
-        _made.Clear();
+        try
+        {
+            if (_tmp != null && Directory.Exists(_tmp)) Directory.Delete(_tmp, true);
+        }
+        finally
+        {
+            _tmp = null;
+            foreach (var o in _made) if (o != null) UnityEngine.Object.DestroyImmediate(o);
+            _made.Clear();
+        }
     }
 
     // An entry dir under the temp venue. Files are written, never imported — these helpers read the
@@ -98,7 +113,8 @@ public class ControllerFixpointTests
     }
 
     // Every field the caller does not set stays at its SDK default, so a case's diff is exactly the field it
-    // varied. `value` defaults to 1f in the SDK, not 0f — set it explicitly where it matters.
+    // varied. `value` defaults to 1f, not 0f — measured by SdkDefaults_AreWhatTheFixturesAssume below rather
+    // than asserted from the SDK's source, which is not on disk here.
     static VRCExpressionsMenu.Control Ctl(
         string name,
         VRCExpressionsMenu.Control.ControlType type = VRCExpressionsMenu.Control.ControlType.Toggle,
@@ -111,6 +127,32 @@ public class ControllerFixpointTests
             parameter = new VRCExpressionsMenu.Control.Parameter { name = parameter },
             value = value,
         };
+
+    // ── The SDK shapes every fixture below depends on ──────────────────────────────────────────────
+    //
+    // MenuDiff's null-handling only makes sense against particular SDK shapes: `parameter` a class (so `?.`
+    // means something), `Label` a struct (so only its name can be null), `controls` pre-initialised, `value`
+    // defaulting to 1f. Those are asserted here by measurement, not read off the SDK — VRCSDK3A ships as a
+    // DLL, and this suite must not rest on a claim no committed artifact can check. Without this case the
+    // fixtures encode the assumption silently and an SDK change would surface as a confusing diff elsewhere.
+    [Test]
+    public void SdkDefaults_AreWhatTheFixturesAssume()
+    {
+        var fresh = new VRCExpressionsMenu.Control();
+        Assert.AreEqual(1f, fresh.value, "fixtures set value explicitly because the default is 1f, not 0f");
+        Assert.IsNull(fresh.parameter, "parameter is a reference type, which is why MenuDiff null-conditionals it");
+        Assert.IsNull(fresh.icon, "the icon cases rest on this being null by default");
+
+        var page = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
+        _made.Add(page);
+        Assert.IsNotNull(page.controls, "controls is pre-initialised, so the null-controls case must assign null");
+
+        // A struct, so an ELEMENT is never null and only `name` can be — the asymmetry with subParameters.
+        Assert.IsFalse(typeof(VRCExpressionsMenu.Control.Label).IsClass,
+            "Label is a struct; MenuDiff coalesces its name rather than null-conditionalling the element");
+        Assert.IsTrue(typeof(VRCExpressionsMenu.Control.Parameter).IsClass,
+            "Parameter is a class; a null element is representable and MenuDiff coalesces it");
+    }
 
     // ── MenuDiff: the equal case, and the page/count legs ───────────────────────────────────────────
 
@@ -212,10 +254,13 @@ public class ControllerFixpointTests
     }
 
     // KNOWN DEFECT, pinned as-is rather than fixed: `value` is compared with !=, so two NaNs report a
-    // difference between byte-identical menus. AnimatorSchemaYaml parses `NaN` via float.TryParse, so a yaml
-    // can author it, commit it, and then never be admitted again — the "regenerate built/" remediation the
-    // caller appends is unreachable by construction. Correct comparison is !x.value.Equals(y.value); making
-    // it is a change to the gate's comparison, which is not this file's call. See docs/local/inbox/F42.md.
+    // difference between byte-identical menus. A menu control's `value:` reaches that field through
+    // AnimatorSchemaYaml's ToNumber, i.e. InferScalar's double.TryParse then a cast to float, and nothing on
+    // that path rejects a non-finite — so a yaml can author `value: NaN`, commit it, and then never be
+    // admitted again, because the "regenerate built/" remediation the caller appends cannot change the value.
+    // Correct comparison is !x.value.Equals(y.value); this package already has the idiom in RepathClips'
+    // FloatEq. Making the change is a change to the gate's comparison, so it is the board's call, not this
+    // file's — see docs/local/inbox/F42.md.
     //
     // Not exact-string: float.ToString() renders NaN culture-dependently.
     [Test]
@@ -387,18 +432,24 @@ public class ControllerFixpointTests
     const string IconSeed = "Assets/Agent/Scratch/F42IconSeed";
     static Texture2D _icon;
 
+    const string IconPath = IconSeed + "/F42Icon.png";
+
+    // The seed texture is destroyed in a finally: NUnit skips OneTimeTearDown when OneTimeSetUp throws, so an
+    // encode or write failure would otherwise leak it with no later chance to clean up.
     [OneTimeSetUp]
     public void OneTimeSetUp()
     {
         AnimatorTestHelpers.EnsureFolder(IconSeed);
-        var path = IconSeed + "/F42Icon.png";
         var tex = new Texture2D(1, 1);
-        tex.SetPixel(0, 0, Color.magenta);
-        tex.Apply();
-        System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
-        UnityEngine.Object.DestroyImmediate(tex);
-        AssetDatabase.ImportAsset(path);
-        _icon = AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+        try
+        {
+            tex.SetPixel(0, 0, Color.magenta);
+            tex.Apply();
+            System.IO.File.WriteAllBytes(IconPath, tex.EncodeToPNG());
+        }
+        finally { UnityEngine.Object.DestroyImmediate(tex); }
+        AssetDatabase.ImportAsset(IconPath);
+        _icon = AssetDatabase.LoadAssetAtPath<Texture2D>(IconPath);
         Assert.IsNotNull(_icon, "icon fixture must import — the icon leg is unreachable without a real asset");
     }
 
@@ -409,18 +460,23 @@ public class ControllerFixpointTests
         AssetDatabase.DeleteAsset(IconSeed);
     }
 
+    // The expected path is the LITERAL fixture path, not AssetDatabase.GetAssetPath(_icon): sourcing it from
+    // the same accessor the implementation calls would make this assertion agree with a rendering change
+    // instead of catching one.
     [Test]
     public void MenuDiff_IconDiffers_NamesBothAssetPaths()
     {
         var a = Menu("menu", Ctl("Hat"));
         a.controls[0].icon = _icon;
         var b = Menu("menu", Ctl("Hat"));
-        var expected = $"menu 'Hat': icon '{AssetDatabase.GetAssetPath(_icon)}' vs '' — regenerate built/";
-        Assert.AreEqual(expected, ControllerFixpoint.MenuDiff(a, b, "menu"));
+        Assert.AreEqual($"menu 'Hat': icon '{IconPath}' vs '' — regenerate built/",
+            ControllerFixpoint.MenuDiff(a, b, "menu"));
     }
 
-    // The gate's own configuration: both sides null. Must be EQUAL. If this ever regressed, every entry
-    // authoring an icon would become permanently unadmittable, and no other case here would notice.
+    // The gate's own configuration: both sides null, and they must compare EQUAL — if that regressed, every
+    // entry authoring an icon would become permanently unadmittable. Named as its own case because the
+    // condition deserves stating; MenuDiff_IdenticalTrees_ReturnsNull covers the same regression incidentally,
+    // its controls carrying null icons too.
     [Test]
     public void MenuDiff_BothIconsNull_AreEqual()
     {
@@ -457,7 +513,7 @@ public class ControllerFixpointTests
     [Test]
     public void MenuPresence_BothPresent_Compares()
     {
-        var (pass, msg) = ControllerFixpoint.MenuPresence(true, true);
+        var (pass, msg) = ControllerFixpoint.MenuPresence(Menu("menu"), true);
         Assert.AreEqual(ControllerFixpoint.MenuPass.Compare, pass);
         Assert.IsNull(msg);
     }
@@ -465,17 +521,22 @@ public class ControllerFixpointTests
     [Test]
     public void MenuPresence_NeitherPresent_Skips()
     {
-        var (pass, msg) = ControllerFixpoint.MenuPresence(false, false);
+        var (pass, msg) = ControllerFixpoint.MenuPresence(null, false);
         Assert.AreEqual(ControllerFixpoint.MenuPass.Skip, pass);
         Assert.IsNull(msg);
     }
 
     // The two asymmetric cases carry DIFFERENT remediations — one says delete or restore, the other says
-    // regenerate — so the messages are asserted, not just the verdict. A swapped pair is the bug.
+    // regenerate — so the message is asserted, not just the verdict: told the wrong one, an author does the
+    // wrong thing. The expected strings are duplicated from the implementation deliberately rather than
+    // routed through a shared constant; a constant would still catch a mis-wired branch but would make a
+    // REWRITE of either message invisible, and the wording is the part that instructs a human. This file is
+    // the declared review invariant for that pair (tool-design.md §Duplication: a managed echo names its
+    // canon, which is MenuPresence).
     [Test]
     public void MenuPresence_CommittedOnly_FailsTellingAuthorToDeleteOrRestore()
     {
-        var (pass, msg) = ControllerFixpoint.MenuPresence(false, true);
+        var (pass, msg) = ControllerFixpoint.MenuPresence(null, true);
         Assert.AreEqual(ControllerFixpoint.MenuPass.Fail, pass);
         Assert.AreEqual("built/ ships a menu asset the yaml no longer emits — delete it or restore the menu: block", msg);
     }
@@ -483,10 +544,34 @@ public class ControllerFixpointTests
     [Test]
     public void MenuPresence_FreshOnly_FailsTellingAuthorToRegenerate()
     {
-        var (pass, msg) = ControllerFixpoint.MenuPresence(true, false);
+        var (pass, msg) = ControllerFixpoint.MenuPresence(Menu("menu"), false);
         Assert.AreEqual(ControllerFixpoint.MenuPass.Fail, pass);
         Assert.AreEqual("yaml emits a menu but built/ has none — regenerate built/", msg);
     }
+
+    // ── GateExit: the only thing gate.ps1 actually reads ───────────────────────────────────────────
+    //
+    // Every [gate] FAIL line this tool logs is decoration if this returns 0 anyway. The failing-half wiring
+    // around it (entryFailed, the two counters) still has no unit door and is covered only by the end-to-end
+    // acceptance run described in the file header — but the expression itself is now pinned.
+
+    [Test]
+    public void GateExit_NothingFailed_IsZero()
+        => Assert.AreEqual(0, ControllerFixpoint.GateExit(0, 0));
+
+    [Test]
+    public void GateExit_AnEntryFailed_IsOne()
+        => Assert.AreEqual(1, ControllerFixpoint.GateExit(1, 0));
+
+    // The prefab-integrity pass is the only one guarding hand-authored content, so its failures must reach
+    // the exit code independently of the document passes — an && flipped to || would discard exactly this.
+    [Test]
+    public void GateExit_OnlyPrefabIntegrityFailed_IsOne()
+        => Assert.AreEqual(1, ControllerFixpoint.GateExit(0, 1));
+
+    [Test]
+    public void GateExit_BothFailed_IsOne()
+        => Assert.AreEqual(1, ControllerFixpoint.GateExit(3, 2));
 
     // ── MenuBeside: the re-derived filename convention ─────────────────────────────────────────────
     //
@@ -551,13 +636,21 @@ public class ControllerFixpointTests
     // None is reachable from the library as committed: all 21 controller: lines are unquoted plain scalars
     // with no comment, no indent, no duplicate, and no space before the colon. These are armed for the next
     // entry, which is the gate's actual subject.
+    //
+    // SCOPE OF THE COMPARISON: each case below is about how the two readers resolve the controller KEY and its
+    // value. The fixtures are bare `controller:` lines, which AnimatorSchemaYaml would refuse outright as
+    // documents — Bind requires `basis:` — so "the real parser binds this" below always means the key, never
+    // the whole file. The divergence is real for a well-formed library document, where the only difference is
+    // the spelling of this one line.
 
-    // Real parser strips the quotes and the compiler writes FX.controller; the gate looks for
-    // "FX".controller. Loud, but the FAIL tells the author to regenerate built/, which cannot help.
+    // Real parser strips the quotes and the compiler writes FX.controller; the gate keeps them, so it looks
+    // for a filename containing '"'. That does not merely miss — it is an illegal Windows path, and RunGate
+    // feeds it to Path.Combine outside any try, so the run DIES with no [gate] line. See the Interlock test
+    // at the bottom of this file, which asserts that; the crash is why this row leads the F42 inbox report.
     [Test]
     public void ParseControllerName_QuotedScalar_KeepsQuotes_Divergence()
         => Assert.AreEqual("\"FX\"", ControllerFixpoint.ParseControllerName(Yaml("controller: \"FX\"\n")),
-            "DIVERGENCE: the real parser strips quotes; the gate keeps them and then cannot find built/");
+            "DIVERGENCE: the real parser strips quotes; the gate keeps them and then cannot build a legal path");
 
     // The real parser needs whitespace before a '#' for it to start a comment, so the true name is FX#odd.
     [Test]
@@ -570,13 +663,13 @@ public class ControllerFixpointTests
     [Test]
     public void ParseControllerName_SpaceBeforeColon_ReturnsNull_SilentDivergence()
         => Assert.IsNull(ControllerFixpoint.ParseControllerName(Yaml("controller : FX\n")),
-            "SILENT DIVERGENCE: the real parser trims the key and binds this; the gate skips the document");
+            "SILENT DIVERGENCE: the real parser trims the key and binds it; the gate sees no controller key");
 
     // SILENT: same shape — the real parser strips quotes around a KEY too.
     [Test]
     public void ParseControllerName_QuotedKey_ReturnsNull_SilentDivergence()
         => Assert.IsNull(ControllerFixpoint.ParseControllerName(Yaml("\"controller\": FX\n")),
-            "SILENT DIVERGENCE: the real parser unquotes the key and binds this; the gate skips the document");
+            "SILENT DIVERGENCE: the real parser unquotes the key and binds it; the gate sees no controller key");
 
     // The real parser REFUSES a duplicate key outright. The gate takes the first and moves on — harmless
     // only because the compile that follows fails loudly on the same file.
@@ -819,6 +912,13 @@ public class ControllerFixpointTests
         Assert.AreEqual("\"FX\"", parsed);
         Assert.IsTrue(ControllerFixpoint.IsGuidConsumer(_tmp),
             "the entry is a GUID-consumer, so the document would be held to its built/ controller");
+
+        // The stable, runtime-independent form of the defect: the parsed name cannot be part of a legal path.
+        Assert.GreaterOrEqual(parsed.IndexOfAny(Path.GetInvalidPathChars()), 0,
+            "the parsed name carries a character no path may contain");
+        // And the consequence on THIS runtime. Path.Combine's invalid-char ArgumentException exists on the
+        // Mono profile Unity 2022.3 ships and was removed in .NET Core 2.1+, so if this assert ever fails on a
+        // newer runtime the defect has changed shape, not disappeared — the illegal name above still is one.
         Assert.Throws<ArgumentException>(() => Path.Combine(built, parsed + ".controller"),
             "RunGate builds the built/ path exactly this way, outside any try — a quoted name kills the run");
     }
@@ -833,7 +933,7 @@ public class ControllerFixpointTests
         var built = Dir("built");
 
         Assert.IsNull(ControllerFixpoint.ParseControllerName(yaml),
-            "the real parser binds this document; the gate does not see a controller key");
+            "the real parser binds this key; the gate does not see a controller key at all");
         Assert.IsTrue(ControllerFixpoint.IsGuidConsumer(_tmp),
             "the entry IS a GUID-consumer — and it does not help, because SKIP fires first");
         Assert.IsEmpty(ControllerFixpoint.OrphanControllers(built, new List<string>()).ToList(),
