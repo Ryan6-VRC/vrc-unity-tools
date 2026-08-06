@@ -159,6 +159,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
             EditorUtility.SetDirty(mat);
         }
 
+        /// <summary>
+        /// Refuses a multi-material selection, the way the display inspector already does. Everything below
+        /// reads and writes a single <c>Material</c>: <see cref="DrawModeBar"/> writes the float and keywords
+        /// to one target while <see cref="MaterialEditor.ShaderProperty"/> still writes every selected
+        /// material, so picking a mode across a selection leaves the others on the old keyword — and
+        /// <see cref="DrawModeKeywordMismatch"/> only ever inspects the first, so it cannot report the split
+        /// it exists to catch. The section gates (<c>_Shell_Enabled</c>, the effect toggles) read the first
+        /// material too, hiding rows the rest still need.
+        ///
+        /// <para>Returns true when the caller should fall back to <c>base.OnGUI</c>.</para>
+        /// </summary>
+        protected static bool RefuseMultiSelect(MaterialEditor editor, string hidden)
+        {
+            if (editor.targets == null || editor.targets.Length <= 1) return false;
+            EditorGUILayout.HelpBox(
+                "Editing " + editor.targets.Length + " materials at once. " + hidden + " is hidden because " +
+                "the mode bar writes its keyword to one material at a time, which would leave the rest " +
+                "showing a mode they are not rendering. Edit them one at a time.", MessageType.Info);
+            return true;
+        }
+
         // ── Shared sections ─────────────────────────────────────────────────────────────────────────
 
         /// <summary>

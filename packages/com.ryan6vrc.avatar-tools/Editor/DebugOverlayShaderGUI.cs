@@ -35,6 +35,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             var mat = materialEditor.target as Material;
             if (mat == null) { base.OnGUI(materialEditor, properties); return; }
+            if (RefuseMultiSelect(materialEditor, "The probe mode and overlay controls"))
+            {
+                base.OnGUI(materialEditor, properties);
+                return;
+            }
 
             EnsureStyles();
 

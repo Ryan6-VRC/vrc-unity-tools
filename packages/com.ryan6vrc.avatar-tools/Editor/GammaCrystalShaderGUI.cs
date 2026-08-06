@@ -46,6 +46,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             var mat = materialEditor.target as Material;
             if (mat == null) { base.OnGUI(materialEditor, properties); return; }
+            if (RefuseMultiSelect(materialEditor, "The grading and area-of-effect controls"))
+            {
+                base.OnGUI(materialEditor, properties);
+                return;
+            }
 
             EnsureStyles();
             DrawSummary(mat);
