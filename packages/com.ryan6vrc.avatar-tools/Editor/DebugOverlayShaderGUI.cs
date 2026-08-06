@@ -45,10 +45,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             DrawModeBar(mat);
 
-            if (Section("Screenspace overlay", "Whether the probe takes over the whole frame instead of " +
+            if (Section("Overlay", "Whether the probe takes over the whole frame instead of " +
                         "rendering on its mesh", ref _showOverlay))
                 using (Body())
+                {
                     DrawOverlaySection(materialEditor, properties, mat);
+                    if (GetFloat(mat, "_Overlay_Fullscreen", 0f) != 0f)
+                        EditorGUILayout.HelpBox(
+                            "Fullscreen builds its quad from vertex IDs 0-3, so it only covers the frame on " +
+                            "a mesh whose first two triangles are drawn from those four vertices — a cube or " +
+                            "a quad. On any other mesh, including this entry's own DebugSphere, one triangle " +
+                            "survives and the probe covers a diagonal half; Flip vertex order moves which " +
+                            "half, and cannot fix it. Swap the mesh rather than the toggle.",
+                            MessageType.Info);
+                }
 
             DrawShellSection(materialEditor, properties, mat);
             DrawRenderingSection(materialEditor);

@@ -28,10 +28,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── The shared property surface ──────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// The two screenspace-overlay toggles. Both shaders that carry them are mesh-independent by
-        /// design, which is why the vertex-reorder workaround stays: the fullscreen path keys off
-        /// <c>SV_VertexID</c>, so which four vertices form the quad is a property of whatever mesh the
-        /// material was dropped on.
+        /// The two screenspace-overlay toggles. The fullscreen path keys off <c>SV_VertexID</c> 0-3, so it
+        /// needs a mesh whose first two triangles are drawn from those four vertices — a cube or a quad.
+        /// The reorder toggle permutes which corner each id lands on; on a mesh that never draws a second
+        /// triangle from ids 0-3 it can only move the covered half, not complete it, which is why the
+        /// subclass warns rather than offering it as a repair.
         /// </summary>
         protected static readonly string[] OverlayProps =
             { "_Overlay_Fullscreen", "_Overlay_Screenspace_Vertex_Reorder" };

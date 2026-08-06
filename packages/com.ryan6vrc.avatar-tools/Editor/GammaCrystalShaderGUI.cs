@@ -53,12 +53,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (Section("Grading", "What the bubble does to the scene inside it", ref _showGrading))
                 using (Body())
                 {
+                    // The three group names live here, not in a shader [Header]: Unity draws a property's
+                    // header inside whichever section drew the property, which titles the fold twice.
+                    EditorGUILayout.LabelField("Gamma", EditorStyles.boldLabel);
                     DrawNamed(materialEditor, properties, GammaProps);
                     Line();
+                    EditorGUILayout.LabelField("Exposure", EditorStyles.boldLabel);
                     DrawNamed(materialEditor, properties, ExposureToggleProps);
                     if (GetFloat(mat, "_Exposure_Enable", 0f) != 0f)
                         DrawNamed(materialEditor, properties, ExposureProps);
                     Line();
+                    EditorGUILayout.LabelField("Scotopic desaturation", EditorStyles.boldLabel);
                     DrawNamed(materialEditor, properties, ScotopicToggleProps);
                     if (GetFloat(mat, "_Scotopic_Enable", 0f) != 0f)
                         DrawNamed(materialEditor, properties, ScotopicProps);
@@ -74,7 +79,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // is a property of the interaction between the two sections rather than of either one. Drawn
             // after both, where an operator has just seen what it mediates.
             using (Body())
+            {
+                EditorGUILayout.LabelField("Shell scene grading", EditorStyles.boldLabel);
                 DrawNamed(materialEditor, properties, GradingResistProps);
+            }
 
             DrawRenderingSection(materialEditor);
             DrawUnclaimed(properties);
