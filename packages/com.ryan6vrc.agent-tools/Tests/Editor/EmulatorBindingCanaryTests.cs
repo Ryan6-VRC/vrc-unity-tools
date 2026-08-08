@@ -4,7 +4,7 @@ using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 
 // Reflection canary over the whole Av3Emulator surface this workshop depends on — both the members shipped
-// tools read and the members docs/verify.md teaches agents to drive by hand.
+// tools read and the members docs/emulator.md teaches agents to drive by hand.
 //
 // The second half is the point. The pinned members already have two fail-loud runtime refusals behind them
 // (PlayGateCore's emulator-config offender, RenderThumbnailPlay.Begin's drift refusal), so a rename there
@@ -95,7 +95,7 @@ public class EmulatorBindingCanaryTests
             "RenderThumbnailPlay reads it with NonPublic binding");
     }
 
-    // ── The surface docs/verify.md teaches by hand ───────────────────────────────────────────────────
+    // ── The surface docs/emulator.md teaches by hand ───────────────────────────────────────────────────
 
     [Test]
     public void DocumentedRuntimeFields_Resolve_Publicly()

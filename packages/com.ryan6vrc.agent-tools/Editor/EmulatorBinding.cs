@@ -46,7 +46,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         public static readonly string[] PinnedRuntimeNonPublicFields = { PlayableMixer, Playables, FxIndex };
 
-        // ----- The surface docs/verify.md teaches agents to drive by hand ------------------------------
+        // ----- The surface docs/emulator.md teaches agents to drive by hand ------------------------------
         // No tool calls these. They are here because the doc's factual claim that they exist is worth
         // machine-checking: a rename in this set breaks a recipe an agent is following, and nothing else in
         // the workshop would notice.
