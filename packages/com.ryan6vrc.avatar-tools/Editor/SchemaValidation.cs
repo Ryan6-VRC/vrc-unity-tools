@@ -186,8 +186,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (sm.Layout != null)
                 foreach (var key in sm.Layout.Nodes.Keys)
                 {
+                    // MachineHasMember unescapes for itself, so it takes the ESCAPED key — `raw` exists only for
+                    // the canonicality comparison below. Passing `raw` here would unescape twice, and
+                    // UnescapeSegment is not idempotent for a name carrying a literal backslash: a state named
+                    // `A\B` escapes to `A\\B`, unescapes once to `A\B`, and a second pass strips it to `AB` — a
+                    // spurious fatal on the tool's own output.
                     var raw = AddressPath.UnescapeSegment(key);
-                    if (!MachineHasMember(sm, raw))
+                    if (!MachineHasMember(sm, key))
                         errors.Add($"# dangling-layout: layer '{layer}' layout node '{key}' names no state or submachine of its machine (at layer '{layer}')");
                     // A non-canonical key (e.g. a '/'-named node written literally instead of escaped) resolves to
                     // a real member here but MISSES emit's EscapeSegment lookup, silently grid-dropping the authored

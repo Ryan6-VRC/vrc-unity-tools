@@ -611,7 +611,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // (measured), so a child's assignment here cannot rewrite one already made on its parent.
                 if (!string.IsNullOrEmpty(model.DefaultStatePath))
                 {
+                    // ANCHOR a single segment. `defaultState:` is root-relative by definition, but ResolveName
+                    // implements the `to:` grammar, where a lone segment resolves LOCALLY — so an unanchored
+                    // `defaultState: P` would bind this machine's own `P` while SchemaValidation checked the
+                    // ROOT's `P`, and a document with both would validate against one and bind the other in
+                    // silence. Decompile always anchors (it emits "/P"), so this only bites a hand-authored
+                    // document; anchoring here makes the two spellings mean the same thing.
                     string p = model.DefaultStatePath;
+                    if (p[0] != '/') p = "/" + p;
                     // ResolveName's exceptions are worded for transition targets; catch and re-word, so a
                     // `defaultState:` failure never reports itself as a transition the document doesn't have.
                     bool isState;
@@ -626,6 +633,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                     if (!isState)
                         throw new EmitException($"machine '{target.name}': defaultState '{p}' resolves to a sub-machine, but Unity's default state is a state reference — name a state, or use `default:` for a direct sub-machine");
+                    // Unity constrains a default to the machine's OWN SUBTREE: assigning a state outside it (an
+                    // ancestor's direct state, a sibling branch) is silently discarded and the previous default
+                    // stands — measured. Without this check the compile would appear to succeed while binding
+                    // nothing, which is precisely the silent class this key exists to close.
+                    if (!IsInSubtree(target, foreignState))
+                        throw new EmitException($"machine '{target.name}': defaultState '{p}' names a state outside this machine's own sub-tree, which Unity silently discards — a machine's default must be one of its own states or one nested inside it");
                     target.defaultState = foreignState;
                 }
 
@@ -730,6 +743,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
 
                 return ResolveFromRoot(name, root, fromMachine, name, out toState, out toSm);
+            }
+
+            // Is `state` this machine's own, or nested anywhere beneath it? The bound Unity enforces on a
+            // defaultState assignment (see WireMachine's defaultState branch).
+            private static bool IsInSubtree(AnimatorStateMachine sm, AnimatorState state)
+            {
+                if (sm == null) return false;
+                foreach (var cs in sm.states)
+                    if (cs.state == state) return true;
+                foreach (var child in sm.stateMachines)
+                    if (child.stateMachine != null && IsInSubtree(child.stateMachine, state)) return true;
+                return false;
             }
 
             // Resolve a root-relative path: every non-final segment is a sub-machine, the final segment a state

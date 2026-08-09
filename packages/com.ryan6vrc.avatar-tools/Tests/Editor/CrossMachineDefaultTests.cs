@@ -189,6 +189,140 @@ public class CrossMachineDefaultTests
             + "every existing document for nothing");
     }
 
+    // Auto-population copies the FIRST STATE EMITTED in the subtree, not the child machine's own default —
+    // ControllerEmit adds a machine's direct states before recursing, and the later `sub.defaultState = Y`
+    // does not propagate up. A predicate comparing against the child's default classifies THIS as
+    // reproducible, emits nothing, and the rebuild boots X: the same loss, one shape over.
+    [Test]
+    public void A_Default_That_Is_Not_The_First_Emitted_State_Is_Not_Auto_Population()
+    {
+        var c = New("NotFirst");
+        var root = c.layers[0].stateMachine;      // no direct states
+        var sub = root.AddStateMachine("Sub");
+        sub.AddState("X");                        // added first ⇒ what a rebuild would auto-populate
+        var y = sub.AddState("Y");
+        sub.defaultState = y;
+        root.AddEntryTransition(sub);             // trailing unconditional rung: the fold candidate
+        root.defaultState = y;                    // equals the CHILD'S default, but not the first emitted
+        Persist(c);
+
+        string yaml = FixpointOracle.Decode(c);
+        StringAssert.Contains("defaultState: Sub/Y", yaml,
+            "a rebuild would land on X, so this default is not free and must be written");
+
+        var rebuilt = FixpointOracle.CompileTo(TestRoot, yaml, "NotFirst", "c1");
+        Assert.AreEqual("Y", rebuilt.layers[0].stateMachine.defaultState.name);
+        Assert.AreEqual(yaml, FixpointOracle.Decode(rebuilt), "and the textual fixpoint holds");
+    }
+
+    // The complement, and the reason the exemption exists at all: when the default IS the first emitted state,
+    // the rebuild re-derives it for free and the bare form stays. A raw VENDOR machine has no entry rung at all
+    // (Unity wires Entry through m_DefaultState), so this must not depend on one.
+    [Test]
+    public void Vendor_Shape_Without_An_Entry_Rung_Keeps_The_Bare_Form()
+    {
+        var c = New("NoRung");
+        var root = c.layers[0].stateMachine;      // no direct states, NO entry transitions
+        var sub = root.AddStateMachine("Sub");
+        sub.AddState("N");
+        Persist(c);
+
+        var reloaded = AssetDatabase.LoadAssetAtPath<AnimatorController>(AssetDatabase.GetAssetPath(c));
+        Assert.IsNotNull(reloaded.layers[0].stateMachine.defaultState, "precondition: Unity auto-populated it");
+
+        string yaml = FixpointOracle.Decode(reloaded);
+        Assert.IsFalse(yaml.Contains("defaultState:"),
+            "a rebuild re-derives this for free — emitting a key would churn vendor documents for nothing");
+        var rebuilt = FixpointOracle.CompileTo(TestRoot, yaml, "NoRung", "c1");
+        Assert.AreEqual("N", rebuilt.layers[0].stateMachine.defaultState.name);
+    }
+
+    // The digest must distinguish same-named states in sibling branches — the corpus shape has five parallel
+    // `Preset N` machines each holding a `Neutral`, and ReportController's own line renders the CARRYING
+    // machine's path plus the target's bare name, which is identical across them.
+    [Test]
+    public void Graph_Digest_Distinguishes_Sibling_Branches_With_Same_Named_States()
+    {
+        AnimatorController Make(string name, bool bootSecondBranch)
+        {
+            var c = New(name);
+            var root = c.layers[0].stateMachine;
+            var p0 = root.AddStateMachine("Preset 0");
+            var n0 = p0.AddState("Neutral");
+            var p1 = root.AddStateMachine("Preset 1");
+            var n1 = p1.AddState("Neutral");
+            root.AddState("Disable");
+            root.defaultState = bootSecondBranch ? n1 : n0;
+            Persist(c);
+            return c;
+        }
+
+        var a = Make("SibA", false);
+        var b = Make("SibB", true);
+        Assert.AreNotEqual(ControllerGraphDigest.Of(a), ControllerGraphDigest.Of(b),
+            "booting Preset 1/Neutral instead of Preset 0/Neutral is a different graph");
+    }
+
+    // `defaultState:` is root-relative in EVERY spelling, including a lone segment — it must not fall through to
+    // the `to:` grammar's local reading, or a document validates against the root's state and binds a same-named
+    // local one. Unity additionally constrains a default to the carrying machine's own sub-tree and silently
+    // discards anything else (measured), so the root-relative reading of a bare segment inside a nested machine
+    // is a refusal, not a quiet no-op.
+    [Test]
+    public void Bare_Single_Segment_DefaultState_Is_Read_From_The_Root_And_Refused_If_Outside()
+    {
+        string yaml =
+            "schema: 1\ncontroller: Anchor_Fx\nbasis: avatar-root\n" +
+            "layers:\n  - name: L\n    states:\n      P:\n        motion: ~\n    default: P\n" +
+            "    machines:\n      M:\n        states:\n          P:\n            motion: ~\n" +
+            "        default: P\n        defaultState: P\n";      // bare ⇒ the ROOT's P, which is outside M
+        var doc = AnimatorSchemaYaml.Parse(yaml, "mem://anchor");
+        Assert.IsEmpty(SchemaValidation.Validate(doc) ?? new System.Collections.Generic.List<string>(),
+            "validation reads the same root-relative address the emitter does");
+
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => ControllerEmit.Build(doc, out _));
+        StringAssert.Contains("outside this machine", ex.Message,
+            "binding it would be silently discarded by Unity, so the compile refuses instead");
+    }
+
+    // The in-subtree form of the same address works, and is what decompile emits.
+    [Test]
+    public void A_Nested_Machine_Addresses_Its_Own_State_Root_Relatively()
+    {
+        string yaml =
+            "schema: 1\ncontroller: Anchor2_Fx\nbasis: avatar-root\n" +
+            "layers:\n  - name: L\n    states:\n      P:\n        motion: ~\n    default: P\n" +
+            "    machines:\n      M:\n        states:\n          Q:\n            motion: ~\n" +
+            "          R:\n            motion: ~\n        default: Q\n        defaultState: M/R\n";
+        var doc = AnimatorSchemaYaml.Parse(yaml, "mem://anchor2");
+        Assert.IsEmpty(SchemaValidation.Validate(doc) ?? new System.Collections.Generic.List<string>());
+        ControllerEmit.Build(doc, out var built);
+
+        var m = built.Controller.layers[0].stateMachine.stateMachines
+            .First(s => s.stateMachine.name == "M").stateMachine;
+        Assert.AreEqual("R", m.defaultState.name, "the root-relative address binds M's own R, overriding `default: Q`");
+    }
+
+    // A literal backslash in a name must survive the layout gate — UnescapeSegment is not idempotent, so an
+    // extra unescape turns `A\B` into `AB` and fails the tool's own output.
+    [Test]
+    public void Backslash_In_A_Name_Passes_The_Layout_Gate()
+    {
+        var c = New("Backslash");
+        var root = c.layers[0].stateMachine;
+        root.AddState(@"A\B");
+        root.AddState("Filler");
+        var arr = root.states;
+        arr[0].position = new Vector3(123, 45, 0);   // force a layout: block
+        root.states = arr;
+        Persist(c);
+
+        string yaml = FixpointOracle.Decode(c);
+        var errors = SchemaValidation.Validate(AnimatorSchemaYaml.Parse(yaml, "mem://backslash"));
+        Assert.IsEmpty(errors ?? new System.Collections.Generic.List<string>(),
+            "a literal backslash is a legal name character");
+    }
+
     // Depth, and root-relativity. A path computed relative to the EMITTING machine is identical to the correct
     // one for a layer root, so only a nested machine can tell the two implementations apart.
     [Test]

@@ -41,7 +41,61 @@ namespace Ryan6Vrc.AvatarTools.Tests
             body = Regex.Replace(body, @"^# ReportController: .*$", "# ReportController: <normalized>", RegexOptions.Multiline);
             // The controller name also appears inside the params-asset / menu references some fixtures carry.
             body = body.Replace(c.name, "<controller>");
-            return body;
+            return body + DefaultStatePaths(c);
+        }
+
+        // ReportController renders a default as the CARRYING machine's path plus the target's bare NAME
+        // ("Entry -> `Input RightHand/Neutral` (default)"), which cannot distinguish sibling branches that use
+        // the same state name — precisely the corpus shape this gate was built for, where five parallel
+        // `Preset N` machines each hold a `Neutral`. A rebuild booting `Preset 3/Neutral` instead of
+        // `Preset 0/Neutral` would render byte-identically. So the digest appends each default's FULL owner
+        // path, purpose-built here because the borrowed rendering is ambiguous at exactly the load-bearing spot.
+        //
+        // This block is the one part of the digest not independently authored, so it is kept minimal and additive:
+        // everything else still rests on ReportController's reading, and this only disambiguates it.
+        private static string DefaultStatePaths(AnimatorController c)
+        {
+            var sb = new System.Text.StringBuilder("\n## Default state paths\n");
+            foreach (var layer in c.layers)
+                Walk(layer.stateMachine, layer.name, layer.name);
+            return sb.ToString();
+
+            void Walk(AnimatorStateMachine sm, string path, string layerName)
+            {
+                if (sm == null) return;
+                sb.Append(path).Append(" -> ").Append(OwnerPath(sm.defaultState, c, layerName) ?? "<none>").Append('\n');
+                foreach (var child in sm.stateMachines)
+                    if (child.stateMachine != null)
+                        Walk(child.stateMachine, path + "/" + child.stateMachine.name, layerName);
+            }
+        }
+
+        // Where a state actually lives, searched from the layer root — null when it lives nowhere in this layer
+        // (which is itself a difference worth surfacing).
+        private static string OwnerPath(AnimatorState target, AnimatorController c, string layerName)
+        {
+            if (target == null) return null;
+            foreach (var layer in c.layers)
+            {
+                if (layer.name != layerName) continue;
+                string found = Search(layer.stateMachine, layer.name);
+                if (found != null) return found;
+            }
+            return "<outside this layer>";
+
+            string Search(AnimatorStateMachine sm, string path)
+            {
+                if (sm == null) return null;
+                foreach (var cs in sm.states)
+                    if (cs.state == target) return path + "/" + cs.state.name;
+                foreach (var child in sm.stateMachines)
+                {
+                    if (child.stateMachine == null) continue;
+                    var r = Search(child.stateMachine, path + "/" + child.stateMachine.name);
+                    if (r != null) return r;
+                }
+                return null;
+            }
         }
 
         // Assert two controllers describe the same graph. `what` names the step under test (e.g. "raw -> owned"),

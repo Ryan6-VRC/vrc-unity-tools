@@ -53,6 +53,36 @@ public class DriverRepeatMessageTests
         StringAssert.Contains("same operand", r);
     }
 
+    // The replacement must not swap one guess for another. `Add` ACCUMULATES — two identical `Add X 2` entries
+    // add 4 — so "dropping one would not change runtime behaviour" is false, and a differing pair is not
+    // last-write-wins either. The message states the comparison and stops.
+    [Test]
+    public void The_Message_Does_Not_Assert_Runtime_Consequences_It_Cannot_Know()
+    {
+        string same = RefusalFor(
+            new Driver.Parameter { type = Driver.ChangeType.Add, name = "N", value = 2f },
+            new Driver.Parameter { type = Driver.ChangeType.Add, name = "N", value = 2f });
+        StringAssert.DoesNotContain("would not change runtime behaviour", same,
+            "false for Add, which accumulates");
+
+        string diff = RefusalFor(
+            new Driver.Parameter { type = Driver.ChangeType.Add, name = "N", value = 2f },
+            new Driver.Parameter { type = Driver.ChangeType.Add, name = "N", value = 5f });
+        StringAssert.DoesNotContain("wins at runtime", diff, "not last-write-wins for Add");
+        StringAssert.DoesNotContain("is dead", diff);
+    }
+
+    // "The same operand" must mean the same, not near enough: an epsilon would assert an equality the asset
+    // does not contain.
+    [Test]
+    public void Near_But_Unequal_Values_Are_Not_Reported_As_The_Same()
+    {
+        string r = RefusalFor(
+            new Driver.Parameter { type = Driver.ChangeType.Set, name = "X", value = 1f },
+            new Driver.Parameter { type = Driver.ChangeType.Set, name = "X", value = 1f + 1e-7f });
+        StringAssert.Contains("DIFFERENT operands", r);
+    }
+
     [Test]
     public void Differing_Value_Set_Repeat_Names_Both_Values()
     {

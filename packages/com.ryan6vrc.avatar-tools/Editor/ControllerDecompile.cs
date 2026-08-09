@@ -331,19 +331,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
 
                 // Is a foreign PPtr merely Unity's auto-population, or an authored foreign default? The value alone
-                // cannot say, but REPRODUCIBILITY can: auto-population only fills an EMPTY field, so it can only
-                // happen on a machine with no direct state of its own to claim the slot, and it copies the child's
-                // own default. When both hold, a rebuild from the bare `default: <child>` re-derives this exact
-                // PPtr for free — so the bare form is faithful and stays, and no `defaultState:` is emitted.
+                // cannot say — but the question that actually matters is narrower and decidable: WOULD A REBUILD
+                // RE-DERIVE THIS VALUE FOR FREE? If yes, emitting nothing is faithful and the document stays
+                // legible; if no, the PPtr must be written explicitly or it is lost.
                 //
-                // Break either condition and the rebuild would NOT re-derive it: with a direct state present,
-                // AddState claims the slot first and the foreign value is lost (this is the corpus defect); with a
-                // value other than the child's own default, nothing would reproduce it. Both cases need the PPtr
-                // written explicitly.
+                // Auto-population fills an EMPTY ancestor slot at the moment a state is added, and ControllerEmit
+                // adds a machine's own direct states before recursing into its children — so the value a rebuild
+                // lands on is the FIRST STATE EMITTED ANYWHERE IN THE SUBTREE, depth-first. It is emphatically NOT
+                // the child machine's own default: a sub-machine whose states are [X, Y] with default Y hands the
+                // ancestor X, because X was added first and the later `sub.defaultState = Y` does not propagate up
+                // (both measured). Comparing against the child's default instead classified an authored default as
+                // auto-population and dropped it — the same loss this rule exists to close, one shape over.
+                //
+                // Stating the predicate exactly also collapses the two conditions that used to guard it. A machine
+                // WITH a direct state cannot qualify (FirstEmittedState returns that direct state, which by
+                // definition is not the foreign default), and a trailing entry rung is irrelevant to what Unity
+                // auto-fills — so neither `directStates.Count == 0` nor `foldTarget != null` needs restating here.
+                // Dropping the rung condition is what lets a raw VENDOR machine (no rung at all — Unity wires Entry
+                // through m_DefaultState alone) keep the bare form instead of gaining a spurious key.
                 bool foreignIsAutoPopulation =
                     sm.defaultState != null && !defaultIsDirectState
-                    && directStates.Count == 0
-                    && foldTarget != null && foldTarget.defaultState == sm.defaultState;
+                    && FirstEmittedState(sm) == sm.defaultState;
 
                 bool defaultIsForeign = sm.defaultState != null && !defaultIsDirectState && !foreignIsAutoPopulation;
 
@@ -751,6 +759,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var mp = so.FindProperty("m_Motion");
                     return mp != null && mp.objectReferenceInstanceIDValue != 0;
                 }
+            }
+
+            // The state a rebuild's auto-population would land on: ControllerEmit adds a machine's own direct
+            // states in document order before recursing into its child machines, so this is the first state
+            // emitted anywhere in the subtree, depth-first. Mirrors EmitMachine's order — change one and this
+            // must follow, which is why the two carry the same note.
+            private static AnimatorState FirstEmittedState(AnimatorStateMachine sm)
+            {
+                foreach (var cs in sm.states)
+                    if (cs.state != null) return cs.state;
+                foreach (var child in sm.stateMachines)
+                {
+                    if (child.stateMachine == null) continue;
+                    var s = FirstEmittedState(child.stateMachine);
+                    if (s != null) return s;
+                }
+                return null;
             }
 
             // The default-state twin of HasDanglingMotion. `sm.defaultState == null` is Unity's OVERLOADED null,
@@ -1411,13 +1436,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         // what the reader should look at next, so say only what is KNOWN — the earlier message
                         // asserted "commonly a mistyped parameter name", which is a guess about intent, and it
                         // sent a reader hunting a typo through a driver whose two entries were byte-identical.
-                        string detail = SameDriverOperand(first, p)
-                            ? "Both entries carry the same operand, so the repeat is redundant rather than "
-                              + "contradictory: dropping one would not change runtime behaviour, and this still "
-                              + "refuses because re-emitting one entry would not be the driver as authored."
+                        // Say what is OBSERVABLE — the operands are equal or they differ — and stop. The runtime
+                        // consequence is NOT a property of that comparison: `Add` accumulates, so two identical
+                        // `Add X 2` entries add 4 (dropping one is not neutral) and a differing pair is not
+                        // last-write-wins either. Asserting either would be a fresh guess in place of the
+                        // "commonly a mistyped parameter name" guess this message exists to remove.
+                        // An unknown ChangeType has no operand this decoder can read, so it can claim NEITHER
+                        // "same" nor "different" — saying "DIFFERENT operands (<unknown> then <unknown>)" would
+                        // assert a difference while displaying identical text.
+                        string detail = !IsKnownChangeType(p.type)
+                            ? "This decoder does not model that change type, so it cannot say whether the two "
+                              + "entries differ; the repeat is refused on the shape alone."
+                            : SameDriverOperand(first, p)
+                            ? $"Both entries carry the same operand ({DriverOperand(p)}); the ordered pair still "
+                              + "has no schema form, and whether the repeat is harmless depends on the change "
+                              + "type — Add accumulates, Set and Copy do not."
                             : $"The two entries carry DIFFERENT operands ({DriverOperand(first)} then "
-                              + $"{DriverOperand(p)}); the list applies top-to-bottom, so the later one wins at "
-                              + "runtime and the earlier is dead.";
+                              + $"{DriverOperand(p)}), which the single-entry form cannot express at all.";
                         _result.Refusals.Add(
                             $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' — the schema holds " +
                             "one entry per parameter, so a recompile would not reproduce this driver as authored. " +
@@ -1436,25 +1471,32 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Comparing `value` alone would call `Copy A←B` and `Copy A←D` identical — reporting a contradictory
             // repeat as a harmless one, which is the same species of misleading advice this split exists to end.
             // Mirrors DecodeDriver's own per-type field selection above, so the two read the same union.
+            // EXACT equality, not Mathf.Approximately: the message reports these as "the same operand", and two
+            // distinct serialized values a hair apart are not the same — an epsilon here would assert an equality
+            // the asset does not contain. This is a comparison of authored data, not a physics tolerance.
             private static bool SameDriverOperand(Driver.Parameter a, Driver.Parameter b)
             {
                 switch (a.type)
                 {
                     case Driver.ChangeType.Set:
                     case Driver.ChangeType.Add:
-                        return Mathf.Approximately(a.value, b.value);
+                        return a.value == b.value;
                     case Driver.ChangeType.Copy:
                         if (a.source != b.source || a.convertRange != b.convertRange) return false;
                         return !a.convertRange
-                            || (Mathf.Approximately(a.sourceMin, b.sourceMin) && Mathf.Approximately(a.sourceMax, b.sourceMax)
-                                && Mathf.Approximately(a.destMin, b.destMin) && Mathf.Approximately(a.destMax, b.destMax));
+                            || (a.sourceMin == b.sourceMin && a.sourceMax == b.sourceMax
+                                && a.destMin == b.destMin && a.destMax == b.destMax);
                     case Driver.ChangeType.Random:
-                        return Mathf.Approximately(a.valueMin, b.valueMin) && Mathf.Approximately(a.valueMax, b.valueMax)
-                            && Mathf.Approximately(a.chance, b.chance) && a.preventRepeats == b.preventRepeats;
+                        return a.valueMin == b.valueMin && a.valueMax == b.valueMax
+                            && a.chance == b.chance && a.preventRepeats == b.preventRepeats;
                     default:
                         return false;   // unknown ChangeType — already refused separately; never claim "same"
                 }
             }
+
+            private static bool IsKnownChangeType(Driver.ChangeType t)
+                => t == Driver.ChangeType.Set || t == Driver.ChangeType.Add
+                   || t == Driver.ChangeType.Copy || t == Driver.ChangeType.Random;
 
             // The operand as the reader would see it in the inspector, for the differing-value message.
             private static string DriverOperand(Driver.Parameter p)
