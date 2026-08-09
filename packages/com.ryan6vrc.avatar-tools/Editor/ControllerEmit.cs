@@ -587,9 +587,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var target = scope.Target;
 
                 // default resolves in THIS machine's LOCAL scope only — a machine's default is one of its own
-                // direct states or direct sub-machines (Unity has no default into a foreign/nested machine). A
-                // state → defaultState; a sub-machine → an unconditional entry transition added AFTER the entry
-                // ladder (below) so it stays the last, catch-all entry.
+                // direct states or direct sub-machines. A state → defaultState; a sub-machine → an unconditional
+                // entry transition added AFTER the entry ladder (below) so it stays the last, catch-all entry.
                 // default is a bare LOCAL name (a direct state or sub-machine); unescape it before lookup.
                 bool defaultIsState = false;
                 string defaultName = string.IsNullOrEmpty(model.DefaultState) ? null : AddressPath.UnescapeSegment(model.DefaultState);
@@ -598,6 +597,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (scope.States.TryGetValue(defaultName, out var def)) { target.defaultState = def; defaultIsState = true; }
                     else if (!scope.Subs.ContainsKey(defaultName))
                         throw new EmitException($"machine '{target.name}': default '{model.DefaultState}' is neither a direct state nor a direct sub-machine of this machine");
+                }
+
+                // `defaultState:` — the FOREIGN default. Unity's m_DefaultState is a plain AnimatorState PPtr with
+                // no subtree constraint, so a machine can boot a state nested several machines down; the schema
+                // addresses it root-relatively (the `to:` grammar). It writes ONLY the PPtr and adds no rung, so
+                // it composes with a `default:` sub-machine rung rather than competing with it — the two facts
+                // co-exist in Unity and a decompile must be able to re-emit both.
+                //
+                // Runs after the local `default:` above so an explicit foreign default wins over the bare form if
+                // a document carries both for the same state. Safe in pass 2: EmitMachine has already recursed,
+                // so every machine and state exists, and the defaultState setter does NOT propagate to ancestors
+                // (measured), so a child's assignment here cannot rewrite one already made on its parent.
+                if (!string.IsNullOrEmpty(model.DefaultStatePath))
+                {
+                    string p = model.DefaultStatePath;
+                    // ResolveName's exceptions are worded for transition targets; catch and re-word, so a
+                    // `defaultState:` failure never reports itself as a transition the document doesn't have.
+                    bool isState;
+                    AnimatorState foreignState;
+                    try
+                    {
+                        isState = ResolveName(p, scope, root, target.name, out foreignState, out _);
+                    }
+                    catch (EmitException e)
+                    {
+                        throw new EmitException($"machine '{target.name}': defaultState '{p}' does not resolve — {e.Message}");
+                    }
+                    if (!isState)
+                        throw new EmitException($"machine '{target.name}': defaultState '{p}' resolves to a sub-machine, but Unity's default state is a state reference — name a state, or use `default:` for a direct sub-machine");
+                    target.defaultState = foreignState;
                 }
 
                 // State transition ladders (ordered per source state = first-match order). `from` is THIS

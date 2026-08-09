@@ -220,6 +220,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var b in sm.Behaviours) L(sb, Sp(f + 2) + "- " + FlowBehaviour(b));
             }
             if (sm.DefaultState != null) L(sb, Sp(f) + "default: " + ScalarStr(sm.DefaultState));
+            // Both may be present: they are independent facts in Unity, not two spellings of one (AnimatorSchema).
+            if (sm.DefaultStatePath != null) L(sb, Sp(f) + "defaultState: " + ScalarStr(sm.DefaultStatePath));
             if (sm.Layout != null) EmitLayout(sb, sm, f);
         }
 
@@ -248,7 +250,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static bool IsMachineEmpty(StateMachine sm)
             => sm.States.Count == 0 && sm.Machines.Count == 0 && sm.EntryLadder.Count == 0
                && sm.AnyLadder.Count == 0 && sm.Behaviours.Count == 0 && sm.DefaultState == null
-               && sm.Layout == null;
+               && sm.DefaultStatePath == null && sm.Layout == null;
 
         private static void EmitState(StringBuilder sb, State st, int f)
         {

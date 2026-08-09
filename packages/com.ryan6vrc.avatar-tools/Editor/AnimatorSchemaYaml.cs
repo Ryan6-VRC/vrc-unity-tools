@@ -657,6 +657,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 case "entry": BindLadder(sm.EntryLadder, ToList(value, $"{ctx}.entry"), anyLadder: false); return true;
                 case "any": BindLadder(sm.AnyLadder, ToList(value, $"{ctx}.any"), anyLadder: true); return true;
                 case "default": sm.DefaultState = ToStr(value, $"{ctx}.default"); return true;
+                case "defaultState": sm.DefaultStatePath = ToStr(value, $"{ctx}.defaultState"); return true;
                 case "behaviours": BindBehaviours(sm.Behaviours, ToList(value, $"{ctx}.behaviours")); return true;
                 case "layout": BindLayout(sm, ToMap(value, $"{ctx}.layout"), ctx); return true;
                 default: return false;

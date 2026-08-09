@@ -152,8 +152,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // Rule 3 & 5 carrier: walk one state machine's ladders, states, and nested submachines.
         private static void WalkMachine(StateMachine sm, string layer,
-            Dictionary<string, AnimParamType> paramTypes, HashSet<string> clips, List<string> errors)
+            Dictionary<string, AnimParamType> paramTypes, HashSet<string> clips, List<string> errors,
+            StateMachine layerRoot = null)
         {
+            layerRoot = layerRoot ?? sm;
+
+            // `defaultState:` is root-relative, so one predicate serves every nesting level — unlike `default:`,
+            // whose local-name scope is why rule 4 only ever checked the layer root.
+            if (!string.IsNullOrEmpty(sm.DefaultStatePath) && !RootHasStateAtPath(layerRoot, sm.DefaultStatePath))
+                errors.Add($"# dangling-default-state: layer '{layer}' defaultState '{sm.DefaultStatePath}' names no state reachable from the layer root (at layer '{layer}')");
+
             foreach (var t in sm.EntryLadder) CheckConditions(t, layer, "entry", paramTypes, errors);
             foreach (var t in sm.AnyLadder) CheckConditions(t, layer, "any", paramTypes, errors);
 
@@ -172,7 +180,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // onExit conditions are authored on the PARENT (this machine), so they are validated here
                 // rather than inside the recursion — same undeclared-param / type rules as any other ladder.
                 foreach (var t in sub.OnExit) CheckConditions(t, layer, $"onExit of '{sub.Name}'", paramTypes, errors);
-                if (sub.Machine != null) WalkMachine(sub.Machine, layer, paramTypes, clips, errors);
+                if (sub.Machine != null) WalkMachine(sub.Machine, layer, paramTypes, clips, errors, layerRoot);
             }
 
             if (sm.Layout != null)
@@ -255,11 +263,42 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 errors.Add($"# blend-axis-type: param '{param}' ({TypeToken(type)}) is a blend-tree axis but must be float; declare it 'type: float' and sync int via 'vrc: {{ type: int }}' (at layer '{layer}' state '{state}')");
         }
 
+        // `name` arrives ESCAPED (an addressing form — a '/' in a name is '\/'), while States/Machines carry the
+        // raw literal, so it must be unescaped before comparison. Without that a state legitimately named "A/B"
+        // decodes to `default: A\/B` and then fails its own recompile with a spurious dangling-default; the
+        // layout check already unescapes for the same reason.
         private static bool MachineHasMember(StateMachine sm, string name)
         {
-            foreach (var s in sm.States) if (s != null && s.Name == name) return true;
-            foreach (var m in sm.Machines) if (m != null && m.Name == name) return true;
+            string raw = AddressPath.UnescapeSegment(name);
+            foreach (var s in sm.States) if (s != null && s.Name == raw) return true;
+            foreach (var m in sm.Machines) if (m != null && m.Name == raw) return true;
             return false;
+        }
+
+        // `defaultState:` existence — a ROOT-RELATIVE path, so it needs its own walk and must NOT be folded into
+        // MachineHasMember: that predicate is shared with the layout check, whose very next step asserts a key is
+        // canonically escaped. Teaching it to accept paths would let an unescaped '/'-bearing layout key resolve
+        // as a member and slip past that assertion, silently re-gridding a hand-placed node.
+        //
+        // Segment count comes from AddressPath.Split (unescaped separators only) — never Contains('/'), which
+        // would read an escaped single name like "A\/B" as a two-segment path.
+        private static bool RootHasStateAtPath(StateMachine root, string path)
+        {
+            if (path.Length > 0 && path[0] == '/') path = path.Substring(1);
+            var segs = AddressPath.Split(path);
+            if (segs.Count == 0) return false;
+            var cur = root;
+            for (int i = 0; i < segs.Count - 1; i++)
+            {
+                string seg = AddressPath.UnescapeSegment(segs[i]);
+                SubMachine next = null;
+                foreach (var m in cur.Machines) if (m != null && m.Name == seg) { next = m; break; }
+                if (next == null) return false;
+                cur = next.Machine;
+            }
+            string leaf = AddressPath.UnescapeSegment(segs[segs.Count - 1]);
+            foreach (var s in cur.States) if (s != null && s.Name == leaf) return true;
+            return false;   // a sub-machine leaf is a real error too — Unity's default is a STATE reference
         }
 
         // Float equality is invalid in Unity animator conditions, so Float allows only Greater/Less. Int is a
