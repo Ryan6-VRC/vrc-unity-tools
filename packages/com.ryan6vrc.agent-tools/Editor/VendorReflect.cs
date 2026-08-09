@@ -91,13 +91,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             return inner.GetType().Name + ": " + inner.Message;
         }
 
-        // ── VRCFury FullControllerBuilder.RewritePath(FullController, string) ────────────────────────────
+        // ── VRCFury AnimationBindingUtils.RewriteRelativePath(string, IReadOnlyList<BindingRewrite>) ─────
 
-        /// <summary>Resolves the pinned <c>RewritePath(FullController, string)→string</c> private static —
-        /// the build's own Path-Rewrite-Rules application, invoked on the caller's boxed feature model so the
-        /// rule semantics can never drift (and so no near-copy of VRCFury code lives in this repo — VRCFury
-        /// is not FOSS-licensed, so a hand-rolled replication is a licensing question as well as a drift
-        /// hazard). null ⇒ unreachable (API drift / VRCFury absent) → the caller anchors it, loud.</summary>
+        /// <summary>Resolves the pinned <c>RewriteRelativePath(string, IReadOnlyList&lt;BindingRewrite&gt;)→string</c>
+        /// internal static — the build's own Path-Rewrite-Rules application (moved out of
+        /// <c>FullControllerBuilder.RewritePath(FullController, string)</c> at VRCFury 1.1414.0), invoked on the
+        /// caller's live <c>rewriteBindings</c> list so the rule semantics can never drift (and so no near-copy
+        /// of VRCFury code lives in this repo — VRCFury is not FOSS-licensed, so a hand-rolled replication is a
+        /// licensing question as well as a drift hazard). null ⇒ unreachable (API drift / VRCFury absent) → the
+        /// caller anchors it, loud. Param order is (path, rules) — the reverse of the pre-1.1414 method.</summary>
         internal static Func<MethodInfo> ResolveVrcfRewritePath = PinVrcfRewritePathImpl;
 
         private static bool _vrcfPinAttempted;
@@ -108,14 +110,18 @@ namespace Ryan6Vrc.AgentTools.Editor
             _vrcfPinAttempted = true;
             try
             {
-                var t = FindType("VF.Feature.FullControllerBuilder");
+                var t = FindType("VF.Utils.AnimationBindingUtils");
                 if (t == null) return null;
                 foreach (var m in t.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
                 {
-                    if (m.Name != "RewritePath" || m.ReturnType != typeof(string)) continue;
+                    if (m.Name != "RewriteRelativePath" || m.ReturnType != typeof(string)) continue;
                     var ps = m.GetParameters();
-                    if (ps.Length == 2 && ps[0].ParameterType.FullName == "VF.Model.Feature.FullController"
-                                       && ps[1].ParameterType == typeof(string))
+                    // Pinned by shape, not just name: ps[0] the path, ps[1] a generic collection whose element
+                    // type is FullController.BindingRewrite — so a future overload can never silently mis-bind.
+                    if (ps.Length == 2 && ps[0].ParameterType == typeof(string)
+                                       && ps[1].ParameterType.IsGenericType
+                                       && ps[1].ParameterType.GetGenericArguments().Length == 1
+                                       && ps[1].ParameterType.GetGenericArguments()[0].FullName == "VF.Model.Feature.FullController+BindingRewrite")
                     { _vrcfRewritePath = m; break; }
                 }
             }

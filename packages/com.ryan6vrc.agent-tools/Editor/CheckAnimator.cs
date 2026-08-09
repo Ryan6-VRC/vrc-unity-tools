@@ -406,17 +406,19 @@ namespace Ryan6Vrc.AgentTools.Editor
         // The VRCFury FullController "Path Rewrite Rules" (content.rewriteBindings) as a path transform. The
         // build runs these BEFORE the nearest-match ancestor walk, so a caller resolves the rewritten path
         // against the ancestor chain. The transform INVOKES the build's own implementation —
-        // VF.Feature.FullControllerBuilder.RewritePath(model, path), on THIS content's boxed feature model,
-        // so two FullControllers on one mount never cross-contaminate — rather than replicating it: invoked,
-        // the rule semantics can't drift, and no near-copy of VRCFury code lives in this repo (VRCFury is not
-        // FOSS-licensed — a replication is a licensing question as well as a drift hazard). RewritePath only
-        // reads model.rewriteBindings, so handing it the live managed reference mutates nothing.
+        // VF.Utils.AnimationBindingUtils.RewriteRelativePath(path, rules), on THIS content's live
+        // rewriteBindings list, so two FullControllers on one mount never cross-contaminate — rather than
+        // replicating it: invoked, the rule semantics can't drift, and no near-copy of VRCFury code lives in
+        // this repo (VRCFury is not FOSS-licensed — a replication is a licensing question as well as a drift
+        // hazard). RewriteRelativePath only reads the rule rows, so handing it the live list mutates nothing.
         // Returns null when there are no rules (identity). The transform returns null for a path a delete
         // rule drops (that binding is removed at build — not a real break).
         //
-        // Rules present + RewritePath unreachable (drift) or the model unboxable ⇒ anchor via `unreflected`
-        // (the R-H fail-loud rail) and identity: resolving with a silent identity rewrite would fabricate
-        // plausible-but-false binding results with nothing left to say why, so the caveat rides the frame.
+        // Rules present + RewriteRelativePath unreachable (drift) or the model unboxable ⇒ anchor via
+        // `unreflected` (the R-H fail-loud rail) and identity: resolving with a silent identity rewrite would
+        // fabricate plausible-but-false binding results with nothing left to say why, so the caveat rides the
+        // frame. The anchor string stays "VRCF.RewritePath" — it names OUR pin (ParseVrcFury routes on it),
+        // not the vendor method du jour.
         private static Func<string, string> BuildVrcfRewriter(SerializedProperty content, ref string unreflected)
         {
             var arr = content.FindPropertyRelative("rewriteBindings");
@@ -424,7 +426,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             object model = null;
             try { model = content.managedReferenceValue; } catch { /* unboxable ⇒ anchored below */ }
             var mi = VendorReflect.ResolveVrcfRewritePath();
-            if (model == null || mi == null || !mi.GetParameters()[0].ParameterType.IsInstanceOfType(model))
+            // The rules list is read off the boxed model by the FIELD the serialized property names, so the
+            // list handed to the vendor method is the same live object the build reads — never a re-parse.
+            object rules = null;
+            if (model != null)
+            {
+                var rf = model.GetType().GetField("rewriteBindings",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (rf != null) rules = rf.GetValue(model);
+            }
+            if (rules == null || mi == null || !mi.GetParameters()[1].ParameterType.IsInstanceOfType(rules))
             {
                 unreflected = unreflected ?? "VRCF.RewritePath";
                 return null;
@@ -432,7 +443,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             bool warned = false; // the rewriter runs once per binding path; a broken rule row throws for ALL of them
             return path =>
             {
-                try { return (string)mi.Invoke(null, new object[] { model, path }); }
+                try { return (string)mi.Invoke(null, new object[] { path, rules }); }
                 catch (Exception e)
                 {
                     // A post-pin throw is a broken rule row, not API drift; leave the path un-rewritten and
@@ -440,7 +451,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     if (!warned)
                     {
                         warned = true;
-                        Debug.LogWarning("[CheckAnimator] VRCFury RewritePath invoke threw (" + VendorReflect.DescribeInvokeError(e)
+                        Debug.LogWarning("[CheckAnimator] VRCFury RewriteRelativePath invoke threw (" + VendorReflect.DescribeInvokeError(e)
                                        + ") on '" + path + "' — paths left un-rewritten (repeat throws for this rewriter suppressed).");
                     }
                     return path;

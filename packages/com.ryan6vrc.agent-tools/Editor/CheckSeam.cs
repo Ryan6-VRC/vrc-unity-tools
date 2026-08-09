@@ -614,9 +614,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // VRCFury: for each VF.Model.VRCFury whose `content` is a VF.Model.Feature.ArmatureLink, call
-        // VF.Service.ArmatureLinkService.GetLinks(model, avatarObj) (static). Its .mergeBones is a
-        // Stack<(VFGameObject prop/merge, VFGameObject avatar/base)> — flipped vs MA. Reflection will NOT auto-
-        // apply the implicit Transform↔VFGameObject operators, so op_Implicit is invoked explicitly both ways.
+        // VF.Service.ArmatureLinkService.GetLinks(model, avatarObj, objectPaths, armatureCache) (static; the
+        // two cache params arrived at 1.1414.0). Its .mergeBones is a Stack<(VFGameObject prop/merge,
+        // VFGameObject avatar/base)> — flipped vs MA. Reflection will NOT auto-apply the implicit
+        // Transform↔VFGameObject operators, so op_Implicit is invoked explicitly both ways. The caches come
+        // from each type's own GetPerFrame(avatarObj) factory — per-editor-frame lifetime (VRCFury's
+        // Scheduler clears them every update tick), so a call here is always a fresh capture, never stale.
         // GetLinks throws (empty linkTo / link inside armature / bad Hips) AND returns null (propBone == null) —
         // both are resolution failures (thrown → caught upstream; null → thrown here → caught upstream).
         private static void CollectVrcfPairs(GameObject mergeGO, GameObject avatarGO, SeamResolution res)
@@ -626,11 +629,20 @@ namespace Ryan6Vrc.AgentTools.Editor
             var armLinkType = VendorReflect.FindType("VF.Model.Feature.ArmatureLink");
             var svcType = VendorReflect.FindType("VF.Service.ArmatureLinkService");
             var vfGoType = VendorReflect.FindType("VF.Utils.VFGameObject");
-            if (armLinkType == null || svcType == null || vfGoType == null)
-                throw new TypeLoadException("VRCFury ArmatureLink/Service/VFGameObject type missing");
+            var pathCacheType = VendorReflect.FindType("VF.Builder.VRCFObjectPathCache");
+            var armCacheType = VendorReflect.FindType("VF.Builder.VRCFArmatureCache");
+            if (armLinkType == null || svcType == null || vfGoType == null || pathCacheType == null || armCacheType == null)
+                throw new TypeLoadException("VRCFury ArmatureLink/Service/VFGameObject/cache type missing");
 
             var getLinks = svcType.GetMethod("GetLinks", BindingFlags.Public | BindingFlags.Static);
-            if (getLinks == null) throw new MissingMethodException("ArmatureLinkService.GetLinks");
+            // Arity is asserted at pin time so a future signature change fails HERE as drift, with the shape
+            // named — not downstream as a bare TargetParameterCountException at the invoke.
+            if (getLinks == null || getLinks.GetParameters().Length != 4)
+                throw new MissingMethodException("ArmatureLinkService.GetLinks(model, avatarObj, objectPaths, armatureCache)");
+            var pathCacheFactory = pathCacheType.GetMethod("GetPerFrame", BindingFlags.Public | BindingFlags.Static);
+            if (pathCacheFactory == null) throw new MissingMethodException("VRCFObjectPathCache.GetPerFrame");
+            var armCacheFactory = armCacheType.GetMethod("GetPerFrame", BindingFlags.Public | BindingFlags.Static);
+            if (armCacheFactory == null) throw new MissingMethodException("VRCFArmatureCache.GetPerFrame");
             var contentField = vrcfType.GetField("content", BindingFlags.Public | BindingFlags.Instance);
             if (contentField == null) throw new MissingFieldException("VRCFury.content");
             // Scale-at-bake detection: forceOneWorldScale (bool field on the ArmatureLink model) OR a non-unit
@@ -642,6 +654,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (getScaling == null) throw new MissingMethodException("ArmatureLinkService.GetScalingFactor");
 
             var avatarVfGo = ToVfGameObject(vfGoType, avatarGO);
+            var objectPaths = pathCacheFactory.Invoke(null, new object[] { avatarVfGo });
+            var armatureCache = armCacheFactory.Invoke(null, new object[] { avatarVfGo });
 
             foreach (var comp in mergeGO.GetComponentsInChildren(vrcfType, true))
             {
@@ -649,7 +663,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     var content = contentField.GetValue(comp);
                     if (content == null || !armLinkType.IsInstanceOfType(content)) continue; // not an ArmatureLink feature
-                    var links = getLinks.Invoke(null, new object[] { content, avatarVfGo });
+                    var links = getLinks.Invoke(null, new object[] { content, avatarVfGo, objectPaths, armatureCache });
                     if (links == null) throw new NullReferenceException("GetLinks returned null (propBone == null)");
 
                     if (res.ScaleBakeReason == null) // GetScalingFactor(model, links) → (float,float,float); Item3 = factor
