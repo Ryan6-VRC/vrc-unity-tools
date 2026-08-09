@@ -599,6 +599,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Ryan6Vrc.AgentTools.Editor.RunLogFormat.RunLogDir,
                 kind + "_" + Ryan6Vrc.AgentTools.Editor.RunLogFormat.Sanitize(label), summary, body, ".md");
 
+        /// <summary>Re-attach a capture's trailers after logging, `png=` first.
+        ///
+        /// A verdict carrying `png=` must never be handed to <see cref="WriteSessionLog"/>: that writer's failure
+        /// path truncates at the last <c>"=&gt; "</c> and substitutes <c>=&gt; FAIL: write failed</c>, so a locked or
+        /// full RunLog path would rewrite a SUCCESSFUL capture into a failure and drop the `png=` token
+        /// <c>UploadAvatar</c> consumes. A capture's outcome does not depend on whether its log was written, so
+        /// only the <c>| log=</c> trailer is contingent — this splices the two back in the contracted order.</summary>
+        internal static string SpliceTrailers(string logged, string verdictWithoutPng, string pngPath)
+        {
+            const string marker = " | log=";
+            int at = logged.IndexOf(marker, System.StringComparison.Ordinal);
+            if (at < 0) return verdictWithoutPng + " | png=" + pngPath;   // write failed: keep the true verdict
+            return verdictWithoutPng + " | png=" + pngPath + logged.Substring(at);
+        }
+
         /// <summary>Make the RunLog dir visible to the AssetDatabase BEFORE play is entered.
         /// <c>PublishArtifact</c> falls back to a full <c>AssetDatabase.Refresh()</c> on the first write into a
         /// dir the database has never seen, and a refresh during play can import and reload the domain — ending

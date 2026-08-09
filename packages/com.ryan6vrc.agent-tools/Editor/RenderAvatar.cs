@@ -444,7 +444,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             string named = "'" + string.Join("', '", unresolved.ToArray()) + "'";
             return pinned
                 ? "frame A's hide list named " + named + ", which does not resolve under '" + label
-                  + "' at B — B would draw what A excluded, so the pair is not comparable; re-grab frame A"
+                  + "' at B. If the edit under test DELETED it, the pair is still comparable — re-run with that "
+                  + "entry dropped from `hide`. If it was renamed or moved, B will draw what A excluded: pass its "
+                  + "current path. The manifest stores names, not identities, so this door cannot tell the two apart"
                 : "hide entry " + named + " resolved to nothing under '" + label
                   + "' — the subtree would render unexcluded and the sheet would read as if it had been hidden. "
                   + "Entries resolve as descendants of the target: name each as a path relative to it, or as an exact child name";
@@ -606,6 +608,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // ----- Resolve hide list (descendants of target) + default hides -----------------
             ResolveHideList(root, hide, out var hideTargets, out var hideUnresolved, out var hideCaller);
+            var callerHideTargets = new List<GameObject>(hideTargets); // snapshot before DefaultHide joins
             if (hideUnresolved.Count > 0) return CoreFail(label, HideRefusal(pin, label, hideUnresolved));
             // Always drop the build-added Culling mesh (see DefaultHide); a no-op when absent.
             foreach (var tr in root.GetComponentsInChildren<Transform>(true))
@@ -703,8 +706,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var rend in all)
                 {
                     if (!rend.enabled || !rend.gameObject.activeInHierarchy) continue;
+                    // Counted against the CALLER's entries only: DefaultHide ("Culling") joins hideTargets
+                    // below, and folding it in would make hideExcluded nonzero on a built avatar passed no
+                    // `hide` at all — the token names its referent, so it has to mean exactly that.
                     bool inHideList = IsUnderAny(rend.transform, hideTargets);
-                    if (inHideList) { excludedCount++; continue; } // dropped by the hide list (SVM-hidden)
+                    if (inHideList)
+                    {
+                        if (IsUnderAny(rend.transform, callerHideTargets)) excludedCount++;
+                        continue; // dropped by the hide list (SVM-hidden)
+                    }
                     // Honor the operator's eye-hides: a hidden child is counted and skipped, never
                     // force-shown. To include one, the caller un-hides it before the grab (and restores it
                     // after) — the read-only tool never mutates the target subtree's own visibility.
@@ -1124,7 +1134,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             string originNote = identical == r.manifest.views.Length ? "" : " bboxOrigin=bottom";
             string summary = "[RenderAvatar] CaptureDiff " + label + " against=" + Path.GetFileName(against)
                 + " angles=" + string.Join(",", r.manifest.angles) + " => OK gate=" + r.gate + r.canaryToken + " diff=[" + string.Join("; ", parts) + "] identical="
-                + identical + "/" + r.manifest.views.Length + originNote + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + versionNote + " | png=" + pngB;
+                + identical + "/" + r.manifest.views.Length + originNote + r.hideNote + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + versionNote + " | png=" + pngB;
             Debug.Log(summary);
             return summary;
         }

@@ -165,6 +165,18 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>One console entry. <see cref="Full"/> is Unity's verbatim text and is what
         /// <c>filterText</c> matches; <see cref="Body"/> and <see cref="Stack"/> are its two halves,
         /// split at the index Unity reports.</summary>
+        public struct Entry
+        {
+            public EntryKind Kind;
+            public string Full;
+            public string Body;
+            public string Stack;
+            public string File;
+            public int Line;
+        }
+
+        public enum EntryKind { Log, Warning, Error }
+
         /// <summary>Fold byte-identical entries into one row carrying its repeat count, keeping each group's
         /// LAST occurrence in that occurrence's position. Keeping the last is the load-bearing half: `count`
         /// clamps from the newest end, so an oldest-representative row for a message that recurred a second ago
@@ -200,18 +212,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             rows.Reverse();
             return rows;
         }
-
-        public struct Entry
-        {
-            public EntryKind Kind;
-            public string Full;
-            public string Body;
-            public string Stack;
-            public string File;
-            public int Line;
-        }
-
-        public enum EntryKind { Log, Warning, Error }
 
         // ----- Console read (reflection into UnityEditor.LogEntries) ---------------------------
 

@@ -475,11 +475,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (result != null) return result + residualNote;   // silhouette-fail / non-success paths
                 if (string.IsNullOrEmpty(residualNote))
                 {
-                    // `png=` before `log=`: TOOLS.md contracts png= as the token that feeds UploadAvatar.
-                    string ok = RenderThumbnailCore.WriteSessionLog("renderthumbnail", label,
-                        prefix + " => OK | png=" + pngPath,
+                    // The verdict is logged WITHOUT `png=`, then both trailers are spliced on, `png=` first.
+                    // Routing the png-bearing line through the writer would hand it to WriteRunLog's failure
+                    // path, which truncates at the last "=> " — so a locked RunLog would turn a good capture
+                    // into "=> FAIL: write failed" and drop the png= token UploadAvatar reads (TOOLS.md).
+                    // A capture that succeeded says so; only the log trailer is contingent on the write.
+                    string logged = RenderThumbnailCore.WriteSessionLog("renderthumbnail", label, prefix + " => OK",
                         "# RenderThumbnail\n\n- target: `" + label + "`\n- png: " + pngPath + "\n"
                         + "- verdict line: " + prefix + " => OK\n");
+                    string ok = RenderThumbnailCore.SpliceTrailers(logged, prefix + " => OK", pngPath);
                     Debug.Log(ok);
                     return ok;
                 }

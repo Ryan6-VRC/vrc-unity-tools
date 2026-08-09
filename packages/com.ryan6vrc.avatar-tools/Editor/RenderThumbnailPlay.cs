@@ -149,6 +149,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return Fail("unsaved/unsaved-to-disk scene(s) loaded: [" + string.Join(",", unsaved) + "] — save or "
                     + "close them first; End() restores the scene setup from disk and would lose the edits");
 
+            // BEFORE any session state exists. Creating the RunLog dir leaves the AssetDatabase blind to it, so
+            // the first write pays a full Refresh — and a Refresh with a compile pending reloads the domain,
+            // wiping the non-serialized statics below (_prepared / _sceneSetup / _targetName). That would strand
+            // the forced play-mode options and the deactivated avatars with an End() that has nothing to restore
+            // from. Paying it here, before there is anything to lose, is what makes the later writes free.
+            RenderThumbnailCore.EnsureRunLogDirImported();
+
             _sceneSetup = EditorSceneManager.GetSceneManagerSetup();
 
             // Everything below mutates scene state; any throw (an OpenScene on a non-scene file, a bad target)
@@ -208,11 +215,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _attached = false;
                 _shootUpdate = null;
                 _lastShootResult = "(no shot yet)";
-
-                // Out of play, before anything else writes: makes the RunLog dir visible to the AssetDatabase
-                // now, so no later in-play write can trigger the domain-reloading refresh that would end the
-                // session being logged.
-                RenderThumbnailCore.EnsureRunLogDirImported();
 
                 string beginSummary = "Begin " + _targetName + " => READY-TO-PLAY"
                     + (emuMade ? " emulator=created/enabled" : " emulator=present")
@@ -563,13 +565,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         verdict = "[RenderThumbnailPlay] " + tag + " " + common + " => OK | png=" + pngPath;
                     }
                     // The COMPLETION verdict is the event worth recording — the starter string carries only a tag.
-                    // `png=` stays ahead of `log=`: TOOLS.md contracts png= as what feeds UploadAvatar.
-                    verdict = RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-shoot", _root.name, verdict,
+                    // A png-bearing verdict is logged WITHOUT that trailer and spliced back after: routing it
+                    // through the writer would let a failed write rewrite a good capture into "=> FAIL: write
+                    // failed" and drop the png= token UploadAvatar reads (RenderThumbnailCore.SpliceTrailers).
+                    int pngAt = pngPath == null ? -1 : verdict.IndexOf(" | png=", StringComparison.Ordinal);
+                    string verdictBody = pngAt < 0 ? verdict : verdict.Substring(0, pngAt);
+                    string loggedShoot = RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-shoot", _root.name, verdictBody,
                         "# RenderThumbnailPlay Shoot\n\n- tag: `" + tag + "`\n- target: `" + _root.name + "`\n"
                         + "- pose: " + poseName + "\n- expression: " + expressionName + "\n"
                         + "- framing: " + framingToken + "\n- settle: " + elapsed + " frames\n"
                         + "- still moving at capture: " + movingToken + "\n"
                         + "- png: " + (pngPath ?? "(none — nothing drew)") + "\n");
+                    verdict = pngAt < 0 ? loggedShoot : RenderThumbnailCore.SpliceTrailers(loggedShoot, verdictBody, pngPath);
                     FinishShoot(step, tag, verdict);
                 }
                 catch (Exception ex)

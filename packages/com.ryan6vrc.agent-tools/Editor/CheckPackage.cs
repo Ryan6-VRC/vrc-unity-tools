@@ -17,8 +17,8 @@ namespace Ryan6Vrc.AgentTools.Editor
     ///   - renderer meshes: present / MISSING
     ///   - MonoBehaviours: missing script references
     ///   - FBX external-material remap, in two classes: entries that RESOLVE while the model imports empty
-    ///     (a stale import — force-reimport), and entries that resolve to NOTHING (the material pack was
-    ///     never imported — import it first, then force-reimport). The remedies run in opposite order.
+    ///     (a stale import — force-reimport), and entries that resolve to NOTHING (their .mat targets are
+    ///     absent — restore or import those, then force-reimport). The remedies run in opposite order.
     ///
     /// The load-bearing distinction is MISSING vs EMPTY. A slot whose serialized reference has a
     /// non-zero instance id that fails to resolve is broken; a clean-zero slot is an intentional
@@ -242,15 +242,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             var importer = AssetImporter.GetAtPath(assetPath) as ModelImporter;
             if (importer == null || importer.materialImportMode == ModelImporterMaterialImportMode.None) return;
 
-            int mapped = 0;
+            var mapped = new List<string>();
             var unresolved = new List<string>();
             foreach (var kv in importer.GetExternalObjectMap())
             {
                 if (kv.Key.type != typeof(Material)) continue;
-                mapped++;
+                mapped.Add(kv.Key.name);
                 if (kv.Value == null) unresolved.Add(kv.Key.name);
             }
-            if (mapped == 0) return;
+            if (mapped.Count == 0) return;
 
             var model = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
             if (model == null) return;
@@ -262,7 +262,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             if (empty == 0) return;
 
-            var verdict = ClassifyRemap(mapped, unresolved.Count, empty);
+            var verdict = ClassifyRemap(mapped.Count, unresolved.Count, empty);
             if (verdict == RemapVerdict.None) return;
 
             if (verdict == RemapVerdict.Unresolved) r.RemapUnresolved += empty; else r.RemapStale += empty;
@@ -271,7 +271,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 Location = assetPath,
                 ObjectPath = "",
                 Kind = verdict == RemapVerdict.Unresolved ? "fbx-remap-unresolved" : "fbx-remap-stale",
-                Detail = DescribeRemap(verdict, mapped, unresolved, empty)
+                Detail = DescribeRemap(verdict, mapped.Count, unresolved, empty, mapped)
             });
         }
 
@@ -289,14 +289,17 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Pure wording for the two remap classes, kept beside the decision so a reader comparing
         /// the remedies sees they run in opposite order.</summary>
-        internal static string DescribeRemap(RemapVerdict verdict, int mappedCount, List<string> unresolved, int emptySlots)
+        internal static string DescribeRemap(RemapVerdict verdict, int mappedCount, List<string> unresolved, int emptySlots,
+                                            List<string> mapped = null)
         {
             if (verdict == RemapVerdict.Unresolved)
-                return emptySlots + " empty slot(s); " + unresolved.Count + " of " + mappedCount
-                     + " external-material remap(s) resolve to nothing (" + NameList(unresolved)
-                     + ") — import the material pack, THEN force-reimport the FBX";
-            return emptySlots + " empty slot(s) despite " + mappedCount
-                 + " resolvable external-material remap(s) — force-reimport the FBX";
+                return emptySlots + " empty renderer slot(s); " + unresolved.Count + " of " + mappedCount
+                     + " external-material remap entries resolve to nothing (" + NameList(unresolved)
+                     + ") — restore or import those material assets, THEN force-reimport the FBX. A reimport alone "
+                     + "cannot fix this: the targets do not exist yet";
+            return emptySlots + " empty renderer slot(s) despite " + mappedCount
+                 + " resolvable external-material remap entries (" + NameList(mapped ?? new List<string>()) + ") — force-reimport the FBX. "
+                 + "If a reimport does not clear it, the empty slots are not the mapped ones and this model is fine";
         }
 
         /// <summary>Comma-joined names, capped so a many-material FBX names a readable few and counts the rest

@@ -161,7 +161,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             string prefix = includeChildren ? "selectiondeep_" : "selection_";
             string path = WriteSnapshot(w, prefix + Sanitize(go.name));
-            return "[AgentInspector] snapshot " + go.name + " => OK" + SizeNote(path, hierarchyPath, includeChildren)
+            return "[AgentInspector] snapshot " + go.name + " => OK" + SizeNote(path, hierarchyPath, includeChildren, followAssets)
                  + " | log=" + path;
         }
 
@@ -179,7 +179,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Byte size of the written artifact, plus the narrower-door hint when it lands past the read
         /// cap. Measured from DISK, not from the string's length: the file is UTF-8 and Japanese asset names are
         /// routine here, so a char count under-reports bytes and would promise a fit that fails.</summary>
-        internal static string SizeNote(string path, string hierarchyPath, bool includeChildren)
+        internal static string SizeNote(string path, string hierarchyPath, bool includeChildren, bool followAssets = false)
         {
             long bytes;
             try { bytes = new FileInfo(path).Length; }
@@ -188,8 +188,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (bytes <= ReadCapBytes) return note;
             return note + " (past the ~" + (ReadCapBytes / 1024) + "KB read cap — narrow it: "
                  + (includeChildren
-                    ? "Snapshot(\"" + hierarchyPath + "\", includeChildren: false, followAssets: false), or snapshot a deeper path"
-                    : "snapshot a deeper path, or drop followAssets")
+                    ? "Snapshot(\"" + hierarchyPath + "\", includeChildren: false" + (followAssets ? ", followAssets: false" : "") + "), or snapshot a deeper path"
+                    : followAssets ? "re-run with followAssets: false, or snapshot a deeper path"
+                                   : "snapshot a deeper path — this call is already at its narrowest flags")
                  + ")";
         }
 

@@ -405,11 +405,12 @@ public class ReportShapeOverlapTests
         return ot;
     }
 
-    // The defect this repair exists for: a shape is worn, and the only thing declaring it sits behind a parked,
-    // undriven ancestor. Before the fix the dead declaration suppressed the flag and the double-subtraction
-    // shipped silently.
+    // A declaration reachable only from behind a parked, undriven ancestor may not apply at the initial state.
+    // It is ANNOTATED, never flagged: proving it dead needs MA's build-time animation index (any clip binding
+    // the ancestor's m_IsActive keeps the reaction live), which no edit-time read has — so flagging would
+    // invent offenders on every FX-toggled wardrobe, the failure this tool exists to avoid.
     [Test]
-    public void Report_declaredOnlyBehindParkedAncestor_flaggedAndNamesTheAncestor()
+    public void Report_declaredOnlyBehindParkedAncestor_annotatedNotFlagged()
     {
         var avatar = NewAvatarRoot("Avatar");
         var m = MakeMesh(20);
@@ -420,10 +421,12 @@ public class ReportShapeOverlapTests
         parked.SetActive(false);
         body.GetComponent<SkinnedMeshRenderer>().SetBlendShapeWeight(m.GetBlendShapeIndex("Shrink_Hip"), 100f);
 
-        var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
-        var row = ResolutionRow(md, "Shrink_Hip");
-        StringAssert.Contains("MISMATCH", row);
-        StringAssert.Contains("ParkedGroup", row); // the ancestor is the repair handle, so the row must name it
+        var summary = Report(Path(body), new string[0], Path(avatar));
+        var row = ResolutionRow(ReadLog(summary), "Shrink_Hip");
+        StringAssert.Contains("ParkedGroup", row);          // the ancestor is the repair handle: name it
+        StringAssert.Contains("inactiveDeclared=1", summary); // and count it, so the reader sees the population
+        Assert.IsFalse(row.Contains("MISMATCH"),
+            "a parked declaration is annotated for the reader to rule on, never promoted to a verdict: " + row);
     }
 
     // The false-positive direction, and the one that would have made this repair worse than the defect: an
@@ -468,8 +471,8 @@ public class ReportShapeOverlapTests
 
         var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
         var row = ResolutionRow(md, "Shrink_Hip");
-        StringAssert.Contains("MISMATCH", row);
         StringAssert.Contains("SharedGroup", row);
+        Assert.IsFalse(row.Contains("MISMATCH"), "annotated, not flagged: " + row);
     }
 
     // The caller's own root is not authoring state. `map-outfit-shapes` prescribes turning a piece off to drive
@@ -489,6 +492,83 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("outfitRoot itself is inactive", summary);
         var row = ResolutionRow(ReadLog(summary), "Shrink_Hip");
         Assert.IsFalse(row.Contains("inactive:"), "the caller's own root must not be charged to a row: " + row);
+    }
+
+    // MA scans toggles from the AVATAR root, and the ordinary wardrobe layout parks the ObjectToggle on a menu
+    // object ABOVE the outfit. Scoping the scan to the caller's root would miss it and annotate a genuinely
+    // driven ancestor as parked — a false annotation on the most common layout there is.
+    [Test]
+    public void Report_toggleAboveTheOutfitRoot_stillCountsAsDriven()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var outfit = new GameObject("Outfit"); outfit.transform.SetParent(avatar.transform, false);
+        var sc = AddShapeChanger(avatar, "Changer", body, ("Shrink_Hip", ShapeChangeType.Set));
+        sc.transform.SetParent(outfit.transform, false);
+        var parked = Interpose(sc.gameObject, "ToggledGroup");
+        parked.SetActive(false);
+        AddObjectToggle(avatar, "MenuToggle", parked, true); // sits above `outfit`, the root we pass below
+
+        var md = ReadLog(Report(Path(body), new string[0], Path(outfit)));
+        Assert.IsFalse(ResolutionRow(md, "Shrink_Hip").Contains("inactive:"),
+            "a toggle above the caller's root still drives the ancestor: " + ResolutionRow(md, "Shrink_Hip"));
+    }
+
+    // `Inverted` is how "apply this while the piece is OFF" is authored, and ReactionRule.InitiallyActive XORs
+    // it — so an inverted changer behind a parked ancestor is initially ACTIVE. Reading it as parked would
+    // annotate exactly the healthy inverted case.
+    [Test]
+    public void Report_invertedChangerBehindParkedAncestor_isLiveNotParked()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var sc = AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+        sc.Inverted = true;
+        Interpose(sc.gameObject, "ParkedGroup").SetActive(false);
+
+        var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
+        Assert.IsFalse(ResolutionRow(md, "Shrink_Hip").Contains("inactive:"),
+            "an inverted declaration behind a parked ancestor is initially active: " + ResolutionRow(md, "Shrink_Hip"));
+    }
+
+    // MA's initial state is the last INITIALLY-ACTIVE group, not the last declared. A live declaration must win
+    // over a parked one whatever the hierarchy order — otherwise the annotation is order-dependent.
+    [Test]
+    public void Report_oneLiveAndOneParkedDeclaration_readsAsLive()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChanger(avatar, "LiveOutfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+        var parkedSc = AddShapeChanger(avatar, "ParkedOutfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+        Interpose(parkedSc.gameObject, "ParkedGroup").SetActive(false);
+
+        var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
+        Assert.IsFalse(ResolutionRow(md, "Shrink_Hip").Contains("inactive:"),
+            "a live declaration owns the shape regardless of enumeration order: " + ResolutionRow(md, "Shrink_Hip"));
+    }
+
+    // A toggle row that drives the ancestor OFF resolves to inactive, so treating mere toggle MEMBERSHIP as
+    // "driven" would restore the blind spot the annotation exists to surface.
+    [Test]
+    public void Report_toggleDrivingTheAncestorOff_isNotTreatedAsDriven()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var sc = AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+        var parked = Interpose(sc.gameObject, "ParkedGroup");
+        parked.SetActive(false);
+        AddObjectToggle(avatar, "Toggle", parked, false); // drives it OFF
+
+        var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
+        StringAssert.Contains("inactive:", ResolutionRow(md, "Shrink_Hip"));
     }
 
     // A live chain is unaffected — the anti-flood invariant still holds for everything this repair does not touch.

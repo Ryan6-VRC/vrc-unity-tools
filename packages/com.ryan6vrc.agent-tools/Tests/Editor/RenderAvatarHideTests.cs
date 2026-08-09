@@ -101,7 +101,11 @@ public class RenderAvatarHideTests
         var s = RenderAvatar.HideRefusal(pinned: true, label: "Avatar", unresolved: new List<string> { "Skirt" });
 
         StringAssert.Contains("frame A", s);
-        StringAssert.Contains("re-grab frame A", s);
+        // Deletion and rename need OPPOSITE actions and the manifest stores names, not identities, so the
+        // refusal must give both and say why it cannot choose — asserting a single cure would be a guess.
+        StringAssert.Contains("DELETED", s);
+        StringAssert.Contains("renamed or moved", s);
+        StringAssert.Contains("names, not identities", s);
         StringAssert.DoesNotContain("path relative to it", s);
     }
 

@@ -292,19 +292,18 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // door it means two whole skeletons shared at most one skinned humanoid bone NAME, which for a
                 // refit output is a failed warp or a bone-naming break, and "verify the bake" would send the
                 // reader to inspect a result that should be rebuilt.
+                // Root-choice, not mergeable quality, and true at BOTH doors: a seam-door caller who narrows past
+                // the meshes lands in exactly this state and would otherwise be told to "verify the baked result".
+                if (maxW.Count == 0)
+                    return RefuseAbstain("no skinned weights under mergeable root '" + PathOf(mergeGO) + "'" +
+                        " — nothing under it binds a bone, so coincidence cannot be scored. The usual cause is a " +
+                        "root narrowed past the meshes (SkinnedMeshRenderers sitting as SIBLINGS of the armature, " +
+                        "not under it): pass the root that contains both. This is not evidence about the " +
+                        "mergeable's quality", label);
+
                 if (bare)
                 {
-                    // A third cause, and the one the message used to argue against: the caller narrowed the
-                    // mergeable root past its own meshes. Narrowing to an armature whose SkinnedMeshRenderers are
-                    // siblings drops every weight and lands here — measured live, with 19 shared weighted bones
-                    // sitting just outside the root while this line said "rebuild the mergeable". So when the root
-                    // skins nothing, say that first: it is a fact, not a guess, and it is a one-argument fix.
-                    if (maxW.Count == 0)
-                        return RefuseAbstain("no skinned weights under mergeable root '" + PathOf(mergeGO) + "'" +
-                            " — nothing under it binds a bone, so coincidence cannot be scored. The usual cause is a " +
-                            "root narrowed past the meshes (SkinnedMeshRenderers sitting as SIBLINGS of the armature, " +
-                            "not under it): pass the root that contains both. This is not evidence about the " +
-                            "mergeable's quality", label);
+                    // The remaining bare-door case: weights exist, but at most one shared humanoid bone. The
                     return RefuseAbstain("only " + weightedHum.Count + " shared weighted humanoid bone: " + bone + delta +
                         " — too few to certify coincidence. Two whole skeletons matching on at most one skinned " +
                         "bone name is a failed transfer or a bone-naming break, not a close fit: rebuild the " +

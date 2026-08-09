@@ -35,7 +35,7 @@ public class AgentInspectorSizeTests
     {
         File.WriteAllText(_tmp, new string('x', 300 * 1024));
 
-        var s = AgentInspector.SizeNote(_tmp, "Avatar/Body", includeChildren: true);
+        var s = AgentInspector.SizeNote(_tmp, "Avatar/Body", includeChildren: true, followAssets: true);
 
         StringAssert.Contains("read cap", s);
         // Must chain into an actual next call, and must match the 3-arg signature unity-tools.md documents —
@@ -43,6 +43,20 @@ public class AgentInspectorSizeTests
         StringAssert.Contains("includeChildren: false", s);
         StringAssert.Contains("followAssets: false", s);
         StringAssert.Contains("Avatar/Body", s);
+    }
+
+    // A remedy that prescribes a flag already at its default is a no-op the reader pays to try — the same
+    // defect this batch fixes in CheckPackage's reimport advice.
+    [Test]
+    public void SizeNote_pastTheCapWithFollowAssetsAlreadyOff_doesNotPrescribeIt()
+    {
+        File.WriteAllText(_tmp, new string('x', 300 * 1024));
+
+        var s = AgentInspector.SizeNote(_tmp, "Avatar/Body", includeChildren: false, followAssets: false);
+
+        StringAssert.Contains("read cap", s);
+        StringAssert.DoesNotContain("followAssets", s);
+        StringAssert.Contains("deeper path", s);
     }
 
     // The measurement bug this guards: the artifact is UTF-8 and Japanese vendor asset names are routine in

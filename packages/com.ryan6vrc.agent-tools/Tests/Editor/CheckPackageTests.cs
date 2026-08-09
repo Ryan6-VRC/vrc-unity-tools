@@ -217,11 +217,14 @@ public class CheckPackageTests
             mappedCount: 2, unresolved: new System.Collections.Generic.List<string> { "m_lower", "m_upper" }, emptySlots: 10);
         StringAssert.Contains("m_lower", s);
         StringAssert.Contains("m_upper", s);
-        // Order is the payload: the pack must be imported BEFORE the reimport, or the reimport achieves nothing.
-        int pack = s.IndexOf("material pack", System.StringComparison.Ordinal);
+        // Order is the payload: the targets must exist BEFORE the reimport, or the reimport achieves nothing.
+        int restore = s.IndexOf("restore or import", System.StringComparison.Ordinal);
         int reimport = s.IndexOf("force-reimport", System.StringComparison.Ordinal);
-        Assert.That(pack, Is.GreaterThanOrEqualTo(0), "the unresolved remedy must name the material pack: " + s);
-        Assert.That(pack, Is.LessThan(reimport), "import-the-pack must precede force-reimport in the remedy: " + s);
+        Assert.That(restore, Is.GreaterThanOrEqualTo(0), "the unresolved remedy must name the missing targets: " + s);
+        Assert.That(restore, Is.LessThan(reimport), "restoring the targets must precede force-reimport: " + s);
+        // A null remap target proves the target is absent, not WHY — a deleted or re-GUIDed .mat looks identical
+        // to a never-imported pack, so the message must not assert the cause it cannot observe.
+        StringAssert.DoesNotContain("never imported", s);
     }
 
     [Test]
@@ -230,8 +233,10 @@ public class CheckPackageTests
         var s = CheckPackage.DescribeRemap(CheckPackage.RemapVerdict.Stale,
             mappedCount: 4, unresolved: new System.Collections.Generic.List<string>(), emptySlots: 3);
         StringAssert.Contains("force-reimport", s);
-        // Naming the pack here would send a caller off to import something that already resolves.
-        StringAssert.DoesNotContain("material pack", s);
+        // Naming absent targets here would send a caller off to restore something that already resolves.
+        StringAssert.DoesNotContain("restore or import", s);
+        // Model-level assertion, so a reimport can legitimately not clear it — say so, or the caller loops.
+        StringAssert.Contains("not the mapped ones", s);
     }
 
     [Test]
