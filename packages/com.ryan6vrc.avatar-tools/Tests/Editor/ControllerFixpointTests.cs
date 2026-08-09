@@ -573,6 +573,77 @@ public class ControllerFixpointTests
     public void GateExit_BothFailed_IsOne()
         => Assert.AreEqual(1, ControllerFixpoint.GateExit(3, 2));
 
+    // ── ForeignProjectPathLines: the committed-prefab provenance predicate ──────────────────────────
+    //
+    // Pure text in, offender handles out — no AssetDatabase, no live object, so the whole predicate is
+    // unit-reachable even though its caller (CheckPrefabIntegrity) is boundary-bound and stays out of this
+    // file. What is NOT covered here is the wiring: that CheckPrefabIntegrity calls this and folds its count
+    // into offenderCount sits behind that same boundary, exactly like the missing-script and anchor-seam
+    // checks beside it.
+
+    [Test]
+    public void ForeignProjectPathLines_CleanPrefabText_IsEmpty()
+        => Assert.IsEmpty(ControllerFixpoint.ForeignProjectPathLines(
+            "  m_Name: Thing\n  id: 8f0a|Packages/com.example.patterns/entry/assets/Thing.fbx\n"));
+
+    // The leak shape this exists for: a cached `<guid>|<path>` reference back-filled with the inspecting
+    // project's own layout. Exact-string on the handle — the line number and the echoed text ARE the fix
+    // instruction's address, and a Does.Contain assertion would let either rot.
+    [Test]
+    public void ForeignProjectPathLines_BackFilledProjectPath_IsReportedWithItsLine()
+        => CollectionAssert.AreEqual(
+            new[] { "line 2: id: 8f0a|Assets/Somewhere/Thing.fbx" },
+            ControllerFixpoint.ForeignProjectPathLines(
+                "  m_Name: Thing\n  id: 8f0a|Assets/Somewhere/Thing.fbx\n  m_Enabled: 1\n"));
+
+    // Line numbers are 1-based (an editor's gutter) and every hit is reported, not just the first — six
+    // such lines in one prefab is the case that motivated the check.
+    [Test]
+    public void ForeignProjectPathLines_EveryHitIsReported_OneBasedLineNumbers()
+        => CollectionAssert.AreEqual(
+            new[] { "line 1: a: Assets/One", "line 3: c: Assets/Three" },
+            ControllerFixpoint.ForeignProjectPathLines("a: Assets/One\nb: clean\nc: Assets/Three"));
+
+    // CRLF text must yield the same handle as LF text — a prefab committed through a Windows checkout is
+    // the common case, and a stray \r on the end of the echoed line would break the exact-string above.
+    [Test]
+    public void ForeignProjectPathLines_CrlfTextYieldsTheSameHandle()
+        => CollectionAssert.AreEqual(
+            new[] { "line 2: id: 8f0a|Assets/Somewhere/Thing.fbx" },
+            ControllerFixpoint.ForeignProjectPathLines(
+                "  m_Name: Thing\r\n  id: 8f0a|Assets/Somewhere/Thing.fbx\r\n"));
+
+    // Judgment-free: the substring is the WHOLE predicate. No path-shape parse, no allowlist — a bare
+    // mention anywhere in the text is the defect, because a VPM package resolves nothing under Assets/.
+    [Test]
+    public void ForeignProjectPathLines_MatchesAnywhereInTheLine_NotOnlyInAnIdField()
+        => CollectionAssert.AreEqual(
+            new[] { "line 1: - {fileID: 0, guid: dead, path: Assets/X}" },
+            ControllerFixpoint.ForeignProjectPathLines("- {fileID: 0, guid: dead, path: Assets/X}"));
+
+    // Case-sensitive by construction (Ordinal): Unity's folder IS `Assets/`, and a case-insensitive match
+    // would start hitting prose in a comment. Pinned so the comparison choice is a deliberate one.
+    [Test]
+    public void ForeignProjectPathLines_IsCaseSensitive()
+        => Assert.IsEmpty(ControllerFixpoint.ForeignProjectPathLines("path: assets/X"));
+
+    // A trailing-slash-less `Assets` is not a path and does not fire — the slash is part of the predicate.
+    [Test]
+    public void ForeignProjectPathLines_BareWordAssets_DoesNotFire()
+        => Assert.IsEmpty(ControllerFixpoint.ForeignProjectPathLines("m_Name: MyAssets"));
+
+    // One pathological line cannot swamp the gate's single-line FAIL message.
+    [Test]
+    public void ForeignProjectPathLines_LongLineIsTruncated()
+    {
+        var hit = ControllerFixpoint.ForeignProjectPathLines("Assets/" + new string('x', 500))[0];
+        Assert.AreEqual("line 1: Assets/" + new string('x', 153) + "…", hit);
+    }
+
+    [Test]
+    public void ForeignProjectPathLines_EmptyText_IsEmpty()
+        => Assert.IsEmpty(ControllerFixpoint.ForeignProjectPathLines(""));
+
     // ── MenuBeside: the re-derived filename convention ─────────────────────────────────────────────
     //
     // CompileController builds the same path independently (emitDir + "/" + name + "_Menu.asset"). These
