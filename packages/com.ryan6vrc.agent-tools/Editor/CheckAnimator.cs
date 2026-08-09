@@ -390,7 +390,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (over != null && over.objectReferenceValue is GameObject go) root = go;
             if (root == null) root = c.gameObject;
             var pathRewrite = BuildVrcfRewriter(content, ref unreflected);
-            // CreateNearestMatchPathRewriter short-circuits on `binding.path == "" && rootBindingsApplyToAvatar`,
+            // AnimationBindingUtils.ResolveTarget short-circuits on `path == "" && RootBindingsApplyToAvatar`,
             // so with the flag set a root-level binding stays at the AVATAR root instead of being matched onto
             // the mount. A caller resolving it against the mount would read the mount as the animated node.
             var rootToAvatar = content.FindPropertyRelative("rootBindingsApplyToAvatar");
@@ -406,17 +406,19 @@ namespace Ryan6Vrc.AgentTools.Editor
         // The VRCFury FullController "Path Rewrite Rules" (content.rewriteBindings) as a path transform. The
         // build runs these BEFORE the nearest-match ancestor walk, so a caller resolves the rewritten path
         // against the ancestor chain. The transform INVOKES the build's own implementation —
-        // VF.Feature.FullControllerBuilder.RewritePath(model, path), on THIS content's boxed feature model,
-        // so two FullControllers on one mount never cross-contaminate — rather than replicating it: invoked,
-        // the rule semantics can't drift, and no near-copy of VRCFury code lives in this repo (VRCFury is not
-        // FOSS-licensed — a replication is a licensing question as well as a drift hazard). RewritePath only
-        // reads model.rewriteBindings, so handing it the live managed reference mutates nothing.
+        // VF.Utils.AnimationBindingUtils.RewriteRelativePath(path, rules), on THIS content's live
+        // rewriteBindings list, so two FullControllers on one mount never cross-contaminate — rather than
+        // replicating it: invoked, the rule semantics can't drift, and no near-copy of VRCFury code lives in
+        // this repo (VRCFury is not FOSS-licensed — a replication is a licensing question as well as a drift
+        // hazard). RewriteRelativePath only reads the rule rows, so handing it the live list mutates nothing.
         // Returns null when there are no rules (identity). The transform returns null for a path a delete
         // rule drops (that binding is removed at build — not a real break).
         //
-        // Rules present + RewritePath unreachable (drift) or the model unboxable ⇒ anchor via `unreflected`
-        // (the R-H fail-loud rail) and identity: resolving with a silent identity rewrite would fabricate
-        // plausible-but-false binding results with nothing left to say why, so the caveat rides the frame.
+        // Rules present + RewriteRelativePath unreachable (drift) or the model unboxable ⇒ anchor via
+        // `unreflected` (the R-H fail-loud rail) and identity: resolving with a silent identity rewrite would
+        // fabricate plausible-but-false binding results with nothing left to say why, so the caveat rides the
+        // frame. The anchor string stays "VRCF.RewritePath" — it names OUR pin (ParseVrcFury routes on it),
+        // not the vendor method du jour.
         private static Func<string, string> BuildVrcfRewriter(SerializedProperty content, ref string unreflected)
         {
             var arr = content.FindPropertyRelative("rewriteBindings");
@@ -424,7 +426,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             object model = null;
             try { model = content.managedReferenceValue; } catch { /* unboxable ⇒ anchored below */ }
             var mi = VendorReflect.ResolveVrcfRewritePath();
-            if (model == null || mi == null || !mi.GetParameters()[0].ParameterType.IsInstanceOfType(model))
+            // The rules list is read off the boxed model by the FIELD the serialized property names, so the
+            // list handed to the vendor method is the same live object the build reads — never a re-parse.
+            object rules = null;
+            if (model != null)
+            {
+                // NonPublic included so a future [SerializeField]-private migration of the field doesn't
+                // desync this read from the SerializedProperty arraySize check above (which would still see
+                // rules and anchor the frame for a field that merely changed accessibility).
+                var rf = model.GetType().GetField("rewriteBindings",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (rf != null) rules = rf.GetValue(model);
+            }
+            if (rules == null || mi == null || !mi.GetParameters()[1].ParameterType.IsInstanceOfType(rules))
             {
                 unreflected = unreflected ?? "VRCF.RewritePath";
                 return null;
@@ -432,7 +446,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             bool warned = false; // the rewriter runs once per binding path; a broken rule row throws for ALL of them
             return path =>
             {
-                try { return (string)mi.Invoke(null, new object[] { model, path }); }
+                try { return (string)mi.Invoke(null, new object[] { path, rules }); }
                 catch (Exception e)
                 {
                     // A post-pin throw is a broken rule row, not API drift; leave the path un-rewritten and
@@ -440,7 +454,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     if (!warned)
                     {
                         warned = true;
-                        Debug.LogWarning("[CheckAnimator] VRCFury RewritePath invoke threw (" + VendorReflect.DescribeInvokeError(e)
+                        Debug.LogWarning("[CheckAnimator] VRCFury RewriteRelativePath invoke threw (" + VendorReflect.DescribeInvokeError(e)
                                        + ") on '" + path + "' — paths left un-rewritten (repeat throws for this rewriter suppressed).");
                     }
                     return path;
@@ -477,8 +491,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         // <paramref name="pathRewrite"/> (default null ⇒ identity, CheckAnimator's behavior) transforms each
         // binding path before resolution — CheckAvatar passes the VRCF FullController rewriter so a binding is
         // resolved the way the build will (rewriteBindings then nearest-match). A rewrite returning null
-        // means a delete-rule drops that binding at build, so it is skipped (not unresolved). The returned
-        // pair always carries the ORIGINAL binding (what the .anim holds — what a repath must target).
+        // means a delete-rule drops that binding at build, so it is skipped (not unresolved). A rewrite
+        // yielding a leading-`/` path is VRCFury's absolute form (AnimationBindingUtils.ResolveTarget's
+        // absolute branch, nondestructive.md): the build resolves it from the avatar root with no ancestor
+        // walk, so the probe here does the same — against the LAST entry of roots only, which every caller
+        // builds as the avatar-most root (AncestorChain appends upward; the explicit basis appends avatarGO
+        // last). The returned pair always carries the ORIGINAL binding (what the .anim holds — what a repath
+        // must target).
         internal static List<(AnimationClip clip, EditorCurveBinding binding)> CollectUnresolvedBindings(
             AnimatorController controller, List<GameObject> roots, Func<string, string> pathRewrite = null)
         {
@@ -493,15 +512,26 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     if (IsHumanoidAnimatorCurve(b)) continue; // muscle/root curves have no scene object
                     var probe = b; // struct copy — preserves type/propertyName/isPPtrCurve, only path may change
+                    bool absolute = false;
                     if (pathRewrite != null)
                     {
                         string rewritten = pathRewrite(b.path);
                         if (rewritten == null) continue; // a delete-rule drops this binding at build — not a break
-                        probe.path = rewritten;
+                        absolute = rewritten.StartsWith("/");
+                        probe.path = absolute ? rewritten.TrimStart('/') : rewritten;
                     }
                     bool resolved = false;
-                    foreach (var root in roots)
-                        if (AnimationUtility.GetAnimatedObject(root, probe) != null) { resolved = true; break; }
+                    if (absolute)
+                    {
+                        if (roots.Count > 0 &&
+                            AnimationUtility.GetAnimatedObject(roots[roots.Count - 1], probe) != null)
+                            resolved = true;
+                    }
+                    else
+                    {
+                        foreach (var root in roots)
+                            if (AnimationUtility.GetAnimatedObject(root, probe) != null) { resolved = true; break; }
+                    }
                     if (resolved) continue;
                     unresolved.Add((clip, b));
                 }
@@ -561,18 +591,22 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // keeps the narrower humanoid-only skip: a broken Animator binding is still a break there.
                     if (b.type == typeof(Animator)) continue;
                     var probe = b;
+                    bool absolute = false;
                     if (pathRewrite != null)
                     {
                         string rewritten = pathRewrite(b.path);
                         if (rewritten == null) continue; // a delete-rule drops this binding at build
-                        probe.path = rewritten;
+                        absolute = rewritten.StartsWith("/");
+                        probe.path = absolute ? rewritten.TrimStart('/') : rewritten;
                     }
                     // Walk the object the binding ACTUALLY resolves to rather than re-finding the path by
                     // string: GetAnimatedObject is the resolver the clip-binding class already trusts, and
                     // taking its result removes a silent-skip branch (a path Transform.Find cannot retrace).
                     // An empty path under rootBindingsApplyToAvatar resolves against the avatar root ALONE —
                     // the build leaves it there, so walking the mount would read the mount as the animated node.
-                    var probeRoots = (probe.path.Length == 0 && rootBindingsApplyToAvatar)
+                    // A leading-`/` rewrite output is VRCFury's absolute form and resolves the same way:
+                    // avatar root alone, no ancestor walk (CollectUnresolvedBindings mirrors this).
+                    var probeRoots = (absolute || (probe.path.Length == 0 && rootBindingsApplyToAvatar))
                         ? new List<GameObject> { avatarRoot } : roots;
                     UnityEngine.Object animated = null;
                     foreach (var root in probeRoots)

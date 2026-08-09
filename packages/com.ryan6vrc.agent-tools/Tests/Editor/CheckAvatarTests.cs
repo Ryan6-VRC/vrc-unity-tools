@@ -391,6 +391,26 @@ public class CheckAvatarTests
         StringAssert.Contains("path=`Ghost/Missing`", log, log);
     }
 
+    // A rewrite rule whose `to` starts with `/` emits VRCFury's absolute form: the build
+    // (AnimationBindingUtils.ResolveTarget) resolves it from the avatar root with no ancestor walk. The
+    // checker must do the same — probing the literal `/`-prefixed path against the walk roots resolves
+    // nowhere and manufactures a false clip-binding offender on a build that works.
+    [Test]
+    public void Vrcf_rewriteBindings_absoluteRule_resolvesFromAvatarRoot()
+    {
+        var a = NewAvatar("LintVrcfAbs");
+        NewChild(NewChild(a, "Armature"), "Bone");             // real location: avatar-root Armature/Bone
+        var prop = NewChild(NewChild(a, "Deep"), "Prop");      // VRCF mount, nested away from the bone
+
+        var clip = NewClip(TmpDir, "VrcfAbsClip", "Armature/Bone");
+        var c = AddVrcfFullController(prop, NewController("VrcfAbsCtrl", clip), prop);
+        SetVrcfRewriteBindings(c, ("Armature", "/Armature", false)); // absolute: resolve from avatar root
+
+        var r = Inspect("LintVrcfAbs");
+        StringAssert.Contains("clipBinding=0", r,
+            "an absolute (leading-/) rewrite must resolve against the avatar root, not read as a break: " + r);
+    }
+
     // A matched delete rule drops the binding at build — it must not surface as a break.
     [Test]
     public void Vrcf_rewriteBindings_deleteRule_dropsBinding()
@@ -1068,7 +1088,7 @@ public class CheckAvatarTests
         StringAssert.Contains("clipBinding=0", log); // it resolves — so 0 is the skip, not a miss
     }
 
-    // CreateNearestMatchPathRewriter short-circuits an empty-path binding when rootBindingsApplyToAvatar
+    // AnimationBindingUtils.ResolveTarget short-circuits an empty-path binding when rootBindingsApplyToAvatar
     // is set, leaving it at the avatar root instead of matching it onto the mount. Resolving it against
     // the mount would read the mount itself as the animated node and invent a seam.
     [Test]
