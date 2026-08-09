@@ -132,9 +132,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── VRCFury ArmatureLinkService.GetLinks + the ArmatureLink walk's supporting handles ─────────────
 
         /// <summary>Every pinned handle <c>CheckSeam</c>'s VRCFury collector invokes, resolved as one set
-        /// because none of them is usable alone. Field order is the RESOLUTION order: a release that drifts
-        /// two members names the earlier one, so reordering these silently changes which member the operator
-        /// is sent to.</summary>
+        /// because none of them is usable alone. The METHOD and FIELD pins below are declared in resolution
+        /// order, and that order is load-bearing: each has its own throw site, so a release that drifts two
+        /// of them names the earlier one, and reordering silently changes which member the operator is sent
+        /// to. The three Type fields are not ordered — all five resolved types share one combined null check
+        /// and one message, so their order is unobservable.</summary>
         internal sealed class VrcfArmatureLinkPins
         {
             internal Type VrcfType;                     // VF.Model.VRCFury — the component the collector sweeps for

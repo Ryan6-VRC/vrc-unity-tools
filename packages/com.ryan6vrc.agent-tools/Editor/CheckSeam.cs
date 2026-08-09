@@ -634,10 +634,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         // VRCFury: for each VF.Model.VRCFury whose `content` is a VF.Model.Feature.ArmatureLink, call
         // VF.Service.ArmatureLinkService.GetLinks(model, avatarObj, objectPaths, armatureCache). Every handle
         // invoked here is pinned by VendorReflect.ResolveVrcfArmatureLink, which owns the pin shapes and the
-        // drift evidence behind them; a null return means VRCFury is absent, and a drift THROWS into the
-        // ClassifyReflect guards below. Its .mergeBones is a Stack<(VFGameObject prop/merge, VFGameObject
+        // drift evidence behind them; a null return means VRCFury is absent, and a drift THROWS past this
+        // collector entirely, into ResolveMergeMap's guard — NOT the per-component try below, which only
+        // covers the walk. Its .mergeBones is a Stack<(VFGameObject prop/merge, VFGameObject
         // avatar/base)> — flipped vs MA, and its ends are VFGameObjects, converted back through
-        // VendorReflect.FromVfGameObject (which owns why that conversion must be explicit). The caches come from each type's own
+        // VendorReflect.FromVfGameObject (which owns why that conversion must be explicit). The caches come
+        // from each type's own
         // GetPerFrame(avatarObj) factory, materialised LAZILY on the first ArmatureLink content so that (a) a
         // snapshot throw (VRCFArmatureCache walks the humanoid Avatar asset and throws on a half-imported
         // one) classifies per-component instead of aborting the whole collector, and (b) an avatar carrying
