@@ -582,8 +582,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             var maType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
             if (maType == null) return; // MA not installed ⇒ no MA seam
+            // Arity asserted at pin time (every invoke pin here does this): a drifted signature must fail as
+            // Missing* → ReflectError, because a TargetParameterCountException at the invoke would land in
+            // ClassifyReflect's other arm — an "incompatible rig" abstain lying about API drift.
             var getMapping = maType.GetMethod("GetBonesMapping", BindingFlags.Public | BindingFlags.Instance);
-            if (getMapping == null) throw new MissingMethodException("ModularAvatarMergeArmature.GetBonesMapping");
+            if (getMapping == null || getMapping.GetParameters().Length != 0)
+                throw new MissingMethodException("ModularAvatarMergeArmature.GetBonesMapping()");
             foreach (var comp in mergeGO.GetComponentsInChildren(maType, true))
             {
                 try
@@ -640,9 +644,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (getLinks == null || getLinks.GetParameters().Length != 4)
                 throw new MissingMethodException("ArmatureLinkService.GetLinks(model, avatarObj, objectPaths, armatureCache)");
             var pathCacheFactory = pathCacheType.GetMethod("GetPerFrame", BindingFlags.Public | BindingFlags.Static);
-            if (pathCacheFactory == null) throw new MissingMethodException("VRCFObjectPathCache.GetPerFrame");
+            if (pathCacheFactory == null || pathCacheFactory.GetParameters().Length != 1)
+                throw new MissingMethodException("VRCFObjectPathCache.GetPerFrame(avatarObject)");
             var armCacheFactory = armCacheType.GetMethod("GetPerFrame", BindingFlags.Public | BindingFlags.Static);
-            if (armCacheFactory == null) throw new MissingMethodException("VRCFArmatureCache.GetPerFrame");
+            if (armCacheFactory == null || armCacheFactory.GetParameters().Length != 1)
+                throw new MissingMethodException("VRCFArmatureCache.GetPerFrame(avatarObject)");
             var contentField = vrcfType.GetField("content", BindingFlags.Public | BindingFlags.Instance);
             if (contentField == null) throw new MissingFieldException("VRCFury.content");
             // Scale-at-bake detection: forceOneWorldScale (bool field on the ArmatureLink model) OR a non-unit
@@ -651,7 +657,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             var forceField = armLinkType.GetField("forceOneWorldScale", BindingFlags.Public | BindingFlags.Instance);
             if (forceField == null) throw new MissingFieldException("ArmatureLink.forceOneWorldScale");
             var getScaling = svcType.GetMethod("GetScalingFactor", BindingFlags.Public | BindingFlags.Static);
-            if (getScaling == null) throw new MissingMethodException("ArmatureLinkService.GetScalingFactor");
+            if (getScaling == null || getScaling.GetParameters().Length != 2)
+                throw new MissingMethodException("ArmatureLinkService.GetScalingFactor(model, links)");
 
             var avatarVfGo = ToVfGameObject(vfGoType, avatarGO);
             var objectPaths = pathCacheFactory.Invoke(null, new object[] { avatarVfGo });
