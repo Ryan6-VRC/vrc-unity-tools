@@ -282,33 +282,104 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     model.Machines.Add(subModel);
                 }
 
-                // Default: a DIRECT-state default is authoritative; a sub-machine default is the trailing
-                // unconditional entry transition (ControllerEmit adds it last, after the entry ladder). Unity's
-                // defaultState getter resolves THROUGH to a child's default when this machine has no direct
-                // states, so it is only trusted when it names one of THIS machine's own direct states.
+                // Default. Unity stores ONE m_DefaultState PPtr per machine, but it means three different things
+                // depending on what it points at, and the field is NOT self-describing:
+                //
+                //   direct state  -> the ordinary `default:` (authoritative).
+                //   foreign state -> a state nested inside a descendant machine. Legal, durable through
+                //                    serialization, and reachable from Unity's own "Set as Layer Default State"
+                //                    on a nested node. This is `defaultState:` (a root-relative address).
+                //   auto-populated -> Unity WRITES this field itself: adding a state to a descendant machine
+                //                    walks up and fills an ancestor's empty m_DefaultState. So a foreign value is
+                //                    not evidence of authorship, and neither the getter NOR a raw SerializedProperty
+                //                    read can tell the two apart (measured). What distinguishes them is the
+                //                    trailing entry rung, which is what the compiler actually emits for a
+                //                    `default:` naming a sub-machine — see ControllerEmit's note on the same field.
+                //
+                // A foreign default and a trailing unconditional rung CO-EXIST in Unity (measured), so this must
+                // not be an if/else over one key: folding the rung while dropping the PPtr silently rewrites which
+                // state the layer boots, which is exactly the loss this walk exists to refuse.
                 var directStates = new HashSet<AnimatorState>(sm.states.Where(x => x.state != null).Select(x => x.state));
                 bool defaultIsDirectState = sm.defaultState != null && directStates.Contains(sm.defaultState);
                 if (defaultIsDirectState) model.DefaultState = AddressPath.EscapeSegment(sm.defaultState.name);
 
-                // Entry ladder. The trailing unconditional entry into a sub-machine is the sub-machine default,
-                // not a ladder rung — split it off.
+                // A dangling default PPtr reads as null through Unity's overloaded null, so the plain null check
+                // above would drop it and let the rebuild silently boot the first-added state. Same shape as
+                // HasDanglingMotion: a live instanceID with a null managed ref.
+                if (sm.defaultState == null && HasDanglingDefaultState(sm))
+                    _result.Refusals.Add($"{MachineLabel(sm)}: the default state reference is broken (the state it "
+                        + "named no longer exists) — a decompile would drop it and the rebuild would boot a "
+                        + "different state; repair or clear the default in the animator window");
+
+                // The trailing unconditional entry into a DIRECT child sub-machine is what the compiler emits for a
+                // `default:` naming a sub-machine, so it is the candidate to fold back into that key. A target
+                // deeper in the tree is a genuine cross-machine entry rung, not a default — leaving it in the
+                // ladder decodes it with a proper slash-qualified address instead of mislabeling it as a bare
+                // (direct-child) default that would fail to recompile.
                 var entries = sm.entryTransitions;
-                int subDefaultIdx = -1;
+                int foldableIdx = -1;
+                AnimatorStateMachine foldTarget = null;
                 if (!defaultIsDirectState && entries.Length > 0)
                 {
                     var last = entries[entries.Length - 1];
-                    // The trailing unconditional entry is the sub-machine default ONLY when its target is a
-                    // DIRECT child (the compiler only ever emits that shape). A target deeper in the tree is a
-                    // genuine cross-machine entry rung, not a default — leaving it in the ladder decodes it with
-                    // a proper slash-qualified address instead of mislabeling it as a bare (direct-child) default
-                    // that would fail to recompile.
                     if ((last.conditions == null || last.conditions.Length == 0) && last.destinationStateMachine != null && !last.isExit
                         && _smParent.TryGetValue(last.destinationStateMachine, out var lastParent) && lastParent == sm)
                     {
-                        subDefaultIdx = entries.Length - 1;
-                        model.DefaultState = AddressPath.EscapeSegment(last.destinationStateMachine.name); // direct child ⇒ escaped bare name
+                        foldableIdx = entries.Length - 1;
+                        foldTarget = last.destinationStateMachine;
                     }
                 }
+
+                // Is a foreign PPtr merely Unity's auto-population, or an authored foreign default? The value alone
+                // cannot say — but the question that actually matters is narrower and decidable: WOULD A REBUILD
+                // RE-DERIVE THIS VALUE FOR FREE? If yes, emitting nothing is faithful and the document stays
+                // legible; if no, the PPtr must be written explicitly or it is lost.
+                //
+                // Auto-population fills an EMPTY ancestor slot at the moment a state is added, and ControllerEmit
+                // adds a machine's own direct states before recursing into its children — so the value a rebuild
+                // lands on is the FIRST STATE EMITTED ANYWHERE IN THE SUBTREE, depth-first. It is emphatically NOT
+                // the child machine's own default: a sub-machine whose states are [X, Y] with default Y hands the
+                // ancestor X, because X was added first and the later `sub.defaultState = Y` does not propagate up
+                // (both measured). Comparing against the child's default instead classified an authored default as
+                // auto-population and dropped it — the same loss this rule exists to close, one shape over.
+                //
+                // Stating the predicate exactly also collapses the two conditions that used to guard it. A machine
+                // WITH a direct state cannot qualify (FirstEmittedState returns that direct state, which by
+                // definition is not the foreign default), and a trailing entry rung is irrelevant to what Unity
+                // auto-fills — so neither `directStates.Count == 0` nor `foldTarget != null` needs restating here.
+                // Dropping the rung condition is what lets a raw VENDOR machine (no rung at all — Unity wires Entry
+                // through m_DefaultState alone) keep the bare form instead of gaining a spurious key.
+                bool foreignIsAutoPopulation =
+                    sm.defaultState != null && !defaultIsDirectState
+                    && FirstEmittedState(sm) == sm.defaultState;
+
+                bool defaultIsForeign = sm.defaultState != null && !defaultIsDirectState && !foreignIsAutoPopulation;
+
+                // A foreign default and a trailing unconditional rung CO-EXIST in Unity (measured), so the fold is
+                // suppressed rather than competing with the PPtr: the rung stays an ordinary ladder rung and both
+                // facts survive. Folding while dropping the PPtr is precisely the silent boot-state rewrite this
+                // walk exists to refuse.
+                int subDefaultIdx = -1;
+                if (foldableIdx >= 0 && !defaultIsForeign)
+                {
+                    subDefaultIdx = foldableIdx;
+                    model.DefaultState = AddressPath.EscapeSegment(foldTarget.name); // direct child ⇒ escaped bare name
+                }
+
+                if (defaultIsForeign)
+                {
+                    // Root-relative, per-segment escaped, and '/'-anchored when it is a single segment — the same
+                    // addressing StateTargetName emits for a transition target, so `to:` and `defaultState:` cannot
+                    // drift. A state outside this layer (or otherwise unreachable from its root) has no address at
+                    // all: refuse rather than index _statePath and throw, in a walk whose discipline is named refusals.
+                    if (_statePath.TryGetValue(sm.defaultState, out var dpath))
+                        model.DefaultStatePath = AddressPath.Split(dpath).Count == 1 ? "/" + dpath : dpath;
+                    else
+                        _result.Refusals.Add($"{MachineLabel(sm)}: the default state '{sm.defaultState.name}' is not "
+                            + "reachable from this layer's root state machine, so the schema cannot address it — "
+                            + "a decompile would drop it and the rebuild would boot a different state");
+                }
+
                 for (int i = 0; i < entries.Length; i++)
                 {
                     if (i == subDefaultIdx)
@@ -528,10 +599,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             //
             // SCOPE (what the census actually covers — the rest stays a hand-allowlist): the TOP-LEVEL scalar
             // fields of AnimatorState, state/any/entry transitions, BlendTree, and the seven VRC SMB kinds.
-            // NOT covered — array-element structs (ChildMotion / AnimatorCondition at depth > 0, guarded by the
-            // recursive decoders' own explicit binding) and the layer / state-machine families (structs, not
-            // UnityEngine.Objects, so not SerializedObject-sweepable — their few fields are consumed/refused
-            // explicitly). Within scope the class is closed; outside it, the hand decoders remain the guard.
+            // NOT covered — array-element structs (ChildMotion / ChildAnimatorState / ChildAnimatorStateMachine /
+            // AnimatorCondition at depth > 0, guarded by the recursive decoders' own explicit binding) and
+            // AnimatorControllerLayer (a struct, so not SerializedObject-sweepable).
+            //
+            // AnimatorStateMachine is NOT in that second group and the reason it stays out is different: it IS a
+            // UnityEngine.Object (a controller sub-asset with its own fileID) and sweeps fine. It is excluded
+            // because a census would be USELESS on it — its only depth-0 scalar of interest is m_DefaultState,
+            // which Unity AUTO-POPULATES (adding a state to a descendant machine fills an empty ancestor's slot),
+            // so the sweep would flag nearly every machine in every controller including this compiler's own
+            // output. It would be silenced into an Aware set within a day and catch nothing. That field's
+            // integrity is carried by the decode rule in DecodeMachine and by a graph-identity fixpoint
+            // assertion instead — a census cannot adjudicate a field whose default is not type-zero.
+            // Within scope the class is closed; outside it, the hand decoders remain the guard.
 
             private static readonly HashSet<string> UniversalIgnore = new HashSet<string>
             {
@@ -678,6 +758,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     var mp = so.FindProperty("m_Motion");
                     return mp != null && mp.objectReferenceInstanceIDValue != 0;
+                }
+            }
+
+            // The state a rebuild's auto-population would land on: ControllerEmit adds a machine's own direct
+            // states in document order before recursing into its child machines, so this is the first state
+            // emitted anywhere in the subtree, depth-first. Mirrors EmitMachine's order — change one and this
+            // must follow, which is why the two carry the same note.
+            private static AnimatorState FirstEmittedState(AnimatorStateMachine sm)
+            {
+                foreach (var cs in sm.states)
+                    if (cs.state != null) return cs.state;
+                foreach (var child in sm.stateMachines)
+                {
+                    if (child.stateMachine == null) continue;
+                    var s = FirstEmittedState(child.stateMachine);
+                    if (s != null) return s;
+                }
+                return null;
+            }
+
+            // The default-state twin of HasDanglingMotion. `sm.defaultState == null` is Unity's OVERLOADED null,
+            // which reads true both for an unset field and for a PPtr to a destroyed state — so the caller's null
+            // check alone cannot tell "no default" from "broken default", and the second would decode to no key
+            // and rebuild booting whichever state was added first.
+            private static bool HasDanglingDefaultState(AnimatorStateMachine sm)
+            {
+                using (var so = new SerializedObject(sm))
+                {
+                    var dp = so.FindProperty("m_DefaultState");
+                    return dp != null && dp.objectReferenceInstanceIDValue != 0;
                 }
             }
 
@@ -1015,12 +1125,31 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return spec;
                 }
 
+                // Two DISTINCT bindings can reconstruct to the same schema target string, because the param-curve
+                // form and the scene-binding form share a spelling: an animator-parameter curve on a parameter
+                // literally named "Prop/MeshRenderer.m_Enabled" and a real MeshRenderer.m_Enabled curve at path
+                // "Prop" both reconstruct to that same text. `set:`/`curves:` are keyed by that text, so the
+                // second silently overwrites the first — one clip in, one curve gone, no diagnostic. Same shape
+                // as the duplicate-clip-name refusal above: the schema keys by name, so a collision is a refusal,
+                // not something to resolve by ordering.
+                var seenTargets = new Dictionary<string, EditorCurveBinding>();
+
                 float maxConstEnd = 0f;
                 foreach (var b in bindings)
                 {
                     var curve = AnimationUtility.GetEditorCurve(clip, b);
                     string target = ReconstructBindingTarget(b, clip.name);
                     if (target == null || curve == null || curve.length == 0) continue;
+                    if (seenTargets.TryGetValue(target, out var prior))
+                    {
+                        _result.Refusals.Add($"inline clip '{clip.name}': two different bindings both address "
+                            + $"'{target}' in the schema — {DescribeBinding(prior)} and {DescribeBinding(b)}. The "
+                            + "clip grammar keys curves by that text, so one would silently overwrite the other; "
+                            + "rename the declared parameter so it cannot also read as a 'path/Component.property' "
+                            + "scene binding");
+                        continue;
+                    }
+                    seenTargets[target] = b;
                     // A constant-VALUE curve collapses to a Set — UNLESS its tangents are linear or stepped:
                     // `set:` carries no tangent marker, so downgrading a constant linear/stepped curve would
                     // silently drop the marker and break the compile↔decompile fixpoint (a valid,
@@ -1129,6 +1258,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // The emit resolver is the ORACLE: a binding whose type's simple name would not resolve back to
             // the SAME type could never recompile, so it is refused here (named + located, null return the
             // caller skips) instead of emitted as doomed yaml. One source of truth, both directions.
+            // Names a binding by its UNRECONSTRUCTED parts, which is the whole point at a collision: the two
+            // offenders are indistinguishable once reconstructed, so echoing the schema text twice would name
+            // neither. Says which is the animator-parameter curve and which the scene binding.
+            private static string DescribeBinding(EditorCurveBinding b)
+                => b.type == typeof(Animator) && b.path.Length == 0
+                    ? $"an animator-parameter curve on '{b.propertyName}'"
+                    : $"a scene binding at path '{b.path}' on {(b.type == null ? "<unresolved type>" : b.type.Name)}.{b.propertyName}";
+
             private string ReconstructBindingTarget(EditorCurveBinding b, string clipName)
             {
                 if (b.type == typeof(Animator) && b.path == "")
@@ -1286,22 +1423,99 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (drv.parameters == null || drv.parameters.Count == 0) return;
                 int prev = -1;
                 bool interleaved = false;
-                var seen = new HashSet<(Driver.ChangeType, string)>();
+                var seen = new Dictionary<(Driver.ChangeType, string), Driver.Parameter>();
                 foreach (var p in drv.parameters)
                 {
                     int bucket = DriverBucket(p.type);
                     if (bucket < prev) interleaved = true;
                     prev = bucket;
-                    if (!seen.Add((p.type, p.name)))
+                    if (seen.TryGetValue((p.type, p.name), out var first))
+                    {
+                        // Both repeats refuse, for the one reason that holds either way: the schema keys by
+                        // (type, name), so a recompile emits a driver the vendor did not author. What differs is
+                        // what the reader should look at next, so say only what is KNOWN — the earlier message
+                        // asserted "commonly a mistyped parameter name", which is a guess about intent, and it
+                        // sent a reader hunting a typo through a driver whose two entries were byte-identical.
+                        // Say what is OBSERVABLE — the operands are equal or they differ — and stop. The runtime
+                        // consequence is NOT a property of that comparison: `Add` accumulates, so two identical
+                        // `Add X 2` entries add 4 (dropping one is not neutral) and a differing pair is not
+                        // last-write-wins either. Asserting either would be a fresh guess in place of the
+                        // "commonly a mistyped parameter name" guess this message exists to remove.
+                        // An unknown ChangeType has no operand this decoder can read, so it can claim NEITHER
+                        // "same" nor "different" — saying "DIFFERENT operands (<unknown> then <unknown>)" would
+                        // assert a difference while displaying identical text.
+                        string detail = !IsKnownChangeType(p.type)
+                            ? "This decoder does not model that change type, so it cannot say whether the two "
+                              + "entries differ; the repeat is refused on the shape alone."
+                            : SameDriverOperand(first, p)
+                            ? $"Both entries carry the same operand ({DriverOperand(p)}); the ordered pair still "
+                              + "has no schema form, and whether the repeat is harmless depends on the change "
+                              + "type — Add accumulates, Set and Copy do not."
+                            : $"The two entries carry DIFFERENT operands ({DriverOperand(first)} then "
+                              + $"{DriverOperand(p)}), which the single-entry form cannot express at all.";
                         _result.Refusals.Add(
                             $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' — the schema holds " +
                             "one entry per parameter, so a recompile would not reproduce this driver as authored. " +
-                            "A repeated write is commonly a mistyped parameter name; check it against the drivers " +
-                            "on sibling states before resolving it");
+                            detail + " Resolve it on the controller (hand-own the behaviour, or delete the " +
+                            "redundant entry at the source) rather than in the document.");
+                    }
+                    else seen[(p.type, p.name)] = p;
                 }
                 if (interleaved)
                     _result.Refusals.Add(
                         $"behaviour on {loc}: driver operations interleave change-types (Set/Add/Copy/Random) — the schema re-applies them grouped by type, which would change their apply order");
+            }
+
+            // A driver Parameter is a UNION discriminated by `type`: the fields that carry its operand differ per
+            // change-type, and the unused ones hold stale or default junk that must not enter the comparison.
+            // Comparing `value` alone would call `Copy A←B` and `Copy A←D` identical — reporting a contradictory
+            // repeat as a harmless one, which is the same species of misleading advice this split exists to end.
+            // Mirrors DecodeDriver's own per-type field selection above, so the two read the same union.
+            // EXACT equality, not Mathf.Approximately: the message reports these as "the same operand", and two
+            // distinct serialized values a hair apart are not the same — an epsilon here would assert an equality
+            // the asset does not contain. This is a comparison of authored data, not a physics tolerance.
+            private static bool SameDriverOperand(Driver.Parameter a, Driver.Parameter b)
+            {
+                switch (a.type)
+                {
+                    case Driver.ChangeType.Set:
+                    case Driver.ChangeType.Add:
+                        return a.value == b.value;
+                    case Driver.ChangeType.Copy:
+                        if (a.source != b.source || a.convertRange != b.convertRange) return false;
+                        return !a.convertRange
+                            || (a.sourceMin == b.sourceMin && a.sourceMax == b.sourceMax
+                                && a.destMin == b.destMin && a.destMax == b.destMax);
+                    case Driver.ChangeType.Random:
+                        return a.valueMin == b.valueMin && a.valueMax == b.valueMax
+                            && a.chance == b.chance && a.preventRepeats == b.preventRepeats;
+                    default:
+                        return false;   // unknown ChangeType — already refused separately; never claim "same"
+                }
+            }
+
+            private static bool IsKnownChangeType(Driver.ChangeType t)
+                => t == Driver.ChangeType.Set || t == Driver.ChangeType.Add
+                   || t == Driver.ChangeType.Copy || t == Driver.ChangeType.Random;
+
+            // The operand as the reader would see it in the inspector, for the differing-value message.
+            private static string DriverOperand(Driver.Parameter p)
+            {
+                switch (p.type)
+                {
+                    case Driver.ChangeType.Set:
+                    case Driver.ChangeType.Add:
+                        return p.value.ToString();
+                    case Driver.ChangeType.Copy:
+                        return p.convertRange
+                            ? $"'{p.source}' remapped [{p.sourceMin},{p.sourceMax}]->[{p.destMin},{p.destMax}]"
+                            : $"'{p.source}'";
+                    case Driver.ChangeType.Random:
+                        return $"min={p.valueMin} max={p.valueMax} chance={p.chance}"
+                            + (p.preventRepeats ? " preventRepeats" : "");
+                    default:
+                        return "<unknown>";
+                }
             }
 
             private static int DriverBucket(Driver.ChangeType t)

@@ -143,7 +143,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
     {
         public List<State> States = new List<State>();
         public List<SubMachine> Machines = new List<SubMachine>();
-        public string DefaultState;             // name within this machine (state or submachine)
+        public string DefaultState;             // BARE local name within this machine (state or submachine)
+        // A default state that does NOT live in this machine — Unity's m_DefaultState is a plain AnimatorState
+        // PPtr with no subtree constraint, so a layer root can boot a state nested several machines down. A
+        // ROOT-RELATIVE address (the `to:` grammar), always naming a state, never a sub-machine.
+        //
+        // Separate from DefaultState because the two are independent facts that CO-EXIST in Unity, not two
+        // spellings of one: a machine can carry a foreign m_DefaultState AND a trailing unconditional entry
+        // rung at the same time (measured). They also emit through different mechanisms — DefaultState writes
+        // a PPtr for a state or an entry rung for a sub-machine, DefaultStatePath only ever writes the PPtr —
+        // so folding them into one key would make the address form silently select the mechanism, and would
+        // leave the co-existing shape unrepresentable.
+        public string DefaultStatePath;
         public List<Transition> EntryLadder = new List<Transition>();   // ordered
         public List<Transition> AnyLadder = new List<Transition>();     // ordered; each has CanTransitionToSelf
         public List<Behaviour> Behaviours = new List<Behaviour>();

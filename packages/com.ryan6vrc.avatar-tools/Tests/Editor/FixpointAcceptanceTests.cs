@@ -110,6 +110,32 @@ public class FixpointAcceptanceTests
             Assert.AreEqual(yamlA, yamlB, "clean fixture: the second decompile is identical to the first (tight fixpoint)");
         else
             AssertRawToOwnedIsOnlyDocumentedNormalization(yamlA, yamlB, expectedBrokenRefs);
+
+        // Everything above compares decode(X) to decode(Y) through ONE oracle, so a property the schema does not
+        // model is dropped identically on both sides and still passes. That is not a gap in the assertions, it is
+        // structural — and it is how a cross-machine defaultState reached a perfect textual fixpoint while the
+        // two controllers booted different states. The raw→owned step is where information is actually lost, so
+        // that is where a SECOND, independent reading has to agree. Asserting it on the recompile step instead
+        // would buy nothing: by then both sides already agree on the wrong value.
+        if (clean)
+            ControllerGraphDigest.AssertSameGraph(c0, c1, "raw -> owned");
+        else
+            // A raw vendor fixture legitimately changes across this step (broken motion refs become null slots),
+            // so whole-digest equality would fail for a documented reason. Narrow it to the default-state lines:
+            // the class this gate exists for, and one with no remaining legitimate normalization now that a
+            // resolve-through default folds to the same bare `default:` on both sides.
+            Assert.AreEqual(DefaultStateLines(ControllerGraphDigest.Of(c0)), DefaultStateLines(ControllerGraphDigest.Of(c1)),
+                "raw -> owned must not change which state any machine boots");
+    }
+
+    // The "(default)" rows of a ReportController digest, in order — the independent reading of every machine's
+    // boot state.
+    private static string DefaultStateLines(string digest)
+    {
+        var keep = new List<string>();
+        foreach (var line in digest.Split('\n'))
+            if (line.EndsWith("(default)")) keep.Add(line.Trim());
+        return string.Join("\n", keep);
     }
 
     // Prove the raw→owned step changed ONLY (a) resolve-through defaults and (b) genuinely-broken refs.
