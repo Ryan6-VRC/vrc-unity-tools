@@ -212,11 +212,21 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (!byName.TryGetValue(kv.Key, out var hits)) continue; // mergeable lacks this bone — legitimate
                 if (hits.Count > 1)
                 {
+                    // The narrow-root remedy is CONDITIONAL and used to be offered flat. It only works when the
+                    // ambiguity sits outside the mesh subtree; narrowing past a collision that sits beside the
+                    // meshes drops every weight and re-refuses with a far more alarming "rebuild the mergeable"
+                    // (measured live — the reader nearly rebuilt a good refit on its strength). A vendor physbone
+                    // collider named after a bone is the common third cause and is a rename on the probe, not a
+                    // narrower root, so the remedies are ordered least-destructive first.
                     refusal = "bone name '" + kv.Key + "' is ambiguous under mergeable '" + mergeGO.name +
                         "': " + hits.Count + " transforms carry it (" + PathOf(hits[0].gameObject) + " vs " +
                         PathOf(hits[1].gameObject) + ") — name-matching would score an arbitrary one. The scan " +
-                        "includes INACTIVE objects, so a disabled backup armature counts: remove or rename the " +
-                        "duplicate, narrow the mergeable root past it, or seam the mergeable and use Check";
+                        "includes INACTIVE objects, so a disabled backup armature counts. Rename or remove one of " +
+                        "the two (a physbone collider named after the bone it guards is the usual duplicate, and " +
+                        "renaming it on the probe costs nothing), or seam the mergeable and use Check. Narrowing " +
+                        "the mergeable root works ONLY if the duplicate sits outside the mesh subtree — narrowing " +
+                        "past a sibling of the skinned meshes drops every weight and refuses again for a different, " +
+                        "worse-reading reason";
                     return pairs;
                 }
                 pairs.Add(new BonePair { Base = kv.Value, Merge = hits[0] });
@@ -283,10 +293,23 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // refit output is a failed warp or a bone-naming break, and "verify the bake" would send the
                 // reader to inspect a result that should be rebuilt.
                 if (bare)
+                {
+                    // A third cause, and the one the message used to argue against: the caller narrowed the
+                    // mergeable root past its own meshes. Narrowing to an armature whose SkinnedMeshRenderers are
+                    // siblings drops every weight and lands here — measured live, with 19 shared weighted bones
+                    // sitting just outside the root while this line said "rebuild the mergeable". So when the root
+                    // skins nothing, say that first: it is a fact, not a guess, and it is a one-argument fix.
+                    if (maxW.Count == 0)
+                        return RefuseAbstain("no skinned weights under mergeable root '" + PathOf(mergeGO) + "'" +
+                            " — nothing under it binds a bone, so coincidence cannot be scored. The usual cause is a " +
+                            "root narrowed past the meshes (SkinnedMeshRenderers sitting as SIBLINGS of the armature, " +
+                            "not under it): pass the root that contains both. This is not evidence about the " +
+                            "mergeable's quality", label);
                     return RefuseAbstain("only " + weightedHum.Count + " shared weighted humanoid bone: " + bone + delta +
                         " — too few to certify coincidence. Two whole skeletons matching on at most one skinned " +
                         "bone name is a failed transfer or a bone-naming break, not a close fit: rebuild the " +
                         "mergeable rather than inspecting this one", label);
+                }
                 return RefuseAbstain("single humanoid attachment: " + bone + delta +
                     " — offset-tolerant accessory/proxy, verify the baked result", label);
             }

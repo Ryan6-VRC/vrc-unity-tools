@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -150,11 +151,54 @@ namespace Ryan6Vrc.AgentTools.Editor
                 "[ImportPackage] VERIFY {0} (status={1}, root={2}, files={3}, busy={4}): {5} => {6}",
                 name, status ?? "none", rootLabel, fileCount, editorBusy ? "yes" : "no", reason, Token(v));
 
+            // A wrong expectedRoot is routine — seller-wrapped packages bury their content (VRCLens lands under
+            // Assets/Hirabiki/VRCLens), and nothing here can name the folder the import actually created: the
+            // completion callbacks carry only a package name, so no imported-path list exists to consult. What
+            // IS knowable is how far down the guess survives, which is enough to aim the retry.
+            if (v == Verdict.Fail && rootProvided && !rootExists)
+                summary += " | " + DescribeNearestExistingRoot(expectedRoot, packagePath);
+
             if (logExists) summary += " | log=" + logPath;
             summary += " | next=run CheckPackage.VerifyFolder for import health";
 
             if (v == Verdict.Fail) Debug.LogError(summary); else Debug.Log(summary);
             return summary;
+        }
+
+        // ----- Miss pointer (impure: walks the AssetDatabase; kept OUT of Decide) ---------------
+
+        /// <summary>Name the deepest existing prefix of a missed <paramref name="expectedRoot"/> and what it
+        /// actually contains, so the caller can re-aim without a second round trip. Deliberately NOT inside
+        /// <c>Decide</c>: that table is pure precisely so every branch is assertable without a filesystem, and
+        /// folding a directory walk into it would trade that away. Composed here and appended to the summary.</summary>
+        internal static string DescribeNearestExistingRoot(string expectedRoot, string packagePath,
+                                                          Func<string, List<string>> listSubfolders = null)
+        {
+            listSubfolders = listSubfolders ?? (p => new List<string>(AssetDatabase.GetSubFolders(p)));
+
+            var parts = expectedRoot.Replace('\\', '/').Split('/');
+            string deepest = null;
+            var probe = "";
+            for (int i = 0; i < parts.Length; i++)
+            {
+                probe = i == 0 ? parts[0] : probe + "/" + parts[i];
+                if (!AssetDatabase.IsValidFolder(probe)) break;
+                deepest = probe;
+            }
+            if (deepest == null) return "no part of '" + expectedRoot + "' exists — is the path rooted at Assets/?";
+
+            var children = listSubfolders(deepest);
+            string names;
+            if (children.Count == 0) names = "no subfolders";
+            else
+            {
+                const int Cap = 8;
+                var leaves = new List<string>();
+                for (int i = 0; i < children.Count && i < Cap; i++) leaves.Add(RunLogFormat.Leaf(children[i]));
+                names = string.Join(", ", leaves.ToArray()) + (children.Count > Cap ? ", +" + (children.Count - Cap) + " more" : "");
+            }
+            return "deepest existing is '" + deepest + "' containing [" + names
+                 + "] — re-run Verify(\"" + packagePath + "\", expectedRoot: \"" + deepest + "/<one of those>\")";
         }
 
         // ----- Pure decision core (unit-tested against the full matrix) -----------------------

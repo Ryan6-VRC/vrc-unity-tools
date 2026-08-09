@@ -161,7 +161,36 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             string prefix = includeChildren ? "selectiondeep_" : "selection_";
             string path = WriteSnapshot(w, prefix + Sanitize(go.name));
-            return "[AgentInspector] snapshot " + go.name + " => OK | log=" + path;
+            return "[AgentInspector] snapshot " + go.name + " => OK" + SizeNote(path, hierarchyPath, includeChildren)
+                 + " | log=" + path;
+        }
+
+        // A whole-hierarchy snapshot of a complex vendor avatar runs past the agent harness's file-read cap
+        // (measured: 639KB), and the caller learns that only when the Read fails — after paying for the walk.
+        // The artifact is deliberately NOT truncated: its completeness is what it is for. Instead the summary
+        // reports the size and, past the cap, names the narrower doors that would fit.
+        //
+        // ReadCapBytes is a FOREIGN constant — a property of the harness reading the file, not of Unity, the
+        // asset, or this tool, so nothing here can detect it drifting. Two guards follow from that: the size is
+        // reported unconditionally (a drifted threshold then costs a missing hint, never a false claim), and the
+        // hint is worded as approximate, because the real limit is not purely byte-shaped.
+        private const long ReadCapBytes = 256 * 1024;
+
+        /// <summary>Byte size of the written artifact, plus the narrower-door hint when it lands past the read
+        /// cap. Measured from DISK, not from the string's length: the file is UTF-8 and Japanese asset names are
+        /// routine here, so a char count under-reports bytes and would promise a fit that fails.</summary>
+        internal static string SizeNote(string path, string hierarchyPath, bool includeChildren)
+        {
+            long bytes;
+            try { bytes = new FileInfo(path).Length; }
+            catch { return ""; } // the artifact is already written; a stat failure must not sink the call
+            string note = " bytes=" + bytes;
+            if (bytes <= ReadCapBytes) return note;
+            return note + " (past the ~" + (ReadCapBytes / 1024) + "KB read cap — narrow it: "
+                 + (includeChildren
+                    ? "Snapshot(\"" + hierarchyPath + "\", includeChildren: false, followAssets: false), or snapshot a deeper path"
+                    : "snapshot a deeper path, or drop followAssets")
+                 + ")";
         }
 
         /// <summary>Resolve a root-relative hierarchy path in the active scene; first match wins

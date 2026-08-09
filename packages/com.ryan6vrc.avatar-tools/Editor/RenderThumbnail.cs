@@ -475,7 +475,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (result != null) return result + residualNote;   // silhouette-fail / non-success paths
                 if (string.IsNullOrEmpty(residualNote))
                 {
-                    string ok = prefix + " => OK | png=" + pngPath;
+                    // `png=` before `log=`: TOOLS.md contracts png= as the token that feeds UploadAvatar.
+                    string ok = RenderThumbnailCore.WriteSessionLog("renderthumbnail", label,
+                        prefix + " => OK | png=" + pngPath,
+                        "# RenderThumbnail\n\n- target: `" + label + "`\n- png: " + pngPath + "\n"
+                        + "- verdict line: " + prefix + " => OK\n");
                     Debug.Log(ok);
                     return ok;
                 }

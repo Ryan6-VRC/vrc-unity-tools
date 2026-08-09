@@ -16,7 +16,9 @@ namespace Ryan6Vrc.AgentTools.Editor
     ///   - material slots: resolved / empty / MISSING
     ///   - renderer meshes: present / MISSING
     ///   - MonoBehaviours: missing script references
-    ///   - FBX external-material remap: resolves but the imported model is left empty (stale import)
+    ///   - FBX external-material remap, in two classes: entries that RESOLVE while the model imports empty
+    ///     (a stale import — force-reimport), and entries that resolve to NOTHING (the material pack was
+    ///     never imported — import it first, then force-reimport). The remedies run in opposite order.
     ///
     /// The load-bearing distinction is MISSING vs EMPTY. A slot whose serialized reference has a
     /// non-zero instance id that fails to resolve is broken; a clean-zero slot is an intentional
@@ -30,12 +32,12 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// serialized identity (guid + fileID), which is what the file records, spanning material slots and
     /// meshes alike.
     ///
-    /// The remap-stale check catches what the empty-vs-MISSING rule deliberately ignores: an FBX
-    /// using external materials (materialLocation: External) is remapped to .mat assets only at
-    /// import time. Import it before those materials exist (e.g. costume package before a separate
-    /// MaterialPack) and it caches empty slots that no later import re-applies — the model reads as
-    /// "intentionally empty" yet renders untextured. When the remap resolves to real materials but
-    /// the imported renderers are still empty, that's an unambiguous stale import: force-reimport.
+    /// The remap checks catch what the empty-vs-MISSING rule deliberately ignores: an FBX carrying an
+    /// external-material remap is bound to .mat assets only at import time. Import it before those
+    /// materials exist (e.g. costume package before a separate MaterialPack) and it caches empty slots
+    /// that no later import re-applies — the model reads as "intentionally empty" yet renders untextured.
+    /// These are the one place an empty slot is evidence, and only because the remap says something was
+    /// supposed to fill it; everywhere else the empty count stays deliberately silent.
     ///
     /// Prefab assets are inspected via LoadPrefabContents, which composes variant overrides in an
     /// isolated preview scene without touching the open scene. INSPECTION ONLY — never mutates.
@@ -211,19 +213,44 @@ namespace Ryan6Vrc.AgentTools.Editor
                 : "guid " + guid + " resolves to " + assetPath + ", which holds no object with fileID " + fileId;
         }
 
-        // An FBX using external materials is remapped to .mat assets only at import time. If the
-        // remap resolves to real materials but the imported model's renderers are still empty, the
-        // model was imported before those materials existed and never re-applied — a stale import
-        // that reads as "intentionally empty" yet renders untextured. Fix: force-reimport the FBX.
+        // An FBX's external-material remap is applied only at import time, so a model imported before its
+        // materials existed caches empty slots that no later import re-applies — it reads "intentionally
+        // empty" yet renders untextured.
+        //
+        // This used to gate on `materialLocation == External`, which is the LEGACY extract-to-files mode.
+        // Modern Unity remaps through the external-object map while materialLocation stays `InPrefab`, so
+        // that gate silently disabled the whole check: measured 2026-08-08, all 69 map-carrying models in
+        // AvatarProject's vendor tree are `InPrefab`, i.e. nothing below had ever run. The external-object
+        // map is what this check actually depends on, so the map is what it gates on.
+        //
+        // Two classes, because their remedies run in OPPOSITE ORDER and doing the wrong one is a no-op:
+        //   entries resolve, slots still empty -> stale import; force-reimport the FBX.
+        //   entries resolve to nothing         -> the material pack was never imported; import it FIRST,
+        //                                         then force-reimport.
+        //
+        // Scope bound, stated because the message cannot: this asserts "the model carries an external-material
+        // map AND has empty slots", not "this particular slot is the one the map should have filled" — the
+        // importer's source-material list does not index-align with renderer slots (measured: 2 entries against
+        // 10 empty slots), so a per-slot attribution would be an assumption, not a reading. Naming the
+        // unresolved keys is what lets the reader close that gap. Censused at 15/69 map-carrying models, every
+        // one a genuine miss.
+        //
+        // `materialImportMode == None` is excluded: materials are deliberately not imported there, so every
+        // slot is empty by design and an empty count carries no signal at all.
         private static void ScanModelRemap(string assetPath, Report r)
         {
             var importer = AssetImporter.GetAtPath(assetPath) as ModelImporter;
-            if (importer == null || importer.materialLocation != ModelImporterMaterialLocation.External) return;
+            if (importer == null || importer.materialImportMode == ModelImporterMaterialImportMode.None) return;
 
-            int resolvableRemaps = 0;
+            int mapped = 0;
+            var unresolved = new List<string>();
             foreach (var kv in importer.GetExternalObjectMap())
-                if (kv.Key.type == typeof(Material) && kv.Value != null) resolvableRemaps++;
-            if (resolvableRemaps == 0) return;
+            {
+                if (kv.Key.type != typeof(Material)) continue;
+                mapped++;
+                if (kv.Value == null) unresolved.Add(kv.Key.name);
+            }
+            if (mapped == 0) return;
 
             var model = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
             if (model == null) return;
@@ -235,19 +262,58 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             if (empty == 0) return;
 
-            r.RemapStale += empty;
+            var verdict = ClassifyRemap(mapped, unresolved.Count, empty);
+            if (verdict == RemapVerdict.None) return;
+
+            if (verdict == RemapVerdict.Unresolved) r.RemapUnresolved += empty; else r.RemapStale += empty;
             r.Offenders.Add(new Offender
             {
-                Location = assetPath, ObjectPath = "", Kind = "fbx-remap-stale",
-                Detail = empty + " empty slot(s) despite a resolvable external-material remap — force-reimport the FBX"
+                Location = assetPath,
+                ObjectPath = "",
+                Kind = verdict == RemapVerdict.Unresolved ? "fbx-remap-unresolved" : "fbx-remap-stale",
+                Detail = DescribeRemap(verdict, mapped, unresolved, empty)
             });
+        }
+
+        internal enum RemapVerdict { None, Stale, Unresolved }
+
+        /// <summary>The remap decision, pure so every branch is asserted directly rather than by hunting a
+        /// binary FBX whose importer happens to produce it. A partly-missing pack classifies as
+        /// <c>Unresolved</c>: import-first is the remedy that fixes it, and force-reimporting alone would
+        /// leave the unresolved half exactly as it was.</summary>
+        internal static RemapVerdict ClassifyRemap(int mappedCount, int unresolvedCount, int emptySlots)
+        {
+            if (mappedCount == 0 || emptySlots == 0) return RemapVerdict.None;
+            return unresolvedCount > 0 ? RemapVerdict.Unresolved : RemapVerdict.Stale;
+        }
+
+        /// <summary>Pure wording for the two remap classes, kept beside the decision so a reader comparing
+        /// the remedies sees they run in opposite order.</summary>
+        internal static string DescribeRemap(RemapVerdict verdict, int mappedCount, List<string> unresolved, int emptySlots)
+        {
+            if (verdict == RemapVerdict.Unresolved)
+                return emptySlots + " empty slot(s); " + unresolved.Count + " of " + mappedCount
+                     + " external-material remap(s) resolve to nothing (" + NameList(unresolved)
+                     + ") — import the material pack, THEN force-reimport the FBX";
+            return emptySlots + " empty slot(s) despite " + mappedCount
+                 + " resolvable external-material remap(s) — force-reimport the FBX";
+        }
+
+        /// <summary>Comma-joined names, capped so a many-material FBX names a readable few and counts the rest
+        /// rather than emitting a wall the reader skips.</summary>
+        internal static string NameList(List<string> names)
+        {
+            const int Cap = 6;
+            if (names.Count <= Cap) return string.Join(", ", names.ToArray());
+            return string.Join(", ", names.GetRange(0, Cap).ToArray()) + ", +" + (names.Count - Cap) + " more";
         }
 
         // ----- Output -------------------------------------------------------------------------
 
         private static string Finish(Report r, string label)
         {
-            bool pass = r.MatMissing == 0 && r.MeshesMissing == 0 && r.ScriptsMissing == 0 && r.RemapStale == 0 && r.LoadErrors == 0;
+            bool pass = r.MatMissing == 0 && r.MeshesMissing == 0 && r.ScriptsMissing == 0
+                     && r.RemapStale == 0 && r.RemapUnresolved == 0 && r.LoadErrors == 0;
             r.Result = pass ? "PASS" : "FAIL";
             string logPath = WriteRunLog(r, label);
 
@@ -261,8 +327,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                 + (r.UnidentifiedTargets.Count > 0 ? ", " + r.UnidentifiedTargets.Count + " identified by instance id only (may over-count)" : "");
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CheckPackage] {0} ({1}, {2} scanned): materials resolved={3} empty={4} MISSING={5} | meshMISSING={6} | scriptMISSING={7} | remapSTALE={8}{9}{10} => {11} | log={12}",
-                label, r.Mode, r.Scanned, r.MatResolved, r.MatEmpty, r.MatMissing, r.MeshesMissing, r.ScriptsMissing, r.RemapStale, dangling,
+                "[CheckPackage] {0} ({1}, {2} scanned): materials resolved={3} empty={4} MISSING={5} | meshMISSING={6} | scriptMISSING={7} | remapSTALE={8} | remapUNRESOLVED={9}{10}{11} => {12} | log={13}",
+                label, r.Mode, r.Scanned, r.MatResolved, r.MatEmpty, r.MatMissing, r.MeshesMissing, r.ScriptsMissing,
+                r.RemapStale, r.RemapUnresolved, dangling,
                 r.LoadErrors > 0 ? " | loadErrors=" + r.LoadErrors : "", r.Result, logPath);
 
             if (pass) Debug.Log(summary); else Debug.LogError(summary);
@@ -289,6 +356,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("  \"danglingUnidentifiedTargets\": ").Append(r.UnidentifiedTargets.Count).Append(",\n");
             sb.Append("  \"scriptsMissing\": ").Append(r.ScriptsMissing).Append(",\n");
             sb.Append("  \"remapStale\": ").Append(r.RemapStale).Append(",\n");
+            sb.Append("  \"remapUnresolved\": ").Append(r.RemapUnresolved).Append(",\n");
             sb.Append("  \"loadErrors\": ").Append(r.LoadErrors).Append(",\n");
             sb.Append("  \"result\": ").Append(Q(r.Result)).Append(",\n");
             sb.Append("  \"offenders\": [");
@@ -343,6 +411,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public int MeshesMissing;
             public int ScriptsMissing;
             public int RemapStale;
+            public int RemapUnresolved;
             public int LoadErrors;
             public string Result;
             public readonly List<Offender> Offenders = new List<Offender>();

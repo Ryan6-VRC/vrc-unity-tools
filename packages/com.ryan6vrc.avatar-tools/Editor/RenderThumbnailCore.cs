@@ -582,5 +582,32 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             return null;
         }
+
+        // ----- Session RunLogs ------------------------------------------------------------------
+        // Both thumbnail doors used to write no RunLog at all — they borrowed RunLogFormat.Sanitize for a temp
+        // PNG name and nothing else. So the fitting sweep's "which doors were driven" signal was blind to both
+        // arcs, and End()'s restore claim rested on its own return string with no artifact behind it.
+        //
+        // Routed through RunLogFormat.WriteRunLog for the dir ownership and the in-band `| log=` trailer. Its
+        // failure contract is inherited deliberately: a write failure REWRITES the verdict to
+        // `=> FAIL: write failed` rather than returning a verdict with no trailer. A verdict that cannot be
+        // recorded is not one this family asserts.
+
+        /// <summary>Write one session-verb RunLog and return <paramref name="summary"/> with the trailer.</summary>
+        internal static string WriteSessionLog(string kind, string label, string summary, string body)
+            => Ryan6Vrc.AgentTools.Editor.RunLogFormat.WriteRunLog(
+                Ryan6Vrc.AgentTools.Editor.RunLogFormat.RunLogDir,
+                kind + "_" + Ryan6Vrc.AgentTools.Editor.RunLogFormat.Sanitize(label), summary, body, ".md");
+
+        /// <summary>Make the RunLog dir visible to the AssetDatabase BEFORE play is entered.
+        /// <c>PublishArtifact</c> falls back to a full <c>AssetDatabase.Refresh()</c> on the first write into a
+        /// dir the database has never seen, and a refresh during play can import and reload the domain — ending
+        /// the very session being logged. Paying that refresh at Begin, out of play, defuses it.</summary>
+        internal static void EnsureRunLogDirImported()
+        {
+            System.IO.Directory.CreateDirectory(Ryan6Vrc.AgentTools.Editor.RunLogFormat.RunLogDir);
+            if (!UnityEditor.AssetDatabase.IsValidFolder(Ryan6Vrc.AgentTools.Editor.RunLogFormat.RunLogDir))
+                UnityEditor.AssetDatabase.Refresh();
+        }
     }
 }

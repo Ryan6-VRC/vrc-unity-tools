@@ -378,6 +378,154 @@ public class ReportShapeOverlapTests
         return sc;
     }
 
+    // ── Build-effective active state ──────────────────────────────────────────────────────────────────
+    // MA conditions every reaction on its ancestors' activeSelf, so a declaration behind a PARKED ancestor
+    // does not apply at the initial state and cannot own a worn shape. The discriminator that decides this
+    // is whether the parked ancestor is toggle-driven: getting it wrong in either direction is a false
+    // verdict, so both directions are asserted, not just the one the repair was written for.
+
+    // Reparent a ShapeChanger's host under a new intermediate GameObject, so the fixture can park (or drive)
+    // a single ancestor without touching the changer itself.
+    private GameObject Interpose(GameObject child, string name)
+    {
+        var mid = new GameObject(name);
+        mid.transform.SetParent(child.transform.parent, false);
+        child.transform.SetParent(mid.transform, false);
+        return mid;
+    }
+
+    private ModularAvatarObjectToggle AddObjectToggle(GameObject avatar, string name, GameObject target, bool active)
+    {
+        var host = new GameObject(name);
+        host.transform.SetParent(avatar.transform, false);
+        var ot = host.AddComponent<ModularAvatarObjectToggle>();
+        var objRef = new AvatarObjectReference();
+        objRef.Set(target);
+        ot.Objects = new List<ToggledObject> { new ToggledObject { Object = objRef, Active = active } };
+        return ot;
+    }
+
+    // The defect this repair exists for: a shape is worn, and the only thing declaring it sits behind a parked,
+    // undriven ancestor. Before the fix the dead declaration suppressed the flag and the double-subtraction
+    // shipped silently.
+    [Test]
+    public void Report_declaredOnlyBehindParkedAncestor_flaggedAndNamesTheAncestor()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var sc = AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+        var parked = Interpose(sc.gameObject, "ParkedGroup");
+        parked.SetActive(false);
+        body.GetComponent<SkinnedMeshRenderer>().SetBlendShapeWeight(m.GetBlendShapeIndex("Shrink_Hip"), 100f);
+
+        var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
+        var row = ResolutionRow(md, "Shrink_Hip");
+        StringAssert.Contains("MISMATCH", row);
+        StringAssert.Contains("ParkedGroup", row); // the ancestor is the repair handle, so the row must name it
+    }
+
+    // The false-positive direction, and the one that would have made this repair worse than the defect: an
+    // outfit switched off in the scene but driven by an ObjectToggle is a LIVE conditional, not a dead branch
+    // (MA exempts toggle targets from constant-folding). This is the standard shipping shape.
+    [Test]
+    public void Report_parkedAncestorDrivenByObjectToggle_stillDeclares()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var sc = AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+        var parked = Interpose(sc.gameObject, "ToggledGroup");
+        parked.SetActive(false);
+        AddObjectToggle(avatar, "Toggle", parked, true);
+        body.GetComponent<SkinnedMeshRenderer>().SetBlendShapeWeight(m.GetBlendShapeIndex("Shrink_Hip"), 100f);
+
+        var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
+        var row = ResolutionRow(md, "Shrink_Hip");
+        Assert.IsFalse(row.Contains("MISMATCH"),
+            "a toggle-driven inactive ancestor is a live conditional — flagging it invents an offender: " + row);
+        Assert.IsFalse(row.Contains("inactive:"), "a toggle-driven ancestor is not parked: " + row);
+    }
+
+    // The deleted skip. MA's affected-object skip is guarded on `affectedObject != null`, and FindShapes calls
+    // ObjectRule with the 3-arg form, so ShapeChangers pass null and EVERY ancestor gets a condition — including
+    // one that is also an ancestor of the body. Mirroring MeshCutter's skip here would restore the false green.
+    [Test]
+    public void Report_parkedAncestorAlsoAncestorOfBody_stillCountsAsParked()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var shared = new GameObject("SharedGroup");
+        shared.transform.SetParent(avatar.transform, false);
+        var body = NewChildBody(shared, "Body", m);
+        var sc = AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+        sc.transform.SetParent(shared.transform, false); // changer and body share the parked ancestor
+        shared.SetActive(false);
+        body.GetComponent<SkinnedMeshRenderer>().SetBlendShapeWeight(m.GetBlendShapeIndex("Shrink_Hip"), 100f);
+
+        var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
+        var row = ResolutionRow(md, "Shrink_Hip");
+        StringAssert.Contains("MISMATCH", row);
+        StringAssert.Contains("SharedGroup", row);
+    }
+
+    // The caller's own root is not authoring state. `map-outfit-shapes` prescribes turning a piece off to drive
+    // this tool, so charging the root to the rows would mark every declaration dead in one stroke.
+    [Test]
+    public void Report_outfitRootItselfInactive_isANoteNotAWaveOfMismatches()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+        body.GetComponent<SkinnedMeshRenderer>().SetBlendShapeWeight(m.GetBlendShapeIndex("Shrink_Hip"), 100f);
+        avatar.SetActive(false);
+
+        var summary = Report(Path(body), new string[0], Path(avatar));
+        StringAssert.Contains("outfitRoot itself is inactive", summary);
+        var row = ResolutionRow(ReadLog(summary), "Shrink_Hip");
+        Assert.IsFalse(row.Contains("inactive:"), "the caller's own root must not be charged to a row: " + row);
+    }
+
+    // A live chain is unaffected — the anti-flood invariant still holds for everything this repair does not touch.
+    [Test]
+    public void Report_liveChain_declarationStillSuppresses()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var sc = AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+        Interpose(sc.gameObject, "LiveGroup"); // present but active
+        body.GetComponent<SkinnedMeshRenderer>().SetBlendShapeWeight(m.GetBlendShapeIndex("Shrink_Hip"), 100f);
+
+        var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
+        var row = ResolutionRow(md, "Shrink_Hip");
+        Assert.IsFalse(row.Contains("MISMATCH"), "a live declaration still owns its shape: " + row);
+    }
+
+    // MA never consults the ShapeChanger component's own `enabled`, so neither may this — a component-disabled
+    // changer on a live chain still declares. Asserted because "disabled" is the intuitive reading and it is wrong.
+    [Test]
+    public void Report_componentDisabledOnLiveChain_stillDeclares()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var sc = AddShapeChanger(avatar, "Outfit", body, ("Shrink_Hip", ShapeChangeType.Set));
+        sc.enabled = false;
+        body.GetComponent<SkinnedMeshRenderer>().SetBlendShapeWeight(m.GetBlendShapeIndex("Shrink_Hip"), 100f);
+
+        var md = ReadLog(Report(Path(body), new string[0], Path(avatar)));
+        var row = ResolutionRow(md, "Shrink_Hip");
+        Assert.IsFalse(row.Contains("MISMATCH"), "MA ignores the component's enabled flag, so this must too: " + row);
+    }
+
     // A Set-mode ShapeChanger writing the body mesh contributes its shape to the analyzed set even though its
     // scene weight is 0 (the caller passes only the worn Stocking; Shrink_Hip is pulled in by the reaction).
     [Test]

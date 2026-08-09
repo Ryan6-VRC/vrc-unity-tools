@@ -50,7 +50,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <param name="filterText">Keep only entries whose text contains this (ordinal, case-sensitive).
         /// The whole ENTRY is matched — body and callstack — not just the header, so a frame name is a
         /// valid search term. A match also exempts the entry from <paramref name="stripBenign"/>.</param>
-        /// <param name="count">Maximum entries returned, taken from the newest end. Clamped to 1..500.</param>
+        /// <param name="count">Maximum ROWS returned, taken from the newest end. Clamped to 1..500. With
+        /// <paramref name="collapseDuplicates"/> on, a row can stand for several identical entries, so the
+        /// returned window may reach further back in time than <paramref name="count"/> entries.</param>
         /// <param name="includeStackTrace">Include each entry's callstack. On by default: for an
         /// exception the frames are the diagnosis, and withholding them by default would reproduce the
         /// header-only read this tool exists to replace.</param>
@@ -64,12 +66,24 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// a dropped entry is always visible as a number even when its text is gone. An entry kept
         /// BECAUSE it matched <paramref name="filterText"/> is exempt — filtering for noise by name and
         /// then having it stripped would defeat the filter.</param>
+        /// <param name="collapseDuplicates">Fold byte-identical entries (body + callstack) into one row carrying
+        /// a repeat count. On by default, on the same reasoning as <paramref name="stripBenign"/>: a flood of one
+        /// repeated message spends the whole <paramref name="count"/> budget teaching one fact (5,672 identical
+        /// entries returned 60 verbatim copies in a measured session), and the collapse is never silent — the
+        /// summary carries <c>collapsed=</c> and each folded row carries <c>×N</c>. Two bounds worth knowing.
+        /// It keeps the LAST occurrence, because <paramref name="count"/> clamps from the newest end and an
+        /// oldest-representative row could be clamped away, erasing a recurrence from a read taken to see it.
+        /// And an entry kept because it matched <paramref name="filterText"/> is exempt, so the tagged-probe
+        /// idiom (`emulator.md`: log a tagged line every N frames, read it back by tag) still returns the whole
+        /// series — there the identical repeats ARE the signal. Distinct from Unity's own Console "Collapse"
+        /// toggle, which hides entries from this read entirely and shows up as <c>UNREACHED=</c>.</param>
         public static string Report(
             string types = "all",
             string filterText = null,
             int count = 20,
             bool includeStackTrace = true,
-            bool stripBenign = true)
+            bool stripBenign = true,
+            bool collapseDuplicates = true)
         {
             int mask;
             string badTypes;
@@ -85,6 +99,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (!TryReadEntries(out entries, out unreadable, out readError))
                 return "[ReportConsole] FAIL: " + readError;
 
+            bool filtering = !string.IsNullOrEmpty(filterText);
             int scanned = entries.Count;
             var kept = new List<Entry>();
             var benign = new Dictionary<string, int>();
@@ -113,18 +128,28 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             int matched = kept.Count;
-            if (kept.Count > count) kept.RemoveRange(0, kept.Count - count);
+            // Rows carry their own repeat count so the pairing survives the clamp below — a parallel list
+            // would have to be trimmed in lockstep, and the one that got out of step would misattribute a
+            // count to the wrong message.
+            var rows = CollapseDuplicates(kept, collapseDuplicates && !filtering, out int collapsed);
+            if (rows.Count > count) rows.RemoveRange(0, rows.Count - count);
 
             var body = new StringBuilder();
-            for (int i = 0; i < kept.Count; i++)
-                RenderEntry(kept[i], i + 1, includeStackTrace, body);
+            for (int i = 0; i < rows.Count; i++)
+            {
+                RenderEntry(rows[i].Key, i + 1, includeStackTrace, body);
+                if (rows[i].Value > 1) body.Append("    (×").Append(rows[i].Value).Append(" identical, collapsed)\n");
+            }
 
             // Neither a stripped entry nor one Unity declined to hand over is absorbed into a
             // clean-looking count: both are named here, so nothing this door removed is invisible.
             // The Console window's own filter state comes first because it bounds everything after
             // it — a `scanned=` computed under a search filter is a view, not the console.
+            // One number per stage: scanned -> matched -> collapsed -> shown. `collapsed` is rows REMOVED, not a
+            // before/after pair — `matched` already carries the before.
             string summary = "[ReportConsole]" + ConsoleFilterNote(scanned)
-                + " scanned=" + scanned + " matched=" + matched + " shown=" + kept.Count
+                + " scanned=" + scanned + " matched=" + matched
+                + (collapsed > 0 ? " collapsed=" + collapsed : "") + " shown=" + rows.Count
                 + BenignNote(benign) + (unreadable > 0 ? " unreadable=" + unreadable : "") + " => OK";
 
             if (body.Length <= InlineBudget)
@@ -140,6 +165,42 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>One console entry. <see cref="Full"/> is Unity's verbatim text and is what
         /// <c>filterText</c> matches; <see cref="Body"/> and <see cref="Stack"/> are its two halves,
         /// split at the index Unity reports.</summary>
+        /// <summary>Fold byte-identical entries into one row carrying its repeat count, keeping each group's
+        /// LAST occurrence in that occurrence's position. Keeping the last is the load-bearing half: `count`
+        /// clamps from the newest end, so an oldest-representative row for a message that recurred a second ago
+        /// could be clamped away entirely — the recurrence would vanish from a read taken to see it.
+        /// Identity is body + callstack, so two entries that differ only in where they were thrown stay apart.
+        /// Pure over its input, so both properties are assertable without a console.</summary>
+        internal static List<KeyValuePair<Entry, int>> CollapseDuplicates(List<Entry> kept, bool enabled, out int collapsed)
+        {
+            var rows = new List<KeyValuePair<Entry, int>>();
+            collapsed = 0;
+            if (!enabled)
+            {
+                foreach (var e in kept) rows.Add(new KeyValuePair<Entry, int>(e, 1));
+                return rows;
+            }
+
+            var counts = new Dictionary<string, int>();
+            foreach (var e in kept)
+            {
+                var key = e.Body + " " + e.Stack;
+                int seen;
+                counts[key] = counts.TryGetValue(key, out seen) ? seen + 1 : 1;
+            }
+            // Walk backwards so the FIRST time a key is seen from the newest end is its last occurrence, then
+            // restore chronological order — the row lands where its newest instance sat.
+            var emitted = new HashSet<string>();
+            for (int i = kept.Count - 1; i >= 0; i--)
+            {
+                var key = kept[i].Body + " " + kept[i].Stack;
+                if (!emitted.Add(key)) { collapsed++; continue; }
+                rows.Add(new KeyValuePair<Entry, int>(kept[i], counts[key]));
+            }
+            rows.Reverse();
+            return rows;
+        }
+
         public struct Entry
         {
             public EntryKind Kind;
