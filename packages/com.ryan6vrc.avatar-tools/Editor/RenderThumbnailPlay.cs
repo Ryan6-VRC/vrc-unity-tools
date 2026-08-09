@@ -149,6 +149,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return Fail("unsaved/unsaved-to-disk scene(s) loaded: [" + string.Join(",", unsaved) + "] — save or "
                     + "close them first; End() restores the scene setup from disk and would lose the edits");
 
+            // BEFORE any session state exists. Creating the RunLog dir leaves the AssetDatabase blind to it, so
+            // the first write pays a full Refresh — and a Refresh with a compile pending reloads the domain,
+            // wiping the non-serialized statics below (_prepared / _sceneSetup / _targetName). That would strand
+            // the forced play-mode options and the deactivated avatars with an End() that has nothing to restore
+            // from. Paying it here, before there is anything to lose, is what makes the later writes free.
+            RenderThumbnailCore.EnsureRunLogDirImported();
+
             _sceneSetup = EditorSceneManager.GetSceneManagerSetup();
 
             // Everything below mutates scene state; any throw (an OpenScene on a non-scene file, a bad target)
@@ -209,13 +216,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _shootUpdate = null;
                 _lastShootResult = "(no shot yet)";
 
-                return Ok("Begin " + _targetName + " => READY-TO-PLAY"
+                string beginSummary = "Begin " + _targetName + " => READY-TO-PLAY"
                     + (emuMade ? " emulator=created/enabled" : " emulator=present")
                     + (optsChanged ? " playmode-reload=disabled(restored on End)" : "")
                     + (adoptedForced ? " playmode-reload=already-forced(no saved record — cannot tell your setting"
                                        + " from an interrupted session's residue; End will leave it as found)" : "")
                     + (deactivated.Count > 0 ? " deactivated=[" + string.Join(",", deactivated) + "]" : "")
-                    + " — enter play (manage_editor play), then Shoot(...)");
+                    + " — enter play (manage_editor play), then Shoot(...)";
+                return Ok(RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-begin", _targetName, beginSummary,
+                    "# RenderThumbnailPlay Begin\n\n- target: `" + _targetName + "`\n"
+                    + "- emulator: " + (emuMade ? "created/enabled" : "present") + "\n"
+                    + "- playmode-reload: " + (optsChanged ? "disabled (restored on End)"
+                        : adoptedForced ? "already forced; no saved record, End leaves it as found" : "unchanged") + "\n"
+                    + "- deactivated: " + (deactivated.Count > 0 ? string.Join(", ", deactivated) : "(none)") + "\n"));
             }
             catch (Exception ex)
             {
@@ -540,16 +553,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         + " " + head + " settled=" + elapsed + "f moving=" + movingToken;
 
                     string verdict;
+                    string pngPath = null;
                     if (cap.Drawn == 0)
                         verdict = "[RenderThumbnailPlay] " + tag + " " + common + " => FAIL: nothing drew (every pixel "
                             + "matches its row background) — check the local-layer cull, or the subject fills the frame";
                     else
                     {
-                        string png = System.IO.Path.Combine(Application.temporaryCachePath,
+                        pngPath = System.IO.Path.Combine(Application.temporaryCachePath,
                             "renderthumbnailplay_" + RunLogFormat.Sanitize(_root.name) + "_" + tag.Substring(4) + ".png");
-                        System.IO.File.WriteAllBytes(png, cap.Png);
-                        verdict = "[RenderThumbnailPlay] " + tag + " " + common + " => OK | png=" + png;
+                        System.IO.File.WriteAllBytes(pngPath, cap.Png);
+                        verdict = "[RenderThumbnailPlay] " + tag + " " + common + " => OK | png=" + pngPath;
                     }
+                    // The COMPLETION verdict is the event worth recording — the starter string carries only a tag.
+                    // A png-bearing verdict is logged WITHOUT that trailer and spliced back after: routing it
+                    // through the writer would let a failed write rewrite a good capture into "=> FAIL: write
+                    // failed" and drop the png= token UploadAvatar reads (RenderThumbnailCore.SpliceTrailers).
+                    int pngAt = pngPath == null ? -1 : verdict.IndexOf(" | png=", StringComparison.Ordinal);
+                    string verdictBody = pngAt < 0 ? verdict : verdict.Substring(0, pngAt);
+                    string loggedShoot = RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-shoot", _root.name, verdictBody,
+                        "# RenderThumbnailPlay Shoot\n\n- tag: `" + tag + "`\n- target: `" + _root.name + "`\n"
+                        + "- pose: " + poseName + "\n- expression: " + expressionName + "\n"
+                        + "- framing: " + framingToken + "\n- settle: " + elapsed + " frames\n"
+                        + "- still moving at capture: " + movingToken + "\n"
+                        + "- png: " + (pngPath ?? "(none — nothing drew)") + "\n");
+                    verdict = pngAt < 0 ? loggedShoot : RenderThumbnailCore.SpliceTrailers(loggedShoot, verdictBody, pngPath);
                     FinishShoot(step, tag, verdict);
                 }
                 catch (Exception ex)
@@ -616,9 +643,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Restore the operator's Enter-Play-Mode Options and clear session state — only after a successful
             // scene restore (a failed restore above returns early, keeping the session AND its options for retry).
             RestoreEnterPlayModeOptions();
+            string endLabel = _targetName ?? "session";
             _prepared = false; _attached = false; _root = null; _localRuntime = null; _origFxController = null;
             _sceneSetup = null; _targetName = null; _fxIndex = -1; _base = default; _fx = default;
-            return Ok("End => OK — scene setup" + (restored.Length > 0 ? restored : " had nothing to restore"));
+            // The restore claim gets an artifact behind it — previously it was asserted by the return string alone.
+            string endSummary = "End => OK — scene setup" + (restored.Length > 0 ? restored : " had nothing to restore");
+            return Ok(RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-end", endLabel, endSummary,
+                "# RenderThumbnailPlay End\n\n- scene setup: "
+                + (restored.Length > 0 ? restored.Trim() : "nothing to restore") + "\n"
+                + "- Enter-Play-Mode Options: restored\n"));
         }
 
         // ===== Attach: isolate to the built local avatar (first Shoot, in play) =====

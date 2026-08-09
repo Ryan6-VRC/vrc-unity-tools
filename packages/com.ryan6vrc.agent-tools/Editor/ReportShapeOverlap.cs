@@ -54,6 +54,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             public float Value;             // Set value of the last declaration (irrelevant for Delete)
             public readonly List<(int type, float value)> Declares = new List<(int type, float value)>();
             public bool Conflict => Declares.Distinct().Count() > 1; // 2+ differing (type,value) rows on one shape
+            // Nearest parked ancestor (activeSelf=false, not toggle-driven) above the declaring ShapeChanger,
+            // or null when the chain is clear. Set only when EVERY declaration of this shape is parked: one live
+            // declaration owns the shape, so a parked sibling is not worth annotating. Reported, never a verdict
+            // (see Covers).
+            public string InactiveAncestor;
+            internal bool AnyDeclarationLive;
         }
 
         // Minimal ingestion record fed to Analyze. Names is the ORDERED, deduped co-active union
@@ -65,6 +71,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             public List<string> Names = new List<string>();
             public Dictionary<string, int> ReactionTypes = new Dictionary<string, int>();
             public Dictionary<string, ReactionInfo> Reactions = new Dictionary<string, ReactionInfo>();
+            // The caller's own root is inactive: reported once as a note, never charged to the rows. Turning a
+            // piece off is the prescribed way to drive this tool (`map-outfit-shapes`), so treating the root
+            // like an authored inactive ancestor would mark every declaration dead in one stroke.
+            public bool OutfitRootInactive;
+            // The ObjectToggle probe drifted, so toggle-driven ancestors cannot be told from genuinely-parked
+            // ones. The active-state signal is then WITHHELD rather than guessed: a wrong guess here invents
+            // MISMATCH rows, and inventing offenders is worse than the blind spot this signal closes.
+            public bool ActiveStateUnknown;
         }
         internal class Analysis
         {
@@ -187,6 +201,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return;
             }
 
+            // Resolved once per run, not per row: the probe walks every ObjectToggle under the root.
+            var toggleDriven = CollectToggleDriven(AvatarRootOf(outfitRoot) ?? outfitRoot);
+            result.ActiveStateUnknown = toggleDriven == null;
+            result.OutfitRootInactive = !outfitRoot.activeSelf;
+
             foreach (var comp in outfitRoot.GetComponentsInChildren(scType, true))
             {
                 if (comp == null) continue;
@@ -223,6 +242,20 @@ namespace Ryan6Vrc.AgentTools.Editor
                             }
                             ri.ChangeType = changeType;
                             ri.Value = value;
+                            // Walk stops AT the caller's root: above it, "inactive" describes how the caller
+                            // staged the scene, not how the avatar is authored. Last declaration wins, matching
+                            // ChangeType/Value above — a shape declared by both a live and a parked changer is
+                            // owned by whichever the ingest saw last, and the row names which.
+                            // MA's initial state is the last INITIALLY-ACTIVE group, not the last declared
+                            // (ReactiveObjectAnalyzer PreprocessShapes), so liveness is a disjunction over
+                            // declarations rather than last-wins. `Inverted` flips it: an inverted changer behind
+                            // a parked ancestor is exactly how "apply while the piece is off" is authored, and is
+                            // initially ACTIVE (ReactionRule.InitiallyActive ^ Inverted).
+                            var parked = FindInactiveAncestor(comp.transform, outfitRoot.transform, toggleDriven);
+                            bool inverted = ReadInverted(comp);
+                            bool live = (parked == null) ^ inverted;
+                            if (live) { ri.AnyDeclarationLive = true; ri.InactiveAncestor = null; }
+                            else if (!ri.AnyDeclarationLive && parked != null) ri.InactiveAncestor = PathOf(parked.gameObject);
                             // Canonicalize: MA discards a Delete row's Value (it forces the shape to 100), so two
                             // Deletes with differing stale Value fields must NOT read as a conflict — compare Delete
                             // on type only. Set keeps its value, so Set=100 vs Set=50 still conflicts.
@@ -241,6 +274,159 @@ namespace Ryan6Vrc.AgentTools.Editor
                         PathOf(comp.gameObject) + "' (" + e.GetType().Name + "): " + e.Message);
                 }
             }
+        }
+
+        // ── Build-effective active state ─────────────────────────────────────────────────────────────────────
+        //
+        // MA gates a reaction on its ancestors' active state, and the census must say so or a declaration that
+        // cannot fire reads as covering a shape it does not cover — a worn-and-undeclared shape then hides
+        // behind a dead row (the double-subtraction this tool exists to surface).
+        //
+        // The mechanism, read off MA 1.18.1 rather than assumed (canon: `nondestructive.md`):
+        //   • ReactiveObjectAnalyzer.LocateReactions.BuildConditions walks the ShapeChanger's ancestors to the
+        //     avatar root and adds ONE activeSelf ControlCondition per ancestor. It is a condition, not a drop.
+        //     Its affected-object skip does NOT apply here: that skip is guarded on `affectedObject != null`
+        //     and FindShapes calls ObjectRule(key, changer, value) with the 3-arg form, so ShapeChangers pass
+        //     null and every ancestor gets a condition. (Only FindMeshCutter passes an affected object.)
+        //   • ReactiveObjectAnalyzer.AnalyzeConstants then marks a condition constant only when its object is
+        //     neither an ObjectToggle target nor m_IsActive-animated, and drops the whole action group when a
+        //     constant condition is unsatisfied. So a TOGGLE-DRIVEN inactive ancestor is alive — the standard
+        //     shipping shape (outfit parked off in the scene, toggle default-on) — and only a parked, undriven
+        //     ancestor kills the group.
+        //   • MA never consults the ShapeChanger component's own `enabled`, so neither does this.
+        //
+        // What this asserts is therefore an EDIT-TIME state, not a build outcome: AnalyzeConstants no-ops
+        // without a build context, and whether a clip animates an ancestor is not evaluated here.
+        private static readonly string ObjectToggleTypeName = "nadena.dev.modular_avatar.core.ModularAvatarObjectToggle";
+
+        /// <summary>The avatar root at or above <paramref name="go"/>, or null. MA scans toggles from the avatar
+        /// root, and the ordinary wardrobe layout parks the `ObjectToggle` on a menu object ABOVE the outfit, so
+        /// scoping the scan to the caller's root would miss it and annotate a driven ancestor as parked.</summary>
+        internal static GameObject AvatarRootOf(GameObject go)
+        {
+            var descType = VendorReflect.FindType("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor");
+            if (descType == null || go == null) return null;
+            for (var t = go.transform; t != null; t = t.parent)
+                if (t.GetComponent(descType) != null) return t.gameObject;
+            return null;
+        }
+
+        /// <summary>An MA reactive component's <c>Inverted</c> flag; false when unreadable. Inverting is how
+        /// "apply while the piece is OFF" is authored and `ReactionRule.InitiallyActive` XORs it, so ignoring it
+        /// reads exactly the healthy inverted case as parked.</summary>
+        internal static bool ReadInverted(UnityEngine.Object comp)
+        {
+            if (comp == null) return false;
+            try
+            {
+                var pi = comp.GetType().GetProperty("Inverted", BindingFlags.Public | BindingFlags.Instance);
+                if (pi != null) return pi.GetValue(comp) is bool pb && pb;
+                var fi = comp.GetType().GetField("Inverted", BindingFlags.Public | BindingFlags.Instance);
+                return fi != null && fi.GetValue(comp) is bool fb && fb;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Every GameObject an MA <c>ObjectToggle</c> under <paramref name="scope"/> drives ACTIVE. MA
+        /// exempts a toggle target from constant-folding, so an inactive one is a live conditional rather than a
+        /// dead branch. A row driving the object OFF is excluded — it resolves to inactive, so treating it as
+        /// "driven" would restore the blind spot this annotation exists to surface.
+        /// Returns null — never an empty set — when the probe cannot be trusted, so the caller withholds the
+        /// signal instead of reading "no toggles" off a drifted reflection.</summary>
+        internal static HashSet<GameObject> CollectToggleDriven(GameObject scope)
+        {
+            var otType = VendorReflect.FindType(ObjectToggleTypeName);
+            if (otType == null)
+            {
+                if (!VendorReflect.ModularAvatarInstalled()) return new HashSet<GameObject>(); // MA absent: nothing drives anything
+                Debug.LogWarning("[ReportShapeOverlap] MA is installed but ModularAvatarObjectToggle did not resolve; " +
+                    "toggle-driven ancestors cannot be identified, so the active-state signal is withheld.");
+                return null;
+            }
+            var objectsProp = otType.GetProperty("Objects", BindingFlags.Public | BindingFlags.Instance);
+            var toType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ToggledObject");
+            var objField = toType?.GetField("Object");
+            var activeField = toType?.GetField("Active");
+            var aorType = VendorReflect.FindType("nadena.dev.modular_avatar.core.AvatarObjectReference");
+            var getMethod = aorType == null ? null : VendorReflect.ResolveAorGetOverload(aorType);
+            if (objectsProp == null || objField == null || activeField == null || getMethod == null)
+            {
+                Debug.LogWarning("[ReportShapeOverlap] MA ObjectToggle reflection drift (Objects / ToggledObject.Object|Active / " +
+                    "AvatarObjectReference.Get did not resolve); toggle-driven ancestors cannot be identified, so the " +
+                    "active-state signal is withheld.");
+                return null;
+            }
+
+            var driven = new HashSet<GameObject>();
+            foreach (var comp in scope.GetComponentsInChildren(otType, true))
+            {
+                if (comp == null) continue;
+                try
+                {
+                    if (!(objectsProp.GetValue(comp) is System.Collections.IEnumerable rows)) continue;
+                    foreach (var row in rows)
+                    {
+                        try
+                        {
+                            var objRef = objField.GetValue(row);
+                            if (objRef == null) continue;
+                            if (!(activeField.GetValue(row) is bool drivesActive) || !drivesActive) continue;
+                            if (getMethod.Invoke(objRef, new object[] { comp }) is GameObject target) driven.Add(target);
+                        }
+                        catch (Exception e)
+                        {
+                            // A dropped row shrinks the driven set, which would annotate a genuinely-driven
+                            // ancestor as parked. The set is no longer trustworthy, so withhold it entirely.
+                            Debug.LogWarning("[ReportShapeOverlap] skipped an ObjectToggle row on '" +
+                                PathOf(comp.gameObject) + "' (" + e.GetType().Name + "): " + e.Message +
+                                " — active-state annotation withheld for this run.");
+                            return null;
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning("[ReportShapeOverlap] skipped an ObjectToggle component on '" +
+                        PathOf(comp.gameObject) + "' (" + e.GetType().Name + "): " + e.Message);
+                }
+            }
+            return driven;
+        }
+
+        /// <summary>Whether any reaction declares this shape — the MISMATCH suppression rule, used by both the
+        /// count and the row so the two can never disagree.
+        ///
+        /// **A parked ancestor does NOT release suppression, deliberately.** Proving a declaration dead needs
+        /// MA's full liveness rule, and one arm of it is out of reach here: `AnalyzeConstants` keeps a condition
+        /// alive when ANY clip binds that object's `m_IsActive`, which it evaluates against a build-time
+        /// animation index (`asc == null` outside a build, so MA itself does no constant-folding at edit time).
+        /// A predicate missing that arm flags every ancestor an FX or VRCFury toggle drives — ordinary wardrobe
+        /// layouts — and manufacturing offenders is the worse failure, which is the same reason ingestion is not
+        /// gated on active state either. So the parked chain is REPORTED (`[inactive: …]`, `inactiveDeclared=`)
+        /// for the reader to rule on, and the flag stays on the fact this tool can establish: nothing declared
+        /// it at all.</summary>
+        internal static bool Covers(Ingested ingested, string shape)
+            => ingested.Reactions.ContainsKey(shape);
+
+        /// <summary>A shape whose every declaration sits behind a parked ancestor — annotated and counted so the
+        /// reader sees the population without diffing the table. Not a verdict: see <see cref="Covers"/> for why
+        /// this cannot be promoted to one here.</summary>
+        internal static bool IsParkedDeclaration(Ingested ingested, string shape)
+            => ingested.Reactions.TryGetValue(shape, out var ri) && ri.InactiveAncestor != null;
+
+        /// <summary>The nearest parked ancestor between <paramref name="from"/> (inclusive) and
+        /// <paramref name="stopAt"/> (exclusive), skipping toggle-driven ones. Null when the chain is clear.
+        /// Pure over its inputs, so every branch is assertable without building an MA graph.</summary>
+        internal static Transform FindInactiveAncestor(Transform from, Transform stopAt, HashSet<GameObject> toggleDriven)
+        {
+            if (toggleDriven == null) return null; // signal withheld — see Ingested.ActiveStateUnknown
+            for (var cur = from; cur != null && cur != stopAt; cur = cur.parent)
+            {
+                if (cur.gameObject.activeSelf) continue;
+                if (toggleDriven.Contains(cur.gameObject)) continue;
+                return cur;
+            }
+            return null;
         }
 
         // ── Pure core ─────────────────────────────────────────────────────────────────────────────────────
@@ -312,18 +498,21 @@ namespace Ryan6Vrc.AgentTools.Editor
             // mismatch = worn-but-undeclared rows (the disposition signal — NOT a subset boundary of worn, since
             // worn also counts declared-and-worn shapes; the two fields answer different questions).
             int reacted = ingested.Reactions.Count;
-            int worn = 0, mismatchCount = 0;
+            int worn = 0, mismatchCount = 0, inactiveDeclared = 0;
             foreach (var name in ingested.Names)
             {
                 int wi = mesh.GetBlendShapeIndex(name);
                 bool isWorn = wi >= 0 && Mathf.Abs(smr.GetBlendShapeWeight(wi)) > 0f;
                 if (isWorn) worn++;
-                if (isWorn && !ingested.Reactions.ContainsKey(name)) mismatchCount++;
+                if (IsParkedDeclaration(ingested, name)) inactiveDeclared++;
+                if (isWorn && !Covers(ingested, name)) mismatchCount++;
             }
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[ReportShapeOverlap] {0}: shapes={1}/{2} reacted={3} worn={4} mismatch={5} pairs={6} flagged={7} missing={8} => OK",
-                mesh.name, resolved, requested, reacted, worn, mismatchCount, a.Pairs.Count, pairFlagged, a.Missing.Count);
+                "[ReportShapeOverlap] {0}: shapes={1}/{2} reacted={3} inactiveDeclared={4} worn={5} mismatch={6} pairs={7} flagged={8} missing={9} => OK{10}{11}",
+                mesh.name, resolved, requested, reacted, inactiveDeclared, worn, mismatchCount, a.Pairs.Count, pairFlagged, a.Missing.Count,
+                ingested.OutfitRootInactive ? " | note: outfitRoot itself is inactive — not charged to any row" : "",
+                ingested.ActiveStateUnknown ? " | note: active-state signal WITHHELD (ObjectToggle probe drifted)" : "");
 
             var sb = new StringBuilder();
             sb.Append("# ReportShapeOverlap: ").Append(mesh.name).Append('\n');
@@ -335,8 +524,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             // ── Resolution — one row per union shape ────────────────────────────────────────────────────────
             sb.Append("\n## Resolution — reaction / current weight / resolved-target / overlap\n");
             sb.Append("_resolved-target: Set→its value, Delete→100 (bakes fully-applied), no reaction→0 (declared-or-zero). " +
-                "**MISMATCH** marks a row worn (weight≠0) yet undeclared — the double-subtraction hazard. A reaction-declared " +
-                "row is never flagged (the reaction owns it at runtime); disposition is not `current≠resolved-target`._\n\n");
+                "**MISMATCH** marks a row worn (weight≠0) that NOTHING declares — the double-subtraction hazard; " +
+                "disposition is not `current≠resolved-target`, and a declared row is not flagged however far its weight sits " +
+                "from its target. **`[inactive: <path>]` is an annotation, not a flag**: every declaration of that shape sits " +
+                "behind a parked ancestor, so it may not apply at the initial state — read the named ancestor and rule. It is " +
+                "not promoted to MISMATCH because proving a declaration dead needs MA's build-time animation index (any clip " +
+                "binding the ancestor's `m_IsActive` keeps it live), which no edit-time read has; flagging without it would " +
+                "invent offenders on every FX-toggled wardrobe. Toggle-driven and inverted declarations are already excluded " +
+                "here (mechanism: `nondestructive.md`)._\n\n");
             sb.Append("| shape | reaction | current | resolved-target | overlap | disposition |\n");
             sb.Append("| --- | --- | --- | --- | --- | --- |\n");
             // Per-shape max containment, precomputed in one pass over the pairs (an O(1) lookup per union
@@ -355,7 +550,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                 float weight = idx >= 0 ? smr.GetBlendShapeWeight(idx) : 0f;
                 ingested.Reactions.TryGetValue(name, out var ri);
                 bool isWorn = present && Mathf.Abs(weight) > 0f;
-                bool mismatch = ri == null && isWorn; // worn-but-undeclared ONLY — the anti-flood invariant
+                // Worn-but-not-live-declared — still the anti-flood invariant, with a declaration behind a parked
+                // ancestor counting as no declaration rather than as cover.
+                bool mismatch = isWorn && !Covers(ingested, name);
 
                 string reactionCell, resolvedTarget;
                 if (ri == null) { reactionCell = "none"; resolvedTarget = "0"; }
@@ -370,6 +567,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                     reactionCell = ReactionLabel(ri.ChangeType, ri.Value);
                     resolvedTarget = ResolvedTarget(ri.ChangeType, ri.Value);
                 }
+                // Name the offender on the row, not just in the count — the ancestor IS the repair handle.
+                if (ri != null && ri.InactiveAncestor != null)
+                    reactionCell += " `[inactive: " + Cell(ri.InactiveAncestor) + "]`";
 
                 string overlapCell = maxOverlap.TryGetValue(name, out var ov)
                     ? ov.ToString("F2", CultureInfo.InvariantCulture) : "—";

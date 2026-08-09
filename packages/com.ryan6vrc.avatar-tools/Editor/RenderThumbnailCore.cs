@@ -582,5 +582,47 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             return null;
         }
+
+        // ----- Session RunLogs ------------------------------------------------------------------
+        // Both thumbnail doors used to write no RunLog at all — they borrowed RunLogFormat.Sanitize for a temp
+        // PNG name and nothing else. So the fitting sweep's "which doors were driven" signal was blind to both
+        // arcs, and End()'s restore claim rested on its own return string with no artifact behind it.
+        //
+        // Routed through RunLogFormat.WriteRunLog for the dir ownership and the in-band `| log=` trailer. Its
+        // failure contract is inherited deliberately: a write failure REWRITES the verdict to
+        // `=> FAIL: write failed` rather than returning a verdict with no trailer. A verdict that cannot be
+        // recorded is not one this family asserts.
+
+        /// <summary>Write one session-verb RunLog and return <paramref name="summary"/> with the trailer.</summary>
+        internal static string WriteSessionLog(string kind, string label, string summary, string body)
+            => Ryan6Vrc.AgentTools.Editor.RunLogFormat.WriteRunLog(
+                Ryan6Vrc.AgentTools.Editor.RunLogFormat.RunLogDir,
+                kind + "_" + Ryan6Vrc.AgentTools.Editor.RunLogFormat.Sanitize(label), summary, body, ".md");
+
+        /// <summary>Re-attach a capture's trailers after logging, `png=` first.
+        ///
+        /// A verdict carrying `png=` must never be handed to <see cref="WriteSessionLog"/>: that writer's failure
+        /// path truncates at the last <c>"=&gt; "</c> and substitutes <c>=&gt; FAIL: write failed</c>, so a locked or
+        /// full RunLog path would rewrite a SUCCESSFUL capture into a failure and drop the `png=` token
+        /// <c>UploadAvatar</c> consumes. A capture's outcome does not depend on whether its log was written, so
+        /// only the <c>| log=</c> trailer is contingent — this splices the two back in the contracted order.</summary>
+        internal static string SpliceTrailers(string logged, string verdictWithoutPng, string pngPath)
+        {
+            const string marker = " | log=";
+            int at = logged.IndexOf(marker, System.StringComparison.Ordinal);
+            if (at < 0) return verdictWithoutPng + " | png=" + pngPath;   // write failed: keep the true verdict
+            return verdictWithoutPng + " | png=" + pngPath + logged.Substring(at);
+        }
+
+        /// <summary>Make the RunLog dir visible to the AssetDatabase BEFORE play is entered.
+        /// <c>PublishArtifact</c> falls back to a full <c>AssetDatabase.Refresh()</c> on the first write into a
+        /// dir the database has never seen, and a refresh during play can import and reload the domain — ending
+        /// the very session being logged. Paying that refresh at Begin, out of play, defuses it.</summary>
+        internal static void EnsureRunLogDirImported()
+        {
+            System.IO.Directory.CreateDirectory(Ryan6Vrc.AgentTools.Editor.RunLogFormat.RunLogDir);
+            if (!UnityEditor.AssetDatabase.IsValidFolder(Ryan6Vrc.AgentTools.Editor.RunLogFormat.RunLogDir))
+                UnityEditor.AssetDatabase.Refresh();
+        }
     }
 }

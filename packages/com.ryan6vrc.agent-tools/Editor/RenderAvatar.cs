@@ -374,7 +374,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// </summary>
         /// <param name="target">hierarchy path (primary), else numeric instance id, else name.</param>
         /// <param name="angles">subset of {front,back,left,right,top,bottom}; null/empty => [front,back].</param>
-        /// <param name="hide">descendant names/paths to exclude from this grab (transient SVM-hide).</param>
+        /// <param name="hide">descendant names/paths to exclude from this grab (transient SVM-hide). Each entry
+        /// resolves as a descendant of <paramref name="target"/> — a path relative to it, or an exact child name.
+        /// An entry that resolves to nothing FAILs the grab rather than rendering the subtree it named.</param>
         /// <param name="margin">fraction of the frame left as border; avatar fills ~(1-margin). Raise to zoom out.</param>
         /// <param name="showGizmos">draw component gizmos (physbone/contact/collider) into the capture.</param>
         /// <param name="resolution">per-tile square edge in px; the sheet is auto-downscaled to a ~2048 edge cap.</param>
@@ -393,14 +395,77 @@ namespace Ryan6Vrc.AgentTools.Editor
             string proxyInfo = (r.proxiesKept + r.proxiesHidden) > 0
                 ? " proxies=kept:" + r.proxiesKept + ",hidden:" + r.proxiesHidden : "";
             // cam=ok signals a diffable camera manifest was written beside the png — CaptureDiff's `against`.
+            // eyeHidden / hideExcluded name their REFERENT, not their unit: `proxies=…,hidden:N` on this same line
+            // counts renderers too, so a bare "hidden" never said which population it meant.
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[RenderAvatar] Capture {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} hidden={6} excluded={7}{8} => OK gate={9}{10} cam=ok{11} | png={12}",
+                "[RenderAvatar] Capture {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} eyeHidden={6} hideExcluded={7}{8} => OK gate={9}{10} cam=ok{11} | png={12}",
                 r.label, string.Join(",", r.manifest.angles), r.manifest.views.Length, r.manifest.tileRes,
                 r.manifest.margin.ToString("0.##", CultureInfo.InvariantCulture), showGizmos ? "on" : "off",
                 r.hiddenCount, r.excludedCount, proxyInfo, r.gate, r.canaryToken,
-                r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote, png);
+                r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + r.hideNote, png);
             Debug.Log(summary);
             return summary;
+        }
+
+        // ----- Hide list: resolution, refusal, empty-entry note ---------------------------------
+        // Extracted pure because `CaptureCore` takes a SceneView at its top and is therefore unreachable in
+        // batchmode — the same reason this file's freshness predicates are extracted. The rule and both
+        // refusals are the part an agent acts on, so they are the part that has to be assertable.
+
+        /// <summary>Resolve each caller entry as a descendant of <paramref name="root"/>. `targets` feeds the
+        /// SVM hide, `unresolved` drives the refusal, and `callerEntries` keeps the caller's own entries paired
+        /// with what they resolved to — DefaultHide is added by the caller afterwards and stays out of it, since
+        /// a missing `Culling` mesh is the normal case rather than a caller error.</summary>
+        internal static void ResolveHideList(GameObject root, string[] hide,
+            out List<GameObject> targets, out List<string> unresolved,
+            out List<KeyValuePair<string, GameObject>> callerEntries)
+        {
+            targets = new List<GameObject>();
+            unresolved = new List<string>();
+            callerEntries = new List<KeyValuePair<string, GameObject>>();
+            if (hide == null) return;
+            foreach (var h in hide)
+            {
+                if (string.IsNullOrEmpty(h)) continue;
+                var entry = h.Trim();
+                var go = ResolveDescendant(root, entry);
+                if (go == null) { unresolved.Add(entry); continue; }
+                callerEntries.Add(new KeyValuePair<string, GameObject>(entry, go));
+                if (!targets.Contains(go)) targets.Add(go);
+            }
+        }
+
+        /// <summary>The two refusals an unresolved entry earns. They differ because the list has different
+        /// authors: `Capture`'s was typed by the caller, who can fix it, while a pinned diff replays frame A's
+        /// list — where the usual reason an entry stops resolving is that the edit under test deleted that very
+        /// object, making "fix your spelling" the wrong instruction entirely.</summary>
+        internal static string HideRefusal(bool pinned, string label, List<string> unresolved)
+        {
+            string named = "'" + string.Join("', '", unresolved.ToArray()) + "'";
+            return pinned
+                ? "frame A's hide list named " + named + ", which does not resolve under '" + label
+                  + "' at B. If the edit under test DELETED it, the pair is still comparable — re-run with that "
+                  + "entry dropped from `hide`. If it was renamed or moved, B will draw what A excluded: pass its "
+                  + "current path. The manifest stores names, not identities, so this door cannot tell the two apart"
+                : "hide entry " + named + " resolved to nothing under '" + label
+                  + "' — the subtree would render unexcluded and the sheet would read as if it had been hidden. "
+                  + "Entries resolve as descendants of the target: name each as a path relative to it, or as an exact child name";
+        }
+
+        /// <summary>Names each resolved entry that excludes no drawable renderer. Legitimate on its own (hiding
+        /// an empty container), but also exactly what a hide list looks like once its meshes have moved out from
+        /// under it — so it is named rather than failed.</summary>
+        internal static string HideEmptyNote(List<KeyValuePair<string, GameObject>> callerEntries)
+        {
+            var empty = new List<string>();
+            foreach (var kv in callerEntries)
+            {
+                bool anyDrawable = false;
+                foreach (var rend in kv.Value.GetComponentsInChildren<Renderer>(true))
+                    if (rend.enabled && rend.gameObject.activeInHierarchy) { anyDrawable = true; break; }
+                if (!anyDrawable) empty.Add(kv.Key);
+            }
+            return empty.Count == 0 ? "" : " hideEmpty=[" + string.Join(",", empty.ToArray()) + "]";
         }
 
         // ----- Shared capture types + core ------------------------------------------------------
@@ -425,7 +490,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public Color32[] sheet; public int sheetW, sheetH;
             public CamManifest manifest; public string label;
             public int hiddenCount, excludedCount, proxiesKept, proxiesHidden;
-            public string proxyNote = "", horizonNote = "", settleNote = "", gate = "", canaryToken = "", canaryNote = "";
+            public string proxyNote = "", horizonNote = "", settleNote = "", gate = "", canaryToken = "", canaryNote = "", hideNote = "";
         }
         private static CoreResult Failed(string msg) => new CoreResult { ok = false, fail = msg };
         private static CoreResult CoreFail(string label, string reason) => Failed(Fail(label, reason));
@@ -542,14 +607,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                     + ") — freshness can't be certified; re-pin the settle handles | armed-by=" + armedBy);
 
             // ----- Resolve hide list (descendants of target) + default hides -----------------
-            var hideTargets = new List<GameObject>();
-            if (hide != null)
-                foreach (var h in hide)
-                {
-                    if (string.IsNullOrEmpty(h)) continue;
-                    var go = ResolveDescendant(root, h.Trim());
-                    if (go != null && !hideTargets.Contains(go)) hideTargets.Add(go);
-                }
+            ResolveHideList(root, hide, out var hideTargets, out var hideUnresolved, out var hideCaller);
+            var callerHideTargets = new List<GameObject>(hideTargets); // snapshot before DefaultHide joins
+            if (hideUnresolved.Count > 0) return CoreFail(label, HideRefusal(pin, label, hideUnresolved));
             // Always drop the build-added Culling mesh (see DefaultHide); a no-op when absent.
             foreach (var tr in root.GetComponentsInChildren<Transform>(true))
                 if (Array.IndexOf(DefaultHide, tr.name) >= 0 && !hideTargets.Contains(tr.gameObject))
@@ -646,8 +706,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var rend in all)
                 {
                     if (!rend.enabled || !rend.gameObject.activeInHierarchy) continue;
+                    // Counted against the CALLER's entries only: DefaultHide ("Culling") joins hideTargets
+                    // below, and folding it in would make hideExcluded nonzero on a built avatar passed no
+                    // `hide` at all — the token names its referent, so it has to mean exactly that.
                     bool inHideList = IsUnderAny(rend.transform, hideTargets);
-                    if (inHideList) { excludedCount++; continue; } // dropped by the hide list (SVM-hidden)
+                    if (inHideList)
+                    {
+                        if (IsUnderAny(rend.transform, callerHideTargets)) excludedCount++;
+                        continue; // dropped by the hide list (SVM-hidden)
+                    }
                     // Honor the operator's eye-hides: a hidden child is counted and skipped, never
                     // force-shown. To include one, the caller un-hides it before the grab (and restores it
                     // after) — the read-only tool never mutates the target subtree's own visibility.
@@ -655,7 +722,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                     drawable.Add(rend);
                 }
                 if (drawable.Count == 0)
-                    return CoreFail(label, "no drawable renderers after exclusion (hidden=" + hiddenCount + " excluded=" + excludedCount + ")");
+                    return CoreFail(label, "no drawable renderers after exclusion (eyeHidden=" + hiddenCount + " hideExcluded=" + excludedCount + ")");
+
+                string hideNote = HideEmptyNote(hideCaller);
 
                 // ----- Freshness: force a synchronous skin re-bake for the capture --------------------------
                 // Two freshness layers, and the settle gate only governs one. The NDMF pipeline keeps proxy
@@ -887,7 +956,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return new CoreResult
                 {
                     ok = true, sheet = sheet, sheetW = sheetW, sheetH = sheetH, manifest = manifest, label = label,
-                    hiddenCount = hiddenCount, excludedCount = excludedCount,
+                    hiddenCount = hiddenCount, excludedCount = excludedCount, hideNote = hideNote,
                     proxiesKept = proxiesKept, proxiesHidden = proxiesHidden,
                     proxyNote = proxyNote, horizonNote = horizonNote, settleNote = SettleNote(reactive),
                     gate = GateToken(reactive, settle), canaryToken = canaryToken, canaryNote = canaryNote,
@@ -1058,9 +1127,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 ? " | note=frame A grabbed by tool v" + A.toolVersion + " (now v" + ToolVersion + "); a pre-fix grab may be stale-baked" : "";
             // Carry B's freshness/settle notes — an unsettled or horizon-incomplete B undercuts the whole
             // "empty diff ⇒ immaterial GIVEN freshness" premise, so the caveat must ride the diff summary too.
+            // The sheet is bottom-origin and RenderDiff reports raw buffer coords, so bbox y grows UPWARD from
+            // the bottom edge. Reading it as top-down inverts every localization — a reader chasing a
+            // top-of-frame change concludes "nothing there". Stated once, as its own token rather than inside
+            // `diff=[…]`, which is strictly one entry per angle and is parsed by position.
+            string originNote = identical == r.manifest.views.Length ? "" : " bboxOrigin=bottom";
             string summary = "[RenderAvatar] CaptureDiff " + label + " against=" + Path.GetFileName(against)
                 + " angles=" + string.Join(",", r.manifest.angles) + " => OK gate=" + r.gate + r.canaryToken + " diff=[" + string.Join("; ", parts) + "] identical="
-                + identical + "/" + r.manifest.views.Length + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + versionNote + " | png=" + pngB;
+                + identical + "/" + r.manifest.views.Length + originNote + r.hideNote + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + versionNote + " | png=" + pngB;
             Debug.Log(summary);
             return summary;
         }

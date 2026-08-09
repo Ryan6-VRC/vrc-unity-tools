@@ -712,6 +712,31 @@ public class CheckSeamTests
         ReadLog(bareResult);
     }
 
+    // The caller-root cause. A mergeable root narrowed past its own meshes — SkinnedMeshRenderers sitting as
+    // SIBLINGS of the armature rather than under it — leaves nothing skinned under the root, which used to land
+    // in the 0-bone message and read as "a failed transfer or a bone-naming break … rebuild the mergeable".
+    // Measured live, that verdict was wrong by 19 shared weighted bones and nearly cost a good refit. The tell is
+    // mechanical (no weights under the root at all), so the message must lead with it and disclaim the
+    // quality reading rather than offer it.
+    [Test]
+    public void Bare_rootWithNoSkinnedWeights_blamesTheRootNotTheMergeable()
+    {
+        var baseGO = NewChild(_root, "Base");
+        var mergeGO = NewChild(_root, "Merge");
+        var map = new CheckSeam.HumanoidMap { SpanMm = 350f };
+        foreach (var name in new[] { "Chest", "Spine" }) map.Bones.Add(NewChild(baseGO, name).transform);
+        CheckSeam.ResolveHumanoid = _ => map;
+        // Bones under the root, but every skinned mesh outside it — the narrowed-root shape.
+        foreach (var name in new[] { "Chest", "Spine" }) NewChild(mergeGO, name);
+
+        var r = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
+
+        StringAssert.StartsWith("[CheckSeam:bare] REFUSE:", r); // the bare door labels its own refusals
+        StringAssert.Contains("no skinned weights under mergeable root", r);
+        StringAssert.Contains("SIBLINGS", r);            // names the shape that causes it
+        StringAssert.DoesNotContain("rebuild the", r);   // the misdirection this branch exists to prevent
+    }
+
     // Resolver-free is the load-bearing claim, so prove it by making any consultation fatal: a ResolveSeam that
     // throws. A PASS here means the seam mapping was never reached — including the MergeArmature/BoneProxy
     // presence probes, which sit behind the zero-pairs branch the bare door does not run.

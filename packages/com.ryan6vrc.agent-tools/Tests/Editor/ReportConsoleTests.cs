@@ -398,6 +398,85 @@ public class ReportConsoleTests
         Assert.AreEqual(before, after, "ReportConsole must not add console entries (success or FAIL path)");
     }
 
+    // ── Duplicate collapse ────────────────────────────────────────────────────────────────────────────
+    // A flood of one repeated message spends the whole `count` budget teaching one fact (5,672 identical
+    // entries returned 60 verbatim copies in a measured session). Collapse is pure over its input, so the two
+    // properties that matter — which occurrence represents a group, and what must stay apart — are asserted
+    // directly rather than by provoking a real flood.
+
+    private static ReportConsole.Entry E(string body, string stack = "")
+        => new ReportConsole.Entry { Kind = ReportConsole.EntryKind.Error, Full = body + stack, Body = body, Stack = stack };
+
+    [Test]
+    public void Collapse_identicalEntries_foldToOneRowCarryingTheCount()
+    {
+        var kept = new System.Collections.Generic.List<ReportConsole.Entry> { E("boom"), E("boom"), E("boom") };
+
+        var rows = ReportConsole.CollapseDuplicates(kept, true, out int collapsed);
+
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual(3, rows[0].Value);
+        Assert.AreEqual(2, collapsed, "collapsed counts rows REMOVED — `matched` already carries the before");
+    }
+
+    // The regression the last-occurrence rule exists to prevent. `count` clamps from the NEWEST end, so a group
+    // represented by its oldest instance can be clamped away — erasing a message that recurred a moment ago from
+    // a read taken to see exactly that. Asserted by position: the row lands where its newest instance sat.
+    [Test]
+    public void Collapse_keepsTheLastOccurrenceSoTheClampCannotEraseARecurrence()
+    {
+        var kept = new System.Collections.Generic.List<ReportConsole.Entry>
+        {
+            E("boom"), E("unique-old"), E("boom"), E("unique-new")
+        };
+
+        var rows = ReportConsole.CollapseDuplicates(kept, true, out _);
+
+        Assert.AreEqual(3, rows.Count);
+        Assert.AreEqual("unique-old", rows[0].Key.Body, "chronological order is preserved");
+        Assert.AreEqual("boom", rows[1].Key.Body, "the folded row sits where its NEWEST instance was, not its first");
+        Assert.AreEqual("unique-new", rows[2].Key.Body);
+    }
+
+    [Test]
+    public void Collapse_sameBodyDifferentCallstack_staysApart()
+    {
+        // Where a message was thrown from is the diagnosis; folding two call sites into one row would erase it.
+        var kept = new System.Collections.Generic.List<ReportConsole.Entry> { E("boom", "at A"), E("boom", "at B") };
+
+        var rows = ReportConsole.CollapseDuplicates(kept, true, out int collapsed);
+
+        Assert.AreEqual(2, rows.Count);
+        Assert.AreEqual(0, collapsed);
+    }
+
+    [Test]
+    public void Collapse_disabled_returnsTheVerbatimSequence()
+    {
+        var kept = new System.Collections.Generic.List<ReportConsole.Entry> { E("boom"), E("boom") };
+
+        var rows = ReportConsole.CollapseDuplicates(kept, false, out int collapsed);
+
+        Assert.AreEqual(2, rows.Count);
+        Assert.AreEqual(0, collapsed);
+        Assert.AreEqual(1, rows[0].Value);
+    }
+
+    // The tagged-probe idiom (`emulator.md`): a lambda logging one tagged line every N frames, read back by tag.
+    // There the identical repeats ARE the time series, so a filtered read must return them whole — the same
+    // exemption stripBenign already makes for a filter match.
+    [Test]
+    public void Report_filteredRead_isExemptFromCollapse()
+    {
+        string tag = "D3ProbeTag" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
+        for (int i = 0; i < 4; i++) Debug.Log(tag + " holding");
+
+        var outText = ReportConsole.Report(types: "log", filterText: tag, count: 50);
+
+        Assert.IsFalse(outText.Contains("collapsed="), "a filtered read must not collapse: " + outText);
+        StringAssert.Contains("shown=4", outText);
+    }
+
     private static int CountEntries()
     {
         var asm = typeof(UnityEditor.Editor).Assembly;

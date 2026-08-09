@@ -169,6 +169,97 @@ public class CheckPackageTests
         StringAssert.DoesNotContain("danglingUnidentifiedTargets", materials);
     }
 
+    // ── External-material remap: the two classes, pure ────────────────────────────────────────────────
+    // Both classes FAIL, but their remedies run in OPPOSITE order, so the discriminator carries the whole
+    // value: telling a caller to force-reimport when the pack was never imported is a guaranteed no-op.
+    // Asserted through the pure decision + wording rather than a binary FBX fixture, matching the
+    // DescribeTarget precedent above — an importer state that produces each branch cannot be built here.
+
+    [Test]
+    public void ClassifyRemap_noMapEntries_isSilent()
+    {
+        // The predicate that replaced the dead `materialLocation == External` gate. A model with no external
+        // map says nothing about its empty slots, and empty slots alone must never become evidence — that is
+        // the false-alarm trap this whole tool is built to avoid.
+        Assert.AreEqual(CheckPackage.RemapVerdict.None, CheckPackage.ClassifyRemap(0, 0, 12));
+    }
+
+    [Test]
+    public void ClassifyRemap_mapButNoEmptySlots_isSilent()
+    {
+        Assert.AreEqual(CheckPackage.RemapVerdict.None, CheckPackage.ClassifyRemap(4, 2, 0));
+    }
+
+    [Test]
+    public void ClassifyRemap_allEntriesResolveYetSlotsEmpty_isStale()
+    {
+        Assert.AreEqual(CheckPackage.RemapVerdict.Stale, CheckPackage.ClassifyRemap(4, 0, 3));
+    }
+
+    [Test]
+    public void ClassifyRemap_anyUnresolvedEntry_isUnresolved()
+    {
+        Assert.AreEqual(CheckPackage.RemapVerdict.Unresolved, CheckPackage.ClassifyRemap(2, 2, 10));
+    }
+
+    [Test]
+    public void ClassifyRemap_partiallyResolvedPack_isUnresolvedNotStale()
+    {
+        // The case that decides which remedy the caller is handed. Force-reimport alone leaves the
+        // unresolved half exactly as it was, so a partial miss must not read as merely stale.
+        Assert.AreEqual(CheckPackage.RemapVerdict.Unresolved, CheckPackage.ClassifyRemap(5, 1, 2));
+    }
+
+    [Test]
+    public void DescribeRemap_unresolved_namesTheKeysAndOrdersTheRemedy()
+    {
+        var s = CheckPackage.DescribeRemap(CheckPackage.RemapVerdict.Unresolved,
+            mappedCount: 2, unresolved: new System.Collections.Generic.List<string> { "m_lower", "m_upper" }, emptySlots: 10);
+        StringAssert.Contains("m_lower", s);
+        StringAssert.Contains("m_upper", s);
+        // Order is the payload: the targets must exist BEFORE the reimport, or the reimport achieves nothing.
+        int restore = s.IndexOf("restore or import", System.StringComparison.Ordinal);
+        int reimport = s.IndexOf("force-reimport", System.StringComparison.Ordinal);
+        Assert.That(restore, Is.GreaterThanOrEqualTo(0), "the unresolved remedy must name the missing targets: " + s);
+        Assert.That(restore, Is.LessThan(reimport), "restoring the targets must precede force-reimport: " + s);
+        // A null remap target proves the target is absent, not WHY — a deleted or re-GUIDed .mat looks identical
+        // to a never-imported pack, so the message must not assert the cause it cannot observe.
+        StringAssert.DoesNotContain("never imported", s);
+    }
+
+    [Test]
+    public void DescribeRemap_stale_prescribesReimportAndNotThePack()
+    {
+        var s = CheckPackage.DescribeRemap(CheckPackage.RemapVerdict.Stale,
+            mappedCount: 4, unresolved: new System.Collections.Generic.List<string>(), emptySlots: 3);
+        StringAssert.Contains("force-reimport", s);
+        // Naming absent targets here would send a caller off to restore something that already resolves.
+        StringAssert.DoesNotContain("restore or import", s);
+        // Model-level assertion, so a reimport can legitimately not clear it — say so, or the caller loops.
+        StringAssert.Contains("not the mapped ones", s);
+    }
+
+    [Test]
+    public void NameList_capsAndCountsTheRemainder()
+    {
+        var many = new System.Collections.Generic.List<string>();
+        for (int i = 0; i < 9; i++) many.Add("mat" + i);
+        var s = CheckPackage.NameList(many);
+        StringAssert.Contains("mat0", s);
+        StringAssert.Contains("+3 more", s);
+        StringAssert.DoesNotContain("mat8", s);
+    }
+
+    [Test]
+    public void Summary_carriesBothRemapClassesSeparately()
+    {
+        // Two counters, two names: a single fused remap number would hide which remedy applies.
+        SavePrefab("empty", new Material[1]);
+        var summary = CheckPackage.VerifyFolder(TmpDir);
+        StringAssert.Contains("remapSTALE=0", summary);
+        StringAssert.Contains("remapUNRESOLVED=0", summary);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────────────────────────────
 
     // The "materials" object's own text, brace-balanced from its opening '{' — whitespace-independent, which
