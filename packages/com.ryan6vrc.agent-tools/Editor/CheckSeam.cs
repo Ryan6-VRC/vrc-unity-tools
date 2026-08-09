@@ -534,6 +534,18 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Reflection surfaces a real throw wrapped in TargetInvocationException — unwrap it. Genuine API drift
         // (the tool broken against the installed package) => ReflectError (misuse/error). A seam that exists but
         // won't resolve onto this base => UnresolvableReason (valid abstain).
+        // True when the method's parameter list is exactly the given types, in order. The pins assert TYPES,
+        // not arity: a same-arity retype (measured — GetLinks param 3 across 1.1380.0→1.1400.0) passes every
+        // arity check and then throws ArgumentException at the invoke, into ClassifyReflect's wrong arm.
+        private static bool ParamTypesAre(System.Reflection.MethodInfo m, params Type[] types)
+        {
+            var ps = m.GetParameters();
+            if (ps.Length != types.Length) return false;
+            for (int i = 0; i < ps.Length; i++)
+                if (ps[i].ParameterType != types[i]) return false;
+            return true;
+        }
+
         private static void ClassifyReflect(Exception e, SeamResolution res)
         {
             // First carrier wins across BOTH fields. The pre-refactor single outer try aborted on the first
@@ -541,6 +553,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             // a later throw must not upgrade an earlier abstain (UnresolvableReason/warning) to misuse
             // (ReflectError/error). Preserves Check()'s REFUSE severity and removes iteration-order dependence.
             if (res.ReflectError != null || res.UnresolvableReason != null) return;
+            // A RAW ArgumentException/TargetParameterCountException — not unwrapped from a
+            // TargetInvocationException shell — was thrown by the reflection layer itself (argument binding
+            // failed before the vendor method ran): that is API drift, whatever the pins missed. A
+            // vendor-thrown ArgumentException arrives wrapped and still classifies below.
+            if (!(e is System.Reflection.TargetInvocationException) &&
+                (e is ArgumentException || e is System.Reflection.TargetParameterCountException))
+            {
+                res.ReflectError = e.GetType().Name + " (reflective invoke rejected its arguments — vendor API drift): " + e.Message;
+                return;
+            }
             var real = (e as System.Reflection.TargetInvocationException)?.InnerException ?? e;
             if (real is MissingMethodException || real is MissingFieldException ||
                 real is MissingMemberException || real is TypeLoadException)
@@ -582,12 +604,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             var maType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
             if (maType == null) return; // MA not installed ⇒ no MA seam
-            // Arity asserted at pin time (every invoke pin here does this): a drifted signature must fail as
-            // Missing* → ReflectError, because a TargetParameterCountException at the invoke would land in
-            // ClassifyReflect's other arm — an "incompatible rig" abstain lying about API drift.
+            // Shape asserted at pin time (every invoke pin here does this): a drifted signature must fail as
+            // Missing* → ReflectError, not land in ClassifyReflect's other arm as an "incompatible rig"
+            // abstain lying about API drift. The RETURN type is asserted too: a null from the `as IEnumerable`
+            // cast below is consumed as "mergeTarget does not resolve" — a drifted return type would emit
+            // that specific, confidently wrong repair instruction for a component whose target is fine.
             var getMapping = maType.GetMethod("GetBonesMapping", BindingFlags.Public | BindingFlags.Instance);
-            if (getMapping == null || getMapping.GetParameters().Length != 0)
-                throw new MissingMethodException("ModularAvatarMergeArmature.GetBonesMapping()");
+            if (getMapping == null || getMapping.GetParameters().Length != 0
+                || !typeof(System.Collections.IEnumerable).IsAssignableFrom(getMapping.ReturnType))
+                throw new MissingMethodException("ModularAvatarMergeArmature.GetBonesMapping() : IEnumerable");
             foreach (var comp in mergeGO.GetComponentsInChildren(maType, true))
             {
                 try
@@ -619,11 +644,18 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // VRCFury: for each VF.Model.VRCFury whose `content` is a VF.Model.Feature.ArmatureLink, call
         // VF.Service.ArmatureLinkService.GetLinks(model, avatarObj, objectPaths, armatureCache) (static; the
-        // two cache params arrived at 1.1414.0). Its .mergeBones is a Stack<(VFGameObject prop/merge,
-        // VFGameObject avatar/base)> — flipped vs MA. Reflection will NOT auto-apply the implicit
-        // Transform↔VFGameObject operators, so op_Implicit is invoked explicitly both ways. The caches come
-        // from each type's own GetPerFrame(avatarObj) factory — per-editor-frame lifetime (VRCFury's
-        // Scheduler clears them every update tick), so a call here is always a fresh capture, never stale.
+        // two cache params arrived at 1.1380.0 — where param 3 was IReadOnlyList-typed — and took the current
+        // bare-cache shape at 1.1400.0, which is why the pin asserts parameter TYPES, not arity alone: at
+        // 1.1380.0 every name and arity matches and only the type assert catches the mismatch before an
+        // invoke-time ArgumentException). Its .mergeBones is a Stack<(VFGameObject prop/merge, VFGameObject
+        // avatar/base)> — flipped vs MA. Reflection will NOT auto-apply the implicit Transform↔VFGameObject
+        // operators, so op_Implicit is invoked explicitly both ways. The caches come from each type's own
+        // GetPerFrame(avatarObj) factory, materialised LAZILY on the first ArmatureLink content so that (a) a
+        // snapshot throw (VRCFArmatureCache walks the humanoid Avatar asset and throws on a half-imported
+        // one) classifies per-component instead of aborting the whole collector, and (b) an avatar carrying
+        // no ArmatureLink — every CheckAvatar lint — never pays the full-hierarchy capture. GetPerFrame's
+        // guarantee is at most one editor update tick old (Scheduler clears each tick), NOT fresh: a
+        // mutate-then-check sequence inside a single editor callback can read a pre-mutation snapshot.
         // GetLinks throws (empty linkTo / link inside armature / bad Hips) AND returns null (propBone == null) —
         // both are resolution failures (thrown → caught upstream; null → thrown here → caught upstream).
         private static void CollectVrcfPairs(GameObject mergeGO, GameObject avatarGO, SeamResolution res)
@@ -639,16 +671,18 @@ namespace Ryan6Vrc.AgentTools.Editor
                 throw new TypeLoadException("VRCFury ArmatureLink/Service/VFGameObject/cache type missing");
 
             var getLinks = svcType.GetMethod("GetLinks", BindingFlags.Public | BindingFlags.Static);
-            // Arity is asserted at pin time so a future signature change fails HERE as drift, with the shape
-            // named — not downstream as a bare TargetParameterCountException at the invoke.
-            if (getLinks == null || getLinks.GetParameters().Length != 4)
-                throw new MissingMethodException("ArmatureLinkService.GetLinks(model, avatarObj, objectPaths, armatureCache)");
+            // The full parameter SHAPE is asserted at pin time — types, not arity alone — so a signature
+            // change fails HERE as named drift. Arity alone passes on 1.1380.0 (param 3 is
+            // IReadOnlyList<VRCFObjectPathCache> there) and the invoke then throws ArgumentException into
+            // ClassifyReflect's wrong arm; the type assert is what closes that.
+            if (getLinks == null || !ParamTypesAre(getLinks, armLinkType, vfGoType, pathCacheType, armCacheType))
+                throw new MissingMethodException("ArmatureLinkService.GetLinks(ArmatureLink, VFGameObject, VRCFObjectPathCache, VRCFArmatureCache)");
             var pathCacheFactory = pathCacheType.GetMethod("GetPerFrame", BindingFlags.Public | BindingFlags.Static);
-            if (pathCacheFactory == null || pathCacheFactory.GetParameters().Length != 1)
-                throw new MissingMethodException("VRCFObjectPathCache.GetPerFrame(avatarObject)");
+            if (pathCacheFactory == null || !ParamTypesAre(pathCacheFactory, vfGoType))
+                throw new MissingMethodException("VRCFObjectPathCache.GetPerFrame(VFGameObject)");
             var armCacheFactory = armCacheType.GetMethod("GetPerFrame", BindingFlags.Public | BindingFlags.Static);
-            if (armCacheFactory == null || armCacheFactory.GetParameters().Length != 1)
-                throw new MissingMethodException("VRCFArmatureCache.GetPerFrame(avatarObject)");
+            if (armCacheFactory == null || !ParamTypesAre(armCacheFactory, vfGoType))
+                throw new MissingMethodException("VRCFArmatureCache.GetPerFrame(VFGameObject)");
             var contentField = vrcfType.GetField("content", BindingFlags.Public | BindingFlags.Instance);
             if (contentField == null) throw new MissingFieldException("VRCFury.content");
             // Scale-at-bake detection: forceOneWorldScale (bool field on the ArmatureLink model) OR a non-unit
@@ -657,12 +691,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             var forceField = armLinkType.GetField("forceOneWorldScale", BindingFlags.Public | BindingFlags.Instance);
             if (forceField == null) throw new MissingFieldException("ArmatureLink.forceOneWorldScale");
             var getScaling = svcType.GetMethod("GetScalingFactor", BindingFlags.Public | BindingFlags.Static);
-            if (getScaling == null || getScaling.GetParameters().Length != 2)
-                throw new MissingMethodException("ArmatureLinkService.GetScalingFactor(model, links)");
+            if (getScaling == null || getScaling.GetParameters().Length != 2
+                || getScaling.GetParameters()[0].ParameterType != armLinkType)
+                throw new MissingMethodException("ArmatureLinkService.GetScalingFactor(ArmatureLink, Links)");
 
             var avatarVfGo = ToVfGameObject(vfGoType, avatarGO);
-            var objectPaths = pathCacheFactory.Invoke(null, new object[] { avatarVfGo });
-            var armatureCache = armCacheFactory.Invoke(null, new object[] { avatarVfGo });
+            object objectPaths = null, armatureCache = null; // lazy — see the collector comment above
 
             foreach (var comp in mergeGO.GetComponentsInChildren(vrcfType, true))
             {
@@ -670,6 +704,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     var content = contentField.GetValue(comp);
                     if (content == null || !armLinkType.IsInstanceOfType(content)) continue; // not an ArmatureLink feature
+                    if (objectPaths == null) objectPaths = pathCacheFactory.Invoke(null, new object[] { avatarVfGo });
+                    if (armatureCache == null) armatureCache = armCacheFactory.Invoke(null, new object[] { avatarVfGo });
                     var links = getLinks.Invoke(null, new object[] { content, avatarVfGo, objectPaths, armatureCache });
                     if (links == null) throw new NullReferenceException("GetLinks returned null (propBone == null)");
 

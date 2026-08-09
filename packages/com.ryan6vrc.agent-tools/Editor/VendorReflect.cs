@@ -95,7 +95,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Resolves the pinned <c>RewriteRelativePath(string, IReadOnlyList&lt;BindingRewrite&gt;)→string</c>
         /// internal static — the build's own Path-Rewrite-Rules application (moved out of
-        /// <c>FullControllerBuilder.RewritePath(FullController, string)</c> at VRCFury 1.1414.0), invoked on the
+        /// <c>FullControllerBuilder.RewritePath(FullController, string)</c> at VRCFury 1.1380.0), invoked on the
         /// caller's live <c>rewriteBindings</c> list so the rule semantics can never drift (and so no near-copy
         /// of VRCFury code lives in this repo — VRCFury is not FOSS-licensed, so a hand-rolled replication is a
         /// licensing question as well as a drift hazard). null ⇒ unreachable (API drift / VRCFury absent) → the
