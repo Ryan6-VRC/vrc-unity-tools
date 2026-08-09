@@ -197,8 +197,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                 for (int i = 0; i < children.Count && i < Cap; i++) leaves.Add(RunLogFormat.Leaf(children[i]));
                 names = string.Join(", ", leaves.ToArray()) + (children.Count > Cap ? ", +" + (children.Count - Cap) + " more" : "");
             }
-            return "deepest existing is '" + deepest + "' containing [" + names
-                 + "] — re-run Verify(\"" + packagePath + "\", expectedRoot: \"" + deepest + "/<one of those>\")";
+            // The path is quoted into a C# call the reader may paste, so a Windows separator would emit 	 / 
+
+            // escapes and not compile. RunLogFormat.Q is the same escaper the RunLogs use.
+            string pkg = RunLogFormat.Q(packagePath);
+            return children.Count == 0
+                ? "deepest existing is '" + deepest + "' containing [" + names
+                  + "] — nothing was imported under it, so the package landed elsewhere (or not at all); re-run "
+                  + "Verify(" + pkg + ") with no expectedRoot to read the import log's own status"
+                : "deepest existing is '" + deepest + "' containing [" + names
+                  + "] — re-run Verify(" + pkg + ", expectedRoot: " + RunLogFormat.Q(deepest + "/<one of those>") + ")";
         }
 
         // ----- Pure decision core (unit-tested against the full matrix) -----------------------

@@ -221,9 +221,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                     refusal = "bone name '" + kv.Key + "' is ambiguous under mergeable '" + mergeGO.name +
                         "': " + hits.Count + " transforms carry it (" + PathOf(hits[0].gameObject) + " vs " +
                         PathOf(hits[1].gameObject) + ") — name-matching would score an arbitrary one. The scan " +
-                        "includes INACTIVE objects, so a disabled backup armature counts. Rename or remove one of " +
-                        "the two (a physbone collider named after the bone it guards is the usual duplicate, and " +
-                        "renaming it on the probe costs nothing), or seam the mergeable and use Check. Narrowing " +
+                        "includes INACTIVE objects, so a disabled backup armature counts. Rename or remove carriers " +
+                        "until exactly one remains (a physbone collider named after the bone it guards is the " +
+                        "usual duplicate, and renaming it on the probe costs nothing), or seam the mergeable and " +
+                        "use Check. Narrowing " +
                         "the mergeable root works ONLY if the duplicate sits outside the mesh subtree — narrowing " +
                         "past a sibling of the skinned meshes drops every weight and refuses again for a different, " +
                         "worse-reading reason";

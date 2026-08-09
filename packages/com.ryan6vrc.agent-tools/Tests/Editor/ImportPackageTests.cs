@@ -25,6 +25,7 @@ using Ryan6Vrc.AgentTools.Editor;
 [Category("ImportPackage")]
 public class ImportPackageTests
 {
+    private const string BackslashLiteral = "\\";
     private const string TmpDir = "Assets/AgentImportPackageTmp";
     private string _logPath;
 
@@ -367,12 +368,30 @@ public class ImportPackageTests
         StringAssert.Contains("C:/pkgs/VRCLens.unitypackage", s);
     }
 
+    // The hint is a C# call the reader may paste, so a Windows path must be escaped or the separators become
+    // escape sequences and it will not compile — the same "remedy you cannot actually run" defect this batch
+    // fixes elsewhere.
+    [Test]
+    public void NearestExistingRoot_windowsPath_isEscapedForPasting()
+    {
+        string winPath = "C:" + BackslashLiteral + "temp" + BackslashLiteral + "new" + BackslashLiteral + "pack.unitypackage";
+
+        var s = ImportPackage.DescribeNearestExistingRoot("Assets/Nope", winPath,
+            _ => new List<string> { "Assets/Vendor" });
+
+        // Q() doubles each separator, so the emitted call compiles when pasted.
+        StringAssert.Contains("C:" + BackslashLiteral + BackslashLiteral + "temp", s);
+        Assert.IsFalse(s.Contains("C:" + BackslashLiteral + "temp"  + BackslashLiteral + "new"), "raw separators would not survive a paste: " + s);
+    }
+
     [Test]
     public void NearestExistingRoot_folderWithNoSubfolders_saysSoRatherThanEmptyBrackets()
     {
         var s = ImportPackage.DescribeNearestExistingRoot("Assets/Nope", "p.unitypackage", _ => new List<string>());
 
         StringAssert.Contains("no subfolders", s);
+        // Telling the caller to append "<one of those>" when there is nothing to append is an unfollowable step.
+        StringAssert.DoesNotContain("one of those", s);
     }
 
     [Test]

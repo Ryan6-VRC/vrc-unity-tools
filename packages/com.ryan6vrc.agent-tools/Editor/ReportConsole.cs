@@ -73,9 +73,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// summary carries <c>collapsed=</c> and each folded row carries <c>×N</c>. Two bounds worth knowing.
         /// It keeps the LAST occurrence, because <paramref name="count"/> clamps from the newest end and an
         /// oldest-representative row could be clamped away, erasing a recurrence from a read taken to see it.
-        /// And an entry kept because it matched <paramref name="filterText"/> is exempt, so the tagged-probe
-        /// idiom (`emulator.md`: log a tagged line every N frames, read it back by tag) still returns the whole
-        /// series — there the identical repeats ARE the signal. Distinct from Unity's own Console "Collapse"
+        /// And a filtered read is exempt WHOLESALE — passing <paramref name="filterText"/> disables collapse for
+        /// that call rather than per entry, so the two cannot be combined — which is what keeps the tagged-probe
+        /// idiom (`emulator.md`: log a tagged line every N frames, read it back by tag) returning its whole
+        /// series, since there the identical repeats ARE the signal. Repeats need not be adjacent: a group folds
+        /// onto its newest position, so a read taken to establish SEQUENCE should pass false. Distinct from Unity's own Console "Collapse"
         /// toggle, which hides entries from this read entirely and shows up as <c>UNREACHED=</c>.</param>
         public static string Report(
             string types = "all",
