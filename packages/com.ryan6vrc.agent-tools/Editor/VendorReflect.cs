@@ -128,5 +128,120 @@ namespace Ryan6Vrc.AgentTools.Editor
             catch { _vrcfRewritePath = null; }
             return _vrcfRewritePath;
         }
+
+        // ── VRCFury ArmatureLinkService.GetLinks + the ArmatureLink walk's supporting handles ─────────────
+
+        /// <summary>Every pinned handle <c>CheckSeam</c>'s VRCFury collector invokes, resolved as one set
+        /// because none of them is usable alone. Field order is the RESOLUTION order: a release that drifts
+        /// two members names the earlier one, so reordering these silently changes which member the operator
+        /// is sent to.</summary>
+        internal sealed class VrcfArmatureLinkPins
+        {
+            internal Type VrcfType;                     // VF.Model.VRCFury — the component the collector sweeps for
+            internal Type ArmLinkType;                  // VF.Model.Feature.ArmatureLink — the `content` shape it acts on
+            internal Type VfGoType;                     // VF.Utils.VFGameObject
+            internal MethodInfo GetLinks;               // static (ArmatureLink, VFGameObject, VRCFObjectPathCache, VRCFArmatureCache)
+            internal MethodInfo PathCacheFactory;       // static VRCFObjectPathCache.GetPerFrame(VFGameObject)
+            internal MethodInfo ArmCacheFactory;        // static VRCFArmatureCache.GetPerFrame(VFGameObject)
+            internal FieldInfo ContentField;            // VRCFury.content
+            internal FieldInfo ForceOneWorldScaleField; // ArmatureLink.forceOneWorldScale
+            internal MethodInfo GetScalingFactor;       // static (ArmatureLink, Links) → (float,float,float)
+        }
+
+        /// <summary>Resolves the ArmatureLink pin set. <b>null means VRCFury is ABSENT</b> — the legitimate
+        /// silent floor, on which the caller returns without recording anything. That is the OPPOSITE of the
+        /// two seams above, where null means drift and the caller runs a loud degraded fallback, so this
+        /// method deliberately has <b>no catch</b>: every drift branch THROWS, and <c>CheckSeam</c>'s
+        /// ClassifyReflect (which owns that taxonomy) maps Missing*/TypeLoad onto an error-severity REFUSE.
+        /// Swallowing a drift to null here would instead hand the collector an empty result, which reads
+        /// downstream as "no seam — bare prop" at warning: a broken tool telling the operator to add a seam
+        /// that already exists. Not memoized either, because a memo would have to cache a throw.</summary>
+        internal static VrcfArmatureLinkPins ResolveVrcfArmatureLink()
+        {
+            var pins = new VrcfArmatureLinkPins();
+            pins.VrcfType = FindType("VF.Model.VRCFury");
+            if (pins.VrcfType == null) return null; // VRCFury not installed ⇒ no VRCFury seam
+
+            pins.ArmLinkType = FindType("VF.Model.Feature.ArmatureLink");
+            pins.VfGoType = FindType("VF.Utils.VFGameObject");
+            var svcType = FindType("VF.Service.ArmatureLinkService");
+            var pathCacheType = FindType("VF.Builder.VRCFObjectPathCache");
+            var armCacheType = FindType("VF.Builder.VRCFArmatureCache");
+            if (pins.ArmLinkType == null || svcType == null || pins.VfGoType == null
+                || pathCacheType == null || armCacheType == null)
+                throw new TypeLoadException("VRCFury ArmatureLink/Service/VFGameObject/cache type missing");
+
+            // The full parameter SHAPE is asserted at pin time — types, not arity alone — so a signature
+            // change fails HERE as named drift. Arity alone passes on 1.1380.0 (param 3 is
+            // IReadOnlyList<VRCFObjectPathCache> there) and the invoke then throws ArgumentException into
+            // ClassifyReflect's wrong arm; the type assert is what closes that.
+            pins.GetLinks = svcType.GetMethod("GetLinks", BindingFlags.Public | BindingFlags.Static);
+            if (pins.GetLinks == null || !ParamTypesAre(pins.GetLinks, pins.ArmLinkType, pins.VfGoType, pathCacheType, armCacheType))
+                throw new MissingMethodException("ArmatureLinkService.GetLinks(ArmatureLink, VFGameObject, VRCFObjectPathCache, VRCFArmatureCache)");
+            pins.PathCacheFactory = pathCacheType.GetMethod("GetPerFrame", BindingFlags.Public | BindingFlags.Static);
+            if (pins.PathCacheFactory == null || !ParamTypesAre(pins.PathCacheFactory, pins.VfGoType))
+                throw new MissingMethodException("VRCFObjectPathCache.GetPerFrame(VFGameObject)");
+            pins.ArmCacheFactory = armCacheType.GetMethod("GetPerFrame", BindingFlags.Public | BindingFlags.Static);
+            if (pins.ArmCacheFactory == null || !ParamTypesAre(pins.ArmCacheFactory, pins.VfGoType))
+                throw new MissingMethodException("VRCFArmatureCache.GetPerFrame(VFGameObject)");
+            pins.ContentField = pins.VrcfType.GetField("content", BindingFlags.Public | BindingFlags.Instance);
+            if (pins.ContentField == null) throw new MissingFieldException("VRCFury.content");
+            pins.ForceOneWorldScaleField = pins.ArmLinkType.GetField("forceOneWorldScale", BindingFlags.Public | BindingFlags.Instance);
+            if (pins.ForceOneWorldScaleField == null) throw new MissingFieldException("ArmatureLink.forceOneWorldScale");
+            // Deliberately a WEAKER assert than its neighbours — arity plus param[0] only. Its param 1 is
+            // VRCFury's internal `Links`, a type the collector never names (it holds whatever GetLinks handed
+            // back), so asserting it would pin a type nothing else here resolves. Tightening this to
+            // ParamTypesAre would fail a pin that passes today.
+            pins.GetScalingFactor = svcType.GetMethod("GetScalingFactor", BindingFlags.Public | BindingFlags.Static);
+            if (pins.GetScalingFactor == null || pins.GetScalingFactor.GetParameters().Length != 2
+                || pins.GetScalingFactor.GetParameters()[0].ParameterType != pins.ArmLinkType)
+                throw new MissingMethodException("ArmatureLinkService.GetScalingFactor(ArmatureLink, Links)");
+            return pins;
+        }
+
+        /// <summary>True when the method's parameter list is exactly the given types, in order. The pins assert
+        /// TYPES, not arity: a same-arity retype (measured — GetLinks param 3 across 1.1380.0→1.1400.0) passes
+        /// every arity check and then throws ArgumentException at the invoke, into the wrong arm of
+        /// <c>CheckSeam</c>'s ClassifyReflect.</summary>
+        internal static bool ParamTypesAre(MethodInfo m, params Type[] types)
+        {
+            var ps = m.GetParameters();
+            if (ps.Length != types.Length) return false;
+            for (int i = 0; i < ps.Length; i++)
+                if (ps[i].ParameterType != types[i]) return false;
+            return true;
+        }
+
+        /// <summary>Transform/GameObject → VFGameObject via the explicit op_Implicit (reflection won't apply
+        /// it implicitly).</summary>
+        internal static object ToVfGameObject(Type vfGoType, GameObject go)
+        {
+            foreach (var m in vfGoType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (m.Name != "op_Implicit" || m.ReturnType != vfGoType) continue;
+                var ps = m.GetParameters();
+                if (ps.Length != 1) continue;
+                if (ps[0].ParameterType == typeof(Transform)) return m.Invoke(null, new object[] { go.transform });
+                if (ps[0].ParameterType == typeof(GameObject)) return m.Invoke(null, new object[] { go });
+            }
+            throw new MissingMethodException("op_Implicit(Transform|GameObject) → VFGameObject");
+        }
+
+        /// <summary>VFGameObject → Transform via the explicit op_Implicit (either the Transform or the
+        /// GameObject operator).</summary>
+        internal static Transform FromVfGameObject(Type vfGoType, object vfGo)
+        {
+            if (vfGo == null) return null;
+            foreach (var m in vfGoType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (m.Name != "op_Implicit") continue;
+                var ps = m.GetParameters();
+                if (ps.Length != 1 || ps[0].ParameterType != vfGoType) continue;
+                var result = m.Invoke(null, new object[] { vfGo });
+                if (result is Transform t) return t;
+                if (result is GameObject g) return g.transform;
+            }
+            throw new MissingMethodException("op_Implicit(VFGameObject) → Transform|GameObject");
+        }
     }
 }
