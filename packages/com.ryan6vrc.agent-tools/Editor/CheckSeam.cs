@@ -533,19 +533,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // Reflection surfaces a real throw wrapped in TargetInvocationException — unwrap it. Genuine API drift
         // (the tool broken against the installed package) => ReflectError (misuse/error). A seam that exists but
-        // won't resolve onto this base => UnresolvableReason (valid abstain).
-        // True when the method's parameter list is exactly the given types, in order. The pins assert TYPES,
-        // not arity: a same-arity retype (measured — GetLinks param 3 across 1.1380.0→1.1400.0) passes every
-        // arity check and then throws ArgumentException at the invoke, into ClassifyReflect's wrong arm.
-        private static bool ParamTypesAre(System.Reflection.MethodInfo m, params Type[] types)
-        {
-            var ps = m.GetParameters();
-            if (ps.Length != types.Length) return false;
-            for (int i = 0; i < ps.Length; i++)
-                if (ps[i].ParameterType != types[i]) return false;
-            return true;
-        }
-
+        // won't resolve onto this base => UnresolvableReason (valid abstain). This severity split is the
+        // contract every vendor pin in VendorReflect throws into — it is why those pins must not swallow.
         private static void ClassifyReflect(Exception e, SeamResolution res)
         {
             // First carrier wins across BOTH fields. The pre-refactor single outer try aborted on the first
@@ -643,13 +632,14 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // VRCFury: for each VF.Model.VRCFury whose `content` is a VF.Model.Feature.ArmatureLink, call
-        // VF.Service.ArmatureLinkService.GetLinks(model, avatarObj, objectPaths, armatureCache) (static; the
-        // two cache params arrived at 1.1380.0 — where param 3 was IReadOnlyList-typed — and took the current
-        // bare-cache shape at 1.1400.0, which is why the pin asserts parameter TYPES, not arity alone: at
-        // 1.1380.0 every name and arity matches and only the type assert catches the mismatch before an
-        // invoke-time ArgumentException). Its .mergeBones is a Stack<(VFGameObject prop/merge, VFGameObject
-        // avatar/base)> — flipped vs MA. Reflection will NOT auto-apply the implicit Transform↔VFGameObject
-        // operators, so op_Implicit is invoked explicitly both ways. The caches come from each type's own
+        // VF.Service.ArmatureLinkService.GetLinks(model, avatarObj, objectPaths, armatureCache). Every handle
+        // invoked here is pinned by VendorReflect.ResolveVrcfArmatureLink, which owns the pin shapes and the
+        // drift evidence behind them; a null return means VRCFury is absent, and a drift THROWS past this
+        // collector entirely, into ResolveMergeMap's guard — NOT the per-component try below, which only
+        // covers the walk. Its .mergeBones is a Stack<(VFGameObject prop/merge, VFGameObject
+        // avatar/base)> — flipped vs MA, and its ends are VFGameObjects, converted back through
+        // VendorReflect.FromVfGameObject (which owns why that conversion must be explicit). The caches come
+        // from each type's own
         // GetPerFrame(avatarObj) factory, materialised LAZILY on the first ArmatureLink content so that (a) a
         // snapshot throw (VRCFArmatureCache walks the humanoid Avatar asset and throws on a half-imported
         // one) classifies per-component instead of aborting the whole collector, and (b) an avatar carrying
@@ -660,59 +650,31 @@ namespace Ryan6Vrc.AgentTools.Editor
         // both are resolution failures (thrown → caught upstream; null → thrown here → caught upstream).
         private static void CollectVrcfPairs(GameObject mergeGO, GameObject avatarGO, SeamResolution res)
         {
-            var vrcfType = VendorReflect.FindType("VF.Model.VRCFury");
-            if (vrcfType == null) return; // VRCFury not installed ⇒ no VRCFury seam
-            var armLinkType = VendorReflect.FindType("VF.Model.Feature.ArmatureLink");
-            var svcType = VendorReflect.FindType("VF.Service.ArmatureLinkService");
-            var vfGoType = VendorReflect.FindType("VF.Utils.VFGameObject");
-            var pathCacheType = VendorReflect.FindType("VF.Builder.VRCFObjectPathCache");
-            var armCacheType = VendorReflect.FindType("VF.Builder.VRCFArmatureCache");
-            if (armLinkType == null || svcType == null || vfGoType == null || pathCacheType == null || armCacheType == null)
-                throw new TypeLoadException("VRCFury ArmatureLink/Service/VFGameObject/cache type missing");
+            var pins = VendorReflect.ResolveVrcfArmatureLink();
+            if (pins == null) return; // VRCFury not installed ⇒ no VRCFury seam
 
-            var getLinks = svcType.GetMethod("GetLinks", BindingFlags.Public | BindingFlags.Static);
-            // The full parameter SHAPE is asserted at pin time — types, not arity alone — so a signature
-            // change fails HERE as named drift. Arity alone passes on 1.1380.0 (param 3 is
-            // IReadOnlyList<VRCFObjectPathCache> there) and the invoke then throws ArgumentException into
-            // ClassifyReflect's wrong arm; the type assert is what closes that.
-            if (getLinks == null || !ParamTypesAre(getLinks, armLinkType, vfGoType, pathCacheType, armCacheType))
-                throw new MissingMethodException("ArmatureLinkService.GetLinks(ArmatureLink, VFGameObject, VRCFObjectPathCache, VRCFArmatureCache)");
-            var pathCacheFactory = pathCacheType.GetMethod("GetPerFrame", BindingFlags.Public | BindingFlags.Static);
-            if (pathCacheFactory == null || !ParamTypesAre(pathCacheFactory, vfGoType))
-                throw new MissingMethodException("VRCFObjectPathCache.GetPerFrame(VFGameObject)");
-            var armCacheFactory = armCacheType.GetMethod("GetPerFrame", BindingFlags.Public | BindingFlags.Static);
-            if (armCacheFactory == null || !ParamTypesAre(armCacheFactory, vfGoType))
-                throw new MissingMethodException("VRCFArmatureCache.GetPerFrame(VFGameObject)");
-            var contentField = vrcfType.GetField("content", BindingFlags.Public | BindingFlags.Instance);
-            if (contentField == null) throw new MissingFieldException("VRCFury.content");
-            // Scale-at-bake detection: forceOneWorldScale (bool field on the ArmatureLink model) OR a non-unit
-            // GetScalingFactor Item3. A scaled bake makes edit-time world-position coincidence meaningless (the
-            // baker rescales the whole prop), so we can't certify from the edit-time pose — REFUSE (abstain).
-            var forceField = armLinkType.GetField("forceOneWorldScale", BindingFlags.Public | BindingFlags.Instance);
-            if (forceField == null) throw new MissingFieldException("ArmatureLink.forceOneWorldScale");
-            var getScaling = svcType.GetMethod("GetScalingFactor", BindingFlags.Public | BindingFlags.Static);
-            if (getScaling == null || getScaling.GetParameters().Length != 2
-                || getScaling.GetParameters()[0].ParameterType != armLinkType)
-                throw new MissingMethodException("ArmatureLinkService.GetScalingFactor(ArmatureLink, Links)");
-
-            var avatarVfGo = ToVfGameObject(vfGoType, avatarGO);
+            var avatarVfGo = VendorReflect.ToVfGameObject(pins.VfGoType, avatarGO);
             object objectPaths = null, armatureCache = null; // lazy — see the collector comment above
 
-            foreach (var comp in mergeGO.GetComponentsInChildren(vrcfType, true))
+            foreach (var comp in mergeGO.GetComponentsInChildren(pins.VrcfType, true))
             {
                 try
                 {
-                    var content = contentField.GetValue(comp);
-                    if (content == null || !armLinkType.IsInstanceOfType(content)) continue; // not an ArmatureLink feature
-                    if (objectPaths == null) objectPaths = pathCacheFactory.Invoke(null, new object[] { avatarVfGo });
-                    if (armatureCache == null) armatureCache = armCacheFactory.Invoke(null, new object[] { avatarVfGo });
-                    var links = getLinks.Invoke(null, new object[] { content, avatarVfGo, objectPaths, armatureCache });
+                    var content = pins.ContentField.GetValue(comp);
+                    if (content == null || !pins.ArmLinkType.IsInstanceOfType(content)) continue; // not an ArmatureLink feature
+                    if (objectPaths == null) objectPaths = pins.PathCacheFactory.Invoke(null, new object[] { avatarVfGo });
+                    if (armatureCache == null) armatureCache = pins.ArmCacheFactory.Invoke(null, new object[] { avatarVfGo });
+                    var links = pins.GetLinks.Invoke(null, new object[] { content, avatarVfGo, objectPaths, armatureCache });
                     if (links == null) throw new NullReferenceException("GetLinks returned null (propBone == null)");
 
+                    // Scale-at-bake detection: forceOneWorldScale (bool field on the ArmatureLink model) OR a
+                    // non-unit GetScalingFactor Item3. A scaled bake makes edit-time world-position coincidence
+                    // meaningless (the baker rescales the whole prop), so we can't certify from the edit-time
+                    // pose — REFUSE (abstain).
                     if (res.ScaleBakeReason == null) // GetScalingFactor(model, links) → (float,float,float); Item3 = factor
                     {
-                        bool forceOne = (bool)forceField.GetValue(content);
-                        var factorTuple = getScaling.Invoke(null, new object[] { content, links });
+                        bool forceOne = (bool)pins.ForceOneWorldScaleField.GetValue(content);
+                        var factorTuple = pins.GetScalingFactor.Invoke(null, new object[] { content, links });
                         float factor = 1f;
                         if (factorTuple != null)
                         {
@@ -736,41 +698,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                         if (item2 == null) throw new MissingFieldException(pt.Name, "Item2");
                         var mergeVf = item1.GetValue(pair); // prop/merge
                         var baseVf = item2.GetValue(pair);  // avatar/base
-                        res.Pairs.Add(new BonePair { Base = FromVfGameObject(vfGoType, baseVf), Merge = FromVfGameObject(vfGoType, mergeVf) });
+                        res.Pairs.Add(new BonePair { Base = VendorReflect.FromVfGameObject(pins.VfGoType, baseVf),
+                                                     Merge = VendorReflect.FromVfGameObject(pins.VfGoType, mergeVf) });
                     }
                 }
                 catch (Exception e) { ClassifyReflect(e, res); }
             }
-        }
-
-        // Transform/GameObject → VFGameObject via the explicit op_Implicit (reflection won't apply it implicitly).
-        private static object ToVfGameObject(Type vfGoType, GameObject go)
-        {
-            foreach (var m in vfGoType.GetMethods(BindingFlags.Public | BindingFlags.Static))
-            {
-                if (m.Name != "op_Implicit" || m.ReturnType != vfGoType) continue;
-                var ps = m.GetParameters();
-                if (ps.Length != 1) continue;
-                if (ps[0].ParameterType == typeof(Transform)) return m.Invoke(null, new object[] { go.transform });
-                if (ps[0].ParameterType == typeof(GameObject)) return m.Invoke(null, new object[] { go });
-            }
-            throw new MissingMethodException("op_Implicit(Transform|GameObject) → VFGameObject");
-        }
-
-        // VFGameObject → Transform via the explicit op_Implicit (either the Transform or the GameObject operator).
-        private static Transform FromVfGameObject(Type vfGoType, object vfGo)
-        {
-            if (vfGo == null) return null;
-            foreach (var m in vfGoType.GetMethods(BindingFlags.Public | BindingFlags.Static))
-            {
-                if (m.Name != "op_Implicit") continue;
-                var ps = m.GetParameters();
-                if (ps.Length != 1 || ps[0].ParameterType != vfGoType) continue;
-                var result = m.Invoke(null, new object[] { vfGo });
-                if (result is Transform t) return t;
-                if (result is GameObject g) return g.transform;
-            }
-            throw new MissingMethodException("op_Implicit(VFGameObject) → Transform|GameObject");
         }
 
         private static HumanoidMap DefaultResolveHumanoid(GameObject baseGO)
