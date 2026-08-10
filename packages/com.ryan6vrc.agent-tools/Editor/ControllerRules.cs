@@ -32,15 +32,18 @@ namespace Ryan6Vrc.AgentTools.Editor
         // they must be exempt from undeclaredParam or the rule FAILs every real controller. This mirrors
         // the SDK's reserved-parameter list (VRCExpressionParameters / the avatar-parameters docs); it is
         // the source of truth, this array only tracks it. If the SDK exposes this set at compile time,
-        // prefer querying it over this literal. `IsAnimatorEnabled` is documented thinly and is easy to
-        // mistake for an author-declared name; it is a built-in, and VRCFury's own VRChatGlobalParams
-        // (FullControllerBuilder.cs) carries it, short-circuiting its param prefixing for it. Do not drop it.
+        // prefer querying it over this literal. `IsAnimatorEnabled` and `PreviewMode` are documented
+        // thinly and are easy to mistake for author-declared names. Both are built-ins: VRCFury's own
+        // VRChatGlobalParams (FullControllerBuilder.cs) carries each and short-circuits its param
+        // prefixing for them, and av3emulator declares both as adjacent BuiltinParameterDefinitions
+        // (LyumaAv3Runtime.cs). Two independent implementations, same treatment — do not drop either.
         private static readonly string[] VrcReservedParams =
         {
             "IsLocal", "Viseme", "Voice", "GestureLeft", "GestureRight", "GestureLeftWeight",
             "GestureRightWeight", "AngularY", "VelocityX", "VelocityY", "VelocityZ", "VelocityMagnitude",
             "Upright", "Grounded", "Seated", "AFK", "TrackingType", "VRMode", "MuteSelf", "InStation",
-            "Earmuffs", "IsOnFriendsList", "AvatarVersion", "IsAnimatorEnabled", "ScaleModified", "ScaleFactor",
+            "Earmuffs", "IsOnFriendsList", "AvatarVersion", "IsAnimatorEnabled", "PreviewMode",
+            "ScaleModified", "ScaleFactor",
             "ScaleFactorInverse", "EyeHeightAsMeters", "EyeHeightAsPercent",
         };
 

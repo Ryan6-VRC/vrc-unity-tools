@@ -404,6 +404,12 @@ public class ControllerRulesTests
     public void IsVrcReserved_IsAnimatorEnabled_IsABuiltIn()
         => Assert.IsTrue(ControllerRules.IsVrcReserved("IsAnimatorEnabled"));
 
+    // Its neighbour in both VRCFury's VRChatGlobalParams and av3emulator's builtin table. Exempting one
+    // and not the other left the identical latent false-FAIL a single name over.
+    [Test]
+    public void IsVrcReserved_PreviewMode_IsABuiltIn()
+        => Assert.IsTrue(ControllerRules.IsVrcReserved("PreviewMode"));
+
     [Test]
     public void IsVrcReserved_AnAuthoredName_IsNotReserved()
         => Assert.IsFalse(ControllerRules.IsVrcReserved("IsAnimatorEnabledToo"));

@@ -632,6 +632,24 @@ public class ControllerFixpointTests
     public void ForeignProjectPathLines_BareWordAssets_DoesNotFire()
         => Assert.IsEmpty(ControllerFixpoint.ForeignProjectPathLines("m_Name: MyAssets"));
 
+    // The case the test above LOOKS like it covers and does not: a word ending in "Assets" followed by
+    // a slash. `Assets/` must start a path segment, or a project's own MyAssets/ folder is a hard FAIL
+    // carrying a diagnostic about a VRCFury back-fill that never happened.
+    [Test]
+    public void ForeignProjectPathLines_WordEndingInAssetsWithSlash_DoesNotFire()
+    {
+        Assert.IsEmpty(ControllerFixpoint.ForeignProjectPathLines("m_Name: MyAssets/Thing"));
+        Assert.IsEmpty(ControllerFixpoint.ForeignProjectPathLines("path: MyProjectAssets/Sub/x.mat"));
+    }
+
+    // …while a real segment boundary still fires, whatever precedes it.
+    [Test]
+    public void ForeignProjectPathLines_AssetsAtSegmentBoundary_Fires()
+    {
+        Assert.IsNotEmpty(ControllerFixpoint.ForeignProjectPathLines("id: abc|Assets/Avatars/X.controller"));
+        Assert.IsNotEmpty(ControllerFixpoint.ForeignProjectPathLines("path: Some/Where/Assets/X.mat"));
+    }
+
     // One pathological line cannot swamp the gate's single-line FAIL message.
     [Test]
     public void ForeignProjectPathLines_LongLineIsTruncated()
