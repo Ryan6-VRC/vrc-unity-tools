@@ -389,4 +389,38 @@ public class ControllerRulesTests
         Assert.IsNotNull(o);
         StringAssert.Contains("synced layer", o.Where, "the offender names the synced layer as its site");
     }
+
+    // ── IsVrcReserved: the built-in exempt set ─────────────────────────────────────────────────────
+    //
+    // Two consumers, one predicate: the undeclared-param rule exempts these names, and CompileController's
+    // VRCExpressionParameters emitter uses the same answer to keep built-ins out of the emitted params
+    // asset. A name missing here is therefore both a false FAIL and a parameter the emitter publishes onto
+    // an avatar that already owns it.
+
+    // `IsAnimatorEnabled` is documented thinly enough to read as an author-declared name; it is a VRChat
+    // built-in, carried by VRCFury's own VRChatGlobalParams (FullControllerBuilder.cs), which short-circuits
+    // param prefixing for it. Pinned so the emitter's exemption cannot be dropped by a tidying pass.
+    [Test]
+    public void IsVrcReserved_IsAnimatorEnabled_IsABuiltIn()
+        => Assert.IsTrue(ControllerRules.IsVrcReserved("IsAnimatorEnabled"));
+
+    // Its neighbour in both VRCFury's VRChatGlobalParams and av3emulator's builtin table. Exempting one
+    // and not the other left the identical latent false-FAIL a single name over.
+    [Test]
+    public void IsVrcReserved_PreviewMode_IsABuiltIn()
+        => Assert.IsTrue(ControllerRules.IsVrcReserved("PreviewMode"));
+
+    [Test]
+    public void IsVrcReserved_AnAuthoredName_IsNotReserved()
+        => Assert.IsFalse(ControllerRules.IsVrcReserved("IsAnimatorEnabledToo"));
+
+    // Ordinal set membership — an exact-case match or nothing. A near-miss must NOT be exempted, or a real
+    // undeclared-parameter typo would pass the rule silently.
+    [Test]
+    public void IsVrcReserved_IsCaseSensitive()
+        => Assert.IsFalse(ControllerRules.IsVrcReserved("isAnimatorEnabled"));
+
+    [Test]
+    public void IsVrcReserved_Null_IsNotReserved()
+        => Assert.IsFalse(ControllerRules.IsVrcReserved(null));
 }

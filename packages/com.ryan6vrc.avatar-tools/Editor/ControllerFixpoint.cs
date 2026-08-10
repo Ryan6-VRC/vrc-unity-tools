@@ -28,13 +28,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // in one Editor seconds apart produce byte-different files (measured across all 17 library
     // documents — every one byte-different, every one content-identical). A byte gate would fail every
     // entry on every run. Flat single-document assets (*_Parameters.asset, *_Menu.asset) have no
-    // sub-asset ids and DO compare byte-stable, but see above: there is nothing there to guard.
+    // sub-asset ids and DO compare byte-stable. *_Menu.asset is compared (MenuPresence/MenuDiff).
+    // *_Parameters.asset is NOT, and that is a real hole rather than a considered omission: the
+    // emitter filters on `!p.Scratch && !ControllerRules.IsVrcReserved(p.Name)`, so changing the
+    // reserved-name set silently adds or drops entries in every emitted params asset while both
+    // sides of decompile-equality stay identical (the .controller carries no notion of either flag)
+    // and this gate reports PASS. Any change to that set therefore has to be settled by diffing the
+    // committed *_Parameters.asset by hand, because nothing here will.
     //
     // A committed built .controller lives at an arbitrary --root filesystem path, not under the
     // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
     // A second RunGate pass loads each entry's prefab(s) the same way — copied into Assets/ to
-    // import — and fails any with a missing MonoBehaviour script or an anchor seam; the coverage a
-    // Structural Module (a prefab, no controller.yaml) otherwise never gets.
+    // import — and fails any with a missing MonoBehaviour script, an anchor seam, or a committed
+    // consuming-project path (ForeignProjectPathLines); the coverage a Structural Module (a prefab, no
+    // controller.yaml) otherwise never gets. That last one is the one check here that DOES guard
+    // hand-authored content, and it is not the exception the paragraph above forbids: it reads the
+    // committed prefab, which is hand-authored source, never built/.
     public static class ControllerFixpoint
     {
         static string Decode(AnimatorController c, out string refusal)
@@ -378,6 +387,32 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     var rel = Path.GetFullPath(src).Substring(entryFull.Length).TrimStart('/', '\\');
                     var label = rel.Replace('\\', '/');
+
+                    // Provenance, checked on the COMMITTED text and before the load, so a prefab that fails
+                    // to load still gets this verdict — the two defects are independent.
+                    var foreign = ForeignProjectPathLines(File.ReadAllText(src));
+                    if (foreign.Count > 0)
+                    {
+                        // The per-line truncation bounds one line, not the join — six leaked lines was
+                        // the motivating case, and N of them still swamp a single-line FAIL. Cap the list.
+                        var shown = foreign.Count > 5
+                            ? string.Join("; ", foreign.GetRange(0, 5)) + $"; and {foreign.Count - 5} more"
+                            : string.Join("; ", foreign);
+                        offenders.Add($"{label} names a consuming project's Assets/ path on {foreign.Count} line(s) — " +
+                                      shown +
+                                      ". A VPM package resolves nothing under Assets/: this is a cached asset " +
+                                      "reference back-filled with the path of whatever project last inspected the " +
+                                      "prefab (VRCFury stores each reference as `<guid>|<path>` and fills `path` on " +
+                                      "first inspection), and committing it publishes that project's layout. Fix: " +
+                                      "re-resolve the reference in an Editor that mounts this library as a package " +
+                                      "so the cached path names Packages/<this package>/…, then commit that line. " +
+                                      "Blanking the path by hand is not a fix: the next inspection refills it from " +
+                                      "whichever project does the inspecting");
+                        // One leaky prefab is one offender. Adding foreign.Count weighted it by line
+                        // count against every other defect here, which counts one per defect.
+                        offenderCount += 1;
+                    }
+
                     var go = AssetDatabase.LoadAssetAtPath<GameObject>(ToAssetsRelative(Path.Combine(full, rel)));
                     if (go == null) { offenders.Add(label + " (failed to load)"); offenderCount++; continue; }
                     int missing = 0;
@@ -403,6 +438,45 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             catch (Exception e) { return (false, e.Message); }
             finally { CleanupScratch(scratch); }
+        }
+
+        // Every line of a committed prefab's text carrying the substring `Assets/` — a path that can only have
+        // come from the project that last inspected the prefab, since a VPM package resolves its own content
+        // under `Packages/<name>/` and never under `Assets/`. The leak path is a cached asset reference:
+        // VRCFury stores one as `<guid>|<path>` and back-fills `path` on first inspection, so an Editor that
+        // mounts this library writable (a `file:` mount, not Library/PackageCache) writes its own project
+        // layout into tracked source, where a commit publishes it permanently.
+        //
+        // Judgment-free by construction: presence of the substring is the whole predicate — no allowlist, no
+        // knob, no attempt to tell a leaked path from an intentional one, because at gate tier there is no
+        // such thing as an intentional one. Measured over this library at the time of the change: 0 of 31
+        // committed prefabs contain `Assets/`, while 17 of 31 carry a `<guid>|<path>` pair that can acquire it
+        // — a zero false-positive surface against a live leak surface of 17.
+        //
+        // `Assets/` has to START a path segment. A bare substring test also fires on a project's own
+        // `MyAssets/` folder or a mesh named `ExtraAssets/…` — legal content, failed by a diagnostic
+        // that names the wrong defect entirely and sends the reader hunting a VRCFury back-fill that
+        // was never there. The lookbehind is the whole difference; the breadth is otherwise kept,
+        // because at gate tier there is no such thing as an intentional `Assets/` path.
+        private static readonly System.Text.RegularExpressions.Regex ForeignProjectPath =
+            new System.Text.RegularExpressions.Regex(@"(?<![A-Za-z0-9_])Assets/",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        // Returns `line <n>: <text>` handles (1-based, matching an editor's gutter), each truncated so one
+        // pathological line cannot swamp the gate's single-line FAIL message.
+        internal static System.Collections.Generic.List<string> ForeignProjectPathLines(string prefabText)
+        {
+            var hits = new System.Collections.Generic.List<string>();
+            if (string.IsNullOrEmpty(prefabText)) return hits;
+            var lines = prefabText.Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                if (!ForeignProjectPath.IsMatch(lines[i])) continue;
+                var text = lines[i].TrimEnd('\r').Trim();
+                if (text.Length > 160) text = text.Substring(0, 160) + "…";
+                hits.Add($"line {i + 1}: {text}");
+            }
+            return hits;
         }
 
         // Tier is derived from files present; a GUID-consumer shape (a prefab, a non-empty assets/, or a
@@ -456,8 +530,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // (a multi-controller entry ships an FX + Gesture pair), each against built/<name>.controller.
         // A built controller no document claims is drift and fails the entry. Exits 0 iff all pass.
         // A second pass enumerates every non-dot dir shipping a prefab (controller.yaml or not) and
-        // asserts each imports with zero missing MonoBehaviour scripts and carries no anchor seam
-        // (CheckAvatar.ScanAnchorSeams).
+        // asserts each imports with zero missing MonoBehaviour scripts, carries no anchor seam
+        // (CheckAvatar.ScanAnchorSeams), and names no consuming project's Assets/ path
+        // (ForeignProjectPathLines).
         public static void RunGate()
         {
             string root = null;
@@ -534,7 +609,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Second pass: every non-dot dir shipping a prefab must import with zero missing scripts.
             // Structural Modules (a prefab, no controller.yaml) are invisible to the loop above; this
             // pass covers them and every other entry's prefab alike — a vanished VRCFury/MA script ref
-            // is the regression it catches. Script integrity only; behaviour still rests on the README.
+            // is the regression it catches. It also asserts provenance on the committed text
+            // (ForeignProjectPathLines). Integrity and provenance only; behaviour still rests on the README.
             var prefabEntries = Directory.GetDirectories(root)
                 .Where(d => !Path.GetFileName(d).StartsWith("."))
                 .Where(d => Directory.GetFiles(d, "*.prefab", SearchOption.AllDirectories).Length > 0)
