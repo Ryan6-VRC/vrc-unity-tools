@@ -385,6 +385,104 @@ namespace Ryan6Vrc.AgentTools.Editor
             return written;
         }
 
+        /// <summary>Which parameters a controller READS and which it WRITES, each mapped to every site that
+        /// does it. The traversals are the lint rules' own — the same walks, the same vendor semantics, run
+        /// for a report instead of a verdict — so a provenance table and a lint can never disagree about
+        /// where a parameter is touched.
+        ///
+        /// Reads: transition conditions (AnyState, Entry, sub-state-machine edges, state transitions), the
+        /// four per-state motion parameters, blend-tree axes and Direct children, and a driver <c>Copy</c>'s
+        /// source. Writes: every driver op's destination, synced-layer override drivers, and clip parameter
+        /// curves. A parameter both read and written appears in both, which is the normal case for a
+        /// latch — this is a census, not a classification.
+        ///
+        /// The clip-curve half covers DECLARED parameters only, because <see cref="ParamCurveWrites"/> is
+        /// the shared input to the write rules and an undeclared curve target is already an error there;
+        /// a caller reporting provenance should say so rather than imply the census is exhaustive.</summary>
+        internal static ParamUsage CollectParamUsage(AnimatorController controller)
+        {
+            var usage = new ParamUsage
+            {
+                Reads = new Dictionary<string, List<string>>(StringComparer.Ordinal),
+                Writes = new Dictionary<string, List<string>>(StringComparer.Ordinal),
+            };
+            if (controller == null) return usage;
+
+            void At(Dictionary<string, List<string>> into, string name, string where)
+            {
+                if (string.IsNullOrEmpty(name)) return;
+                if (!into.TryGetValue(name, out var l)) into[name] = l = new List<string>();
+                if (!l.Contains(where)) l.Add(where);
+            }
+            void Read(string name, string where) => At(usage.Reads, name, where);
+            void Write(string name, string where) => At(usage.Writes, name, where);
+            void Conds(AnimatorCondition[] conds, string where)
+            {
+                if (conds == null) return;
+                foreach (var cd in conds) Read(cd.parameter, where);
+            }
+
+            var states = new List<StateCtx>();
+            var machines = new List<SmCtx>();
+            var layers = controller.layers;
+            for (int li = 0; li < layers.Length; li++)
+            {
+                var layer = layers[li];
+                if (layer.syncedLayerIndex >= 0) continue; // handled by the synced-override walk below
+                if (layer.stateMachine == null) continue;
+                CollectSm(layer.stateMachine, layer.name, li, "", states, machines);
+            }
+
+            foreach (var m in machines)
+            {
+                foreach (var t in m.Sm.anyStateTransitions) Conds(t.conditions, m.Path + " AnyState");
+                foreach (var t in m.Sm.entryTransitions) Conds(t.conditions, m.Path + " Entry");
+                foreach (var child in m.Sm.stateMachines)
+                    if (child.stateMachine != null)
+                        foreach (var t in m.Sm.GetStateMachineTransitions(child.stateMachine))
+                            Conds(t.conditions, m.Path + " → " + child.stateMachine.name);
+                if (m.Sm.behaviours != null)
+                    foreach (var b in m.Sm.behaviours)
+                        DriverOps(b, m.Path + " (SM driver)", (n, w, isSource) =>
+                        { if (isSource) Read(n, w); else Write(n, w); });
+            }
+            foreach (var s in states)
+            {
+                var st = s.State;
+                foreach (var t in st.transitions) Conds(t.conditions, s.Path);
+                if (st.speedParameterActive) Read(st.speedParameter, s.Path + " speedParameter");
+                if (st.timeParameterActive) Read(st.timeParameter, s.Path + " motionTime");
+                if (st.mirrorParameterActive) Read(st.mirrorParameter, s.Path + " mirrorParameter");
+                if (st.cycleOffsetParameterActive) Read(st.cycleOffsetParameter, s.Path + " cycleOffset");
+                BlendParams(st.motion, s.Path, Read);
+                if (st.behaviours != null)
+                    foreach (var b in st.behaviours)
+                        DriverOps(b, s.Path + " (driver)", (n, w, isSource) =>
+                        { if (isSource) Read(n, w); else Write(n, w); });
+            }
+
+            for (int li = 0; li < layers.Length; li++)
+            {
+                var layer = layers[li];
+                if (layer.syncedLayerIndex < 0 || layer.syncedLayerIndex >= layers.Length) continue;
+                var src = layers[layer.syncedLayerIndex].stateMachine;
+                if (src == null) continue;
+                WalkSyncedOverrideDrivers(src, layer, layer.name ?? ("layer " + li), (n, w, isSource) =>
+                { if (isSource) Read(n, w); else Write(n, w); });
+            }
+
+            foreach (var kv in ParamCurveWrites(controller))
+                Write(kv.Key, "clip `" + kv.Value + "` (parameter curve)");
+
+            return usage;
+        }
+
+        internal struct ParamUsage
+        {
+            public Dictionary<string, List<string>> Reads;
+            public Dictionary<string, List<string>> Writes;
+        }
+
         // ----- Rule 3: entryShadow (error, deterministic) -------------------------------------------
         // An earlier UNCONDITIONAL entry transition makes every later entry transition unreachable.
         private static void RuleEntryShadow(List<SmCtx> machines, LintResult rep)

@@ -33,11 +33,13 @@ internal static class CheckAvatarFixture
         return go;
     }
 
-    // Seams live on CheckAvatar (frame/merge seams) or VendorReflect (the shared AOR boxing/pin seams) —
-    // one lookup covers both homes so a test names the seam, not the type that holds it.
+    // Seams live on CheckAvatar (its own merge seams), VendorReflect (the shared AOR boxing/pin seams),
+    // or MergeSurfaces (the shared surface enumeration's) — one lookup covers every home so a test names
+    // the seam, not the type that holds it, and lifting code into shared use is not a test edit.
     private static FieldInfo SeamField(string field) =>
         typeof(CheckAvatar).GetField(field, BindingFlags.NonPublic | BindingFlags.Static)
-        ?? typeof(VendorReflect).GetField(field, BindingFlags.NonPublic | BindingFlags.Static);
+        ?? typeof(VendorReflect).GetField(field, BindingFlags.NonPublic | BindingFlags.Static)
+        ?? typeof(MergeSurfaces).GetField(field, BindingFlags.NonPublic | BindingFlags.Static);
 
     internal static void SetSeam(string field, object value) => SeamField(field).SetValue(null, value);
 
