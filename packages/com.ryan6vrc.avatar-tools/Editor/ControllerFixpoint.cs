@@ -14,9 +14,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // primitives: decode(c) = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(c).Doc), the same
     // canonical string the fixpoint tests trust.
     //
-    // THE ONE QUESTION THIS GATE ASKS: was built/ regenerated after its source yaml changed? In
-    // vrc-patterns the yaml is the source of truth and built/ is a generated artifact, committed only
-    // so prefabs can resolve it by GUID and so a study entry opens in the animator window. Nobody
+    // THE ONE QUESTION THIS GATE ASKS: does committed built/ match what the compiler emits from its yaml
+    // TODAY? A stale regeneration after a yaml edit is the common cause but not the only one — a change to
+    // the emitter's own filters fails a document whose yaml nobody touched, which is what the params pass
+    // below exists for. In vrc-patterns the yaml is the source of truth and built/ is a generated artifact,
+    // committed only so prefabs can resolve it by GUID and so a study entry opens in the animator window. Nobody
     // hand-maintains it. So a field the schema does not model does not matter here — and one that DOES
     // matter is a reason to grow the schema, never a reason to tighten this comparison. Do not add a
     // check that guards hand-authored content in a generated directory; that category is empty by
@@ -27,14 +29,34 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // Unity assigns .controller sub-asset fileIDs non-deterministically: two compiles of the SAME yaml
     // in one Editor seconds apart produce byte-different files (measured across all 17 library
     // documents — every one byte-different, every one content-identical). A byte gate would fail every
-    // entry on every run. Flat single-document assets (*_Parameters.asset, *_Menu.asset) have no
-    // sub-asset ids and DO compare byte-stable. *_Menu.asset is compared (MenuPresence/MenuDiff).
-    // *_Parameters.asset is NOT, and that is a real hole rather than a considered omission: the
-    // emitter filters on `!p.Scratch && !ControllerRules.IsVrcReserved(p.Name)`, so changing the
-    // reserved-name set silently adds or drops entries in every emitted params asset while both
-    // sides of decompile-equality stay identical (the .controller carries no notion of either flag)
-    // and this gate reports PASS. Any change to that set therefore has to be settled by diffing the
-    // committed *_Parameters.asset by hand, because nothing here will.
+    // entry on every run.
+    //
+    // The two flat emitted assets get their own passes, because decompile-equality cannot reach either:
+    // *_Menu.asset (MenuPresence/MenuDiff) and *_Parameters.asset (ParamsPresence/ParamsDiff). The params
+    // pass exists because the emitter filters on `!p.Scratch && !ControllerRules.IsVrcReserved(p.Name)`
+    // and the .controller carries no notion of either flag — so flipping a `scratch:` or changing the
+    // reserved-name set silently adds or drops entries in every emitted params asset while both sides of
+    // decompile-equality stay identical. What makes that worth a check rather than a warning is that the
+    // TRIGGER LIVES IN A DIFFERENT REPO FROM THE ARTIFACT IT DAMAGES — ControllerRules.VrcReservedParams
+    // here, built/*_Parameters.asset in vrc-patterns — so nothing routes the author who trips it to this
+    // comment, and ordering the two commits correctly rests on the author already knowing.
+    //
+    // Both flat passes are STRUCTURAL, not byte compares, and for one shared reason plus one that differs.
+    // Shared: the gate's failure message is its product, and a byte mismatch on a 104-parameter asset
+    // (object-sync) names no offender at all — it hands the reader back exactly the hand-diff these passes
+    // exist to retire. Differing: a *_Parameters.asset really is one flat document and WOULD compare
+    // byte-stable, so there the choice is diagnostic quality alone; a *_Menu.asset does NOT, because
+    // sub-menu pages persist as sub-assets of the one file (CompileController's AddObjectToAsset) and carry
+    // the same non-deterministic fileIDs a .controller does — see MenuDiff's own header.
+    //
+    // COVERAGE LIMIT, so a PASS is never read as wider than it is: RunGate selects entries for the three
+    // passes ABOVE (controller, menu, params) with a NON-RECURSIVE Directory.GetDirectories(root), so a
+    // nested entry is outside all three — compositions/object-sync-demo/ (and its own nested object-sync/),
+    // object-sync/y/, object-sync/y_double/. That is 4 of the library's 22 committed params assets, and it
+    // includes a second copy of object-sync's that can diverge from its gated twin unseen. The
+    // prefab-integrity pass below does NOT share this limit: it selects with SearchOption.AllDirectories and
+    // copies each entry whole, so a nested entry's prefabs are checked as part of their parent. Widening the
+    // other three is a separate change; they inherit the blind spot rather than fixing it.
     //
     // A committed built .controller lives at an arbitrary --root filesystem path, not under the
     // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
@@ -178,6 +200,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         if (diff != null) return (false, "committed built/ menu differs from compile(yaml): " + diff + " — regenerate built/");
                     }
                 }
+
+                // The PARAMS pass. Same blind spot as the menu's and a different cause: the params asset is
+                // emitted from flags (`scratch:`, VRC-reserved) the .controller does not carry, so both sides
+                // of decompile-equality agree while the emitted list changes underneath. Its own block rather
+                // than an extension of the menu's — that one has already bound `pass`/`presenceMsg`.
+                if (builtControllerPath != null)
+                {
+                    var freshParams = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(
+                        ParamsBeside(AssetDatabase.GetAssetPath(cFresh)));
+                    var committedParamsPath = ParamsBeside(builtControllerPath);
+
+                    var (pPass, pMsg) = ParamsPresence(freshParams, File.Exists(committedParamsPath));
+                    if (pPass == MenuPass.Fail) return (false, pMsg);
+                    if (pPass == MenuPass.Compare)
+                    {
+                        var importedParams = ImportCommittedParams(committedParamsPath, scratch + "/params");
+                        if (importedParams == null) return (false, "committed params asset failed to import");
+                        var pDiff = ParamsDiff(importedParams, freshParams, "params");
+                        // NOT "— regenerate built/". Regenerating is the fix for exactly one of the two causes,
+                        // and is actively wrong for the other: if the reserved-name set or a `scratch:` flag
+                        // changed, regenerating commits that change into the artifact and turns this gate green
+                        // on the regression it just caught. Same shape as ForeignProjectPathLines naming the
+                        // non-fix, and for the same reason — the obvious remedy here launders the defect.
+                        if (pDiff != null)
+                            return (false, "committed built/ params differ from compile(yaml): " + pDiff +
+                                           " — regenerating built/ is the fix ONLY if the yaml's own parameter list " +
+                                           "changed on purpose. If a `scratch:` flag or ControllerRules.VrcReservedParams " +
+                                           "changed, settle that first: regenerating blind commits it as though reviewed");
+                    }
+                }
                 return (true, "OK");
             }
             catch (Exception e) { return (false, e.Message); }
@@ -227,6 +279,38 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var dir = Path.GetDirectoryName(controllerPath) ?? "";
             return Path.Combine(dir, Path.GetFileNameWithoutExtension(controllerPath) + "_Menu.asset")
                        .Replace('\\', '/');
+        }
+
+        // The params asset CompileController writes beside a controller, by the same formula it uses
+        // (CompileController.cs: emitDir + "/" + name + "_Parameters.asset"). Path arithmetic only — the
+        // file need not exist.
+        //
+        // A SECOND named helper rather than one AssetBeside(path, suffix) shared with MenuBeside, for the
+        // reason MenuBeside's header gives: each copy is kept in step with the compiler's own formula by a
+        // suite pinning it against literals. One suffix-taking helper would let a single wrong call site
+        // satisfy both pins at once.
+        internal static string ParamsBeside(string controllerPath)
+        {
+            var dir = Path.GetDirectoryName(controllerPath) ?? "";
+            return Path.Combine(dir, Path.GetFileNameWithoutExtension(controllerPath) + "_Parameters.asset")
+                       .Replace('\\', '/');
+        }
+
+        // Copy the committed params asset (+ its .meta, for the committed GUID) into Assets/ and load it.
+        // Same constraint as ImportCommitted: entry files live outside the project and cannot be loaded in
+        // place. The single-file copy also carries ImportCommitted's collision caveat — anchor-prop ships an
+        // FX + Gesture pair and one params asset, so only the named file may be copied per checked document.
+        static VRCExpressionParameters ImportCommittedParams(string paramsPath, string destAssetsDir)
+        {
+            var full = Path.GetFullPath(destAssetsDir);
+            Directory.CreateDirectory(full);
+            var src = Path.GetFullPath(paramsPath);
+            File.Copy(src, Path.Combine(full, Path.GetFileName(src)), true);
+            if (File.Exists(src + ".meta"))
+                File.Copy(src + ".meta", Path.Combine(full, Path.GetFileName(src) + ".meta"), true);
+            AssetDatabase.Refresh();
+            return AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(
+                ToAssetsRelative(Path.Combine(full, Path.GetFileName(paramsPath))));
         }
 
         // Copy the committed menu (+ its .meta, for the committed GUID) into Assets/ and load it. Same
@@ -316,6 +400,102 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
             return null;
+        }
+
+        // The params equivalent of MenuPresence, and it takes the TYPED ASSET rather than a bool for the
+        // same reason — two same-typed bool parameters would let a caller swap them, compile, and invert
+        // which refusal fires, with nothing in this file's suite invoking Check to catch it.
+        //
+        // The Skip leg is NOT dead code: EmitVrcParameters early-returns when every declared param is
+        // scratch: or VRC-reserved, and the library exercises that today — anchor-prop/gesture.yaml declares
+        // one param, `scratch: true`, so anchor-prop ships two controllers and ONE params asset.
+        internal static (MenuPass pass, string msg) ParamsPresence(VRCExpressionParameters fresh, bool committedExists)
+        {
+            bool freshEmits = fresh != null;
+            if (!freshEmits && committedExists)
+                return (MenuPass.Fail, "built/ ships a params asset the yaml no longer emits — delete it if " +
+                                       "those parameters were removed on purpose, or restore them if a `scratch:` " +
+                                       "flag or the reserved-name set wrongly emptied the list");
+            if (freshEmits && !committedExists)
+                // Conditional for the same reason the ParamsDiff call site is: a document that emitted nothing
+                // and now emits something is EITHER a yaml gaining its first non-scratch param (regenerate) OR
+                // a `scratch:` flipped off / a name leaving the reserved set (settle that first). Regenerating
+                // blind on the second commits the change as though it had been reviewed.
+                return (MenuPass.Fail, "yaml emits parameters but built/ has none — regenerating built/ is the " +
+                                       "fix ONLY if the yaml's own parameter list changed on purpose. If a " +
+                                       "`scratch:` flag or ControllerRules.VrcReservedParams changed, settle " +
+                                       "that first: regenerating blind commits it as though reviewed");
+            return (freshEmits ? MenuPass.Compare : MenuPass.Skip, null);
+        }
+
+        // Structural comparison of two emitted params assets. Flat — five scalars per entry, no recursion,
+        // no control-type variants — so unlike MenuDiff there is nothing to address by page path.
+        //
+        // ON A COUNT MISMATCH THIS NAMES THE PARAMETERS, and that clause is the whole reason this pass beats
+        // a byte compare. The defect class it exists to catch (a `scratch:` flip, a reserved-name change)
+        // adds or drops exactly one entry, so it ALWAYS lands on the count leg and never reaches the loop
+        // below. MenuDiff returns a bare count there and is right to — a menu page holds a handful of
+        // controls — but object-sync's params asset holds 104, where two integers tell the reader nothing
+        // and send them back to the hand-diff this pass replaces. Names are capped like the prefab pass's
+        // offender list: five, then a count.
+        //
+        // DOES NOT COMPARE m_Name, and that is load-bearing rather than an oversight. MenuDiff compares the
+        // page name because CompileController syncs existingMenu.name on its reuse path; the params branch
+        // beside it never syncs m_Name (it assigns .parameters only), so a committed asset carrying a stale
+        // name from a rename would fail here for a difference the compiler will never reconcile.
+        //
+        // Order-sensitive by index, like MenuDiff: EmitVrcParameters preserves the document's declaration
+        // order, so order is a deterministic function of the yaml and a reordering is real drift.
+        internal static string ParamsDiff(VRCExpressionParameters a, VRCExpressionParameters b, string where)
+        {
+            var ap = a.parameters ?? new VRCExpressionParameters.Parameter[0];
+            var bp = b.parameters ?? new VRCExpressionParameters.Parameter[0];
+            if (ap.Length != bp.Length)
+            {
+                var an = new HashSet<string>(ap.Select(p => p?.name ?? ""), StringComparer.Ordinal);
+                var bn = new HashSet<string>(bp.Select(p => p?.name ?? ""), StringComparer.Ordinal);
+                var dropped = ap.Select(p => p?.name ?? "").Where(n => !bn.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
+                var added = bp.Select(p => p?.name ?? "").Where(n => !an.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
+                // Equal name SETS at differing lengths means a duplicated name, and both lists come back empty
+                // — which would emit "dropped (none), added (none)" and name nothing at all, the byte-compare
+                // diagnostic this leg exists to beat. Say what actually differs instead.
+                if (dropped.Count == 0 && added.Count == 0)
+                    return $"{where}: committed has {ap.Length} parameter(s), compiled has {bp.Length}" +
+                           " — same names either side, so one of them declares a name twice";
+                return $"{where}: committed has {ap.Length} parameter(s), compiled has {bp.Length}" +
+                       $" — compiled dropped {NameList(dropped)}, added {NameList(added)}";
+            }
+
+            for (int i = 0; i < ap.Length; i++)
+            {
+                var x = ap[i]; var y = bp[i];
+                if ((x?.name ?? "") != (y?.name ?? ""))
+                    return $"{where}[{i}]: name '{x?.name}' vs '{y?.name}'";
+                // Two nulls at one index compare name-equal above and would then NRE on the field reads below,
+                // which Check's catch turns into a FAIL reading "Object reference not set" — an anonymous
+                // diagnostic, the one thing this pass must never emit. Unity's serializer does not hand back a
+                // null element, so the live route is a hand-edited committed asset.
+                if (x == null || y == null)
+                    return $"{where}[{i}]: null parameter entry";
+                string w = $"{where} '{x.name}'";
+                if (x.valueType != y.valueType) return $"{w}: valueType {x.valueType} vs {y.valueType}";
+                if (x.saved != y.saved) return $"{w}: saved {x.saved} vs {y.saved}";
+                // Exact !=, deliberately no epsilon: both sides come from one emitter over one yaml literal,
+                // so any difference is an authored change and an epsilon would pass a real edit. Inherits
+                // MenuDiff's NaN behaviour — two NaN defaults report a difference no regenerate can fix.
+                if (x.defaultValue != y.defaultValue) return $"{w}: defaultValue {x.defaultValue} vs {y.defaultValue}";
+                if (x.networkSynced != y.networkSynced) return $"{w}: networkSynced {x.networkSynced} vs {y.networkSynced}";
+            }
+            return null;
+        }
+
+        // "'A', 'B' and 2 more", or "(none)" — the count-leg name list, capped the way the prefab pass caps
+        // its offender lines so one pathological asset cannot swamp the gate's single-line FAIL.
+        static string NameList(List<string> names)
+        {
+            if (names.Count == 0) return "(none)";
+            if (names.Count <= 5) return string.Join(", ", names.Select(n => $"'{n}'"));
+            return string.Join(", ", names.GetRange(0, 5).Select(n => $"'{n}'")) + $" and {names.Count - 5} more";
         }
 
         // Reads the `controller:` name off a schema document without compiling it. Null when the file
@@ -519,6 +699,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 .Where(n => !set.Contains(n.Substring(0, n.Length - "_Menu".Length)));
         }
 
+        // Same rule for a committed params asset, named off its controller the way a menu is. Not subsumed by
+        // OrphanControllers, which globs *.controller only: delete a document and its built controller but
+        // leave the params asset, and this is the one pass that sees it.
+        //
+        // An entry legitimately ships fewer params assets than controllers (anchor-prop: two controllers, one
+        // asset — its Gesture document declares only a scratch: param), so this asks the one-way question, an
+        // asset whose controller nothing claims, and never that every claimed controller has one.
+        internal static IEnumerable<string> OrphanParams(string builtDir, IEnumerable<string> claimed)
+        {
+            var set = new HashSet<string>(claimed, StringComparer.Ordinal);
+            return Directory.GetFiles(builtDir, "*_Parameters.asset")
+                .Select(Path.GetFileNameWithoutExtension)
+                .Where(n => !set.Contains(n.Substring(0, n.Length - "_Parameters".Length)));
+        }
+
         // The gate's whole contract with gate.ps1: 0 iff nothing failed in either pass. Every FAIL this tool
         // logs is worthless if this expression says 0 anyway, and it is the one line where a mistake makes a
         // broken gate look like a passing one, so it is lifted out of RunGate for the same reason as the rest.
@@ -597,6 +792,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // this catches the case where the whole document went away and took the check with it.
                 if (Directory.Exists(builtDir))
                     foreach (var orphan in OrphanMenus(builtDir, claimed))
+                    {
+                        Debug.Log($"[gate] FAIL {entry}: built/{orphan}.asset matches no yaml document (drift)");
+                        entryFailed = true;
+                    }
+
+                // And for a committed params asset, same rule and same reason.
+                if (Directory.Exists(builtDir))
+                    foreach (var orphan in OrphanParams(builtDir, claimed))
                     {
                         Debug.Log($"[gate] FAIL {entry}: built/{orphan}.asset matches no yaml document (drift)");
                         entryFailed = true;
