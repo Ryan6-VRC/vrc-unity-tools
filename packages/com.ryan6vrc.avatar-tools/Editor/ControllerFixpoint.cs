@@ -49,14 +49,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // sub-menu pages persist as sub-assets of the one file (CompileController's AddObjectToAsset) and carry
     // the same non-deterministic fileIDs a .controller does — see MenuDiff's own header.
     //
-    // COVERAGE LIMIT, so a PASS is never read as wider than it is: RunGate selects entries for the three
-    // passes ABOVE (controller, menu, params) with a NON-RECURSIVE Directory.GetDirectories(root), so a
-    // nested entry is outside all three — compositions/object-sync-demo/ (and its own nested object-sync/),
-    // object-sync/y/, object-sync/y_double/. That is 4 of the library's 22 committed params assets, and it
-    // includes a second copy of object-sync's that can diverge from its gated twin unseen. The
-    // prefab-integrity pass below does NOT share this limit: it selects with SearchOption.AllDirectories and
-    // copies each entry whole, so a nested entry's prefabs are checked as part of their parent. Widening the
-    // other three is a separate change; they inherit the blind spot rather than fixing it.
+    // ENTRIES ARE FOUND AT ANY DEPTH (EnumerateEntries). The recursion is full rather than one level down,
+    // and that is worth stating before someone narrows it back: the library already nests to depth 3
+    // (compositions/object-sync-demo/object-sync/), so a widen scoped to compositions/'s immediate children
+    // would gate three of the four nested entries and re-open this hole one level lower. Every composition
+    // is a nested entry by construction — CONVENTIONS.md defines one as an arrangement of two or more
+    // entries — so this is a growing tier, not four dirs to special-case. Recursion costs tier derivation
+    // nothing: IsGuidConsumer reads its own directory only, so a parent never reads as a GUID-consumer
+    // because of a child's prefab (pinned by IsGuidConsumer_AssetsContentOneLevelDown_IsNotSeen_KnownGap).
+    //
+    // TWO PRUNES, each load-bearing. A dot-named directory is skipped AND NOT DESCENDED, checked at every
+    // segment rather than at the leaf: .git/refs/… has the leaf name "refs", so a later "simplification" to
+    // SearchOption.AllDirectories looks equivalent while walking the whole of .git. And built/ and assets/
+    // are never descended — both are reserved inside an entry (CONVENTIONS.md), so a controller.yaml under
+    // either is content, and gating one would invent a phantom Pattern (for built/, comparing a generated
+    // file against a recompile of itself). That compare is CASE-INSENSITIVE because IsGuidConsumer's
+    // Directory.Exists is: on Windows a mis-cased Assets/ is the same directory to that probe, so an ordinal
+    // compare here would read it as reserved for tier derivation and still descend into it.
+    //
+    // The prefab-integrity pass keeps a TOP-LEVEL enumeration and must NOT be widened to match. It filters
+    // top-level dirs by GetFiles(d, "*.prefab", SearchOption.AllDirectories), so a nested entry shipping a
+    // prefab necessarily makes its top-level ancestor selected, and CheckPrefabIntegrity copies that
+    // ancestor WHOLE — nested prefabs are already checked, as part of their parent. Widening its selection
+    // would add no coverage and would copy every nested entry twice. What the whole-entry copy does require
+    // is that a nested entry's committed GUIDs differ from its parent's; the copy loop asserts that.
     //
     // A committed built .controller lives at an arbitrary --root filesystem path, not under the
     // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
@@ -528,9 +544,34 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var entryFull = Path.GetFullPath(entryDir);
             try
             {
+                // Two committed .meta files under ONE tree declaring the same GUID is the collision
+                // ImportCommittedAsset's header names, arriving by the other route: this copy takes the
+                // entry WHOLE, so a nested entry's .meta files import alongside its parent's. Unity resolves
+                // a duplicate by REWRITING one .meta on disk and leaving refs to it stale, so the damage
+                // lands as a null asset load — an anonymous failure in the pass with the least legible
+                // diagnostics, and a rewrite of tracked source as a side effect. Asserted here, before the
+                // Refresh that would trigger it, while both paths are still in hand.
+                //
+                // The live route is the obvious way to add a nested entry: copy the parent directory, edit
+                // its generator's CONFIG, regenerate — and leave the committed .meta GUIDs untouched.
+                var guids = new Dictionary<string, string>(StringComparer.Ordinal);
                 foreach (var src in Directory.GetFiles(entryDir, "*", SearchOption.AllDirectories))
                 {
                     var rel = Path.GetFullPath(src).Substring(entryFull.Length).TrimStart('/', '\\');
+                    if (src.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var guid = CommittedGuid(src);
+                        if (guid != null)
+                        {
+                            var label = rel.Replace('\\', '/');
+                            if (guids.TryGetValue(guid, out var first))
+                                return (false, $"two committed .meta files declare guid {guid} — {first} and " +
+                                               label + ". A nested entry copied from its parent keeps the " +
+                                               "parent's GUIDs; re-GUID the copy's built/ .meta files (the " +
+                                               "prefab that references them must be repointed in the same edit)");
+                            guids[guid] = label;
+                        }
+                    }
                     var dest = Path.Combine(full, rel);
                     Directory.CreateDirectory(Path.GetDirectoryName(dest));
                     File.Copy(src, dest, true);
@@ -690,17 +731,87 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 .Where(n => !set.Contains(n.Substring(0, n.Length - "_Parameters".Length)));
         }
 
+        // Every entry under root, at any depth, ordinally sorted: a non-dot directory holding a
+        // controller.yaml. The class header owns why the recursion is full and why the two prunes exist;
+        // what belongs here is that the prunes SKIP AND DO NOT DESCEND, which is the whole difference from
+        // a one-level filter applied to SearchOption.AllDirectories.
+        //
+        // Sorting the absolute paths ordinally is the same order the flat enumeration produced for the
+        // top-level set, so the log's entry order is unchanged for every entry that was already gated.
+        // Nothing downstream depends on it — each entry's Check opens and cleans its own scratch in a
+        // finally — but a stable order is what makes two gate logs diffable.
+        internal static List<string> EnumerateEntries(string root)
+        {
+            var found = new List<string>();
+            Descend(root, found);
+            found.Sort(StringComparer.Ordinal);
+            return found;
+        }
+
+        // CASE-INSENSITIVE deliberately; the class header owns why (IsGuidConsumer's Directory.Exists probe
+        // is case-insensitive on Windows, so an ordinal compare here would let a mis-cased Assets/ read as
+        // reserved for tier derivation while this walk descended into it).
+        static bool IsReserved(string name) =>
+            string.Equals(name, "built", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "assets", StringComparison.OrdinalIgnoreCase);
+
+        // An entry is descended INTO as well as recorded — that is the point, since object-sync/y/ lives
+        // inside the gated object-sync/. A walk that stopped at the first entry it found would pass every
+        // other test in this file and still miss the shape the recursion exists for.
+        static void Descend(string dir, List<string> found)
+        {
+            foreach (var child in Directory.GetDirectories(dir))
+            {
+                var name = Path.GetFileName(child);
+                if (name.StartsWith(".", StringComparison.Ordinal)) continue;
+                if (IsReserved(name)) continue;
+                if (File.Exists(Path.Combine(child, "controller.yaml"))) found.Add(child);
+                Descend(child, found);
+            }
+        }
+
+        // An entry's log address: its path RELATIVE TO ROOT, forward-slashed. Not the leaf name, and that is
+        // the whole reason this exists rather than a Path.GetFileName call at the caller. Two live entries
+        // are leaf-named object-sync (the top-level one and compositions/object-sync-demo/object-sync/), and
+        // FOUR entries ship a controller named ObjectSync_Fx — because, per animator.md, "the emitted
+        // .controller takes its name from the DOCUMENT, not the outDir leaf". RunGate composes its per-doc
+        // line as $"{entry}/{filename}", so a leaf-named label emits two byte-identical FAIL lines for two
+        // different entries. The class header calls the gate's failure message its product; an offender
+        // nobody can address is that product failing in exactly the defect class this walk exists to catch.
+        //
+        // FRAME, because two live in one log: an ENTRY label is root-relative, while the offender labels
+        // INSIDE a prefab-integrity failure are entry-relative (CheckPrefabIntegrity's own `rel`).
+        internal static string EntryLabel(string root, string entryDir)
+        {
+            var r = Path.GetFullPath(root).Replace('\\', '/').TrimEnd('/');
+            var e = Path.GetFullPath(entryDir).Replace('\\', '/');
+            return e.StartsWith(r + "/", StringComparison.Ordinal) ? e.Substring(r.Length + 1) : Path.GetFileName(e);
+        }
+
+        // The `guid:` line of a .meta, or null where there is none. Used by the prefab pass's copy loop to
+        // catch two committed .meta files under one tree declaring the same GUID — see its call site.
+        static string CommittedGuid(string metaPath)
+        {
+            foreach (var line in File.ReadLines(metaPath))
+                if (line.StartsWith("guid:", StringComparison.Ordinal))
+                    return line.Substring("guid:".Length).Trim();
+            return null;
+        }
+
         // The gate's whole contract with gate.ps1: 0 iff nothing failed in either pass. Every FAIL this tool
         // logs is worthless if this expression says 0 anyway, and it is the one line where a mistake makes a
         // broken gate look like a passing one, so it is lifted out of RunGate for the same reason as the rest.
         internal static int GateExit(int failedEntries, int prefabFailed) =>
             (failedEntries == 0 && prefabFailed == 0) ? 0 : 1;
 
-        // -executeMethod entrypoint. Args after `--`: --root <dir>. An entry is a non-dot <dir>/* folder
-        // containing controller.yaml; EVERY top-level *.yaml in it with a `controller:` key is gated
-        // (a multi-controller entry ships an FX + Gesture pair), each against built/<name>.controller.
-        // A built controller no document claims is drift and fails the entry. Exits 0 iff all pass.
-        // A second pass enumerates every non-dot dir shipping a prefab (controller.yaml or not) and
+        // -executeMethod entrypoint. Args after `--`: --root <dir>. An entry is a non-dot folder under
+        // --root AT ANY DEPTH containing controller.yaml — EnumerateEntries owns the walk and its two
+        // prunes; EVERY top-level *.yaml in it with a `controller:` key is gated (a multi-controller entry
+        // ships an FX + Gesture pair), each against built/<name>.controller. A built controller no document
+        // claims is drift and fails the entry. Exits 0 iff all pass, 2 on a refusal — including a root that
+        // yields NO entry at all, which would otherwise report 0/0 and exit 0, a gate passing on nothing.
+        // A second pass enumerates every non-dot TOP-LEVEL dir shipping a prefab at any depth
+        // (controller.yaml or not) — unlike the passes above, deliberately, per the class header — and
         // asserts each imports with zero missing MonoBehaviour scripts, carries no anchor seam
         // (CheckAvatar.ScanAnchorSeams), and names no consuming project's Assets/ path
         // (ForeignProjectPathLines).
@@ -714,15 +825,31 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             SweepScratch(); // self-heal any scratch a crashed prior run stranded, before we start
 
-            var entries = Directory.GetDirectories(root)
-                .Where(d => !Path.GetFileName(d).StartsWith("."))
-                .Where(d => File.Exists(Path.Combine(d, "controller.yaml")))
-                .OrderBy(d => d, StringComparer.Ordinal).ToList();
+            // The walk is guarded where the old flat enumeration did not need to be. That one could only
+            // throw on root itself, two lines after root was checked to exist; a recursive walk can hit an
+            // unreadable directory or an over-long path anywhere beneath it, and an escaping exception would
+            // leave RunGate with no [gate] line at all and an exit code that is not this tool's 2.
+            List<string> entries;
+            try { entries = EnumerateEntries(root); }
+            catch (Exception e)
+            {
+                Debug.LogError("[gate] entry walk failed under " + root + ": " + e.Message);
+                EditorApplication.Exit(2); return;
+            }
+            // A root holding no entry is a mis-pointed --root, not a clean library. Without this it reports
+            // "0/0 entries passed" and exits 0 — a gate whose coverage is nothing, reporting success, which
+            // is the defect class this file exists to prevent rather than an edge case to tolerate.
+            if (entries.Count == 0)
+            {
+                Debug.LogError("[gate] no entry (a non-dot dir holding controller.yaml, at any depth) found " +
+                               "under " + root + " — refusing rather than reporting 0/0 as a pass");
+                EditorApplication.Exit(2); return;
+            }
 
             int failedEntries = 0, checkedDocs = 0;
             foreach (var dir in entries)
             {
-                var entry = Path.GetFileName(dir);
+                var entry = EntryLabel(root, dir);
                 bool entryFailed = false;
                 var builtDir = Path.Combine(dir, "built");
 
@@ -799,9 +926,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var dir in prefabEntries)
             {
                 var (ok, msg) = CheckPrefabIntegrity(dir);
-                if (!ok) { Debug.Log($"[gate] prefab-integrity FAIL {Path.GetFileName(dir)}: {msg}"); prefabFailed++; }
+                if (!ok) { Debug.Log($"[gate] prefab-integrity FAIL {EntryLabel(root, dir)}: {msg}"); prefabFailed++; }
             }
-            Debug.Log($"[gate] prefab-integrity {prefabEntries.Count - prefabFailed}/{prefabEntries.Count} entries clean");
+            // NOT "entries", and not the same denominator as the line above: this pass counts TOP-LEVEL
+            // TREES, each checked whole, while the passes above count entries at any depth. Sharing the noun
+            // made the two totals look comparable, so a reader saw "22/22 entries" beside "18/18 entries"
+            // and read a four-entry shortfall in prefab coverage that does not exist. Say which population
+            // this is and where the nested ones went, in the line itself — the class header explaining it is
+            // not visible to anyone reading a gate log.
+            Debug.Log($"[gate] prefab-integrity {prefabEntries.Count - prefabFailed}/{prefabEntries.Count} " +
+                      "top-level trees clean (each checked whole, so a nested entry rides its parent's)");
 
             SweepScratch(); // authoritative cleanup: all Check refs are out of scope now, no Refresh follows
 

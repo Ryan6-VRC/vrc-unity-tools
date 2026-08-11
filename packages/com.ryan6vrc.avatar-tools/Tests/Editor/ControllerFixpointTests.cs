@@ -14,17 +14,23 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 //
 // WHAT THIS FILE DOES NOT COVER, stated because a suite that looks uniform is read as uniform:
 //
-// RunGate's own composition is only partly covered. The exit expression itself is pinned (GateExit), but the
-// wiring that FEEDS it — `entryFailed = true` at each of its three sites, and the failedEntries/prefabFailed
+// RunGate's own composition is only partly covered. Which directories it gates and what it calls them are
+// pinned (EnumerateEntries, EntryLabel) alongside the exit expression (GateExit), but the wiring that FEEDS
+// that expression — `entryFailed = true` at each of its three sites, and the failedEntries/prefabFailed
 // counters — stays inside RunGate, which ends in EditorApplication.Exit and so has no unit door short of
 // lifting the loop bodies too. That was declined as more surgery than the coverage is worth, not judged
-// impossible. The extraction below moved the *computing* half out and left that *failing* half behind, so
+// impossible. The extractions moved the *computing* half out and left that *failing* half behind, so
 // deleting any one `entryFailed = true` still logs FAIL and exits 0 with this whole suite green.
 //
 // What covers it instead is an end-to-end gate run against a scratch copy of vrc-patterns with injected
-// drift (baseline exit 0; a renamed state, a deleted built menu, and an unclaimed built controller each exit
-// 1 with a named FAIL line), recorded in the PR that added this file. Do not read a green run here as "the
-// gate fails when it should".
+// drift, recorded in the PR that made each change. Do not read a green run here as "the gate fails when it
+// should". Two rounds exist, and the second is not a re-run of the first:
+//   - the PR that added this file: baseline exit 0; a renamed state, a deleted built menu, and an unclaimed
+//     built controller each exit 1 with a named FAIL line;
+//   - the PR that made entry enumeration recursive: three nested entries perturbed IN ONE RUN, expecting
+//     19/22 rather than three separate 21/22s — because the arithmetic recursion newly exercises is that a
+//     CHILD entry's failure increments failedEntries by one and does NOT fail its parent, and that a
+//     parent+child pair is neither collapsed nor double-counted. Three isolated runs prove none of that.
 //
 // Check(), CompileToTemp, ImportCommittedAsset, Decode, and CheckPrefabIntegrity are boundary-bound
 // (AssetDatabase, a real compile) and stay out. Decode's fixpoint property is owned next door by
@@ -807,6 +813,76 @@ public class ControllerFixpointTests
     public void ParseControllerName_IndentedKey_ReturnsNull_DivergesOnUniformlyIndentedDocs()
         => Assert.IsNull(ControllerFixpoint.ParseControllerName(Yaml("  controller: FX\n")),
             "DIVERGENCE (degenerate): a uniformly indented document has this as its top-level key");
+
+    // ── EnumerateEntries / EntryLabel: which directories the gate gates, and what it calls them ────
+    //
+    // DELIBERATELY NOT COVERED HERE: that entries are found at depth 1, 2 and 3, and the ordinal sort. The
+    // end-to-end gate run over vrc-patterns names all 22 entries by root-relative path in its log, which is
+    // that assertion against the real corpus rather than a fixture imitating it. What the corpus cannot
+    // exercise is the two prunes (nothing in the library ships a controller.yaml under a reserved or dot
+    // directory) and the leaf-name collision, so those are the cases here.
+
+    // Checked at EVERY segment, not the leaf: this fixture's leaf is "refs". A rewrite to
+    // SearchOption.AllDirectories with a leaf-name filter looks equivalent and walks the whole of .git.
+    [Test]
+    public void EnumerateEntries_DotDirectoryAndItsDescendants_ArePruned()
+    {
+        File_(Dir(".git", "refs", "x"), "controller.yaml", "controller: FX\n");
+        Assert.IsEmpty(ControllerFixpoint.EnumerateEntries(_tmp));
+    }
+
+    // built/ and assets/ are reserved inside an entry, so a controller.yaml under either is content — a
+    // vendor sample, a stashed document — not an entry. Gating one invents a phantom Pattern.
+    //
+    // The mis-cased third case is the one that matters most and is the cheapest to lose: IsGuidConsumer
+    // probes with Directory.Exists, which is case-insensitive on Windows, so an ordinal compare here would
+    // read "Assets" as reserved for tier derivation and still descend into it.
+    [Test]
+    public void EnumerateEntries_ControllerYamlUnderReservedDir_IsNotAnEntry()
+    {
+        File_(Dir("e", "built"), "controller.yaml", "controller: FX\n");
+        File_(Dir("e", "assets"), "controller.yaml", "controller: FX\n");
+        File_(Dir("e", "Assets"), "controller.yaml", "controller: FX\n");
+        File_(Dir("e"), "controller.yaml", "controller: FX\n");
+        Assert.AreEqual(new[] { Path.Combine(_tmp, "e") },
+            ControllerFixpoint.EnumerateEntries(_tmp).ToArray(),
+            "only the entry itself — a controller.yaml under built/, assets/ or a mis-cased Assets/ is content");
+    }
+
+    // The shape the whole recursion exists for (object-sync/ holds object-sync/y/). A walk that stopped
+    // descending once it found an entry passes every other case in this section and still misses it.
+    [Test]
+    public void EnumerateEntries_EntryNestedInsideAnEntry_YieldsBoth()
+    {
+        File_(Dir("outer"), "controller.yaml", "controller: FX\n");
+        File_(Dir("outer", "inner"), "controller.yaml", "controller: FX\n");
+        Assert.AreEqual(new[] { Path.Combine(_tmp, "outer"), Path.Combine(_tmp, "outer", "inner") },
+            ControllerFixpoint.EnumerateEntries(_tmp).ToArray());
+    }
+
+    [Test]
+    public void EntryLabel_NestedEntry_IsRootRelativeWithForwardSlashes()
+        => Assert.AreEqual("a/b/c", ControllerFixpoint.EntryLabel(_tmp, Path.Combine(_tmp, "a", "b", "c")));
+
+    [Test]
+    public void EntryLabel_PathOutsideRoot_FallsBackToLeaf()
+        => Assert.AreEqual("elsewhere",
+            ControllerFixpoint.EntryLabel(_tmp, Path.Combine(Path.GetTempPath(), "not_under_root", "elsewhere")));
+
+    // THE INVARIANT THE OTHER TWO DO NOT COMPOSE, and the reason this helper exists at all. Both cases
+    // above pass against an EntryLabel that fell back to Path.GetFileName more eagerly — and that
+    // implementation collapses vrc-patterns' two object-sync entries onto one address, in a gate whose
+    // failure message is its product.
+    [Test]
+    public void EntryLabel_TwoEntriesSharingALeafName_GetDistinctLabels()
+    {
+        var top = ControllerFixpoint.EntryLabel(_tmp, Path.Combine(_tmp, "object-sync"));
+        var nested = ControllerFixpoint.EntryLabel(
+            _tmp, Path.Combine(_tmp, "compositions", "object-sync-demo", "object-sync"));
+        Assert.AreEqual("object-sync", top);
+        Assert.AreEqual("compositions/object-sync-demo/object-sync", nested);
+        Assert.AreNotEqual(top, nested, "two entries with one leaf name must not share a log address");
+    }
 
     // ── IsGuidConsumer: the tier derivation ────────────────────────────────────────────────────────
     //
