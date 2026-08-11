@@ -56,7 +56,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // is a nested entry by construction — CONVENTIONS.md defines one as an arrangement of two or more
     // entries — so this is a growing tier, not four dirs to special-case. Recursion costs tier derivation
     // nothing: IsGuidConsumer reads its own directory only, so a parent never reads as a GUID-consumer
-    // because of a child's prefab (pinned by IsGuidConsumer_AssetsContentOneLevelDown_IsNotSeen_KnownGap).
+    // because of a child's prefab (pinned by IsGuidConsumer_PrefabOneLevelDown_IsNotSeen — the prefab glob
+    // specifically, since that is the half this rests on).
     //
     // TWO PRUNES, each load-bearing. A dot-named directory is skipped AND NOT DESCENDED, checked at every
     // segment rather than at the leaf: .git/refs/… has the leaf name "refs", so a later "simplification" to
@@ -71,8 +72,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // top-level dirs by GetFiles(d, "*.prefab", SearchOption.AllDirectories), so a nested entry shipping a
     // prefab necessarily makes its top-level ancestor selected, and CheckPrefabIntegrity copies that
     // ancestor WHOLE — nested prefabs are already checked, as part of their parent. Widening its selection
-    // would add no coverage and would copy every nested entry twice. What the whole-entry copy does require
-    // is that a nested entry's committed GUIDs differ from its parent's; the copy loop asserts that.
+    // would add no coverage and would copy every nested entry twice. What that whole-entry copy requires is
+    // that no two committed .meta under one tree share a GUID, which DuplicateCommittedGuid asserts in a
+    // pass of its own — unconditionally, because the hazard outlives the gate (see its header).
     //
     // A committed built .controller lives at an arbitrary --root filesystem path, not under the
     // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
@@ -544,34 +546,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var entryFull = Path.GetFullPath(entryDir);
             try
             {
-                // Two committed .meta files under ONE tree declaring the same GUID is the collision
-                // ImportCommittedAsset's header names, arriving by the other route: this copy takes the
-                // entry WHOLE, so a nested entry's .meta files import alongside its parent's. Unity resolves
-                // a duplicate by REWRITING one .meta on disk and leaving refs to it stale, so the damage
-                // lands as a null asset load — an anonymous failure in the pass with the least legible
-                // diagnostics, and a rewrite of tracked source as a side effect. Asserted here, before the
-                // Refresh that would trigger it, while both paths are still in hand.
-                //
-                // The live route is the obvious way to add a nested entry: copy the parent directory, edit
-                // its generator's CONFIG, regenerate — and leave the committed .meta GUIDs untouched.
-                var guids = new Dictionary<string, string>(StringComparer.Ordinal);
                 foreach (var src in Directory.GetFiles(entryDir, "*", SearchOption.AllDirectories))
                 {
                     var rel = Path.GetFullPath(src).Substring(entryFull.Length).TrimStart('/', '\\');
-                    if (src.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var guid = CommittedGuid(src);
-                        if (guid != null)
-                        {
-                            var label = rel.Replace('\\', '/');
-                            if (guids.TryGetValue(guid, out var first))
-                                return (false, $"two committed .meta files declare guid {guid} — {first} and " +
-                                               label + ". A nested entry copied from its parent keeps the " +
-                                               "parent's GUIDs; re-GUID the copy's built/ .meta files (the " +
-                                               "prefab that references them must be repointed in the same edit)");
-                            guids[guid] = label;
-                        }
-                    }
                     var dest = Path.Combine(full, rel);
                     Directory.CreateDirectory(Path.GetDirectoryName(dest));
                     File.Copy(src, dest, true);
@@ -748,9 +725,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return found;
         }
 
-        // CASE-INSENSITIVE deliberately; the class header owns why (IsGuidConsumer's Directory.Exists probe
-        // is case-insensitive on Windows, so an ordinal compare here would let a mis-cased Assets/ read as
-        // reserved for tier derivation while this walk descended into it).
+        // CASE-INSENSITIVE deliberately, and the reason is a WINDOWS fact rather than a general one: there
+        // IsGuidConsumer's Directory.Exists probe is case-insensitive, so an ordinal compare here would let a
+        // mis-cased Assets/ read as reserved for tier derivation while this walk descended into it. On a
+        // case-sensitive filesystem the two are genuinely different directories and that argument does not
+        // hold — the compare stays case-insensitive there anyway, because the gate runs on Windows (gate.ps1
+        // boots Unity.exe) and one rule that is right where it runs beats two that diverge by host.
         static bool IsReserved(string name) =>
             string.Equals(name, "built", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(name, "assets", StringComparison.OrdinalIgnoreCase);
@@ -788,13 +768,57 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return e.StartsWith(r + "/", StringComparison.Ordinal) ? e.Substring(r.Length + 1) : Path.GetFileName(e);
         }
 
-        // The `guid:` line of a .meta, or null where there is none. Used by the prefab pass's copy loop to
-        // catch two committed .meta files under one tree declaring the same GUID — see its call site.
+        // The `guid:` line of a .meta, or null where there is none. Column-0 match, so a `guid:` nested inside
+        // an importer block (a reference to some other asset) is not mistaken for this file's own.
         static string CommittedGuid(string metaPath)
         {
             foreach (var line in File.ReadLines(metaPath))
                 if (line.StartsWith("guid:", StringComparison.Ordinal))
                     return line.Substring("guid:".Length).Trim();
+            return null;
+        }
+
+        // Two committed .meta files under ONE TOP-LEVEL TREE declaring the same GUID — the collision
+        // ImportCommittedAsset's header names, arriving by a second route: the prefab pass copies a tree
+        // WHOLE, so a nested entry's .meta files import alongside its parent's, and Unity resolves a
+        // duplicate by rewriting one .meta and leaving refs to it stale. In the gate that surfaces as a null
+        // asset load — an anonymous failure in the pass with the least legible diagnostics — and the rewrite
+        // hits the scratch copy, not the checkout, so nothing on disk tells the author afterwards.
+        //
+        // A PASS OF ITS OWN, not a step inside CheckPrefabIntegrity, and the difference is coverage rather
+        // than tidiness: that pass runs only for a tree shipping a prefab somewhere, so two prefab-free
+        // Pattern entries could ship colliding GUIDs, never be imported here, and reach a consuming project
+        // — which DOES mount this library as a package — with the collision intact. The gate is the only
+        // thing standing between a copied entry and that, so it may not be conditional on a prefab.
+        //
+        // The live route is the obvious way to make a variant: copy an entry's directory, edit its
+        // generator's CONFIG, regenerate — and leave the committed .meta GUIDs untouched. Sibling-to-sibling
+        // is as likely as parent-to-child (object-sync/y_double/ reads as a copy of object-sync/y/), so this
+        // asks the tree-wide question rather than a parent-vs-child one.
+        //
+        // Dot-directories are skipped, matching EnumerateEntries and, more to the point, Unity: it never
+        // imports a hidden folder, so a stashed .built-backup/ cannot produce the collision this models, and
+        // failing on it would be a diagnostic about a hazard that does not exist.
+        //
+        // OrdinalIgnoreCase because Unity parses the field as 128-bit hex: differently-cased hex is one GUID
+        // to the importer, and only a hand-edited .meta can produce it.
+        internal static string DuplicateCommittedGuid(string treeDir)
+        {
+            var treeFull = Path.GetFullPath(treeDir);
+            var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var meta in Directory.GetFiles(treeDir, "*.meta", SearchOption.AllDirectories))
+            {
+                var rel = Path.GetFullPath(meta).Substring(treeFull.Length).TrimStart('/', '\\').Replace('\\', '/');
+                if (rel.Split('/').Any(s => s.StartsWith(".", StringComparison.Ordinal))) continue;
+                var guid = CommittedGuid(meta);
+                if (guid == null) continue;
+                if (seen.TryGetValue(guid, out var first))
+                    return $"guid {guid} is declared by two committed .meta files — {first} and {rel}. " +
+                           "One is a copy that kept the original's GUID: re-GUID the second and repoint " +
+                           "whatever references it in the same edit (for a copied built/, that is the " +
+                           "prefab pointing at it)";
+                seen[guid] = rel;
+            }
             return null;
         }
 
@@ -936,6 +960,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // not visible to anyone reading a gate log.
             Debug.Log($"[gate] prefab-integrity {prefabEntries.Count - prefabFailed}/{prefabEntries.Count} " +
                       "top-level trees clean (each checked whole, so a nested entry rides its parent's)");
+
+            // Third pass: no two committed .meta under one top-level tree may declare the same GUID. Over
+            // EVERY non-dot top-level dir, not just the ones shipping a prefab — DuplicateCommittedGuid's
+            // header owns why the unconditional scope is the point rather than thoroughness. Counted into
+            // prefabFailed because both passes fail a TREE, so the exit expression needs no new term.
+            foreach (var dir in Directory.GetDirectories(root)
+                     .Where(d => !Path.GetFileName(d).StartsWith("."))
+                     .OrderBy(d => d, StringComparer.Ordinal))
+            {
+                var dup = DuplicateCommittedGuid(dir);
+                if (dup != null) { Debug.Log($"[gate] duplicate-guid FAIL {EntryLabel(root, dir)}: {dup}"); prefabFailed++; }
+            }
 
             SweepScratch(); // authoritative cleanup: all Check refs are out of scope now, no Refresh follows
 

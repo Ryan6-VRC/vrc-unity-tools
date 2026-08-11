@@ -822,8 +822,9 @@ public class ControllerFixpointTests
     // exercise is the two prunes (nothing in the library ships a controller.yaml under a reserved or dot
     // directory) and the leaf-name collision, so those are the cases here.
 
-    // Checked at EVERY segment, not the leaf: this fixture's leaf is "refs". A rewrite to
-    // SearchOption.AllDirectories with a leaf-name filter looks equivalent and walks the whole of .git.
+    // Checked at EVERY segment, not the leaf: this fixture's candidate entry is .git/refs/x, and no segment
+    // below .git starts with a dot. A leaf-name filter over SearchOption.AllDirectories therefore finds it
+    // and walks the whole of .git, while looking equivalent to this.
     [Test]
     public void EnumerateEntries_DotDirectoryAndItsDescendants_ArePruned()
     {
@@ -833,20 +834,35 @@ public class ControllerFixpointTests
 
     // built/ and assets/ are reserved inside an entry, so a controller.yaml under either is content — a
     // vendor sample, a stashed document — not an entry. Gating one invents a phantom Pattern.
-    //
-    // The mis-cased third case is the one that matters most and is the cheapest to lose: IsGuidConsumer
-    // probes with Directory.Exists, which is case-insensitive on Windows, so an ordinal compare here would
-    // read "Assets" as reserved for tier derivation and still descend into it.
     [Test]
     public void EnumerateEntries_ControllerYamlUnderReservedDir_IsNotAnEntry()
     {
         File_(Dir("e", "built"), "controller.yaml", "controller: FX\n");
         File_(Dir("e", "assets"), "controller.yaml", "controller: FX\n");
-        File_(Dir("e", "Assets"), "controller.yaml", "controller: FX\n");
         File_(Dir("e"), "controller.yaml", "controller: FX\n");
         Assert.AreEqual(new[] { Path.Combine(_tmp, "e") },
             ControllerFixpoint.EnumerateEntries(_tmp).ToArray(),
-            "only the entry itself — a controller.yaml under built/, assets/ or a mis-cased Assets/ is content");
+            "only the entry itself — a controller.yaml under built/ or assets/ is content");
+    }
+
+    // The reserved-name compare is OrdinalIgnoreCase, and this is the case that pins it. IT NEEDS ITS OWN
+    // PARENT: NTFS is case-insensitive, so creating "assets" and then "Assets" beside it returns the FIRST
+    // directory rather than making a second — a mis-cased fixture added to the test above is silently the
+    // lowercase one, and the assertion passes against an ordinal implementation. Measured, not reasoned:
+    // Directory.CreateDirectory("e/assets") then ("e/Assets") leaves e holding exactly { "assets" }, while
+    // ("f/Assets") alone leaves f holding literally { "Assets" }.
+    //
+    // What it defends, on Windows specifically: IsGuidConsumer probes with Directory.Exists, which is
+    // case-insensitive there, so an ordinal compare here would let this directory read as reserved for tier
+    // derivation while this walk descended into it and gated a phantom Pattern inside it.
+    [Test]
+    public void EnumerateEntries_MisCasedReservedDir_IsStillReserved()
+    {
+        File_(Dir("f", "Assets"), "controller.yaml", "controller: FX\n");
+        File_(Dir("f"), "controller.yaml", "controller: FX\n");
+        Assert.AreEqual(new[] { Path.Combine(_tmp, "f") },
+            ControllerFixpoint.EnumerateEntries(_tmp).ToArray(),
+            "a mis-cased Assets/ is the same directory to IsGuidConsumer's probe, so this walk must agree");
     }
 
     // The shape the whole recursion exists for (object-sync/ holds object-sync/y/). A walk that stopped
@@ -951,10 +967,26 @@ public class ControllerFixpointTests
         Assert.IsTrue(ControllerFixpoint.IsGuidConsumer(_tmp));
     }
 
+    // The PREFAB half of the same top-level-only read, and it is load-bearing in a way the assets/ case below
+    // is not: EnumerateEntries' recursion rests on a parent never reading as a GUID-consumer because of a
+    // CHILD entry's prefab, and this is the only case that pins it. Widen the *.prefab glob at the head of
+    // IsGuidConsumer's || to AllDirectories and a nested Module's prefab promotes its parent Pattern, which
+    // then fails for a missing built controller it was never meant to ship — while the case below, and every
+    // other test here, stays green. The natural way to close the gap below is to widen BOTH globs in that one
+    // expression, which is exactly the edit this forbids.
+    [Test]
+    public void IsGuidConsumer_PrefabOneLevelDown_IsNotSeen()
+    {
+        File_(Dir("nested"), "entry.prefab");
+        Assert.IsFalse(ControllerFixpoint.IsGuidConsumer(_tmp),
+            "a nested entry's prefab must not promote its parent's tier — EnumerateEntries rests on this");
+    }
+
     // KNOWN GAP, pinned: assets/ is scanned TOP-LEVEL ONLY, while CheckPrefabIntegrity walks the same tree
     // with AllDirectories. An entry whose only shipped content sits in assets/<subdir>/ therefore reads as a
     // Pattern and loses the built-controller requirement. The live library is flat today; this is armed for
-    // the next entry. Reported in docs/local/inbox/F42.md.
+    // the next entry. Reported in docs/local/inbox/F42.md. Closing it must not widen the prefab glob beside
+    // it — see the case above.
     [Test]
     public void IsGuidConsumer_AssetsContentOneLevelDown_IsNotSeen_KnownGap()
     {
