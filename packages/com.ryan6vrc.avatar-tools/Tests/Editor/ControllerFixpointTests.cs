@@ -1053,6 +1053,27 @@ public class ControllerFixpointTests
 
     // Equal length, differing names: addressed by INDEX, because no name is agreed yet. Same transition
     // MenuDiff makes, and the reason a reorder reports the way the next case says it does.
+    // Lengths differ but the name SETS match, so both difference lists come back empty. Without its own leg
+    // this emits "dropped (none), added (none)" and names nothing — the diagnostic this whole pass rejects.
+    [Test]
+    public void ParamsDiff_DuplicatedName_SaysSoRatherThanNamingNothing()
+        => Assert.AreEqual(
+            "params: committed has 3 parameter(s), compiled has 2 — same names either side, so one of them declares a name twice",
+            ControllerFixpoint.ParamsDiff(
+                Params(Prm("A"), Prm("B"), Prm("B")), Params(Prm("A"), Prm("B")), "params"));
+
+    // A null element survives the name compare (both coalesce to "") and would NRE on the field reads, which
+    // Check's catch renders as a bare "Object reference not set" FAIL naming nothing.
+    // The array is spelled out rather than written Params(null): a bare null binds as the whole params array,
+    // not as one null element, which silently makes both sides empty and the case vacuous.
+    [Test]
+    public void ParamsDiff_NullParameterEntry_IsNamedRatherThanThrowing()
+    {
+        var a = Params(new VRCExpressionParameters.Parameter[] { null });
+        var b = Params(new VRCExpressionParameters.Parameter[] { null });
+        Assert.AreEqual("params[0]: null parameter entry", ControllerFixpoint.ParamsDiff(a, b, "params"));
+    }
+
     [Test]
     public void ParamsDiff_NameDiffers_AddressedByIndexNotName()
         => Assert.AreEqual("params[0]: name 'A' vs 'B'",
@@ -1137,12 +1158,18 @@ public class ControllerFixpointTests
                         "wrongly emptied the list", msg);
     }
 
+    // Must NOT be a bare "regenerate built/". A document that emitted nothing and now emits something can be
+    // a `scratch:` flipped off or a name leaving the reserved set, where regenerating launders the change —
+    // the same trap the ParamsDiff call site refuses. The two Fail legs stay distinguishable by lead clause.
     [Test]
     public void ParamsPresence_FreshOnly_FailsWithTheOtherMessage()
     {
         var (pass, msg) = ControllerFixpoint.ParamsPresence(Params(Prm("A")), false);
         Assert.AreEqual(ControllerFixpoint.MenuPass.Fail, pass);
-        Assert.AreEqual("yaml emits parameters but built/ has none — regenerate built/", msg);
+        Assert.AreEqual("yaml emits parameters but built/ has none — regenerating built/ is the fix ONLY if " +
+                        "the yaml's own parameter list changed on purpose. If a `scratch:` flag or " +
+                        "ControllerRules.VrcReservedParams changed, settle that first: regenerating blind " +
+                        "commits it as though reviewed", msg);
     }
 
     // ParamsBeside: the re-derived filename convention. This case is the ONLY thing keeping this copy in step

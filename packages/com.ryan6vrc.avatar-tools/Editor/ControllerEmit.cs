@@ -1166,9 +1166,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // params (internal residue). A non-synced param lists networkSynced=false: it costs no sync bit.
             //
             // Legibility is why UNSYNCED params are listed, not the asset's whole job: a consumer references
-            // the emitted asset by GUID (a VRCFury FullController names it in `prms:`), so what this filter
-            // drops is undeclared on the built avatar. docs/animator-schema.md §The params asset owns the
-            // contract; ControllerFixpoint.ParamsDiff is what catches a filter change altering it silently.
+            // the emitted asset by GUID (a VRCFury FullController names it in `prms:`), so this list IS the
+            // avatar's expression-parameter contract. The two exclusions differ in consequence — a VRC
+            // built-in is supplied by VRChat and costs nothing to omit, while a dropped CUSTOM name is simply
+            // absent from that contract. docs/animator-schema.md §The params asset owns this;
+            // ControllerFixpoint.ParamsDiff is what catches a filter change altering it silently.
             private void EmitVrcParameters()
             {
                 var listed = _doc.Parameters

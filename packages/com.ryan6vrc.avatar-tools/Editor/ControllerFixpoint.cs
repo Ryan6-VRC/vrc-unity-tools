@@ -14,9 +14,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // primitives: decode(c) = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(c).Doc), the same
     // canonical string the fixpoint tests trust.
     //
-    // THE ONE QUESTION THIS GATE ASKS: was built/ regenerated after its source yaml changed? In
-    // vrc-patterns the yaml is the source of truth and built/ is a generated artifact, committed only
-    // so prefabs can resolve it by GUID and so a study entry opens in the animator window. Nobody
+    // THE ONE QUESTION THIS GATE ASKS: does committed built/ match what the compiler emits from its yaml
+    // TODAY? A stale regeneration after a yaml edit is the common cause but not the only one — a change to
+    // the emitter's own filters fails a document whose yaml nobody touched, which is what the params pass
+    // below exists for. In vrc-patterns the yaml is the source of truth and built/ is a generated artifact,
+    // committed only so prefabs can resolve it by GUID and so a study entry opens in the animator window. Nobody
     // hand-maintains it. So a field the schema does not model does not matter here — and one that DOES
     // matter is a reason to grow the schema, never a reason to tighten this comparison. Do not add a
     // check that guards hand-authored content in a generated directory; that category is empty by
@@ -37,21 +39,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // decompile-equality stay identical. What makes that worth a check rather than a warning is that the
     // TRIGGER LIVES IN A DIFFERENT REPO FROM THE ARTIFACT IT DAMAGES — ControllerRules.VrcReservedParams
     // here, built/*_Parameters.asset in vrc-patterns — so nothing routes the author who trips it to this
-    // comment. The one time it happened (#111 reserving IsAnimatorEnabled, vrc-patterns#68 dropping the
-    // scratch: standing in for it) the order was got right by hand, because that PR happened to be editing
-    // this neighbourhood.
+    // comment, and ordering the two commits correctly rests on the author already knowing.
     //
-    // Both flat passes are STRUCTURAL, not byte compares, even though a flat single-document asset has no
-    // sub-asset ids and would compare byte-stable. The gate's failure message is its product, and a byte
-    // mismatch on a 104-parameter asset (object-sync) names no offender at all — it would hand the reader
-    // back exactly the hand-diff this pass exists to retire.
+    // Both flat passes are STRUCTURAL, not byte compares, and for one shared reason plus one that differs.
+    // Shared: the gate's failure message is its product, and a byte mismatch on a 104-parameter asset
+    // (object-sync) names no offender at all — it hands the reader back exactly the hand-diff these passes
+    // exist to retire. Differing: a *_Parameters.asset really is one flat document and WOULD compare
+    // byte-stable, so there the choice is diagnostic quality alone; a *_Menu.asset does NOT, because
+    // sub-menu pages persist as sub-assets of the one file (CompileController's AddObjectToAsset) and carry
+    // the same non-deterministic fileIDs a .controller does — see MenuDiff's own header.
     //
-    // COVERAGE LIMIT, so a PASS is never read as wider than it is: RunGate enumerates entry dirs
-    // NON-RECURSIVELY, so a nested entry is outside every pass here — compositions/object-sync-demo/ (and
-    // its own nested object-sync/), object-sync/y/, object-sync/y_double/. That is 4 of the library's 22
-    // committed params assets, and it includes a second copy of object-sync's that can diverge from its
-    // gated twin unseen. Widening the enumeration is a separate change; this pass inherits the blind spot
-    // rather than fixing it.
+    // COVERAGE LIMIT, so a PASS is never read as wider than it is: RunGate selects entries for the three
+    // passes ABOVE (controller, menu, params) with a NON-RECURSIVE Directory.GetDirectories(root), so a
+    // nested entry is outside all three — compositions/object-sync-demo/ (and its own nested object-sync/),
+    // object-sync/y/, object-sync/y_double/. That is 4 of the library's 22 committed params assets, and it
+    // includes a second copy of object-sync's that can diverge from its gated twin unseen. The
+    // prefab-integrity pass below does NOT share this limit: it selects with SearchOption.AllDirectories and
+    // copies each entry whole, so a nested entry's prefabs are checked as part of their parent. Widening the
+    // other three is a separate change; they inherit the blind spot rather than fixing it.
     //
     // A committed built .controller lives at an arbitrary --root filesystem path, not under the
     // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
@@ -412,7 +417,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                        "those parameters were removed on purpose, or restore them if a `scratch:` " +
                                        "flag or the reserved-name set wrongly emptied the list");
             if (freshEmits && !committedExists)
-                return (MenuPass.Fail, "yaml emits parameters but built/ has none — regenerate built/");
+                // Conditional for the same reason the ParamsDiff call site is: a document that emitted nothing
+                // and now emits something is EITHER a yaml gaining its first non-scratch param (regenerate) OR
+                // a `scratch:` flipped off / a name leaving the reserved set (settle that first). Regenerating
+                // blind on the second commits the change as though it had been reviewed.
+                return (MenuPass.Fail, "yaml emits parameters but built/ has none — regenerating built/ is the " +
+                                       "fix ONLY if the yaml's own parameter list changed on purpose. If a " +
+                                       "`scratch:` flag or ControllerRules.VrcReservedParams changed, settle " +
+                                       "that first: regenerating blind commits it as though reviewed");
             return (freshEmits ? MenuPass.Compare : MenuPass.Skip, null);
         }
 
@@ -444,6 +456,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var bn = new HashSet<string>(bp.Select(p => p?.name ?? ""), StringComparer.Ordinal);
                 var dropped = ap.Select(p => p?.name ?? "").Where(n => !bn.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
                 var added = bp.Select(p => p?.name ?? "").Where(n => !an.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
+                // Equal name SETS at differing lengths means a duplicated name, and both lists come back empty
+                // — which would emit "dropped (none), added (none)" and name nothing at all, the byte-compare
+                // diagnostic this leg exists to beat. Say what actually differs instead.
+                if (dropped.Count == 0 && added.Count == 0)
+                    return $"{where}: committed has {ap.Length} parameter(s), compiled has {bp.Length}" +
+                           " — same names either side, so one of them declares a name twice";
                 return $"{where}: committed has {ap.Length} parameter(s), compiled has {bp.Length}" +
                        $" — compiled dropped {NameList(dropped)}, added {NameList(added)}";
             }
@@ -453,7 +471,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var x = ap[i]; var y = bp[i];
                 if ((x?.name ?? "") != (y?.name ?? ""))
                     return $"{where}[{i}]: name '{x?.name}' vs '{y?.name}'";
-                string w = $"{where} '{x?.name}'";
+                // Two nulls at one index compare name-equal above and would then NRE on the field reads below,
+                // which Check's catch turns into a FAIL reading "Object reference not set" — an anonymous
+                // diagnostic, the one thing this pass must never emit. Unity's serializer does not hand back a
+                // null element, so the live route is a hand-edited committed asset.
+                if (x == null || y == null)
+                    return $"{where}[{i}]: null parameter entry";
+                string w = $"{where} '{x.name}'";
                 if (x.valueType != y.valueType) return $"{w}: valueType {x.valueType} vs {y.valueType}";
                 if (x.saved != y.saved) return $"{w}: saved {x.saved} vs {y.saved}";
                 // Exact !=, deliberately no epsilon: both sides come from one emitter over one yaml literal,
