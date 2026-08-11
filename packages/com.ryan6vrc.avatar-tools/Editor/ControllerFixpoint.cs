@@ -130,22 +130,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return loaded;
         }
 
-        // Copy ONE committed built controller (+ its .meta) into Assets/ so the AssetDatabase imports
-        // it with the committed GUID, then load it. Only the named controller is copied — a multi-
-        // controller entry (an FX + Gesture pair) would otherwise import every sibling's committed
-        // GUID once per checked document, colliding across scratch dirs. Assumes the package under
-        // test is NOT also loaded in this host — else the committed GUID exists twice (a collision).
-        static AnimatorController ImportCommitted(string builtControllerPath, string destAssetsDir)
+        // Copy ONE committed built asset (+ its .meta) into Assets/ so the AssetDatabase imports it with the
+        // committed GUID, then load it. All three committed artifacts a Check compares — the .controller, the
+        // _Menu.asset, the _Parameters.asset — arrive through here.
+        //
+        // TWO CONSTRAINTS, and each was learned at a different caller, so neither is safe to drop when reading
+        // this for one of them:
+        //
+        // Only the NAMED file is copied. A multi-artifact entry (anchor-prop ships an FX + Gesture pair and one
+        // params asset) would otherwise import every sibling's committed GUID once per checked document,
+        // colliding across scratch dirs. Assumes the package under test is NOT also loaded in this host — else
+        // the committed GUID exists twice, which is the same collision by another route.
+        //
+        // The copy is what makes the load possible at all: entry files live at an arbitrary --root filesystem
+        // path outside the project, and LoadAssetAtPath resolves nothing there.
+        static T ImportCommittedAsset<T>(string committedPath, string destAssetsDir) where T : UnityEngine.Object
         {
             var full = Path.GetFullPath(destAssetsDir);
             Directory.CreateDirectory(full);
-            var src = Path.GetFullPath(builtControllerPath);
+            var src = Path.GetFullPath(committedPath);
             File.Copy(src, Path.Combine(full, Path.GetFileName(src)), true);
             if (File.Exists(src + ".meta"))
                 File.Copy(src + ".meta", Path.Combine(full, Path.GetFileName(src) + ".meta"), true);
             AssetDatabase.Refresh();
-            return AssetDatabase.LoadAssetAtPath<AnimatorController>(
-                ToAssetsRelative(Path.Combine(full, Path.GetFileName(builtControllerPath))));
+            return AssetDatabase.LoadAssetAtPath<T>(ToAssetsRelative(Path.Combine(full, Path.GetFileName(src))));
         }
 
         // (ok, message). yamlPath: filesystem path to controller.yaml. builtControllerPath: filesystem
@@ -172,7 +180,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 if (builtControllerPath != null)
                 {
-                    var cCommitted = ImportCommitted(builtControllerPath, scratch + "/committed");
+                    var cCommitted = ImportCommittedAsset<AnimatorController>(builtControllerPath, scratch + "/committed");
                     if (cCommitted == null) return (false, "committed controller failed to import");
                     var yCommitted = Decode(cCommitted, out var r3);
                     if (yCommitted == null) return (false, "committed decompile refused: " + r3);
@@ -194,7 +202,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (pass == MenuPass.Fail) return (false, presenceMsg);
                     if (pass == MenuPass.Compare)
                     {
-                        var imported = ImportCommittedMenu(committedMenuPath, scratch + "/menu");
+                        var imported = ImportCommittedAsset<VRCExpressionsMenu>(committedMenuPath, scratch + "/menu");
                         if (imported == null) return (false, "committed menu asset failed to import");
                         var diff = MenuDiff(imported, freshMenu, "menu");
                         if (diff != null) return (false, "committed built/ menu differs from compile(yaml): " + diff + " — regenerate built/");
@@ -215,7 +223,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (pPass == MenuPass.Fail) return (false, pMsg);
                     if (pPass == MenuPass.Compare)
                     {
-                        var importedParams = ImportCommittedParams(committedParamsPath, scratch + "/params");
+                        var importedParams = ImportCommittedAsset<VRCExpressionParameters>(committedParamsPath, scratch + "/params");
                         if (importedParams == null) return (false, "committed params asset failed to import");
                         var pDiff = ParamsDiff(importedParams, freshParams, "params");
                         // NOT "— regenerate built/". Regenerating is the fix for exactly one of the two causes,
@@ -294,38 +302,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var dir = Path.GetDirectoryName(controllerPath) ?? "";
             return Path.Combine(dir, Path.GetFileNameWithoutExtension(controllerPath) + "_Parameters.asset")
                        .Replace('\\', '/');
-        }
-
-        // Copy the committed params asset (+ its .meta, for the committed GUID) into Assets/ and load it.
-        // Same constraint as ImportCommitted: entry files live outside the project and cannot be loaded in
-        // place. The single-file copy also carries ImportCommitted's collision caveat — anchor-prop ships an
-        // FX + Gesture pair and one params asset, so only the named file may be copied per checked document.
-        static VRCExpressionParameters ImportCommittedParams(string paramsPath, string destAssetsDir)
-        {
-            var full = Path.GetFullPath(destAssetsDir);
-            Directory.CreateDirectory(full);
-            var src = Path.GetFullPath(paramsPath);
-            File.Copy(src, Path.Combine(full, Path.GetFileName(src)), true);
-            if (File.Exists(src + ".meta"))
-                File.Copy(src + ".meta", Path.Combine(full, Path.GetFileName(src) + ".meta"), true);
-            AssetDatabase.Refresh();
-            return AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(
-                ToAssetsRelative(Path.Combine(full, Path.GetFileName(paramsPath))));
-        }
-
-        // Copy the committed menu (+ its .meta, for the committed GUID) into Assets/ and load it. Same
-        // constraint as ImportCommitted: entry files live outside the project and cannot be loaded in place.
-        static VRCExpressionsMenu ImportCommittedMenu(string menuPath, string destAssetsDir)
-        {
-            var full = Path.GetFullPath(destAssetsDir);
-            Directory.CreateDirectory(full);
-            var src = Path.GetFullPath(menuPath);
-            File.Copy(src, Path.Combine(full, Path.GetFileName(src)), true);
-            if (File.Exists(src + ".meta"))
-                File.Copy(src + ".meta", Path.Combine(full, Path.GetFileName(src) + ".meta"), true);
-            AssetDatabase.Refresh();
-            return AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(
-                ToAssetsRelative(Path.Combine(full, Path.GetFileName(menuPath))));
         }
 
         // Structural comparison of two menu trees, recursing sub-menus. NOT a byte diff: the two assets
@@ -521,8 +497,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // lives in assets/ as a non-prefab (an .fbx the *.prefab glob would miss) makes the variant
         // load as null otherwise — the head-proxy false-negative this dissolves. Entry files live at an
         // arbitrary --root path outside the project (the patterns package is not loaded here), so they
-        // must be brought into Assets/ to load — the same constraint ImportCommitted solves for
-        // controllers. Per-entry scratch isolation holds: each entry gets its own fresh scratch, so one
+        // must be brought into Assets/ to load — the same constraint ImportCommittedAsset solves for a
+        // single artifact. Per-entry scratch isolation holds: each entry gets its own fresh scratch, so one
         // entry's committed GUIDs never co-import with another's. Only prefabs are asserted on; built/
         // controllers, yaml, and README ride along for GUID resolution but are never load-checked (a
         // dangling controller ref does not fail a prefab load, so widening the copy set masks nothing).
