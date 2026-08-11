@@ -4,14 +4,10 @@ using UnityEngine;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// The one bake spine: clone a placed avatar and run it through the real VRC SDK preprocess chain, so a
-    /// caller can read what actually ships rather than what is authored.
-    ///
-    /// The door is <c>VRCBuildPipelineCallbacks.OnPreprocessAvatar</c> and never NDMF's
-    /// <c>AvatarProcessor.ManualProcessAvatar</c>: manual processing walks NDMF's plugin chain only, so
-    /// Modular Avatar survives while VRCFury — which registers as an SDK preprocess callback and ships no
-    /// NDMF plugin — never runs at all, producing a plausible baked avatar that is not the one that
-    /// uploads, with no error to say so. <c>docs/nondestructive.md</c> §The bake door owns this.
+    /// The one bake spine: clone a placed avatar and run it through the real VRC SDK preprocess chain
+    /// (<c>VRCBuildPipelineCallbacks.OnPreprocessAvatar</c>, never NDMF's <c>ManualProcessAvatar</c>), so a
+    /// caller can read what actually ships rather than what is authored. <c>docs/nondestructive.md</c>
+    /// §The bake door owns why.
     ///
     /// It lives in this package because the dependency arrow only runs one way — <c>avatar-tools</c>
     /// references <c>agent-tools</c>, never the reverse — so a bake spine parked in <c>avatar-tools</c> is
