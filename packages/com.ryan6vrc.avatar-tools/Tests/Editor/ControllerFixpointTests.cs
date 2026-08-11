@@ -128,6 +128,33 @@ public class ControllerFixpointTests
             value = value,
         };
 
+    // Registered in _made for the same reason menus are — a leaked ScriptableObject in this assembly is what
+    // broke 48 unrelated tests, and a VRCExpressionParameters leaks exactly as readily as a menu.
+    VRCExpressionParameters Params(params VRCExpressionParameters.Parameter[] ps)
+    {
+        var p = ScriptableObject.CreateInstance<VRCExpressionParameters>();
+        p.parameters = ps;
+        _made.Add(p);
+        return p;
+    }
+
+    // Every field the caller does not set stays at its SDK default, so a case's diff is exactly the field it
+    // varied — the same contract Ctl above holds to.
+    static VRCExpressionParameters.Parameter Prm(
+        string name,
+        VRCExpressionParameters.ValueType valueType = VRCExpressionParameters.ValueType.Bool,
+        bool saved = false,
+        float defaultValue = 0f,
+        bool networkSynced = false)
+        => new VRCExpressionParameters.Parameter
+        {
+            name = name,
+            valueType = valueType,
+            saved = saved,
+            defaultValue = defaultValue,
+            networkSynced = networkSynced,
+        };
+
     // ── The SDK shapes every fixture below depends on ──────────────────────────────────────────────
     //
     // MenuDiff's null-handling only makes sense against particular SDK shapes: `parameter` a class (so `?.`
@@ -976,6 +1003,225 @@ public class ControllerFixpointTests
     public void OrphanMenus_MissingBuiltDir_Throws()
         => Assert.Throws<DirectoryNotFoundException>(
             () => ControllerFixpoint.OrphanMenus(Path.Combine(_tmp, "built"), new[] { "FX" }).ToList());
+
+    // ── ParamsDiff / ParamsPresence / ParamsBeside / OrphanParams ──────────────────────────────────
+    //
+    // Venue-free in a way the menu suite is not: every helper here touches no AssetDatabase, where MenuDiff
+    // calls GetAssetPath for `icon` and needed a real asset folder. Fixtures are CreateInstance plus a plain
+    // managed field assignment — none of the three mutations docs/verify.md §Test venue forbids.
+
+    [Test]
+    public void ParamsDiff_IdenticalLists_ReturnsNull()
+        => Assert.IsNull(ControllerFixpoint.ParamsDiff(
+            Params(Prm("A"), Prm("B")), Params(Prm("A"), Prm("B")), "params"));
+
+    [Test]
+    public void ParamsDiff_NullParametersArrayEqualsEmptyArray()
+    {
+        var a = Params();
+        a.parameters = null;
+        Assert.IsNull(ControllerFixpoint.ParamsDiff(a, Params(), "params"));
+    }
+
+    // THE CASE THIS WHOLE PASS EXISTS FOR. A `scratch:` flip or a reserved-name change drops (or adds) exactly
+    // one entry, so it always lands on the count leg and never reaches the per-index loop. The count leg must
+    // therefore NAME the parameter — a bare "104 vs 103" is the byte-compare diagnostic this pass rejects.
+    [Test]
+    public void ParamsDiff_DroppedParam_CountLegNamesTheOffender()
+        => Assert.AreEqual(
+            "params: committed has 2 parameter(s), compiled has 1 — compiled dropped 'IsAnimatorEnabled', added (none)",
+            ControllerFixpoint.ParamsDiff(
+                Params(Prm("Toggle"), Prm("IsAnimatorEnabled")), Params(Prm("Toggle")), "params"));
+
+    [Test]
+    public void ParamsDiff_AddedParam_CountLegNamesTheOffender()
+        => Assert.AreEqual(
+            "params: committed has 1 parameter(s), compiled has 2 — compiled dropped (none), added 'Extra'",
+            ControllerFixpoint.ParamsDiff(
+                Params(Prm("Toggle")), Params(Prm("Toggle"), Prm("Extra")), "params"));
+
+    // The cap, and that it is the NAMES that are capped rather than the message truncated mid-string.
+    [Test]
+    public void ParamsDiff_ManyDroppedParams_CapsTheNameListAtFive()
+    {
+        var committed = Params(Enumerable.Range(0, 7).Select(i => Prm("P" + i)).ToArray());
+        Assert.AreEqual(
+            "params: committed has 7 parameter(s), compiled has 0 — " +
+            "compiled dropped 'P0', 'P1', 'P2', 'P3', 'P4' and 2 more, added (none)",
+            ControllerFixpoint.ParamsDiff(committed, Params(), "params"));
+    }
+
+    // Equal length, differing names: addressed by INDEX, because no name is agreed yet. Same transition
+    // MenuDiff makes, and the reason a reorder reports the way the next case says it does.
+    [Test]
+    public void ParamsDiff_NameDiffers_AddressedByIndexNotName()
+        => Assert.AreEqual("params[0]: name 'A' vs 'B'",
+            ControllerFixpoint.ParamsDiff(Params(Prm("A")), Params(Prm("B")), "params"));
+
+    // Pins the stated design decision that order is drift: the emitter preserves declaration order, so a
+    // reorder is a real yaml change and must not pass silently.
+    [Test]
+    public void ParamsDiff_ReorderedParams_ReportedAsNameMismatch()
+        => Assert.AreEqual("params[0]: name 'A' vs 'B'",
+            ControllerFixpoint.ParamsDiff(
+                Params(Prm("A"), Prm("B")), Params(Prm("B"), Prm("A")), "params"));
+
+    [Test]
+    public void ParamsDiff_ValueTypeDiffers_AddressedByName()
+        => Assert.AreEqual("params 'Hat': valueType Bool vs Int",
+            ControllerFixpoint.ParamsDiff(
+                Params(Prm("Hat")), Params(Prm("Hat", valueType: VRCExpressionParameters.ValueType.Int)), "params"));
+
+    // networkSynced earns its own case where the other scalars share one: this is the field that costs a sync
+    // bit on the built avatar, so a silent flip here is the regression with consequences beyond legibility.
+    [Test]
+    public void ParamsDiff_NetworkSyncedDiffers_AddressedByName()
+        => Assert.AreEqual("params 'Hat': networkSynced True vs False",
+            ControllerFixpoint.ParamsDiff(
+                Params(Prm("Hat", networkSynced: true)), Params(Prm("Hat")), "params"));
+
+    [Test]
+    public void ParamsDiff_SavedDiffers_AddressedByName()
+        => Assert.AreEqual("params 'Hat': saved True vs False",
+            ControllerFixpoint.ParamsDiff(
+                Params(Prm("Hat", saved: true)), Params(Prm("Hat")), "params"));
+
+    // Inherited NaN defect, pinned for the same reason MenuDiff's is: NaN != NaN, so two byte-identical
+    // assets report a difference the appended "regenerate built/" remediation cannot clear. Recorded as a
+    // defect, not a contract — and unreachable from the compiler today, which emits no NaN default.
+    // Not exact-string: float.ToString() renders NaN culture-dependently.
+    [Test]
+    public void ParamsDiff_NaNDefaultValue_ReportsDifferenceBetweenIdenticalParams()
+    {
+        var diff = ControllerFixpoint.ParamsDiff(
+            Params(Prm("Hat", defaultValue: float.NaN)), Params(Prm("Hat", defaultValue: float.NaN)), "params");
+        Assert.IsNotNull(diff, "NaN != NaN, so this reports a diff — a defect, not a contract");
+        Assert.That(diff, Does.StartWith("params 'Hat': defaultValue "));
+    }
+
+    // The loop bound and the index-in-address together — a single-entry fixture cannot distinguish
+    // `i < ap.Length` from `i < ap.Length - 1`.
+    [Test]
+    public void ParamsDiff_LastParamIsCompared()
+        => Assert.AreEqual("params 'C': networkSynced False vs True",
+            ControllerFixpoint.ParamsDiff(
+                Params(Prm("A"), Prm("B"), Prm("C")),
+                Params(Prm("A"), Prm("B"), Prm("C", networkSynced: true)), "params"));
+
+    // ParamsPresence: whether ParamsDiff is called at all. The two Fail legs must be DISTINGUISHABLE, which is
+    // the whole reason the refusal strings live in the helper rather than at the call site.
+
+    [Test]
+    public void ParamsPresence_NeitherSideHasOne_Skips()
+    {
+        var (pass, msg) = ControllerFixpoint.ParamsPresence(null, false);
+        Assert.AreEqual(ControllerFixpoint.MenuPass.Skip, pass);
+        Assert.IsNull(msg);
+    }
+
+    [Test]
+    public void ParamsPresence_BothSidesHaveOne_Compares()
+    {
+        var (pass, msg) = ControllerFixpoint.ParamsPresence(Params(Prm("A")), true);
+        Assert.AreEqual(ControllerFixpoint.MenuPass.Compare, pass);
+        Assert.IsNull(msg);
+    }
+
+    [Test]
+    public void ParamsPresence_CommittedOnly_FailsNamingBothRemedies()
+    {
+        var (pass, msg) = ControllerFixpoint.ParamsPresence(null, true);
+        Assert.AreEqual(ControllerFixpoint.MenuPass.Fail, pass);
+        Assert.AreEqual("built/ ships a params asset the yaml no longer emits — delete it if those parameters " +
+                        "were removed on purpose, or restore them if a `scratch:` flag or the reserved-name set " +
+                        "wrongly emptied the list", msg);
+    }
+
+    [Test]
+    public void ParamsPresence_FreshOnly_FailsWithTheOtherMessage()
+    {
+        var (pass, msg) = ControllerFixpoint.ParamsPresence(Params(Prm("A")), false);
+        Assert.AreEqual(ControllerFixpoint.MenuPass.Fail, pass);
+        Assert.AreEqual("yaml emits parameters but built/ has none — regenerate built/", msg);
+    }
+
+    // ParamsBeside: the re-derived filename convention. This case is the ONLY thing keeping this copy in step
+    // with CompileController's own formula — see the helper's header for why they are not shared.
+
+    [Test]
+    public void ParamsBeside_DerivesParamsAssetBesideController()
+        => Assert.AreEqual("a/b/FX_Parameters.asset", ControllerFixpoint.ParamsBeside("a/b/FX.controller"));
+
+    [Test]
+    public void ParamsBeside_NormalizesBackslashesToForwardSlashes()
+        => Assert.AreEqual("a/b/FX_Parameters.asset", ControllerFixpoint.ParamsBeside(@"a\b\FX.controller"));
+
+    [Test]
+    public void ParamsBeside_BareFilenameHasNoDirectoryPrefix()
+        => Assert.AreEqual("FX_Parameters.asset", ControllerFixpoint.ParamsBeside("FX.controller"));
+
+    // OrphanParams: a committed params asset whose controller no document claims.
+
+    [Test]
+    public void OrphanParams_ClaimedParams_IsNotAnOrphan()
+    {
+        var built = Dir("built");
+        File_(built, "FX_Parameters.asset");
+        Assert.IsEmpty(ControllerFixpoint.OrphanParams(built, new[] { "FX" }).ToList());
+    }
+
+    [Test]
+    public void OrphanParams_UnclaimedParams_ReportsAssetStemNotControllerName()
+    {
+        var built = Dir("built");
+        File_(built, "Gesture_Parameters.asset");
+        CollectionAssert.AreEquivalent(new[] { "Gesture_Parameters" },
+            ControllerFixpoint.OrphanParams(built, new[] { "FX" }).ToList());
+    }
+
+    // A claimed controller with NO params asset is legal and must not be reported — anchor-prop ships exactly
+    // this, its Gesture document declaring only a scratch: param so the emitter writes nothing.
+    [Test]
+    public void OrphanParams_ClaimedControllerWithoutAParamsAsset_IsNotReported()
+    {
+        var built = Dir("built");
+        File_(built, "FX_Parameters.asset");
+        Assert.IsEmpty(ControllerFixpoint.OrphanParams(built, new[] { "FX", "Gesture" }).ToList());
+    }
+
+    // Degenerate name: "_Parameters.asset" derives an EMPTY controller name. Pinned for the same reason the
+    // menu mirror is — the Substring arithmetic is what would throw if the glob matched something shorter.
+    [Test]
+    public void OrphanParams_FileNamedExactlyParametersAsset_DerivesEmptyName_WithoutThrowing()
+    {
+        var built = Dir("built");
+        File_(built, "_Parameters.asset");
+        CollectionAssert.AreEquivalent(new[] { "_Parameters" },
+            ControllerFixpoint.OrphanParams(built, new[] { "FX" }).ToList());
+    }
+
+    [Test]
+    public void OrphanParams_ClaimIsCaseSensitive()
+    {
+        var built = Dir("built");
+        File_(built, "FX_Parameters.asset");
+        CollectionAssert.AreEquivalent(new[] { "FX_Parameters" },
+            ControllerFixpoint.OrphanParams(built, new[] { "Fx" }).ToList());
+    }
+
+    [Test]
+    public void OrphanParams_IgnoresControllersAndMenuAssets()
+    {
+        var built = Dir("built");
+        File_(built, "FX.controller");
+        File_(built, "FX_Menu.asset");
+        Assert.IsEmpty(ControllerFixpoint.OrphanParams(built, new List<string>()).ToList());
+    }
+
+    [Test]
+    public void OrphanParams_MissingBuiltDir_Throws()
+        => Assert.Throws<DirectoryNotFoundException>(
+            () => ControllerFixpoint.OrphanParams(Path.Combine(_tmp, "built"), new[] { "FX" }).ToList());
 
     // ── The interlock ──────────────────────────────────────────────────────────────────────────────
     //
