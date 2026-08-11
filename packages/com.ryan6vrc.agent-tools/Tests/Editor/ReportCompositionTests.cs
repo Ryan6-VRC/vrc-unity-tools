@@ -105,11 +105,10 @@ public class ReportCompositionTests
     [Test]
     public void ARootWithNoDescriptor_refusesRatherThanReportingAnEmptyComposition()
     {
-        var go = new GameObject("Bare");
+        new GameObject("Bare");
         LogAssert.Expect(LogType.Error, new Regex(@"\[ReportComposition\] FAIL:"));
         var r = ReportComposition.Report("Bare");
         StringAssert.Contains("has no VRCAvatarDescriptor", r);
-        Object.DestroyImmediate(go);
     }
 
     // ── The rendering mandate: an empty cell must not read as a finding ──────────────────────────────
@@ -117,31 +116,33 @@ public class ReportCompositionTests
     [Test]
     public void AParameterNoScannedSurfaceWrites_carriesTheScopeNoteInTheCell()
     {
-        var root = BuildAvatar("ScopeAvatar", "Unwritten");
+        BuildAvatar("ScopeAvatar", "Unwritten");
         var r = ReportComposition.Report("ScopeAvatar");
         StringAssert.Contains("=> OK", r);
         var body = ReadArtifact(r);
-
         StringAssert.Contains("`Unwritten`", body, "the declared parameter must appear: " + body);
-        // The whole point. An empty writers cell re-manufactures the misread this door exists to prevent,
-        // so the scope note lives IN the cell rather than in a footnote the reader may not reach.
-        StringAssert.Contains(ReportComposition.ScopeWriters, body,
-            "an unwritten parameter's writers cell must state what was not excluded: " + body);
+
+        // Assert on the ROW, not on the document. Both constants are also printed unconditionally in the
+        // trailing Scope section, so a whole-body Contains passes even when the cell is empty — which is
+        // exactly the property this test exists to pin, and exactly what it failed to pin before.
+        string row = RowFor(body, "Unwritten");
+        StringAssert.Contains(ReportComposition.ScopeWriters, row,
+            "the scope note must be IN the writers cell, not only in the footer: " + row);
+        Assert.IsFalse(System.Text.RegularExpressions.Regex.IsMatch(row, @"\|\s*\|\s*\|"),
+            "no cell in the row may be blank — a blank writers cell reads as a finding: " + row);
         StringAssert.Contains(ReportComposition.ScopeAuthoredNames, body,
             "plain mode must decline to claim the built names: " + body);
-        Object.DestroyImmediate(root);
     }
 
     [Test]
     public void ParamFilter_narrowsTheTable_andSaysThatItDid()
     {
-        var root = BuildAvatar("FilterAvatar", "Keep/Me", "Drop/Me");
+        BuildAvatar("FilterAvatar", "Keep/Me", "Drop/Me");
         var r = ReportComposition.Report("FilterAvatar", false, "Keep");
         var body = ReadArtifact(r);
         StringAssert.Contains("`Keep/Me`", body, body);
         Assert.IsFalse(body.Contains("| `Drop/Me` |"), "the filter must actually narrow the table: " + body);
         StringAssert.Contains("paramFilter:", body, "a narrowed table must say it is narrowed, or its counts lie: " + body);
-        Object.DestroyImmediate(root);
     }
 
     [Test]
@@ -152,11 +153,13 @@ public class ReportCompositionTests
         var r = ReportComposition.Report("CensusAvatar");
         StringAssert.Contains("UnityEngine.BoxCollider", ReadArtifact(r),
             "an uninterpreted component must be censused, or other=0 means nobody looked");
-        Object.DestroyImmediate(root);
     }
 
     // ── Fixture ──────────────────────────────────────────────────────────────────────────────────────
 
+    // Objects are left for the next test's NewScene(Single) to take, rather than DestroyImmediate'd —
+    // docs/verify.md §Test venue forbids building-then-destroying live objects this fixture has mutated,
+    // and the sibling CheckHumanoidRigAvatarTests already follows that rule.
     private GameObject BuildAvatar(string name, params string[] declaredParams)
     {
         var root = new GameObject(name);
@@ -175,6 +178,16 @@ public class ReportCompositionTests
         _assets.Add(ep);
         d.expressionParameters = ep;
         return root;
+    }
+
+    /// <summary>The one table row whose first cell names <paramref name="param"/>. Asserting on the whole
+    /// document cannot distinguish a cell from a footnote, and this door's contract is about the cell.</summary>
+    private static string RowFor(string body, string param)
+    {
+        foreach (var line in body.Split('\n'))
+            if (line.StartsWith("| `" + param + "`", System.StringComparison.Ordinal)) return line;
+        Assert.Fail("no table row for `" + param + "` in:\n" + body);
+        return null;
     }
 
     private static string ReadArtifact(string summary)

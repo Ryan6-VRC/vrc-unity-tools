@@ -97,7 +97,18 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal class ParamRow
         {
             public string Name;
-            public string Declared = "(undeclared on the expression parameters asset)";
+            /// <summary>Every asset that declares this name. A list, not a slot: two FullControllers each
+            /// shipping a parameters asset that declares one name is a composed-scope fact, and overwriting
+            /// a single field reports whichever surface happened to be walked last.</summary>
+            public readonly List<string> DeclaredAt = new List<string>();
+            public string Declared => DeclaredAt.Count == 0
+                ? "(undeclared on any expression parameters asset reached here)"
+                : string.Join("; ", DeclaredAt);
+            /// <summary>False for a name that no expression-parameters asset and no controller declares —
+            /// a physbone suffix or a menu sub-parameter the runtime writes. Bake mode must NOT diff these:
+            /// the built side is a declaration set, so an undiffable name would land in `dropped`, whose
+            /// plain reading is "the build removed it".</summary>
+            public bool Diffable;
             public string Type = "—";
             public string Synced = "—";
             public string Saved = "—";
@@ -194,7 +205,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     if (p == null || string.IsNullOrEmpty(p.name)) continue;
                     var r = row(p.name);
-                    r.Declared = where;
+                    if (!r.DeclaredAt.Contains(where)) r.DeclaredAt.Add(where);
+                    r.Diffable = true;
                     r.Type = p.valueType.ToString();
                     r.Synced = p.networkSynced ? "yes" : "no";
                     r.Saved = p.saved ? "yes" : "no";
@@ -216,6 +228,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var p in s.Controller.parameters)
                 {
                     var r = row(p.name);
+                    r.Diffable = true; // a controller declares it, so the built controllers can carry it
                     if (r.Type == "—") r.Type = p.type.ToString() + " (controller only)";
                 }
             }
@@ -247,12 +260,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static void CollectMenu(VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor,
             List<MergeSurfaces.Surface> surfaces, CensusResult res, Func<string, ParamRow> row)
         {
-            var seenAssets = new HashSet<int>();
+            // Keyed on (asset, source): deduping the WALK is right, but dropping the second installer's
+            // provenance is not — a submenu asset two outfits both install is exactly the composed-scope
+            // fact this table exists to carry, and provenance is the product.
+            var seenAssets = new HashSet<(int asset, string source)>();
             void Walk(VRCExpressionsMenu menu, string source, string path, int depth)
             {
                 if (menu == null || menu.controls == null) return;
                 if (depth > 12) { res.Notes.Add("menu walk stopped at depth 12 under '" + path + "' — deeper controls are not in the table."); return; }
-                if (!seenAssets.Add(menu.GetInstanceID())) return; // a menu reachable twice is one menu
+                if (!seenAssets.Add((menu.GetInstanceID(), source))) return;
                 res.MenuAssetsWalked++;
                 foreach (var c in menu.controls)
                 {
@@ -439,14 +455,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("\n## Merge surfaces\n\n| surface | mount | controller | kind | rewriteBindings |\n| --- | --- | --- | --- | --- |\n");
             if (c.Surfaces.Count == 0) sb.Append("| _(none)_ | | | | |\n");
             foreach (var s in c.Surfaces)
-                sb.Append("| ").Append(RunLogFormat.Cell(s.Label)).Append(" | `").Append(s.Mount).Append("` | `")
-                  .Append(s.Controller != null ? s.Controller.name : "—").Append("` | ").Append(s.Kind)
+                sb.Append("| ").Append(RunLogFormat.Cell(s.Label)).Append(" | `").Append(RunLogFormat.Cell(s.Mount)).Append("` | `")
+                  .Append(RunLogFormat.Cell(s.Controller != null ? s.Controller.name : "—")).Append("` | ").Append(s.Kind)
                   .Append(" | ").Append(s.HasRewrite ? "yes" : "no").Append(" |\n");
 
             sb.Append("\n## Parameters\n\n| parameter | declared | type | synced | saved | default | writers | readers |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n");
             if (c.Params.Count == 0) sb.Append("| _(none)_ | | | | | | | |\n");
             foreach (var p in c.Params)
-                sb.Append("| `").Append(p.Name).Append("` | ").Append(RunLogFormat.Cell(p.Declared)).Append(" | ")
+                sb.Append("| `").Append(RunLogFormat.Cell(p.Name)).Append("` | ").Append(RunLogFormat.Cell(p.Declared)).Append(" | ")
                   .Append(p.Type).Append(" | ").Append(p.Synced).Append(" | ").Append(p.Saved).Append(" | ")
                   .Append(p.Default).Append(" | ").Append(RunLogFormat.Cell(Cell(p.Writers, ScopeWriters)))
                   .Append(" | ").Append(RunLogFormat.Cell(Cell(p.Readers, "(none among scanned surfaces)"))).Append(" |\n");

@@ -223,7 +223,7 @@ public class CheckHumanoidRigAvatarTests
     // ── name-shadow: some OTHER transform carries the plain humanoid label ─────────────────────────────
 
     [Test]
-    public void MappingOnThePlainlyNamedBone_isNotAShadow_evenWithASameNamedTwin()
+    public void ACleanRigReportsNoShadow_theTwinCaseIsNotConstructibleHere()
     {
         // The guard that keeps this door off every composed avatar: where the humanoid bone IS the
         // transform named for it, a second same-named transform is the ordinary base/mergeable pair the

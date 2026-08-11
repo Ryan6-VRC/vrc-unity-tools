@@ -106,7 +106,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var d = DetectAuto(controller, mergeSite, notes);
                 if (d.Refusal != null) return Refuse(d.Refusal);
                 var siteGO = FindByHierarchyPath(mergeSite);
-                var siteDesc = siteGO != null ? siteGO.GetComponentInParent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>() : null;
+                // includeInactive: the no-arg overload skips inactive objects, and an authoring avatar is
+                // routinely parked inactive — without this the rider is silently absent in the exact state
+                // most lints run in, which is worse than not having it.
+                var siteDesc = siteGO != null ? siteGO.GetComponentInParent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>(true) : null;
                 siteAvatarGO = siteDesc != null ? siteDesc.gameObject : null;
                 usedMount = d.Root;
                 if (d.Root != null) roots.Add(d.Root);

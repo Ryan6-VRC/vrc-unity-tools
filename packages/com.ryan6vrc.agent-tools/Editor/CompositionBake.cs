@@ -4,7 +4,9 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using UnityEditor;
+using UnityEditor.Animations;
 using UnityEngine;
 using VRC.SDK3.Avatars.ScriptableObjects;
 
@@ -35,10 +37,17 @@ namespace Ryan6Vrc.AgentTools.Editor
     internal static class CompositionBake
     {
         private const string Pending = "pending";
+        /// <summary>Well past the ~30 s worst case measured on a complex avatar with an optimizer installed,
+        /// so a slow bake is never called dead; short enough that a discarded callback is not a long wedge.</summary>
+        private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(5);
         private static readonly Dictionary<int, bool> InFlight = new Dictionary<int, bool>();
 
+        // Keyed on name AND instance id: the path must be STABLE (the caller re-reads it after a transport
+        // timeout, so a timestamp is out) but two roots named "Avatar" in one scene would otherwise share a
+        // file — B's pending stub overwriting A's result, and Verify(B) returning A's summary as B's.
         private static string ArtifactPath(GameObject root) =>
-            RunLogFormat.SnapshotDir + "/composition-bake_" + RunLogFormat.Sanitize(root.name) + ".md";
+            RunLogFormat.SnapshotDir + "/composition-bake_" + RunLogFormat.Sanitize(root.name)
+            + "_" + root.GetInstanceID().ToString("X", CultureInfo.InvariantCulture) + ".md";
 
         internal static string Begin(GameObject root, ReportComposition.CensusResult census, string paramFilter)
         {
@@ -74,7 +83,22 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return "[ReportComposition] FAIL: no bake artifact at " + path + " — run Report(<avatarRoot>, bake:true) first";
             string text = File.ReadAllText(full);
             if (text.Contains("status: " + Pending))
+            {
+                // A domain reload discards the scheduled callback WITHOUT running it and clears the in-memory
+                // in-flight flag, leaving the artifact reading `pending` forever. Nothing in the editor can be
+                // asked whether the callback still exists, so age is the only available signal — and without
+                // it the artifact's own "do not re-issue" instruction wedges the door permanently.
+                var m = Regex.Match(text, @"^started: (.+)$", RegexOptions.Multiline);
+                if (m.Success && DateTime.TryParse(m.Groups[1].Value, CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind, out var started)
+                    && DateTime.UtcNow - started > StaleAfter)
+                    return "[ReportComposition] " + root.name + ": mode=bake => STALE (started "
+                         + started.ToString("o", CultureInfo.InvariantCulture) + ", over "
+                         + StaleAfter.TotalMinutes.ToString(CultureInfo.InvariantCulture)
+                         + " min ago and still pending — the scheduled bake was almost certainly discarded by a "
+                         + "domain reload; re-issue Report(<avatarRoot>, bake:true)) | log=" + path;
                 return "[ReportComposition] " + root.name + ": mode=bake => PENDING | log=" + path;
+            }
             string head = text.Split('\n').FirstOrDefault(l => l.StartsWith("summary: ", StringComparison.Ordinal));
             return head != null ? head.Substring("summary: ".Length).Trim()
                                 : "[ReportComposition] " + root.name + ": mode=bake => OK | log=" + path;
@@ -84,7 +108,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             if (root == null)
             {
-                WriteArtifact(path, Refusal(path, "the avatar root was destroyed before the bake ran"));
+                WriteArtifact(path, Refusal(path, "the avatar root was destroyed before the bake ran", "(destroyed)"));
                 return;
             }
 
@@ -95,21 +119,23 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // A loud refusal naming the stage — NEVER a silent fallback to the authored census. Emitting
                 // authored rows under a heading that promises composed truth is the failure this door exists
                 // to prevent, so bake mode publishes no table at all when the bake did not happen.
-                WriteArtifact(path, Refusal(path, failedStage));
+                WriteArtifact(path, Refusal(path, failedStage, root.name));
                 Debug.LogError("[ReportComposition] " + root.name + ": mode=bake => FAIL (" + failedStage + ") | log=" + path);
                 return;
             }
 
             try
             {
-                var built = BuiltParams(clone);
-                var diff = Diff(census, built, paramFilter);
+                string incomplete;
+                var built = BuiltDeclarations(clone, out incomplete);
+                var diff = Diff(census, built, paramFilter, incomplete == null);
                 string summary = string.Format(CultureInfo.InvariantCulture,
-                    "[ReportComposition] {0}: surfaces={1} params={2} kept={3} renamed={4} dropped={5} merged={6} unattributed={7} mode=bake => OK | log={8}",
+                    "[ReportComposition] {0}: surfaces={1} params={2} kept={3} renamed={4} dropped={5} merged={6} unattributed={7} notInScope={8} builtSideUnread={9} mode=bake => OK | log={10}",
                     root.name, census.Surfaces.Count, census.Params.Count,
                     diff.Count(d => d.Category == "kept"), diff.Count(d => d.Category == "renamed"),
                     diff.Count(d => d.Category == "dropped"), diff.Count(d => d.Category == "merged"),
-                    diff.Count(d => d.Category == "unattributed"), path);
+                    diff.Count(d => d.Category == "unattributed"), diff.Count(d => d.Category == "not-in-scope"),
+                    diff.Count(d => d.Category == "built-side-unread"), path);
 
                 var section = new List<string>
                 {
@@ -117,15 +143,28 @@ namespace Ryan6Vrc.AgentTools.Editor
                     "| --- | --- | --- | --- |",
                 };
                 foreach (var d in diff)
-                    section.Add("| `" + d.Authored + "` | " + d.Category + " | `" + d.Built + "` | "
+                    section.Add("| `" + RunLogFormat.Cell(d.Authored) + "` | " + d.Category + " | `" + RunLogFormat.Cell(d.Built) + "` | "
                               + RunLogFormat.Cell(d.Surface) + " |");
                 section.Add("");
-                section.Add("Categories: **kept** the built avatar carries the authored name; **renamed** a built name was "
-                          + "attributed to it by suffix and owning surface; **dropped** no built parameter was attributable; "
-                          + "**merged** two or more authored names resolved onto one built name; **unattributed** a BUILT "
-                          + "parameter matched no authored one.");
+                if (incomplete != null)
+                    section.Add("**The built read was incomplete: " + incomplete + ".** Exact matches and renames below "
+                              + "are still measured facts; every unmatched authored name is reported "
+                              + "`built-side-unread` rather than `dropped`, because this read cannot tell removal from "
+                              + "not-looking. Treat the absence of a row as unknown, not as evidence.");
+                section.Add("The built side is a DECLARATION set: the built descriptor's expression parameters union every "
+                          + "parameter on every controller the clone plays. Every category below is relative to that.");
+                section.Add("Categories: **kept** the built avatar declares the authored name unchanged; **renamed** exactly "
+                          + "one built name is a prefixed form of it (the authored name behind a `/` or `_` separator); "
+                          + "**dropped** no built declaration was attributable; **merged** two or more authored names "
+                          + "resolved onto one built name, replacing their individual rows so the counts still sum; "
+                          + "**built-side-unread** no match AND the built read was partial, so removal is not claimed; "
+                          + "**unattributed** either a BUILT name no authored one claims, or an authored name more than one "
+                          + "built name could be; **not-in-scope** a runtime-written name (physbone suffix, menu "
+                          + "sub-parameter) that nothing declares, so a declaration set cannot carry it and its absence "
+                          + "means nothing.");
                 section.Add("Attribution is inference, not a pinned grammar — an `unattributed` row is the honest answer and "
-                          + "beats a mapping the tool cannot support.");
+                          + "beats a mapping the tool cannot support. The separator boundary is the whole of the rule; a "
+                          + "bare suffix match would call authored `Toggle` a rename of built `Hair/HairToggle`.");
                 section.Add("Optimizers found on the root: "
                           + (census.Optimizers.Count == 0 ? "(none)" : string.Join(", ", census.Optimizers))
                           + ". The full chain is what ships and is what was measured; disable them yourself for a "
@@ -142,76 +181,186 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        private struct DiffRow { public string Authored, Built, Category, Surface; }
+        internal struct DiffRow { public string Authored, Built, Category, Surface; }
 
-        /// <summary>Every parameter the BUILT clone declares, from its own descriptor. Read off the clone,
-        /// which is the only artifact that carries the post-rewrite names.</summary>
-        private static List<string> BuiltParams(GameObject clone)
+        /// <summary>Every parameter name the BUILT clone declares: its descriptor's expression parameters
+        /// UNION every parameter on every controller the clone plays. Both halves are needed. The expression
+        /// asset alone is a synced-parameter budget, not the avatar's parameter set — a controller-only value
+        /// (a driver scratch, a gesture built-in) never appears there, so diffing against it alone put every
+        /// such name in <c>dropped</c>, whose plain reading is "the build removed it".</summary>
+        internal static List<string> BuiltDeclarations(GameObject clone, out string incompleteReason)
         {
-            var names = new List<string>();
+            incompleteReason = null;
+            var names = new HashSet<string>(StringComparer.Ordinal);
             var d = clone.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             var ep = d != null ? d.expressionParameters : null;
-            if (ep == null || ep.parameters == null) return names;
-            foreach (var p in ep.parameters)
-                if (p != null && !string.IsNullOrEmpty(p.name)) names.Add(p.name);
-            return names;
+            if (ep != null && ep.parameters != null)
+                foreach (var p in ep.parameters)
+                    if (p != null && !string.IsNullOrEmpty(p.name)) names.Add(p.name);
+            foreach (var anim in clone.GetComponentsInChildren<Animator>(true))
+            {
+                AddParams(anim != null ? anim.runtimeAnimatorController : null, names);
+            }
+            int unreadableLayers = 0, authoredLayers = 0;
+            if (d != null)
+            {
+                foreach (var set in new[] { d.baseAnimationLayers, d.specialAnimationLayers })
+                {
+                    if (set == null) continue;
+                    foreach (var l in set)
+                    {
+                        if (l.isDefault) continue;
+                        authoredLayers++;
+                        if (l.animatorController == null) unreadableLayers++;
+                        else AddParams(l.animatorController, names);
+                    }
+                }
+            }
+            // MEASURED, and it is the difference between a report and a false claim: after the preprocess
+            // chain the clone's playable-layer slots read null, so the built controllers are not reachable
+            // the way an authoring avatar's are. Every authored name would then fail to match and be
+            // reported `dropped` — "the build removed it" — when the truth is that this read never saw the
+            // built side. The count is surfaced so the diff can decline to make that claim rather than
+            // publishing it, and the door stays honest about a partial read instead of dressing it as one.
+            if (unreadableLayers > 0)
+                incompleteReason = unreadableLayers + " of " + authoredLayers + " non-default playable layers on the "
+                    + "built clone hold no controller, so the built side is a PARTIAL read (the preprocess chain "
+                    + "does not leave the built controllers in the descriptor's slots)";
+            return names.ToList();
         }
 
-        private static List<DiffRow> Diff(ReportComposition.CensusResult census, List<string> built, string paramFilter)
+        private static void AddParams(RuntimeAnimatorController rac, HashSet<string> into)
         {
-            var rows = new List<DiffRow>();
+            var ac = rac as AnimatorController;
+            if (ac == null && rac is AnimatorOverrideController ovr) ac = ovr.runtimeAnimatorController as AnimatorController;
+            if (ac == null || ac.parameters == null) return;
+            foreach (var p in ac.parameters) if (!string.IsNullOrEmpty(p.name)) into.Add(p.name);
+        }
+
+        /// <summary>Is <paramref name="built"/> a prefixed form of <paramref name="authored"/>? The build
+        /// prepends a namespace, so the authored name survives as a suffix behind a SEPARATOR. A bare
+        /// EndsWith would make authored <c>Toggle</c> a candidate for built <c>Hair/HairToggle</c> and emit a
+        /// confident, wrong provenance claim from the one door whose whole thesis is that it never makes one.
+        /// The boundary is declared here rather than left implicit, and anything outside it stays
+        /// unattributed rather than guessed.</summary>
+        internal static bool IsPrefixedForm(string built, string authored)
+        {
+            if (string.IsNullOrEmpty(built) || string.IsNullOrEmpty(authored)) return false;
+            if (built.Length <= authored.Length || !built.EndsWith(authored, StringComparison.Ordinal)) return false;
+            char boundary = built[built.Length - authored.Length - 1];
+            return boundary == '/' || boundary == '_';
+        }
+
+        /// <summary>Diff the authored census against the built declaration set. Pure — it touches no Unity
+        /// object — which is what makes it unit-testable, and it is the part of this door most able to lie.
+        ///
+        /// Only rows the census marked diffable participate. A physbone suffix or a menu sub-parameter is
+        /// written by the runtime and declared by nothing, so a declaration set cannot carry it: those are
+        /// reported <c>not-in-scope</c> rather than counted as removed.
+        ///
+        /// <paramref name="paramFilter"/> is applied LAST, to both sides of each row. Filtering the authored
+        /// census first — the obvious order — makes the answer depend on the filter: a built name whose
+        /// authored counterpart was filtered out has nothing left to claim it and is reported built-only, so
+        /// filtering on a surface prefix (the most natural use) would report that whole surface as
+        /// unattributed.</summary>
+        internal static List<DiffRow> Diff(ReportComposition.CensusResult census, List<string> built, string paramFilter,
+                                           bool builtSideComplete = true)
+        {
+            var builtSet = new HashSet<string>(built, StringComparer.Ordinal);
             var unclaimed = new HashSet<string>(built, StringComparer.Ordinal);
             var claimedBy = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            var rowsByBuilt = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+            var rows = new List<DiffRow>();
+
+            void Claim(string b, string authored, int rowIndex)
+            {
+                if (!claimedBy.TryGetValue(b, out var l)) claimedBy[b] = l = new List<string>();
+                l.Add(authored);
+                if (!rowsByBuilt.TryGetValue(b, out var idx)) rowsByBuilt[b] = idx = new List<int>();
+                idx.Add(rowIndex);
+                unclaimed.Remove(b);
+            }
 
             foreach (var p in census.Params)
             {
-                if (built.Contains(p.Name))
+                if (!p.Diffable)
                 {
-                    rows.Add(new DiffRow { Authored = p.Name, Built = p.Name, Category = "kept", Surface = p.Declared });
-                    unclaimed.Remove(p.Name);
-                    Claim(claimedBy, p.Name, p.Name);
+                    rows.Add(new DiffRow
+                    {
+                        Authored = p.Name, Built = "—", Category = "not-in-scope",
+                        Surface = "runtime-written (physbone suffix / menu sub-parameter) — nothing declares it, so a declaration set cannot carry it",
+                    });
                     continue;
                 }
-                // A build that prefixes a name leaves the authored name as a SUFFIX of the built one. That is
-                // the only shape claimed here; anything else stays unattributed rather than guessed.
-                var candidates = built.Where(b => b.EndsWith("/" + p.Name, StringComparison.Ordinal)
-                                               || b.EndsWith(p.Name, StringComparison.Ordinal)).ToList();
+                if (builtSet.Contains(p.Name))
+                {
+                    Claim(p.Name, p.Name, rows.Count);
+                    rows.Add(new DiffRow { Authored = p.Name, Built = p.Name, Category = "kept", Surface = p.Declared });
+                    continue;
+                }
+                var candidates = built.Where(b => IsPrefixedForm(b, p.Name)).ToList();
                 if (candidates.Count == 1)
                 {
+                    Claim(candidates[0], p.Name, rows.Count);
                     rows.Add(new DiffRow { Authored = p.Name, Built = candidates[0], Category = "renamed", Surface = p.Declared });
-                    unclaimed.Remove(candidates[0]);
-                    Claim(claimedBy, candidates[0], p.Name);
                 }
                 else if (candidates.Count > 1)
                 {
-                    rows.Add(new DiffRow { Authored = p.Name, Built = string.Join(" | ", candidates), Category = "unattributed", Surface = p.Declared });
-                    foreach (var cnd in candidates) unclaimed.Remove(cnd);
+                    // Ambiguous, so nothing is attributed — and the candidates stay UNCLAIMED on purpose, or a
+                    // genuinely built-only parameter that happens to match an ambiguous authored name would be
+                    // swallowed: never given its own built-only row, and visible only inside a cell attributed
+                    // to an unrelated parameter.
+                    rows.Add(new DiffRow
+                    {
+                        Authored = p.Name, Built = string.Join(" or ", candidates), Category = "unattributed",
+                        Surface = p.Declared + " — more than one built name is a prefixed form of this one",
+                    });
                 }
-                else
+                else if (builtSideComplete)
                 {
                     rows.Add(new DiffRow { Authored = p.Name, Built = "—", Category = "dropped", Surface = p.Declared });
                 }
+                else
+                {
+                    // No match AND the built side is known partial: `dropped` would assert a removal this
+                    // read cannot see. Say what is true instead.
+                    rows.Add(new DiffRow
+                    {
+                        Authored = p.Name, Built = "?", Category = "built-side-unread",
+                        Surface = p.Declared + " — no built name matched, and the built read was incomplete, so removal is NOT the claim",
+                    });
+                }
             }
 
+            // `merged` REPLACES the rows it summarises rather than riding beside them. Emitting one merged row
+            // on top of the two renamed rows that produced it double-counts a single built parameter and makes
+            // the category totals exceed the parameter count — a table lying about its own arithmetic.
+            var drop = new HashSet<int>();
+            var merged = new List<DiffRow>();
             foreach (var kv in claimedBy)
-                if (kv.Value.Count > 1)
-                    rows.Add(new DiffRow { Authored = string.Join(" + ", kv.Value), Built = kv.Key, Category = "merged", Surface = "(two or more authored names on one built name)" });
+            {
+                if (kv.Value.Count <= 1) continue;
+                foreach (var i in rowsByBuilt[kv.Key]) drop.Add(i);
+                merged.Add(new DiffRow
+                {
+                    Authored = string.Join(" + ", kv.Value), Built = kv.Key, Category = "merged",
+                    Surface = "two or more authored names resolved onto one built name",
+                });
+            }
+            var final = new List<DiffRow>();
+            for (int i = 0; i < rows.Count; i++) if (!drop.Contains(i)) final.Add(rows[i]);
+            final.AddRange(merged);
 
             foreach (var b in unclaimed)
-            {
-                if (!string.IsNullOrEmpty(paramFilter) && b.IndexOf(paramFilter, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                rows.Add(new DiffRow { Authored = "—", Built = b, Category = "unattributed", Surface = "(built only)" });
-            }
-            return rows;
+                final.Add(new DiffRow { Authored = "—", Built = b, Category = "unattributed", Surface = "(built only)" });
+
+            if (string.IsNullOrEmpty(paramFilter)) return final;
+            return final.Where(r =>
+                (r.Authored != null && r.Authored.IndexOf(paramFilter, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                (r.Built != null && r.Built.IndexOf(paramFilter, StringComparison.OrdinalIgnoreCase) >= 0)).ToList();
         }
 
-        private static void Claim(Dictionary<string, List<string>> claimedBy, string built, string authored)
-        {
-            if (!claimedBy.TryGetValue(built, out var l)) claimedBy[built] = l = new List<string>();
-            l.Add(authored);
-        }
-
-        private static string Refusal(string path, string stage) =>
+        private static string Refusal(string path, string stage, string name) =>
             "# ReportComposition (bake)\n\nstatus: FAILED\n\nsummary: [ReportComposition] mode=bake => FAIL ("
             + stage + ") | log=" + path
             + "\n\nThe bake did not complete, so this artifact carries NO parameter table. Authored-census rows are "

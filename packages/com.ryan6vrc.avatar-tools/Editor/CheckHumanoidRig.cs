@@ -155,7 +155,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             "onto the base's same-named bone, so an instance-only test reads an ordinary composed avatar as " +
             "entirely proxied. The heuristic is the merge's own matching rule — right exactly where the merge " +
             "is, and unable to tell a bone that will zip from an unrelated transform sharing a name. " +
-            "Bake the avatar and re-run to settle a row this ambiguity reaches (docs/verify.md).";
+            "The cost runs BOTH ways and `nameMasked=` is the count of the second: a mergeable carrying its own " +
+            "skinned copy of a proxy node masks the base's genuine proxy row, so a nonzero count means rows were " +
+            "SUPPRESSED, not merely uncertain. Bake the avatar and re-run to settle any row either direction " +
+            "reaches (docs/verify.md).";
 
         private struct DivergenceRow { public string Kind; public string BoneLabel; public string MappedPath; public string OtherPath; }
 
@@ -257,6 +260,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ---- classify: proxy (unskinned mapping) + name-shadow (a decoy carries the plain label) -----
             var rows = new List<DivergenceRow>();
+            var ambiguous = new List<string>();
             foreach (var kv in liveMap)
             {
                 var bone = kv.Key;
@@ -273,10 +277,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // Name matching is a HEURISTIC, and the emitted scope note says so: it is the merge's own
                 // matching rule, right exactly where the merge is, and unable to tell a bone that will zip
                 // from an unrelated transform that happens to share a name.
-                if (!skinned.Contains(mapped) && !skinnedNames.Contains(mapped.name))
+                bool skinnedByInstance = skinned.Contains(mapped);
+                bool skinnedByNameOnly = !skinnedByInstance && skinnedNames.Contains(mapped.name);
+                if (!skinnedByInstance && !skinnedByNameOnly)
                 {
-                    string candidate = FindProxyCandidate(mapped, skinned, label); // "candidate", never asserted as THE bone
+                    string candidate = FindProxyCandidate(mapped, skinned, skinnedNames, label); // "candidate", never asserted as THE bone
                     rows.Add(new DivergenceRow { Kind = "proxy", BoneLabel = label, MappedPath = PathOf(mapped), OtherPath = candidate });
+                }
+                else if (skinnedByNameOnly)
+                {
+                    // The name arm carries a cost in the other direction and it is not allowed to be silent.
+                    // `skinnedNames` spans the whole avatar, and MergeArmature duplicates the base armature —
+                    // proxy nodes included — into every mergeable, so an outfit whose renderers skin a copy of
+                    // `Head_Proxy` masks the base's genuine proxy row. That row would then vanish into a PASS.
+                    // Counted and named instead: a masked row is ambiguous, not clean.
+                    ambiguous.Add(label + " (" + PathOf(mapped) + "): skinned only by NAME, not by this instance");
                 }
 
                 // A shadow exists only where the mapping points somewhere OTHER than the plainly-named bone.
@@ -293,24 +308,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
             }
 
-            return FinishAvatar(avatarGO, liveMap.Count, modelLabel, importerMap, rows);
+            return FinishAvatar(avatarGO, liveMap.Count, modelLabel, importerMap, rows, ambiguous);
         }
 
         // Nearest skinned candidate for a proxy row: a same-parent sibling, or a descendant of the mapped
         // transform, named either the humanoid label or the mapped name minus a "_Proxy"-style suffix.
         // Never asserted as the intended bone — the offender says "candidate".
-        private static string FindProxyCandidate(Transform mapped, HashSet<Transform> skinned, string label)
+        // "Skinned" here must mean what it means at the classify site one screen up — instance OR name.
+        // Using instance alone made this return null on almost every real avatar (measured: 4 bones skinned
+        // by instance against 49 by name), so every proxy row said "(no candidate found)" while the candidate
+        // was sitting right beside it.
+        private static string FindProxyCandidate(Transform mapped, HashSet<Transform> skinned,
+                                                 HashSet<string> skinnedNames, string label)
         {
+            bool Skinned(Transform t) => skinned.Contains(t) || skinnedNames.Contains(t.name);
             string stripped = StripProxySuffix(mapped.name);
             if (mapped.parent != null)
                 foreach (Transform sib in mapped.parent)
                 {
-                    if (sib == mapped || !skinned.Contains(sib)) continue;
+                    if (sib == mapped || !Skinned(sib)) continue;
                     if (sib.name == label || sib.name == stripped) return PathOf(sib);
                 }
             foreach (var d in mapped.GetComponentsInChildren<Transform>(true))
             {
-                if (d == mapped || !skinned.Contains(d)) continue;
+                if (d == mapped || !Skinned(d)) continue;
                 if (d.name == label || d.name == stripped) return PathOf(d);
             }
             return null;
@@ -335,15 +356,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// stem <c>check-humanoid-rig-avatar_&lt;rootName&gt;</c>, JSON <c>kind</c> distinct from
         /// <see cref="Run"/>'s so the two artifact families can never be confused on disk.</summary>
         private static string FinishAvatar(GameObject root, int bonesChecked, string modelLabel,
-            Dictionary<string, string> importerMap, List<DivergenceRow> rows)
+            Dictionary<string, string> importerMap, List<DivergenceRow> rows, List<string> ambiguous)
         {
             int proxyCount = 0, shadowCount = 0;
             foreach (var r in rows) { if (r.Kind == "proxy") proxyCount++; else shadowCount++; }
             bool pass = rows.Count == 0;
 
             string head = string.Format(CultureInfo.InvariantCulture,
-                "{0} {1}: bones={2} proxy={3} nameShadow={4} model={5} => {6}",
-                AvatarLabelPrefix, root.name, bonesChecked, proxyCount, shadowCount, modelLabel, pass ? "PASS" : "CLASSIFY");
+                "{0} {1}: bones={2} proxy={3} nameShadow={4} nameMasked={5} model={6} => {7}",
+                AvatarLabelPrefix, root.name, bonesChecked, proxyCount, shadowCount, ambiguous.Count, modelLabel,
+                pass ? "PASS" : "CLASSIFY");
 
             var sb = new StringBuilder();
             sb.Append("{\n");
@@ -355,6 +377,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("  \"bonesChecked\": ").Append(bonesChecked).Append(",\n");
             sb.Append("  \"result\": ").Append(Q(pass ? "PASS" : "CLASSIFY")).Append(",\n");
             sb.Append("  \"scope\": ").Append(Q(ScopeNoteLine)).Append(",\n");
+            // A masked row is a SUPPRESSED finding, so it rides the summary as its own count rather than
+            // living only here: a PASS beside a nonzero nameMasked= is not the same claim as a clean one.
+            sb.Append("  \"nameMasked\": [");
+            for (int i = 0; i < ambiguous.Count; i++) sb.Append(i == 0 ? "" : ", ").Append(Q(ambiguous[i]));
+            sb.Append("],\n");
 
             sb.Append("  \"importerMap\": {");
             bool firstImp = true;
