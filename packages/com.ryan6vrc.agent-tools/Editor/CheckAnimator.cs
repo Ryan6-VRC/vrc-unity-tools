@@ -74,6 +74,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             string detection;                         // the "basis=…" line rendered atop the body
             var notes = new List<string>();           // non-offender caveats (e.g. avatar root not found)
             Func<string, string> pathRewrite = null;  // VRCF FullController rewriteBindings under basis=auto (else identity)
+            GameObject siteAvatarGO = null;           // the avatar this controller was linted ON, for the multiplicity count
+            GameObject usedMount = null;              // the mount the basis actually resolved to
 
             if (basis == "explicit")
             {
@@ -90,6 +92,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
                 if (mountGO != null) roots.Add(mountGO);   // mount preferred on tie
                 if (avatarGO != null) roots.Add(avatarGO);
+                siteAvatarGO = avatarGO;
+                usedMount = mountGO ?? avatarGO;
                 buildRewrite = false;                       // explicit never demotes
                 detection = "basis=explicit avatar(" + PathOf(avatarGO) + ") mount(" + PathOf(mountGO) + ")";
                 if (roots.Count == 0)
@@ -101,6 +105,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                     return Refuse("basis=auto requires mergeSite (a scene GameObject path holding a merge component that references this controller)");
                 var d = DetectAuto(controller, mergeSite, notes);
                 if (d.Refusal != null) return Refuse(d.Refusal);
+                var siteGO = FindByHierarchyPath(mergeSite);
+                // includeInactive: the no-arg overload skips inactive objects, and an authoring avatar is
+                // routinely parked inactive — without this the rider is silently absent in the exact state
+                // most lints run in, which is worse than not having it.
+                var siteDesc = siteGO != null ? siteGO.GetComponentInParent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>(true) : null;
+                siteAvatarGO = siteDesc != null ? siteDesc.gameObject : null;
+                usedMount = d.Root;
                 if (d.Root != null) roots.Add(d.Root);
                 buildRewrite = d.BuildRewrite;
                 detection = d.DetectionLine;
@@ -114,7 +125,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var r = ControllerRules.Run(controller, roots, !buildRewrite, pathRewrite);
             notes.AddRange(r.Notes); // rule-produced caveats (skipped rules), after the basis-resolution notes
 
-            return Emit(controller, r, detection, notes);
+            return Emit(controller, r, detection, notes, MergeSiteMultiplicity(controller, siteAvatarGO, usedMount, notes));
         }
 
         // ----- auto basis detection (untyped SerializedObject reads; missing MA/VRCFury assemblies -----
@@ -673,7 +684,40 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Output -------------------------------------------------------------------------------
 
-        private static string Emit(AnimatorController controller, LintResult rep, string detection, List<string> notes)
+        /// <summary>The <c>mergeSites=</c> rider: how many surfaces on this avatar mount the controller
+        /// under test, and which one the basis resolved to. Judgment-free multiplicity, reported at the door
+        /// that produces the verdict, because basis selection is the agent's call and a wrong one flips
+        /// PASS/FAIL on an unchanged controller with nothing in the output to say a second site existed.
+        /// It does NOT touch <see cref="DetectAuto"/>'s single-site contract: that method still refuses on
+        /// ambiguity AT ONE SITE, while this counts sites across the whole avatar, which is a different
+        /// question. Returns null (no token) when there is no avatar to count over or only one site exists —
+        /// a rider that fires on every lint is a rider nobody reads.</summary>
+        private static string MergeSiteMultiplicity(AnimatorController controller, GameObject avatarGO,
+                                                    GameObject usedMount, List<string> notes)
+        {
+            if (avatarGO == null || controller == null) return null;
+            List<MergeSurfaces.Surface> surfaces;
+            try
+            {
+                surfaces = MergeSurfaces.Enumerate(avatarGO, avatarGO.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>(),
+                    vrcfOnly: false, (c, anchor) => notes.Add("merge-site scan: frame field '" + anchor + "' on "
+                        + c.GetType().Name + " @ " + PathOf(c.gameObject) + " did not reflect — the site count below is best-effort."));
+            }
+            catch (Exception e)
+            {
+                // The count is a rider, never the verdict: a scan failure says so and the lint stands.
+                notes.Add("merge-site scan failed (" + e.GetType().Name + ") — mergeSites not counted.");
+                return null;
+            }
+            var mounts = new List<string>();
+            foreach (var s in surfaces)
+                if (s.Controller == controller) mounts.Add(PathOf(s.Mount));
+            if (mounts.Count <= 1) return null;
+            return string.Format(CultureInfo.InvariantCulture, "mergeSites={0} (used: {1})",
+                mounts.Count, usedMount != null ? PathOf(usedMount) : "(none)");
+        }
+
+        private static string Emit(AnimatorController controller, LintResult rep, string detection, List<string> notes, string mergeSites)
         {
             bool errorTierFired = rep.MissingMotion > 0 || rep.UndeclaredParam > 0 || rep.NonFloatBlendParam > 0
                                   || rep.NonFloatParamCurve > 0 || rep.DriverOnAnimatedParam > 0
@@ -688,6 +732,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[CheckAnimator] {0}: missingMotion={1} undeclaredParam={2} nonFloatBlendParam={3} nonFloatParamCurve={4} driverOnAnimatedParam={5} entryShadow={6} deadTransition={7} brokenBinding={8} advisories={9} => {10}",
                 controller.name, rep.MissingMotion, rep.UndeclaredParam, rep.NonFloatBlendParam, rep.NonFloatParamCurve, rep.DriverOnAnimatedParam, rep.EntryShadow, rep.DeadTransition, rep.BrokenBinding, advisories, result);
+            // Rides AFTER the verdict token so the summary's leading grammar is unchanged for anything
+            // parsing it, and so a reader who stops at the verdict still sees the count that qualifies it.
+            if (mergeSites != null) summary += " | " + mergeSites;
 
             var sb = new StringBuilder();
             sb.Append("# CheckAnimator: ").Append(controller.name).Append('\n');
@@ -743,13 +790,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return err;
         }
 
-        private static string PathOf(GameObject go)
-        {
-            if (go == null) return "—";
-            var t = go.transform;
-            var sb = new StringBuilder(t.name);
-            while (t.parent != null) { t = t.parent; sb.Insert(0, t.name + "/"); }
-            return sb.ToString();
-        }
+        private static string PathOf(GameObject go) => MergeSurfaces.PathOf(go);
     }
 }

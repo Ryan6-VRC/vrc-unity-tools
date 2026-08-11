@@ -192,6 +192,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // The bake door is the SDK preprocess chain, NOT ManualProcessAvatar — see
                 // nondestructive.md §The bake door. Unlike ManualProcessAvatar (clone in, new object
                 // out), this mutates IN PLACE, so `mine` IS the baked avatar with nothing else to destroy.
+                //
+                // agent-tools' AvatarBake is the canon for WHY this door and not that one; it is not called
+                // from here because the lifecycles genuinely differ — that helper owns its post-callback and
+                // reports a failed stage as a string, while this path keeps the clone alive across a render
+                // and pairs OnPostprocessAvatar with scene/selection restoration in one finally, and turns a
+                // preprocess throw into a throw. Two call sites of one SDK API, one home for the rule.
                 string stamp = Guid.NewGuid().ToString("N").Substring(0, 8);
                 var mine = UnityEngine.Object.Instantiate(root);
                 string mineName = root.name + "__rt_" + stamp;

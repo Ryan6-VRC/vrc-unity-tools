@@ -213,10 +213,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return map;
         }
 
-        /// <summary>Maps a discovered frame's unreflected-anchor (default identity). A test injects an anchor
-        /// onto a real MA/VRCF frame to exercise the R-H fail-loud surface for a drift it can't construct live.</summary>
-        internal static Func<string, string> FrameAnchorOverride = a => a;
-
         // ── Merge-conflict seams (default = real; tests swap fakes) ──────────────────────────────────
         /// <summary>Whole-avatar merge→base pairs (may contain null sides) + a partial-map note (null if clean).</summary>
         internal static Func<GameObject, (List<(Transform merge, Transform baseT)> pairs, string note)> ResolveMergePairs =
@@ -379,7 +375,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return Refuse("'" + avatarRoot + "' has no VRCAvatarDescriptor — Inspect expects the avatar (descriptor) root");
 
             var rep = new Report { Root = avatarGO };
-            var pairs = EnumerateSurfaces(avatarGO, descriptor, rep, vrcfOnly: false);
+            var pairs = MergeSurfaces.Enumerate(avatarGO, descriptor, vrcfOnly: false,
+                (c, anchor) => SurfaceUnreflected(c, anchor, rep),
+                (c, frame) => { var n = MaFrameUncertaintyNote(c, avatarGO, frame); if (n != null) rep.FrameUncertain.Add(n); });
 
             // ---- MA scene-ref detection (D3) — generic over EVERY component ----------------------------
             foreach (var c in avatarGO.GetComponentsInChildren<Component>(true))
@@ -482,7 +480,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             var rep = new Report { Root = root };
             var anchors = CollectAnchors(root);
-            var pairs = EnumerateSurfaces(root, null, rep, vrcfOnly: true);
+            var pairs = MergeSurfaces.Enumerate(root, null, vrcfOnly: true,
+                (c, anchor) => SurfaceUnreflected(c, anchor, rep));
 
             // Keyed on the anchor too: one controller mounted on two FullControllers with different anchors is
             // two distinct repairs, and a key without it reports only whichever was walked first.
@@ -505,110 +504,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var n in rep.FrameUncertain) lines.Add(DegradedPrefix + n);
             if (anchors.Count > 0 || HasUntrackedRelocator(root)) lines.Add(ScopePrefix + AnchorSeamScopeLine);
             return lines;
-        }
-
-        // ── Surface enumeration helpers ───────────────────────────────────────────────────────────────
-
-        private struct Pair { public AnimatorController Controller; public List<GameObject> Roots; public FrameKind Kind; public string Label; public Func<string, string> PathRewrite; public bool RootBindingsApplyToAvatar; }
-
-        /// <summary>Every (controller, frame) pair merged onto <paramref name="root"/>: the descriptor's own
-        /// playable layers, then every MA MergeAnimator and VRCFury FullController in the subtree. Each pair
-        /// is walked once — dedup is per (controller, frame root, kind), not global, so a controller shared
-        /// across frames is resolved once per frame. <paramref name="descriptor"/> may be null (a bare module
-        /// prefab has none, and contributes no descriptor layers). <paramref name="vrcfOnly"/> skips MA frames
-        /// outright: the anchor-seam door walks VRCFury surfaces alone, so enumerating MA ones would only
-        /// manufacture frame notes for a class MA surfaces cannot be in.</summary>
-        private static List<Pair> EnumerateSurfaces(
-            GameObject root, VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor, Report rep,
-            bool vrcfOnly)
-        {
-            var pairs = new List<Pair>();
-            var seen = new HashSet<(int ctrl, int root, int kind)>();
-            void AddPair(AnimatorController c, GameObject frameRoot, List<GameObject> roots, FrameKind kind, string label, Func<string, string> rewrite, bool rootToAvatar = false)
-            {
-                if (c == null) return;
-                int rootId = frameRoot != null ? frameRoot.GetInstanceID() : 0;
-                if (!seen.Add((c.GetInstanceID(), rootId, (int)kind))) return;
-                pairs.Add(new Pair { Controller = c, Roots = roots, Kind = kind, Label = label, PathRewrite = rewrite, RootBindingsApplyToAvatar = rootToAvatar });
-            }
-
-            // (a) Descriptor playable-layer controllers — avatar-root frame.
-            // Adapted rather than passed directly: AddPair's rootBindingsApplyToAvatar is VRCF-only, and a
-            // descriptor layer has no such flag (its basis is always the avatar root).
-            if (descriptor != null && !vrcfOnly)
-                CollectDescriptorLayers(descriptor, root, (c, fr, rs, k, l, rw) => AddPair(c, fr, rs, k, l, rw));
-
-            // (b)/(c) Every MA MergeAnimator + VRCFury FullController in the subtree.
-            foreach (var c in root.GetComponentsInChildren<Component>(true))
-            {
-                if (c == null) continue;
-
-                if (!vrcfOnly && TryMaFrame(c, root, out var maCtrl, out var maFrame))
-                {
-                    string anchor = FrameAnchorOverride(maFrame.UnreflectedAnchor);
-                    if (anchor != null) SurfaceUnreflected(c, anchor, rep); // R-H — loud, but not dropped
-                    // R-K — a Relative MA whose relativePathRoot is set-but-unresolved is a guessed frame.
-                    string uncertain = MaFrameUncertaintyNote(c, root, maFrame);
-                    var roots = new List<GameObject> { maFrame.Root ?? root };
-                    AddPair(maCtrl, maFrame.Root ?? root,
-                        roots, FrameKind.MA, "MA MergeAnimator @ " + PathOf(c.gameObject), null); // MA has no path-rewrite rules
-                    if (uncertain != null) rep.FrameUncertain.Add(uncertain);
-                }
-
-                if (TryVrcfFrame(c, out var vrcfCtrls, out var vrcfFrame))
-                {
-                    string anchor = FrameAnchorOverride(vrcfFrame.UnreflectedAnchor);
-                    if (anchor != null) SurfaceUnreflected(c, anchor, rep);
-                    var mount = vrcfFrame.Root ?? c.gameObject;
-                    var roots = AncestorChain(mount, root); // D-A upward strip: resolves at ANY level ⇒ not a break
-                    // vrcfFrame.PathRewrite is THIS component's rewriteBindings only — applied before the
-                    // ancestor walk, mirroring the build (fixes downward relocations the upward strip can't reach).
-                    foreach (var vc in vrcfCtrls)
-                        AddPair(vc, mount, roots, FrameKind.VRCF, "VRCFury FullController @ " + PathOf(c.gameObject), vrcfFrame.PathRewrite, vrcfFrame.RootBindingsApplyToAvatar);
-                }
-            }
-            return pairs;
-        }
-
-        private static void CollectDescriptorLayers(VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor,
-            GameObject avatarGO, Action<AnimatorController, GameObject, List<GameObject>, FrameKind, string, Func<string, string>> add)
-        {
-            void Walk(VRC.SDK3.Avatars.Components.VRCAvatarDescriptor.CustomAnimLayer[] layers, string which)
-            {
-                if (layers == null) return;
-                foreach (var layer in layers)
-                {
-                    // Skip only SDK-default layers (nothing authored). CustomAnimLayer also carries an
-                    // `isEnabled` flag, but disabled-layer skipping is deliberately NOT adopted: whether the
-                    // SDK build honours isEnabled for base/special layers is unverified, and NOT skipping is the
-                    // fail-loud choice — a disabled layer's broken binding surfaces as a CLASSIFY offender for
-                    // agent discretion, never a false PASS.
-                    if (layer.isDefault) continue;
-                    var c = layer.animatorController as AnimatorController;
-                    if (c == null) continue;
-                    add(c, avatarGO, new List<GameObject> { avatarGO }, FrameKind.DescriptorLayer,
-                        "descriptor " + which + " layer " + layer.type, null); // avatar-root frame; no path-rewrite rules
-                }
-            }
-            Walk(descriptor.baseAnimationLayers, "base");
-            Walk(descriptor.specialAnimationLayers, "special");
-        }
-
-        // The VRCF upward-strip nearest-match: mount root, then each ancestor up to (and including) the
-        // avatar root. A binding resolving at ANY level is NOT a break (mirrors VRCF's build rewriter).
-        private static List<GameObject> AncestorChain(GameObject mount, GameObject avatarGO)
-        {
-            var roots = new List<GameObject>();
-            Transform cur = mount != null ? mount.transform : null;
-            var stop = avatarGO.transform;
-            while (cur != null)
-            {
-                roots.Add(cur.gameObject);
-                if (cur == stop) break;
-                cur = cur.parent;
-            }
-            if (roots.Count == 0 || roots[roots.Count - 1] != avatarGO) roots.Add(avatarGO); // guarantee avatar root is a candidate
-            return roots;
         }
 
         // R-H: name the anchor loud and record it in Notes; the caller still processes the controller's
@@ -1004,14 +899,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return null;
         }
 
-        private static string PathOf(GameObject go)
-        {
-            if (go == null) return "—";
-            var t = go.transform;
-            var sb = new StringBuilder(t.name);
-            while (t.parent != null) { t = t.parent; sb.Insert(0, t.name + "/"); }
-            return sb.ToString();
-        }
+        private static string PathOf(GameObject go) => MergeSurfaces.PathOf(go);
 
         // ── Types ───────────────────────────────────────────────────────────────────────────────────
 
