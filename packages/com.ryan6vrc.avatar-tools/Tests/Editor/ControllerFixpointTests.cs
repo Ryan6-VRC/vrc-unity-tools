@@ -26,7 +26,7 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 // 1 with a named FAIL line), recorded in the PR that added this file. Do not read a green run here as "the
 // gate fails when it should".
 //
-// Check(), CompileToTemp, ImportCommitted(Menu), Decode, and CheckPrefabIntegrity are boundary-bound
+// Check(), CompileToTemp, ImportCommittedAsset, Decode, and CheckPrefabIntegrity are boundary-bound
 // (AssetDatabase, a real compile) and stay out. Decode's fixpoint property is owned next door by
 // FixpointOracle + FixpointAcceptanceTests + RoundtripStressTests, deliberately not re-litigated here.
 //
