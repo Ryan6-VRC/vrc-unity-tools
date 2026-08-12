@@ -18,9 +18,18 @@ public class ClipBindingTypeTests
     private const string ScratchFolder = "Assets/Agent/Scratch/emit";
     private const string ClipsOut = "Assets/Agent/Scratch/ClipBindingType_NUnit";
 
+    // ControllerEmit.Build's 2-arg door mints a VRCExpressionParameters nobody persists; see
+    // AnimatorTestHelpers.UnownedParamsSweep for why a survivor breaks unrelated suites.
+    private readonly AnimatorTestHelpers.UnownedParamsSweep _paramSweep =
+        new AnimatorTestHelpers.UnownedParamsSweep();
+
+    [SetUp]
+    public void BeginParamSweep() => _paramSweep.Begin();
+
     [TearDown]
     public void TearDown()
     {
+        _paramSweep.End();
         if (AssetDatabase.IsValidFolder(ScratchFolder)) AssetDatabase.DeleteAsset(ScratchFolder);
         if (AssetDatabase.IsValidFolder(ClipsOut)) AssetDatabase.DeleteAsset(ClipsOut);
         if (_yamlPath != null && System.IO.File.Exists(_yamlPath)) System.IO.File.Delete(_yamlPath);

@@ -1,15 +1,50 @@
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
+using VRC.SDK3.Avatars.ScriptableObjects;
 
 // Shared fixtures + TransplantCore.Finish one-line-summary parser for the mutating-tool test files
 // (RepathClips, OwnControllerClips). CleanController uses its own summary parser (different grammar) but
 // reuses the grammar-agnostic fixture plumbing here (EnsureFolder, Save, etc.).
 public static class AnimatorTestHelpers
 {
+    // Sweep for suites that call the 2-arg ControllerEmit.Build door directly. That overload targets a
+    // throwaway scratch dir and NOTHING persists its EmitResult.Params, so every call mints a
+    // VRCExpressionParameters that outlives the test — and a survivor is not inert: leaked SDK
+    // ScriptableObjects in this assembly make ControllerEmit.AddStateMachineBehaviour return null and fail
+    // UNRELATED suites with NullReferenceExceptions pointing at untouched production code
+    // (ControllerFixpointTests's `_made` field owns the measurement: leak → 551/600, destroy → 600/600).
+    //
+    // DELTA, not a blanket destroy of every unowned instance: the domain legitimately holds unowned
+    // VRCExpressionParameters that a test did not create — the SDK's own, an open inspector's — and
+    // destroying one of those would break the editor out from under the run. Only what appeared between
+    // Begin and End is this test's to clean up.
+    //
+    // Production code destroying its own side assets is CompileController's job and is covered by
+    // SideAssetLifecycleTests; this is strictly the TEST-side half, for the door that has no owner at all.
+    public sealed class UnownedParamsSweep
+    {
+        private HashSet<int> _before;
+
+        private static IEnumerable<VRCExpressionParameters> Unowned() =>
+            Resources.FindObjectsOfTypeAll<VRCExpressionParameters>()
+                .Where(p => string.IsNullOrEmpty(AssetDatabase.GetAssetPath(p)));
+
+        public void Begin() => _before = new HashSet<int>(Unowned().Select(p => p.GetInstanceID()));
+
+        public void End()
+        {
+            if (_before == null) return;
+            foreach (var p in Unowned().Where(p => !_before.Contains(p.GetInstanceID())).ToList())
+                Object.DestroyImmediate(p);
+            _before = null;
+        }
+    }
+
     public static void EnsureFolder(string path)
     {
         if (AssetDatabase.IsValidFolder(path)) return;

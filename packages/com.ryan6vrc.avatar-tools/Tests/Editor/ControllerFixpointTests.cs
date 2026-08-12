@@ -1409,4 +1409,45 @@ public class ControllerFixpointTests
         Assert.IsEmpty(ControllerFixpoint.OrphanControllers(built, new List<string>()).ToList(),
             "built/ is empty, so even the orphan net finds nothing: the document is ungated in silence");
     }
+
+    // ── The committed-.meta presence guard ──────────────────────────────────────────────────────────
+    //
+    // The importer around this is AssetDatabase-bound and stays out of this suite (see the header). The
+    // CONDITION is pure filesystem, so it gets a door here — otherwise the guard is verified once by a
+    // one-off end-to-end gate run and never again, which is the failure mode this file's header already
+    // records for `entryFailed = true`: delete the line and everything stays green.
+
+    [Test]
+    public void MissingCommittedMeta_PassesWhenTheMetaIsThere()
+    {
+        var asset = File_(_tmp, "FX.controller", "%YAML 1.1\n");
+        File_(_tmp, "FX.controller.meta", "guid: 1111111111111111\n");
+        Assert.IsNull(ControllerFixpoint.MissingCommittedMeta(asset));
+    }
+
+    [Test]
+    public void MissingCommittedMeta_NamesTheArtifactAndRefusesTheLaunderingFix()
+    {
+        var asset = File_(_tmp, "FX.controller", "%YAML 1.1\n");   // no .meta beside it
+
+        var msg = ControllerFixpoint.MissingCommittedMeta(asset);
+        Assert.IsNotNull(msg, "a .meta-less import mints a fresh GUID and every structural comparison still "
+            + "passes — presence is the only thing that can catch it");
+        StringAssert.Contains(asset, msg, "the offender must be named: the gate line is all the reader gets");
+        // The obvious remedy is the wrong one, and saying so is the point of the message — regenerating
+        // built/ mints a new GUID too and turns the gate green on the break. Same shape as the params-diff
+        // message and ForeignProjectPathLines.
+        StringAssert.Contains("Do NOT", msg, "the message must refuse the fix that launders the defect");
+    }
+
+    // Presence, not identity: a .meta whose CONTENT is unrelated still satisfies this guard, because
+    // duplicate/incoherent GUIDs are DuplicateCommittedGuid's pass and splitting one defect across two
+    // checks is how both end up half-enforced.
+    [Test]
+    public void MissingCommittedMeta_DoesNotAdjudicateTheMetaContents()
+    {
+        var asset = File_(_tmp, "FX_Menu.asset", "%YAML 1.1\n");
+        File_(_tmp, "FX_Menu.asset.meta", "not a guid line at all\n");
+        Assert.IsNull(ControllerFixpoint.MissingCommittedMeta(asset));
+    }
 }

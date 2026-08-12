@@ -41,9 +41,15 @@ public class DecompileControllerTests
         return summary;
     }
 
+    // ControllerEmit.Build's 2-arg door mints a VRCExpressionParameters nobody persists; see
+    // AnimatorTestHelpers.UnownedParamsSweep for why a survivor breaks unrelated suites.
+    private readonly AnimatorTestHelpers.UnownedParamsSweep _paramSweep =
+        new AnimatorTestHelpers.UnownedParamsSweep();
+
     [SetUp]
     public void SetUp()
     {
+        _paramSweep.Begin();
         // EnsureFolder (AssetDatabase.CreateFolder) registers TestRoot as a valid asset folder as it creates
         // it — what the old Directory.CreateDirectory + project-wide Refresh() pair was really buying.
         AnimatorTestHelpers.EnsureFolder(TestRoot);
@@ -52,6 +58,7 @@ public class DecompileControllerTests
     [TearDown]
     public void TearDown()
     {
+        _paramSweep.End();
         // No trailing Refresh(): DeleteAsset already tells the AssetDatabase the folder is gone, and the raw
         // Directory.Delete is only a fallback for a folder the AssetDatabase never adopted.
         if (AssetDatabase.IsValidFolder(TestRoot)) AssetDatabase.DeleteAsset(TestRoot);

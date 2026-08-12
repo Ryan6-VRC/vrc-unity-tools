@@ -130,6 +130,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.NonFloatParamCurve > 0 || lint.DriverOnAnimatedParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
             {
                 CleanupAfterLint(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders);
+                // The lint deliberately runs BEFORE any side asset is persisted (above), which is exactly what
+                // leaves them in memory and unowned on this exit.
+                DestroyUnpersistedSideAssets(built);
                 string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
                 return Fail(failLabel, sourcePath, "post-emit graph lint (" + lint.Errors.Count + "): " + offenders);
             }
@@ -143,7 +146,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var existingParams = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(paramsPath);
             if (built.Params != null)
             {
-                if (existingParams != null) { existingParams.parameters = built.Params.parameters; EditorUtility.SetDirty(existingParams); }
+                if (existingParams != null)
+                {
+                    existingParams.parameters = built.Params.parameters;
+                    EditorUtility.SetDirty(existingParams);
+                    // The in-memory asset has handed off its parameter array — a managed array of plain
+                    // [Serializable] Parameter, so it outlives the destroy — and nothing reads built.Params
+                    // after this point. Drop it, for the reason the menu branch below states in full.
+                    UnityEngine.Object.DestroyImmediate(built.Params);
+                }
                 else AssetDatabase.CreateAsset(built.Params, paramsPath);
             }
             else if (existingParams != null) AssetDatabase.DeleteAsset(paramsPath);
@@ -476,8 +487,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             catch (ControllerEmit.EmitException ee) { return "emit: " + ee.Message; }
             catch (Exception e) { return "emit: " + e.GetType().Name + ": " + e.Message; }
 
-            // The proof's side assets are only ever built in memory — the whole point is that nothing is
-            // persisted — so destroy them here. Their folder is swept, but these never reached it.
+            // The proof's side assets — the params asset AND the menu tree — are only ever built in memory
+            // (the whole point is that nothing is persisted), so destroy them here. Their folder is swept,
+            // but these never reached it. ProofCompile runs on every overwrite compile, which makes this the
+            // most-travelled of the destroy sites.
             try
             {
                 var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
@@ -488,10 +501,31 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             finally
             {
-                if (built.Menu != null) UnityEngine.Object.DestroyImmediate(built.Menu);
+                DestroyUnpersistedSideAssets(built);
+            }
+        }
+
+        // Destroy the side assets an EmitResult still owns in memory. Called on every exit that does NOT hand
+        // them off — AssetDatabase.CreateAsset takes ownership, and the in-place reuse path destroys at its own
+        // handoff, so neither goes through here. Params and menu pages are the only unpersisted objects an
+        // EmitResult carries; the controller and its sub-assets are on disk and are the cleanup helpers' business.
+        //
+        // A survivor is not inert. Leaked SDK ScriptableObjects in this assembly make ControllerEmit's
+        // AddStateMachineBehaviour start returning null, failing UNRELATED suites with NullReferenceExceptions
+        // that point at untouched production code — measured at 551/600 vs 600/600 (ControllerFixpointTests's
+        // `_made` field owns that measurement).
+        //
+        // One-arg DestroyImmediate deliberately: these are never persisted, so if that invariant ever breaks
+        // Unity errors instead of silently deleting a real asset. The two-arg form above is for a genuine
+        // sub-asset and is not a precedent for this.
+        private static void DestroyUnpersistedSideAssets(ControllerEmit.EmitResult built)
+        {
+            if (built == null) return;
+            if (built.Params != null) UnityEngine.Object.DestroyImmediate(built.Params);
+            if (built.Menu != null) UnityEngine.Object.DestroyImmediate(built.Menu);
+            if (built.MenuChildren != null)
                 foreach (var child in built.MenuChildren)
                     if (child != null) UnityEngine.Object.DestroyImmediate(child);
-            }
         }
 
         // Emit failed before any params side-asset was written. whatIf sweeps its temp. A FRESH compile deletes

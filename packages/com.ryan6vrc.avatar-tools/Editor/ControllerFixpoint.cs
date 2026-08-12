@@ -167,11 +167,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var full = Path.GetFullPath(destAssetsDir);
             Directory.CreateDirectory(full);
             var src = Path.GetFullPath(committedPath);
+            var metaComplaint = MissingCommittedMeta(src);
+            if (metaComplaint != null) throw new Exception(metaComplaint);
             File.Copy(src, Path.Combine(full, Path.GetFileName(src)), true);
-            if (File.Exists(src + ".meta"))
-                File.Copy(src + ".meta", Path.Combine(full, Path.GetFileName(src) + ".meta"), true);
+            File.Copy(src + ".meta", Path.Combine(full, Path.GetFileName(src) + ".meta"), true);
             AssetDatabase.Refresh();
             return AssetDatabase.LoadAssetAtPath<T>(ToAssetsRelative(Path.Combine(full, Path.GetFileName(src))));
+        }
+
+        // The complaint when a committed artifact has no .meta beside it, or null when it does.
+        //
+        // A .meta-less import is the one drift this gate cannot see from its own comparisons: Unity mints a
+        // FRESH GUID on import, every structural comparison in Check still matches (they compare decoded
+        // graphs, menu trees and parameter lists — never identity), so the gate reports PASS while the
+        // consumer's prms:/menus:/controller reference, which resolves by GUID, dangles. Asserted BEFORE the
+        // copy, because after it the fresh-GUID import is indistinguishable from a correct one.
+        //
+        // Lifted out of ImportCommittedAsset as pure filesystem so it has a unit door: the importer around it
+        // is AssetDatabase-bound and untestable, and a check reachable only through a once-per-PR end-to-end
+        // gate run is a check that silently rots the day someone deletes the line.
+        //
+        // Presence only. Two committed .meta declaring the SAME guid is a different defect with its own pass
+        // (DuplicateCommittedGuid), and this deliberately does not duplicate it.
+        internal static string MissingCommittedMeta(string committedPath)
+        {
+            if (File.Exists(committedPath + ".meta")) return null;
+            return "committed artifact has no .meta beside it: " + committedPath
+                + " — importing it would mint a fresh GUID, so this gate would PASS while every reference to "
+                + "the artifact dangles. Restore the .meta (git checkout / recover the deletion). Do NOT "
+                + "regenerate built/ to fix this: regeneration mints a new GUID too, which turns this gate "
+                + "green on the very break it just caught.";
         }
 
         // (ok, message). yamlPath: filesystem path to controller.yaml. builtControllerPath: filesystem

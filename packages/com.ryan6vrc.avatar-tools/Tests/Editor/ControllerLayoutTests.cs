@@ -10,9 +10,18 @@ public class ControllerLayoutTests
 {
     private const string ScratchFolder = "Assets/Agent/Scratch/emit";
 
+    // ControllerEmit.Build's 2-arg door mints a VRCExpressionParameters nobody persists; see
+    // AnimatorTestHelpers.UnownedParamsSweep for why a survivor breaks unrelated suites.
+    private readonly AnimatorTestHelpers.UnownedParamsSweep _paramSweep =
+        new AnimatorTestHelpers.UnownedParamsSweep();
+
+    [SetUp]
+    public void BeginParamSweep() => _paramSweep.Begin();
+
     [TearDown]
     public void TearDown()
     {
+        _paramSweep.End();
         if (AssetDatabase.IsValidFolder(ScratchFolder))
             AssetDatabase.DeleteAsset(ScratchFolder);
     }
