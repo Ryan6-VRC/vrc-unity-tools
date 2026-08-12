@@ -194,20 +194,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 bake = AvatarBake.Begin(root, root.name + "__rt_" + stamp);
                 if (!bake.Ok)
                 {
-                    // A hook that THREW is re-raised carrying the original as its inner exception, so the
-                    // outer catch's Debug.LogException prints the real NDMF/MA stack and the verdict names a
-                    // crash as a crash. A hook that REFUSED (returned false) logs its own reason to the
-                    // console; surface that it happened.
+                    // The stage comes from the scope, never composed here: it is the only thing that says
+                    // WHICH failure this was, and a hard-coded refusal string would report a destroyed root
+                    // or a setup throw as a build hook's refusal, pointing the reader at a console reason
+                    // nobody logged.
+                    string why = bake.DescribeFailure();
                     if (bake.Failure != null)
-                        // The inner TYPE is spelled into the message, not just chained: the outer catch formats
-                        // the verdict from the OUTER exception, so an unspelled inner type reaches the console
-                        // but never the returned line — which is the half a caller reads.
+                        // Chained AND spelled into the message: the outer catch formats the verdict from the
+                        // OUTER exception, so an unspelled inner type reaches the console but never the
+                        // returned line — which is the half a caller reads.
                         throw new InvalidOperationException(
-                            "VRC build preprocess failed on '" + label + "' — " + bake.Failure.GetType().Name
-                            + ": " + bake.Failure.Message, bake.Failure);
+                            "VRC build preprocess failed on '" + label + "' — " + why, bake.Failure);
                     throw new InvalidOperationException(
-                        "VRC build preprocess refused '" + label + "' — a build hook blocked it (its reason "
-                        + "is in the Unity console). The avatar would not upload in this state either.");
+                        "VRC build preprocess refused '" + label + "' — " + why
+                        // Only claimable when a hook actually ran: a setup failure says nothing about
+                        // whether the avatar would upload.
+                        + (bake.EnteredChain ? " The avatar would not upload in this state either." : ""));
                 }
                 baked = bake.Clone;
 
