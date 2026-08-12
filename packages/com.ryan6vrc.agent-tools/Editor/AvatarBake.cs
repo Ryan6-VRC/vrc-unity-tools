@@ -46,13 +46,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             return new AvatarBakeScope(source, cloneName);
         }
 
-        /// <summary>The verbatim cleanup-note token, pinned here because it is spliced into a CALLER's verdict
-        /// line and the shape is load-bearing: the leading space separates it from whatever precedes it, and
-        /// the tool tag stays the caller's (a note tagged <c>[AvatarBake]</c> mid-verdict would contradict the
-        /// line's own <c>[RenderThumbnail]</c> head). Matches the other note contributors exactly.</summary>
+        /// <summary>The verbatim cleanup-note tokens, pinned here because they are spliced into a CALLER's
+        /// verdict line and the shape is load-bearing: the leading space separates each from whatever precedes
+        /// it, and the tool tag stays the caller's (a note tagged <c>[AvatarBake]</c> mid-verdict would
+        /// contradict the line's own <c>[RenderThumbnail]</c> head). Matches the other note contributors
+        /// exactly. Both are appended, so a teardown that fails twice reports twice.</summary>
         internal static string FormatCleanupNote(Exception e)
         {
             return " note=postprocess-cleanup-threw: " + e.GetType().Name;
+        }
+
+        internal static string FormatDestroyNote(Exception e)
+        {
+            return " note=bake-clone-destroy-threw: " + e.GetType().Name;
         }
     }
 
@@ -67,12 +73,21 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// </summary>
     internal sealed class AvatarBakeScope : IDisposable
     {
+        private readonly Func<GameObject, bool> _preprocess;
+        private readonly Action _postprocess;
         private GameObject _clone;
         private readonly bool _preprocessed;
         private bool _disposed;
 
-        /// <summary>True when the clone baked and is readable until <see cref="Dispose"/>.</summary>
-        internal bool Ok { get; private set; }
+        /// <summary>True when the clone baked and is readable until <see cref="Dispose"/>. DERIVED, not a
+        /// third field: a settable flag is one more thing that can disagree with the two failure channels,
+        /// and this way the type cannot represent "Ok with a failure set".</summary>
+        internal bool Ok { get { return FailedStage == null && Failure == null; } }
+
+        /// <summary>Whether the SDK chain was actually ENTERED. False means the failure happened in setup
+        /// (the clone, the rename, the activate) and no callback ran — so a caller naming
+        /// <c>OnPreprocessAvatar</c> would be describing a call that never happened.</summary>
+        internal bool EnteredChain { get { return _preprocessed; } }
 
         /// <summary>Set only when a build hook REFUSED the build (the chain returned false). Null otherwise —
         /// a hook that threw sets <see cref="Failure"/> instead, because "a hook blocked the build" is a false
@@ -108,7 +123,21 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         internal AvatarBakeScope(GameObject source, string cloneName)
+            : this(source, cloneName, null, null) { }
+
+        /// <summary>Seam constructor: the SDK callbacks are injectable so the lifetime rules above can be
+        /// tested without a composed avatar and a live hook chain. Passing null for either takes the real
+        /// callback, which is what every production caller gets through <see cref="AvatarBake.Begin"/>.
+        /// The seam exists because the properties worth testing here — the pairing fires exactly once,
+        /// fires on the FAILURE path too, and survives a throwing callback — are unreachable otherwise.</summary>
+        internal AvatarBakeScope(GameObject source, string cloneName,
+                                 Func<GameObject, bool> preprocess, Action postprocess)
         {
+            _preprocess = preprocess ?? (go =>
+                VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPreprocessAvatar(go));
+            _postprocess = postprocess ?? (() =>
+                VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPostprocessAvatar());
+
             if (source == null) { FailedStage = "clone (source was null)"; return; }
 
             try
@@ -123,11 +152,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // Owed the instant the chain is ENTERED, not once it returns: a hook that throws midway has
                 // already moved SDK state that only the post-callback puts back.
                 _preprocessed = true;
-                if (VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPreprocessAvatar(_clone))
-                {
-                    Ok = true;   // OnPreprocessAvatar mutates in place, so the clone IS the baked avatar
-                    return;
-                }
+                if (_preprocess(_clone)) return;   // mutates in place, so the clone IS the baked avatar
                 FailedStage = "OnPreprocessAvatar returned false (a build hook blocked the build — read the console for which)";
             }
             catch (Exception e)
@@ -135,14 +160,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                 Failure = e;
             }
 
-            // Failure path only: nothing to read, so the clone goes now. Dispose still owes the post-callback.
-            if (_clone != null) UnityEngine.Object.DestroyImmediate(_clone);
-            _clone = null;
+            // Failure path only: nothing to read, so the clone goes now. Dispose still owes the post-callback,
+            // and this destroy is guarded because a throw here would propagate OUT OF THE CONSTRUCTOR — the
+            // caller's variable would never be assigned, so nothing would be left holding the owed pairing.
+            DestroyClone();
         }
 
         /// <summary>Destroy the clone, then fire the SDK's paired <c>OnPostprocessAvatar</c>. Idempotent, and
         /// <b>never throws</b>: it runs inside callers' teardown <c>finally</c> blocks, where a throw would
-        /// replace the real pipeline exception with a cleanup one. A failed post-callback lands in
+        /// replace the real pipeline exception with a cleanup one. A failed teardown lands in
         /// <see cref="CleanupNote"/> instead — surfaced, never swallowed, never fatal.</summary>
         public void Dispose()
         {
@@ -151,16 +177,58 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // Destroy before the callback, matching the order the render path already runs (its preview scene
             // closes — destroying the clone — before the pairing fires), so both callers share one order.
-            // Guarded rather than assumed: a caller may already have destroyed it with the scene it lived in.
-            if (_clone != null) UnityEngine.Object.DestroyImmediate(_clone);
-            _clone = null;
+            // In a try/finally, not in sequence: a failed destroy must not cost the pairing, and _disposed is
+            // already set, so a skipped post-callback here could never be recovered by a retry.
+            try { DestroyClone(); }
+            finally
+            {
+                if (_preprocessed)
+                {
+                    // The pair is a contract: OnPreprocessAvatar was entered, so OnPostprocessAvatar must
+                    // fire. It runs every hook's OWN cleanup (NDMF's temporary-asset sweep among them) rather
+                    // than this tool guessing folder names it does not control. Assets that outlive it are
+                    // not chased.
+                    try { _postprocess(); }
+                    catch (Exception e)
+                    {
+                        CleanupNote += AvatarBake.FormatCleanupNote(e);
+                        // Logged as well as noted: CompositionBake consumes the scope with `using` and writes
+                        // its artifact inside it, so the note alone would reach nobody there — and stale SDK
+                        // hook state is read by the NEXT build, in whatever tool runs it.
+                        Debug.LogWarning("[AvatarBake] OnPostprocessAvatar threw " + e.GetType().Name
+                            + " — subsequent builds may read stale hook state.");
+                    }
+                }
+            }
+        }
 
-            if (!_preprocessed) return;
-            // The pair is a contract: OnPreprocessAvatar was entered, so OnPostprocessAvatar must fire. It
-            // runs every hook's OWN cleanup (NDMF's temporary-asset sweep among them) rather than this tool
-            // guessing folder names it does not control. Assets that outlive it are not chased.
-            try { VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPostprocessAvatar(); }
-            catch (Exception e) { CleanupNote = AvatarBake.FormatCleanupNote(e); }
+        /// <summary>Destroy the clone at most once, reporting rather than raising. Guarded, not assumed: a
+        /// caller may already have destroyed it with the scene it lived in, and <c>DestroyImmediate</c> can
+        /// raise on an already-destroyed object.</summary>
+        private void DestroyClone()
+        {
+            if (_clone == null) { _clone = null; return; }
+            try { UnityEngine.Object.DestroyImmediate(_clone); }
+            catch (Exception e)
+            {
+                CleanupNote += AvatarBake.FormatDestroyNote(e);
+                Debug.LogWarning("[AvatarBake] destroying the bake clone threw " + e.GetType().Name
+                    + " — a clone may be left in the scene.");
+            }
+            _clone = null;
+        }
+
+        /// <summary>One accurate sentence for whichever failure channel is set, or null when there was none.
+        /// Callers use this instead of composing their own: naming <c>OnPreprocessAvatar</c> for a failure
+        /// that happened before the chain was entered describes a call that never ran, and hard-coding a
+        /// refusal string discards <see cref="FailedStage"/> — which is the only thing that says WHICH
+        /// refusal it was.</summary>
+        internal string DescribeFailure()
+        {
+            if (Failure != null)
+                return (_preprocessed ? "OnPreprocessAvatar threw " : "bake clone setup threw ")
+                     + Failure.GetType().Name + ": " + Failure.Message;
+            return FailedStage;
         }
     }
 }

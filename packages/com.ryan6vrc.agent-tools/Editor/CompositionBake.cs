@@ -125,9 +125,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // authored rows under a heading that promises composed truth is the failure this door exists
                     // to prevent, so bake mode publishes no table at all when the bake did not happen. A hook
                     // that THREW is reported as the crash it was, not as a refusal that never happened.
-                    string failedStage = bake.Failure != null
-                        ? "OnPreprocessAvatar threw " + bake.Failure.GetType().Name + ": " + bake.Failure.Message
-                        : bake.FailedStage;
+                    string failedStage = bake.DescribeFailure();
                     WriteArtifact(path, Refusal(path, failedStage, root.name));
                     Debug.LogError("[ReportComposition] " + root.name + ": mode=bake => FAIL (" + failedStage + ") | log=" + path);
                     return;
