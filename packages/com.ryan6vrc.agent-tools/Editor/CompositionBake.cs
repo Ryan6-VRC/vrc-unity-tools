@@ -112,20 +112,28 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return;
             }
 
-            GameObject clone;
-            string failedStage;
-            if (!AvatarBake.Try(root, out clone, out failedStage))
+            // `using`, so the SDK's paired post-callback fires on EVERY exit — including the refusal return
+            // below, which sits inside the scope precisely because that early return used to skip the pairing.
+            // The read happens INSIDE the scope by necessity, not by style: the post-callback destroys the
+            // clone's generated assets, so every playable-layer controller BuiltDeclarations exists to read is
+            // null once the scope closes (AvatarBake's doc comment has the measurement).
+            using (var bake = AvatarBake.Begin(root))
             {
-                // A loud refusal naming the stage — NEVER a silent fallback to the authored census. Emitting
-                // authored rows under a heading that promises composed truth is the failure this door exists
-                // to prevent, so bake mode publishes no table at all when the bake did not happen.
-                WriteArtifact(path, Refusal(path, failedStage, root.name));
-                Debug.LogError("[ReportComposition] " + root.name + ": mode=bake => FAIL (" + failedStage + ") | log=" + path);
-                return;
-            }
+                if (!bake.Ok)
+                {
+                    // A loud refusal naming the stage — NEVER a silent fallback to the authored census. Emitting
+                    // authored rows under a heading that promises composed truth is the failure this door exists
+                    // to prevent, so bake mode publishes no table at all when the bake did not happen. A hook
+                    // that THREW is reported as the crash it was, not as a refusal that never happened.
+                    string failedStage = bake.Failure != null
+                        ? "OnPreprocessAvatar threw " + bake.Failure.GetType().Name + ": " + bake.Failure.Message
+                        : bake.FailedStage;
+                    WriteArtifact(path, Refusal(path, failedStage, root.name));
+                    Debug.LogError("[ReportComposition] " + root.name + ": mode=bake => FAIL (" + failedStage + ") | log=" + path);
+                    return;
+                }
 
-            try
-            {
+                var clone = bake.Clone;
                 string incomplete;
                 var built = BuiltDeclarations(clone, out incomplete);
                 var diff = Diff(census, built, paramFilter, incomplete == null);
@@ -174,11 +182,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                             + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section);
                 WriteArtifact(path, body);
                 Debug.Log(summary);
-            }
-            finally
-            {
-                if (clone != null) UnityEngine.Object.DestroyImmediate(clone);
-            }
+            }   // scope closes: the clone is destroyed and OnPostprocessAvatar fires, in that order
         }
 
         internal struct DiffRow { public string Authored, Built, Category, Surface; }
