@@ -169,9 +169,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             Scene preview = default;
             GameObject baked = null;
-            // Set the instant preprocess is entered: teardown owes the SDK its paired OnPostprocessAvatar
-            // even when a hook throws midway.
-            bool bakePreprocessed = false;
+            // Declared out here, not in a `using`: the scope must be disposed INSIDE the teardown below (so the
+            // SDK pairing still fires last, after the preview scene closes) while its CleanupNote is read AFTER
+            // that, when the verdict is assembled. A using-block can give one or the other, not both.
+            AvatarBakeScope bake = null;
             string result = null;      // non-null on the silhouette-fail / non-success paths only
             string prefix = null;      // the OK verdict head, consumed after teardown once residualNote is known
             string pngPath = null;     // the written PNG path, ditto
@@ -185,47 +186,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
             try
             {
                 // ---- Step 2: unique private clone -> bake (the non-destructiveness keystone) ----
+                // agent-tools' AvatarBake owns the door and why it is this one, not ManualProcessAvatar.
                 // The GUID suffix makes any generated-asset subfolder provably exclusive to this run
                 // (regardless of timer resolution), so a pre-existing-folder wholesale-delete can never
                 // touch a user's kept bake.
-                //
-                // The bake door is the SDK preprocess chain, NOT ManualProcessAvatar — see
-                // nondestructive.md §The bake door. Unlike ManualProcessAvatar (clone in, new object
-                // out), this mutates IN PLACE, so `mine` IS the baked avatar with nothing else to destroy.
-                //
-                // agent-tools' AvatarBake is the canon for WHY this door and not that one; it is not called
-                // from here because the lifecycles genuinely differ — that helper owns its post-callback and
-                // reports a failed stage as a string, while this path keeps the clone alive across a render
-                // and pairs OnPostprocessAvatar with scene/selection restoration in one finally, and turns a
-                // preprocess throw into a throw. Two call sites of one SDK API, one home for the rule.
                 string stamp = Guid.NewGuid().ToString("N").Substring(0, 8);
-                var mine = UnityEngine.Object.Instantiate(root);
-                string mineName = root.name + "__rt_" + stamp;
-                mine.name = mineName;
-                mine.SetActive(true); // an inactive avatar is not a valid preprocess target
-
-                bool preprocessOk;
-                bakePreprocessed = true;
-                try
+                bake = AvatarBake.Begin(root, root.name + "__rt_" + stamp);
+                if (!bake.Ok)
                 {
-                    preprocessOk = VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks
-                        .OnPreprocessAvatar(mine);
-                }
-                catch
-                {
-                    UnityEngine.Object.DestroyImmediate(mine);
-                    throw;
-                }
-                if (!preprocessOk)
-                {
-                    UnityEngine.Object.DestroyImmediate(mine);
-                    // A hook REFUSED the build (VRCFury misconfiguration, a failed optimizer pass, an SDK
-                    // validation). It logs its own reason to the console; surface that it happened.
+                    // A hook that THREW is re-raised carrying the original as its inner exception, so the
+                    // outer catch's Debug.LogException prints the real NDMF/MA stack and the verdict names a
+                    // crash as a crash. A hook that REFUSED (returned false) logs its own reason to the
+                    // console; surface that it happened.
+                    if (bake.Failure != null)
+                        // The inner TYPE is spelled into the message, not just chained: the outer catch formats
+                        // the verdict from the OUTER exception, so an unspelled inner type reaches the console
+                        // but never the returned line — which is the half a caller reads.
+                        throw new InvalidOperationException(
+                            "VRC build preprocess failed on '" + label + "' — " + bake.Failure.GetType().Name
+                            + ": " + bake.Failure.Message, bake.Failure);
                     throw new InvalidOperationException(
                         "VRC build preprocess refused '" + label + "' — a build hook blocked it (its reason "
                         + "is in the Unity console). The avatar would not upload in this state either.");
                 }
-                baked = mine;
+                baked = bake.Clone;
 
                 // ---- Step 3: preview scene ----
                 preview = UnityEditor.SceneManagement.EditorSceneManager.NewPreviewScene();
@@ -430,10 +414,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (preview.IsValid())
                     UnityEditor.SceneManagement.EditorSceneManager.ClosePreviewScene(preview); // destroys baked + lights + camera
 
-                // Orphan sweep: any root new in the target's scene since the step-0 snapshot. Our own `mine`
-                // is already destroyed by the inner finally and `baked` by ClosePreviewScene — this is the
+                // Orphan sweep: any root new in the target's scene since the step-0 snapshot. A failed bake's
+                // clone is already destroyed by the scope and `baked` by ClosePreviewScene — this is the
                 // backstop for a stray NDMF intermediate, or a `baked` stranded by a bake that threw after
                 // instantiating the clone into the live scene but before we could move it to the preview.
+                // It reaches that stranded clone because AvatarBake creates it in the SOURCE's scene and
+                // leaves it there until we move it — contract, not incident (see AvatarBakeScope).
                 if (targetScene.IsValid())
                 {
                     foreach (var go in targetScene.GetRootGameObjects())
@@ -460,18 +446,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 finally
                 {
-                    // The SDK's preprocess/postprocess pair is a contract: OnPreprocessAvatar was called,
-                    // so OnPostprocessAvatar must be too. It fires every hook's OWN cleanup (NDMF's
-                    // temporary-asset sweep among them) rather than this tool guessing folder names it
-                    // does not control. Assets that outlive it are not chased — projects accumulate some.
-                    if (bakePreprocessed)
+                    // Closing the scope fires the SDK's paired OnPostprocessAvatar, and it must happen HERE:
+                    // last, after the whole teardown body above, and in a finally that body cannot skip by
+                    // throwing. The pairing is a contract — the post-callback runs every hook's OWN cleanup
+                    // (NDMF's temporary-asset sweep among them) rather than this tool guessing folder names
+                    // it does not control. Assets that outlive it are not chased — projects accumulate some.
+                    // Dispose is documented never to throw, which is what makes it safe in here: a throw
+                    // would replace the real pipeline exception with a teardown one. A failed cleanup is
+                    // surfaced, not swallowed, and never fatal — the PNG is already written.
+                    if (bake != null)
                     {
-                        try { VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPostprocessAvatar(); }
-                        catch (Exception cleanupEx)
-                        {
-                            // Surfaced, not swallowed — but never fatal: the PNG is already written.
-                            residualNote += " note=postprocess-cleanup-threw: " + cleanupEx.GetType().Name;
-                        }
+                        bake.Dispose();
+                        residualNote += bake.CleanupNote;   // null on a clean teardown; `+= null` is a no-op
                     }
                 }
             }
