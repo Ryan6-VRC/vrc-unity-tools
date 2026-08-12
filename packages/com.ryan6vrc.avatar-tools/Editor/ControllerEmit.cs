@@ -377,6 +377,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // `_made` field records the measurement (leak → 551/600, destroy → 600/600).
                 // The controller and its sub-assets are deliberately NOT swept: they are persisted, and the
                 // stripped-on-failure contract above already governs them.
+                // The try closes at the RETURN, not after EmitMenu: everything below is still fallible, and a
+                // throw there strands the side assets exactly as an emit throw would. StampProvenance ends in
+                // AssetImporter.SaveAndReimport — real file IO — so this is not a theoretical tail.
                 try
                 {
                     EmitParameters();
@@ -384,25 +387,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     EmitLayers();
                     EmitVrcParameters();  // in-memory only; CompileController persists
                     EmitMenu();           // in-memory only; CompileController persists
+
+                    EditorUtility.SetDirty(_controller);
+                    AssetDatabase.SaveAssets();
+
+                    StampProvenance(path);
+
+                    // Reload from disk so EmitResult holds the authoritative persisted objects (a reimport can
+                    // remap instances). This makes the returned graph exactly what round-trip verification sees.
+                    // The reload does NOT depend on a reimport having happened: when StampProvenance skips (the
+                    // scratch door), nothing was re-minted and these loads return the same live, SaveAssets-backed
+                    // instances — so it stays correct either way.
+                    ReloadFromDisk(path);
+                    return _result;
                 }
                 catch
                 {
+                    // Still correct this late: ReloadFromDisk rewrites only Controller/Clips/ClipList/Trees, so
+                    // Params and the pages are the same unpersisted instances they were at CreateInstance.
                     DestroyUnpersistedSideAssets();
                     throw;
                 }
-
-                EditorUtility.SetDirty(_controller);
-                AssetDatabase.SaveAssets();
-
-                StampProvenance(path);
-
-                // Reload from disk so EmitResult holds the authoritative persisted objects (a reimport can
-                // remap instances). This makes the returned graph exactly what round-trip verification sees.
-                // The reload does NOT depend on a reimport having happened: when StampProvenance skips (the
-                // scratch door), nothing was re-minted and these loads return the same live, SaveAssets-backed
-                // instances — so it stays correct either way.
-                ReloadFromDisk(path);
-                return _result;
             }
 
             // Destroy the in-memory side assets this build minted. Failure path ONLY — on success these are
