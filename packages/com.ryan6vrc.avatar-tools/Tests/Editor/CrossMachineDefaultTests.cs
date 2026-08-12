@@ -24,12 +24,22 @@ public class CrossMachineDefaultTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/xmdefault";
 
+    // ControllerEmit.Build's 2-arg door mints a VRCExpressionParameters nobody persists; see
+    // AnimatorTestHelpers.UnownedParamsSweep for why a survivor breaks unrelated suites.
+    private readonly AnimatorTestHelpers.UnownedParamsSweep _paramSweep =
+        new AnimatorTestHelpers.UnownedParamsSweep();
+
     [SetUp]
-    public void SetUp() => AnimatorTestHelpers.EnsureFolder(TestRoot);
+    public void SetUp()
+    {
+        _paramSweep.Begin();
+        AnimatorTestHelpers.EnsureFolder(TestRoot);
+    }
 
     [TearDown]
     public void TearDown()
     {
+        _paramSweep.End();
         if (AssetDatabase.IsValidFolder(TestRoot)) AssetDatabase.DeleteAsset(TestRoot);
     }
 

@@ -319,6 +319,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private readonly EmitResult _result = new EmitResult();
             private readonly HashSet<string> _paramNames;
             private AnimatorController _controller;
+            // EVERY menu page CreateInstance'd by this build, registered at creation rather than on return.
+            // _result.MenuChildren only receives a page once BuildMenuPage RETURNS it, so a throw part-way
+            // through a page (a bad icon on control n) strands that page unreachable — and the root page is
+            // not in _result.Menu until EmitMenu's own assignment. This list is the only handle that covers
+            // the in-flight ones, and it exists for the failure path alone; success ignores it.
+            private readonly List<VRCExpressionsMenu> _menuPages = new List<VRCExpressionsMenu>();
 
             public BuildContext(AnimDocument doc, string outDir, string sourceText)
             {
@@ -361,24 +367,62 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     AssetDatabase.CreateAsset(_controller, path);
                 }
 
-                EmitParameters();
-                EmitClips();          // clips first: states/trees reference them by name
-                EmitLayers();
-                EmitVrcParameters();  // in-memory only; CompileController persists
-                EmitMenu();           // in-memory only; CompileController persists
+                // The side assets (Params, and every menu page) are the only things this method creates that
+                // NOTHING owns on the failure path: they are in-memory ScriptableObjects, so a throw out of
+                // Build leaves them unreachable — `result` is an out-parameter that is never assigned, and a
+                // caller's catch has no handle to them. EmitVrcParameters runs BEFORE EmitMenu, and EmitMenu
+                // throws three ways (the MAX_CONTROLS echo, a reserved-param control, a bad icon path), so
+                // this is reachable from an ordinary authoring mistake, not just a corrupt document.
+                // A leaked SDK ScriptableObject in this assembly is NOT inert — ControllerFixpointTests's
+                // `_made` field records the measurement (leak → 551/600, destroy → 600/600).
+                // The controller and its sub-assets are deliberately NOT swept: they are persisted, and the
+                // stripped-on-failure contract above already governs them.
+                // The try closes at the RETURN, not after EmitMenu: everything below is still fallible, and a
+                // throw there strands the side assets exactly as an emit throw would. StampProvenance ends in
+                // AssetImporter.SaveAndReimport — real file IO — so this is not a theoretical tail.
+                try
+                {
+                    EmitParameters();
+                    EmitClips();          // clips first: states/trees reference them by name
+                    EmitLayers();
+                    EmitVrcParameters();  // in-memory only; CompileController persists
+                    EmitMenu();           // in-memory only; CompileController persists
 
-                EditorUtility.SetDirty(_controller);
-                AssetDatabase.SaveAssets();
+                    EditorUtility.SetDirty(_controller);
+                    AssetDatabase.SaveAssets();
 
-                StampProvenance(path);
+                    StampProvenance(path);
 
-                // Reload from disk so EmitResult holds the authoritative persisted objects (a reimport can
-                // remap instances). This makes the returned graph exactly what round-trip verification sees.
-                // The reload does NOT depend on a reimport having happened: when StampProvenance skips (the
-                // scratch door), nothing was re-minted and these loads return the same live, SaveAssets-backed
-                // instances — so it stays correct either way.
-                ReloadFromDisk(path);
-                return _result;
+                    // Reload from disk so EmitResult holds the authoritative persisted objects (a reimport can
+                    // remap instances). This makes the returned graph exactly what round-trip verification sees.
+                    // The reload does NOT depend on a reimport having happened: when StampProvenance skips (the
+                    // scratch door), nothing was re-minted and these loads return the same live, SaveAssets-backed
+                    // instances — so it stays correct either way.
+                    ReloadFromDisk(path);
+                    return _result;
+                }
+                catch
+                {
+                    // Still correct this late: ReloadFromDisk rewrites only Controller/Clips/ClipList/Trees, so
+                    // Params and the pages are the same unpersisted instances they were at CreateInstance.
+                    DestroyUnpersistedSideAssets();
+                    throw;
+                }
+            }
+
+            // Destroy the in-memory side assets this build minted. Failure path ONLY — on success these are
+            // handed to the caller inside the EmitResult, and CompileController owns them from there.
+            // Pages come from _menuPages, not _result.Menu/_result.MenuChildren, because those two only hold
+            // pages that were fully built; see the _menuPages comment.
+            private void DestroyUnpersistedSideAssets()
+            {
+                if (_result.Params != null) UnityEngine.Object.DestroyImmediate(_result.Params);
+                _result.Params = null;
+                foreach (var page in _menuPages)
+                    if (page != null) UnityEngine.Object.DestroyImmediate(page);
+                _menuPages.Clear();
+                _result.Menu = null;
+                _result.MenuChildren.Clear();
             }
 
             // Reset an existing controller for in-place rebuild: detach its layers/parameters, then destroy
@@ -1241,6 +1285,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private VRCExpressionsMenu BuildMenuPage(List<MenuControl> controls, string assetName, string where)
             {
                 var menu = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
+                // Registered HERE, not at the return: everything below this line can throw, and a page that
+                // has not been returned yet is reachable from nowhere else.
+                _menuPages.Add(menu);
                 menu.name = assetName;
                 menu.controls = new List<VRCExpressionsMenu.Control>();
 
