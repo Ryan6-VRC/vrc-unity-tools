@@ -157,9 +157,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 };
                 foreach (var d in diff)
                     section.Add("| `" + RunLogFormat.Cell(d.Authored) + "` | " + d.Category + " | `" + RunLogFormat.Cell(d.Built) + "` | "
-                              + RunLogFormat.Cell(d.Surface) + " |");
+                              + RunLogFormat.Cell(d.Surface + d.Caveat) + " |");
                 section.Add("");
-                foreach (var n in readNotes) section.Add("> built-side read note: " + n);
+                // Each note ends with a hard break and the block ends with a blank line, matching RenderBody's own
+                // note convention: without both, CommonMark lazy continuation folds every following paragraph —
+                // the incompleteness warning, the category legend, the arithmetic — into this blockquote.
+                foreach (var n in readNotes) section.Add("> built-side read note: " + n + "  ");
+                if (readNotes.Count > 0) section.Add("");
                 if (incomplete != null)
                     section.Add("**The built read was incomplete: " + incomplete + ".** Exact matches and renames below "
                               + "are still measured facts; every unmatched authored name is reported "
@@ -185,12 +189,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                           + "bare suffix match would call authored `Toggle` a rename of built `Hair/HairToggle`.");
                 section.Add("**A built name already claimed by exact match is not another row's rename** — an exact match is "
                           + "the stronger claim. That precedence is a tie-breaker only: where it would empty a candidate set "
-                          + "it is not applied, so `dropped` never rests on it. Where it decided a row, that row says so in "
-                          + "its own owning-surface cell and names what was excluded, because the reading it forecloses is "
-                          + "`merged`.");
+                          + "it is not applied, so `dropped` never rests on it. Where it decided a row — `renamed` or "
+                          + "`ambiguous` — that row says so in its own owning-surface cell and names what was excluded, "
+                          + "because the reading it forecloses is `merged`; and where such a row was itself replaced by a "
+                          + "`merged` row, the merged row carries the same disclosure.");
                 section.Add("**The arithmetic.** Authored rows (`kept` + `renamed` + `dropped` + `ambiguous` + "
                           + "`built-side-unread` + `not-in-scope`, plus each `merged` row standing in for the two or more it "
-                          + "replaced) sum to `params=`; `built-only` rows are additional and belong to no authored name. One "
+                          + "replaced) sum to `params=`; `built-only` and `vrc-reserved` rows are additional and belong to no "
+                          + "authored name. One "
                           + "built name can appear BOTH inside an `A or B` cell and as its own `built-only` row: an ambiguous "
                           + "match deliberately claims nothing, or a genuinely built-only parameter would be hidden inside a "
                           + "cell belonging to an unrelated authored name. That is not double-counting.");
@@ -206,7 +212,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             }   // scope closes: the clone is destroyed and OnPostprocessAvatar fires, in that order
         }
 
-        internal struct DiffRow { public string Authored, Built, Category, Surface; }
+        /// <summary>One row of the diff. <c>Caveat</c> is kept OUT of <c>Surface</c> rather than concatenated into
+        /// it so it can be CARRIED when a row is replaced: the <c>merged</c> pass destroys the rows it summarises,
+        /// and a caveat living inside their prose died with them. Rendered immediately after <c>Surface</c>, so the
+        /// cell reads the same either way.</summary>
+        internal struct DiffRow { public string Authored, Built, Category, Surface, Caveat; }
 
         /// <summary>Every parameter name the BUILT clone declares: its descriptor's expression parameters
         /// UNION every parameter on every controller the clone plays. Both halves are needed. The expression
@@ -234,13 +244,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var anim in clone.GetComponentsInChildren<Animator>(true))
             {
                 var rac = anim != null ? anim.runtimeAnimatorController : null;
-                if (!AddParams(rac, names) && notes != null)
+                if (!AddParams(rac, names))
                     notes.Add("the `Animator` at `" + MergeSurfaces.PathOf(anim.gameObject) + "` plays `" + rac.name
                             + "` (" + rac.GetType().Name + "), which this read cannot resolve to an AnimatorController — "
                             + "its parameters are absent from the built side below. Not a partial read of the AVATAR's "
                             + "declaration set (the playable layers carry that), so no category is downgraded.");
             }
             var unreadableSlots = new List<string>();
+            int slotsWithController = 0;
             if (d != null)
             {
                 foreach (var set in new[] { d.baseAnimationLayers, d.specialAnimationLayers })
@@ -258,6 +269,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         // An EMPTY slot declares nothing, and that is all it means. It used to be counted as
                         // evidence the built side went unread — see the history note below.
                         if (l.animatorController == null) continue;
+                        slotsWithController++;
                         if (!AddParams(l.animatorController, names))
                             unreadableSlots.Add(l.type + " → `" + l.animatorController.name + "` ("
                                               + l.animatorController.GetType().Name + ")");
@@ -280,6 +292,19 @@ namespace Ryan6Vrc.AgentTools.Editor
                 incompleteReason = unreadableSlots.Count + " playable-layer slot(s) hold a controller this read "
                     + "could not resolve to an AnimatorController (" + string.Join("; ", unreadableSlots)
                     + "), so their parameters are absent and the built side is a PARTIAL read";
+            // The retarget above dropped a FALSE arm, and with it the only automated detection of the arm's one
+            // TRUE case: a clone holding no controller in any slot and declaring nothing. That is the state #118
+            // measured on a clone read after its generated assets were swept — not an authoring state, and not
+            // survivable, because every authored name would fall to `dropped`: a confident "the build removed it"
+            // across a whole avatar. Kept as a second arm rather than trusted to the caller, because the only
+            // thing standing between this door and that state is AvatarBakeScope's lifetime, which this codebase
+            // has already gotten wrong once and silently. Judgment-free, and unable to fire on a healthy bake:
+            // a real built avatar always has a controller in a slot, and an avatar that truly declares nothing
+            // has no diffable census rows for the flag to downgrade.
+            else if (d != null && slotsWithController == 0 && names.Count == 0)
+                incompleteReason = "the built clone's descriptor holds no playable-layer controller at all and its "
+                    + "expression parameters declare nothing, so NOTHING of the built side was readable — the shape "
+                    + "of a clone read after its generated assets were swept, not of an avatar with nothing on it";
             return names.ToList();
         }
 
@@ -326,7 +351,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// census first — the obvious order — makes the answer depend on the filter: a built name whose
         /// authored counterpart was filtered out has nothing left to claim it and is reported built-only, so
         /// filtering on a surface prefix (the most natural use) would report that whole surface as
-        /// unattributed.</summary>
+        /// unattributed.
+        /// <para>Precedence is filter-INDEPENDENT for a reason worth recording, since the live census reaching
+        /// this method is already narrowed: an excludable built name <c>b</c> ends with a separator plus the
+        /// authored name it would claim, so any filter matching that short name necessarily matches <c>b</c>
+        /// too (matching is substring). A filter can therefore drop the short row but never strip the
+        /// exact-claimer of a row it kept — so no verdict can flip on the filter.</para></summary>
         internal static List<DiffRow> Diff(ReportComposition.CensusResult census, List<string> built, string paramFilter,
                                            bool builtSideComplete = true)
         {
@@ -396,8 +426,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // checked against a specific row, and these are exactly the rows the rule is adopted for.
                     rows.Add(new DiffRow
                     {
-                        Authored = p.Name, Built = candidates[0], Category = "renamed",
-                        Surface = p.Declared + (candidates.Count == raw.Count ? "" : ExclusionNote(raw, narrowed)),
+                        Authored = p.Name, Built = candidates[0], Category = "renamed", Surface = p.Declared,
+                        Caveat = candidates.Count == raw.Count ? null : ExclusionNote(raw, narrowed),
                     });
                 }
                 else if (candidates.Count > 1)
@@ -406,10 +436,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // genuinely built-only parameter that happens to match an ambiguous authored name would be
                     // swallowed: never given its own built-only row, and visible only inside a cell attributed
                     // to an unrelated parameter.
+                    //
+                    // Exclusion is disclosed here too, and it matters MORE than on a renamed row: this is the one
+                    // category whose whole purpose is honesty about not knowing, so a candidate list silently
+                    // trimmed by precedence would make the trimming unknowable from the artifact.
                     rows.Add(new DiffRow
                     {
                         Authored = p.Name, Built = string.Join(" or ", candidates), Category = "ambiguous",
                         Surface = p.Declared + " — more than one built name is a prefixed form of this one",
+                        Caveat = candidates.Count == raw.Count ? null : ExclusionNote(raw, narrowed),
                     });
                 }
                 else if (builtSideComplete)
@@ -436,11 +471,23 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var kv in claimedBy)
             {
                 if (kv.Value.Count <= 1) continue;
-                foreach (var i in rowsByBuilt[kv.Key]) drop.Add(i);
+                // Every caveat on a replaced row is CARRIED onto the row that replaces it. A merged row is the most
+                // confident statement this table makes — "these names became that one" — and it is assembled from
+                // rows that may each have reached their claim only because precedence excluded a rival. Dropping
+                // their caveats here would launder exactly the disclosure the renamed branch exists to make, and
+                // silently: the foreclosed reading vanishes with the row that named it.
+                var carried = new List<string>();
+                foreach (var i in rowsByBuilt[kv.Key])
+                {
+                    drop.Add(i);
+                    if (!string.IsNullOrEmpty(rows[i].Caveat) && !carried.Contains(rows[i].Caveat))
+                        carried.Add(rows[i].Caveat);
+                }
                 merged.Add(new DiffRow
                 {
                     Authored = string.Join(" + ", kv.Value), Built = kv.Key, Category = "merged",
                     Surface = "two or more authored names resolved onto one built name",
+                    Caveat = carried.Count == 0 ? null : string.Concat(carried),
                 });
             }
             var final = new List<DiffRow>();

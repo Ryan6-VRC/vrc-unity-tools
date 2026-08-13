@@ -113,11 +113,42 @@ public class CompositionDiffTests
         // reader checking THIS row sees it. A legend sentence cannot be checked against a specific row.
         var rows = CompositionBake.Diff(Census(("Prop/C", true), ("Sync/D/Prop/C", true)),
             new List<string> { "Sync/D/Prop/C", "VF1_Prop/C" }, null);
-        var surface = rows.First(r => r.Authored == "Prop/C").Surface;
-        Assert.IsTrue(surface.Contains("Sync/D/Prop/C"),
-            "the excluded candidate must be named in the row: " + surface);
-        Assert.IsTrue(surface.Contains("merged"),
-            "the row must name the reading it forecloses: " + surface);
+        var caveat = rows.First(r => r.Authored == "Prop/C").Caveat;
+        Assert.IsTrue(caveat != null && caveat.Contains("Sync/D/Prop/C"),
+            "the excluded candidate must be named in the row: " + caveat);
+        Assert.IsTrue(caveat.Contains("merged"),
+            "the row must name the reading it forecloses: " + caveat);
+    }
+
+    [Test]
+    public void AMergedRow_carriesTheExclusionCaveatOfEveryRowItReplaced()
+    {
+        // The row that replaces two claims is the most confident statement the table makes, and it is assembled
+        // from rows that may each have reached their claim only because precedence excluded a rival. Emitting the
+        // generic merged surface and discarding their caveats launders exactly the disclosure the renamed branch
+        // exists to make — and silently, because the foreclosed reading vanishes with the row that named it.
+        //
+        // `P` sees candidates X/P (exact-claimed, excluded) and VF_Z/P; `Z/P` sees only VF_Z/P. Both claim
+        // VF_Z/P, so both rows are replaced by one merged row — and `P -> X/P` is the reading being foreclosed.
+        var rows = CompositionBake.Diff(Census(("P", true), ("X/P", true), ("Z/P", true)),
+            new List<string> { "X/P", "VF_Z/P" }, null);
+        var m = rows.Where(r => r.Category == "merged").ToList();
+        Assert.AreEqual(1, m.Count, Dump(rows));
+        Assert.IsTrue(m[0].Caveat != null && m[0].Caveat.Contains("X/P"),
+            "the merged row must carry the excluded candidate its replaced row named: " + m[0].Caveat);
+    }
+
+    [Test]
+    public void AnAmbiguousRow_alsoDisclosesWhatExclusionTrimmed()
+    {
+        // Worse here than on a renamed row: `ambiguous` is the one category whose whole purpose is honesty about
+        // not knowing, so a candidate list silently trimmed by precedence makes the trimming unknowable.
+        var rows = CompositionBake.Diff(Census(("P", true), ("A/P", true)),
+            new List<string> { "A/P", "X/P", "Y/P" }, null);
+        var row = rows.First(r => r.Authored == "P");
+        Assert.AreEqual("ambiguous", row.Category, Dump(rows));
+        Assert.IsTrue(row.Caveat != null && row.Caveat.Contains("A/P"),
+            "the trimmed candidate must be named: " + row.Caveat);
     }
 
     [Test]
