@@ -84,6 +84,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // 3. Normalize bounds + probe-anchor on every SMR under ownedRoot (never-shrink bounds; repair-if-invalid anchor)
                 SetBoundsAndAnchor(ownedRoot, data, whatIf);
 
+                // The default-material gate's own coverage, reported where the verdict is read. Non-gating:
+                // the fallback identity test still answers, so this caveats the run rather than failing it.
+                if (BuiltinDefaultMaterialUnresolved)
+                    data.Warning("default-material-instrument: Unity's built-in Default-Material did not resolve, "
+                               + "so that gate rested on the GUID+localId fallback alone — if a slot held the "
+                               + "built-in under a different localId it would not have been counted");
+
                 // 4. PASS/FAIL
                 bool pass = data.Unmatched == 0
                          && data.NullSlots == 0
@@ -256,8 +263,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// GUID+localId fallback, because the built-in handle can fail to resolve. That fallback is the point:
         /// comparing against a null handle would match nothing, <c>defaultMatSlots</c> would sit at 0 forever,
         /// and a FAIL-capable gate would degrade into a silent no-op — the instrument failure
-        /// <c>docs/verify.md</c> exists to forbid. If neither route can answer, this says so loudly rather
-        /// than returning a confident false.</para>
+        /// <c>docs/verify.md</c> exists to forbid. When the handle does not resolve,
+        /// <see cref="BuiltinDefaultMaterialUnresolved"/> carries that into the run's own output, so the
+        /// coverage limit is read where the verdict is.</para>
         ///
         /// <para>Built-in RP only, which is all VRChat ships: under URP/HDRP the built-in still exists but is
         /// not what a new renderer receives, so this predicate would under-fire. Do not port it blind.</para>
@@ -270,10 +278,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 _builtinDefaultMaterial = AssetDatabase.GetBuiltinExtraResource<Material>("Default-Material.mat");
                 _builtinDefaultResolved = true;
-                if (_builtinDefaultMaterial == null)
-                    Debug.LogWarning("[ConformRenderers] could not resolve Unity's built-in Default-Material; "
-                                   + "falling back to a GUID+localId identity test. If that also fails, the "
-                                   + "default-material gate cannot fire and this run's PASS does not cover it.");
             }
 
             if (_builtinDefaultMaterial != null) return mat == _builtinDefaultMaterial;
@@ -282,6 +286,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(mat, out guid, out localId)) return false;
             return guid == BuiltinExtraGuid && localId == DefaultMaterialLocalId
                 && AssetDatabase.GetAssetPath(mat) == BuiltinExtraPath;
+        }
+
+        /// <summary>
+        /// True when the built-in handle did not resolve, so this run's default-material coverage rests on the
+        /// GUID+localId fallback alone. Read AFTER the scan, when the lazy resolve has happened.
+        ///
+        /// <para>The notice has to ride the RUN, not just the console. An agent driving this reads the returned
+        /// summary; a one-per-domain <c>Debug.LogWarning</c> is invisible to it and absent entirely on the
+        /// second call in the same domain. A PASS that could not adjudicate its own gate has to say so where
+        /// the verdict is read, or it is the silent no-op the identity fix exists to prevent.</para>
+        /// </summary>
+        internal static bool BuiltinDefaultMaterialUnresolved
+        {
+            get { return _builtinDefaultResolved && _builtinDefaultMaterial == null; }
         }
 
         /// <summary>
