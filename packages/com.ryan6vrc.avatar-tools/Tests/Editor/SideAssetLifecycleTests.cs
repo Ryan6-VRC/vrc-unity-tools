@@ -245,6 +245,13 @@ menu:
         }
         finally
         {
+            // Sweep here too, not only in the body. A precondition assert above throws BEFORE the in-body
+            // DestroyUnpersisted, and the trigger for one of those asserts is exactly the regression they
+            // watch for — the door ceasing to emit a type — so a red here would leak the very side assets
+            // this file exists to police, scattering the 551/600 cascade across unrelated suites and burying
+            // its own finding as collateral. Idempotent by design, so the in-body call stays the thing under
+            // test. Same "describe, then DESTROY, then fail" order AssertNoneAdded uses.
+            built?.DestroyUnpersisted();
             // This door persists the controller into ControllerEmit's OWN scratch dir, not OutDir, so
             // TearDown's TestRoot delete does not reach it.
             AssetDatabase.DeleteAsset("Assets/Agent/Scratch/emit/S_Fx.controller");

@@ -214,7 +214,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             // pin selected on the parameter alone would therefore freeze the bool operator on some runs and not
             // others, and FromVfGameObject would throw MissingMethodException into ClassifyReflect — every
             // VRCFury seam check REFUSEing at error severity, blaming a vendor drift that never happened.
-            // Transform is preferred over GameObject so the choice is deterministic rather than order-dependent.
+            // Transform wins on BOTH pins, so neither depends on enumeration order. The `Object`-returning arm
+            // is deliberately refused rather than ranked third: its runtime result happens to be a GameObject
+            // today, so the old per-call loop consumed it, but pinning it would assert a return type the
+            // converter cannot check. A VRCFury release keeping ONLY that arm therefore fails here as named
+            // drift instead of working by luck — the trade this whole block exists to make.
             foreach (var m in pins.VfGoType.GetMethods(BindingFlags.Public | BindingFlags.Static))
             {
                 if (m.Name != "op_Implicit") continue;
@@ -222,15 +226,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (ps.Length != 1) continue;
                 if (m.ReturnType == pins.VfGoType)
                 {
-                    // Either arm is equivalent for a non-null GameObject, so first-found is fine here.
-                    if (pins.ToVfGo == null && ps[0].ParameterType == typeof(Transform))
+                    if (ps[0].ParameterType == typeof(Transform))
                     { pins.ToVfGo = m; pins.ToVfGoTakesTransform = true; }
-                    else if (pins.ToVfGo == null && ps[0].ParameterType == typeof(GameObject))
+                    else if (ps[0].ParameterType == typeof(GameObject) && pins.ToVfGo == null)
                     { pins.ToVfGo = m; pins.ToVfGoTakesTransform = false; }
                 }
                 else if (ps[0].ParameterType == pins.VfGoType)
                 {
-                    // Prefer Transform; accept GameObject only while no Transform operator has been seen.
                     if (m.ReturnType == typeof(Transform)) pins.FromVfGo = m;
                     else if (m.ReturnType == typeof(GameObject) && pins.FromVfGo == null) pins.FromVfGo = m;
                 }

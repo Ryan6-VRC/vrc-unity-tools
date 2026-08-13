@@ -18,17 +18,25 @@ using Ryan6Vrc.AgentTools.Editor;
 [Category("ReactiveMarkers")]
 public class ReactiveMarkersTests
 {
-    // Every marker must match a MonoBehaviour in MA's OWN assembly. Gating on the assembly rather than on a
-    // namespace substring is load-bearing: RenderAvatarFreshnessTests defines
-    // modular_avatar_fixture.FakeShapeChanger in THIS assembly, to be matched by the production scan, and a
-    // namespace-substring predicate is satisfied for "ShapeChanger" by that fixture alone — green with MA
-    // absent or its real type renamed, and a false pass where the skip belongs.
+    // Every marker must match a MonoBehaviour that production could actually fire on, which takes BOTH gates.
+    //
+    // The ASSEMBLY gate is the anti-fixture guard, and it is load-bearing: RenderAvatarFreshnessTests defines
+    // modular_avatar_fixture.FakeShapeChanger in THIS assembly, to be matched by the production scan, so a
+    // namespace test alone is satisfied for "ShapeChanger" by that fixture and stays green even if MA's real
+    // type were renamed.
+    //
+    // The NAMESPACE gate mirrors production. HasReactiveMA filters on a `modular_avatar` namespace before it
+    // matches the marker name, so a marker hitting a type in MA's assembly OUTSIDE that namespace would pass
+    // here while production could never fire on it — an entry that reads live and is dead in place. Latent
+    // today (MA's components all sit under nadena.dev.modular_avatar.core), which is why it is asserted rather
+    // than left to stay true by accident.
     private static IEnumerable<Type> MaComponentTypes()
     {
         Type[] types;
         try { types = typeof(AvatarTagComponent).Assembly.GetTypes(); }
         catch (ReflectionTypeLoadException e) { types = e.Types.Where(t => t != null).ToArray(); }
-        return types.Where(t => typeof(MonoBehaviour).IsAssignableFrom(t));
+        return types.Where(t => typeof(MonoBehaviour).IsAssignableFrom(t)
+            && (t.Namespace ?? "").IndexOf("modular_avatar", StringComparison.OrdinalIgnoreCase) >= 0);
     }
 
     private static string[] Markers()
