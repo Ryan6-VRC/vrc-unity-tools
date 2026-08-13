@@ -210,6 +210,30 @@ public class CompositionDiffTests
         Assert.AreEqual("not-in-scope", CategoryOf(rows, "B"));
     }
 
+    // ── a VRChat reserved name is not unexplained build output ────────────────────────────────────────
+
+    [Test]
+    public void AReservedName_isLabelledAsSuch_ratherThanReadingAsAnOrphan()
+    {
+        // `Grounded` is declared nowhere and referenced everywhere, so no authored row can ever claim it.
+        // Left as `built-only` it reads as a dozen unexplained names the build invented. The predicate is
+        // ControllerRules.IsVrcReserved — the same one the undeclared-param rule and the controller compiler
+        // use, so no second list exists to disagree with it.
+        var rows = CompositionBake.Diff(Census(("Real", true)), new List<string> { "Real", "Grounded" }, null);
+        Assert.AreEqual("kept", CategoryOf(rows, "Real"), Dump(rows));
+        Assert.IsTrue(rows.Any(r => r.Built == "Grounded" && r.Category == "vrc-reserved"), Dump(rows));
+    }
+
+    [Test]
+    public void AReservedNameTheAvatarItselfDeclares_isStillKept_notRelabelled()
+    {
+        // The label is applied only to rows nothing claimed, so it can never override a verdict: an avatar
+        // that does declare a reserved name in its own parameters asset is `kept`, as measured.
+        var rows = CompositionBake.Diff(Census(("Grounded", true)), new List<string> { "Grounded" }, null);
+        Assert.AreEqual("kept", CategoryOf(rows, "Grounded"), Dump(rows));
+        Assert.AreEqual(0, rows.Count(r => r.Category == "vrc-reserved"), Dump(rows));
+    }
+
     private static string Dump(List<CompositionBake.DiffRow> rows) =>
         "\n" + string.Join("\n", rows.Select(r => r.Authored + " | " + r.Category + " | " + r.Built));
 }

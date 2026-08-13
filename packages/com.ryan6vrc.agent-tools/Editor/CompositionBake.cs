@@ -141,11 +141,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // count ambiguity and built-only rows together, so preserving the key while the number moves
                     // (145 → 8 on one measured avatar) would leave a reader comparing two artifacts with no
                     // signal that the denominator changed. Renaming both halves makes the change visible.
-                    "[ReportComposition] {0}: surfaces={1} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} notInScope={9} builtSideUnread={10} mode=bake => OK | log={11}",
+                    "[ReportComposition] {0}: surfaces={1} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} mode=bake => OK | log={12}",
                     root.name, census.Surfaces.Count, census.Params.Count,
                     diff.Count(d => d.Category == "kept"), diff.Count(d => d.Category == "renamed"),
                     diff.Count(d => d.Category == "dropped"), diff.Count(d => d.Category == "merged"),
                     diff.Count(d => d.Category == "ambiguous"), diff.Count(d => d.Category == "built-only"),
+                    diff.Count(d => d.Category == "vrc-reserved"),
                     diff.Count(d => d.Category == "not-in-scope"),
                     diff.Count(d => d.Category == "built-side-unread"), path);
 
@@ -173,7 +174,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                           + "**built-side-unread** no match AND the built read was partial, so removal is not claimed; "
                           + "**ambiguous** an authored name more than one built name could be, none attributed; "
                           + "**built-only** a BUILT name no authored one claims — a measured fact, and the normal home of "
-                          + "build-minted internals and SDK-supplied names; **not-in-scope** a runtime-written name (physbone "
+                          + "build-minted internals and SDK-supplied names; **vrc-reserved** the same, for a name on VRChat's "
+                          + "reserved list (`ControllerRules.IsVrcReserved`, the one predicate the lint rules and the "
+                          + "controller compiler also use) — split out because those rows are the SDK's, not this avatar's, "
+                          + "and reading a dozen of them as unexplained build output is the misread; **not-in-scope** a runtime-written name (physbone "
                           + "suffix, menu sub-parameter) that nothing declares, so a declaration set cannot carry it and its "
                           + "absence means nothing.");
                 section.Add("Attribution is inference, not a pinned grammar — an `ambiguous` row is the honest answer and "
@@ -448,11 +452,18 @@ namespace Ryan6Vrc.AgentTools.Editor
             // are the normal population here, and the note says so IN THE CELL, following the empty-writers-cell
             // precedent, because a bare `(built only)` on a hundred rows reads as a hundred findings.
             foreach (var b in unclaimed)
-                final.Add(new DiffRow
-                {
-                    Authored = "—", Built = b, Category = "built-only",
-                    Surface = "(built only — build-minted or SDK-supplied; nothing authored claims it, which is not a finding)",
-                });
+                final.Add(ControllerRules.IsVrcReserved(b)
+                    ? new DiffRow
+                    {
+                        Authored = "—", Built = b, Category = "vrc-reserved",
+                        Surface = "(built only — a VRChat reserved parameter: declared nowhere, referenced everywhere, "
+                                + "so no authored row can claim it)",
+                    }
+                    : new DiffRow
+                    {
+                        Authored = "—", Built = b, Category = "built-only",
+                        Surface = "(built only — build-minted or SDK-supplied; nothing authored claims it, which is not a finding)",
+                    });
 
             if (string.IsNullOrEmpty(paramFilter)) return final;
             return final.Where(r =>
