@@ -270,4 +270,28 @@ public class ReportPackageTests
     {
         Assert.AreEqual("Body(unknown)", ReportPackage.VisemeSummary("Body", null));
     }
+
+    // ── The face-exclusion key for the body pick ──────────────────────────────────────────────
+    //
+    // The body pick excludes the face mesh, and WHICH key it excludes on has to follow the route that
+    // answered — not whether a descriptor exists. The two come apart in a case the resolver's own docstring
+    // calls ordinary: a descriptor declares a face mesh this package's FBX inventory does not contain (an
+    // outfit or hair package pointing at a base body elsewhere). The run degrades to the guess route, but the
+    // descriptor-derived mesh is non-null — so keying the exclusion on its nullity excludes nothing at all
+    // (identity matches no renderer, which is precisely why the join failed), and the top renderer becomes
+    // both visemeMesh and bodyGuess. The report then names one mesh twice while the docs promise two.
+    [TestCase("descriptor",             true)]
+    [TestCase("guess:most-blendshapes", false)]
+    public void FaceExclusionKey_followsTheRouteThatAnswered(string basis, bool identityKey)
+    {
+        Assert.AreEqual(identityKey, ReportPackage.ExcludesFaceByIdentity(basis));
+    }
+
+    // The degraded-with-a-declared-mesh case named above, stated as its own obligation: a declared but
+    // unjoinable mesh must not switch the exclusion to an identity test that matches nothing.
+    [Test]
+    public void FaceExclusionKey_degradedRouteExcludesByName_evenWhenADescriptorDeclaredAMesh()
+    {
+        Assert.IsFalse(ReportPackage.ExcludesFaceByIdentity("guess:most-blendshapes"));
+    }
 }

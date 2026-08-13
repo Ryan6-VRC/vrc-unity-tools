@@ -87,12 +87,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // returned above). Otherwise the summary is a verdict-free descriptive digest.
             bool errored = data.Error != null;
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[ReportPackage] {0}: fbx={1} prefab={2} constraints={3} nonSdkNs={4} toggles={5} visemeMesh={6} bodyGuess={7} superset={8}{9}{10}{11}{12} => {13} | log={14}",
+                "[ReportPackage] {0}: fbx={1} prefab={2} constraints={3} nonSdkNs={4} toggles={5} visemeMesh={6} bodyGuess={7} superset={8}{9}{10}{11}{12}{13} => {14} | log={15}",
                 label, data.FbxEntries.Count, data.PrefabCount, data.Constraints,
                 NonSdkSummary(data.NonSdk), data.ToggleSummary ?? "?",
                 VisemeField(data), data.BodyMesh ?? "?",
                 data.SupersetFbx ?? "none",
-                data.VisemeDistinctNames > 1 ? " visemeDisagreement=" + data.VisemeDistinctNames : "",
+                // The avatar FBX rides the SUMMARY, not just the RunLog: it is the handle the next step takes,
+                // and a result carries the handles the next step needs (docs/tool-design.md §Tools).
+                data.AvatarFbxPath != null ? " avatarFbx=" + TransplantCore.Leaf(data.AvatarFbxPath) : "",
+                // A fact, not an alarm: several FBXes here carry a declared face mesh, so this package holds
+                // more than one candidate avatar and avatarFbx names the first in path order. Ordinary for a
+                // PC/Android pair or a kisekae variant (4 of 14 local vendor packages) — and the same reading
+                // is what catches two sibling avatars in a family package, which is not ordinary at all.
+                data.VisemeJoinedFbxCount > 1 ? " avatarFbxCandidates=" + data.VisemeJoinedFbxCount : "",
                 data.UnresolvedScripts > 0 ? " unresolvedScripts=" + data.UnresolvedScripts : "",
                 data.LoadErrors > 0 ? " loadErrors=" + data.LoadErrors : "",
                 errored ? " error=" + data.Error : "",
@@ -218,17 +225,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Records a descriptor's declared face mesh. First in path order wins.
-        ///
-        /// <para>Two counts, because they answer different questions and only one is a warning. Distinct
-        /// ASSETS is routinely &gt;1 on a healthy package — several body FBX variants each carry their own
-        /// <c>Body</c> mesh, so identity differs while the answer does not (measured: 4 of 14 local vendor
-        /// packages, none of them ambiguous). Distinct NAMES is the real disagreement: descriptors pointing at
-        /// differently-named renderers means which one is the face is genuinely unsettled. Counting only
-        /// identity would cry wolf on a third of the corpus.</para>
+        /// Collects a descriptor's declared face mesh. Every one is kept, in path order, deduped — the pick
+        /// happens later in <see cref="ResolveVisemeAndBody"/>, against the FBX inventory, because that is
+        /// where it can be made against something. Keeping only the first would settle it here on prefab
+        /// sort order alone, and a family package's outfit prefab sorts before the avatar's.
         /// </summary>
-        private static void NoteVisemeMesh(GraphData data, VRCAvatarDescriptor desc,
-                                           HashSet<Mesh> seenAssets, HashSet<string> seenNames)
+        private static void NoteVisemeMesh(GraphData data, VRCAvatarDescriptor desc)
         {
             if (desc == null || !DeclaresFaceMesh(desc.lipSync)) return;
             var smr = desc.VisemeSkinnedMesh;
@@ -237,12 +239,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (mesh == null) return;
 
             data.VisemeDescriptors++;
-            seenAssets.Add(mesh);
-            seenNames.Add(smr.name);
-            data.VisemeDistinctAssets = seenAssets.Count;
-            data.VisemeDistinctNames  = seenNames.Count;
-
-            if (data.VisemeSharedMesh == null) data.VisemeSharedMesh = mesh;
+            if (!data.VisemeDeclared.Contains(mesh)) data.VisemeDeclared.Add(mesh);
+            data.VisemeDistinctAssets = data.VisemeDeclared.Count;
         }
 
         /// <summary>
@@ -264,37 +262,70 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// renderer, so on a base whose single body mesh also carries the visemes it necessarily names
         /// something else, sometimes a prop.</para>
         /// </summary>
+        /// <summary>
+        /// Which key the body pick excludes the face mesh on, given the route that answered. Identity only
+        /// where a descriptor's mesh actually joined the inventory; by name otherwise — including when a
+        /// descriptor DID declare a mesh that this package does not contain, where an identity test would
+        /// match no renderer and so exclude nothing.
+        /// </summary>
+        internal static bool ExcludesFaceByIdentity(string visemeBasis)
+        {
+            return visemeBasis == "descriptor";
+        }
+
+        /// <summary>True when any renderer in <paramref name="e"/> carries one of the declared face meshes.</summary>
+        private static bool CarriesADeclaredMesh(FbxEntry e, List<Mesh> declared)
+        {
+            foreach (var ri in e.Renderers)
+                if (ri.Mesh != null && declared.Contains(ri.Mesh)) return true;
+            return false;
+        }
+
         private static void ResolveVisemeAndBody(GraphData data)
         {
             FbxEntry source = null;
 
-            // ---- Descriptor route: identity-join the declared mesh into the FBX inventory ----
-            if (data.VisemeSharedMesh != null)
+            // ---- Descriptor route: identity-join the declared meshes into the FBX inventory ----
+            // Every declared mesh is tried, in path order, and the FIRST THAT JOINS wins. Trying only the
+            // first declared would hand the answer to prefab sort order: an outfit prefab sorting ahead of
+            // the avatar's names a base body in another package, fails to join, and the run degrades to a
+            // guess while the avatar's own descriptor sat unread two prefabs later.
+            foreach (var declared in data.VisemeDeclared)
             {
                 foreach (var e in data.FbxEntries)
                 {
                     foreach (var ri in e.Renderers)
-                        if (ri.Mesh == data.VisemeSharedMesh) { source = e; break; }
+                        if (ri.Mesh == declared) { source = e; break; }
                     if (source != null) break;
                 }
-
-                if (source != null)
-                {
-                    data.AvatarFbxPath = source.Path;
-                    data.VisemeBasis   = "descriptor";
-                    foreach (var e in data.FbxEntries)
-                        foreach (var ri in e.Renderers)
-                            if (ri.Mesh == data.VisemeSharedMesh)
-                            {
-                                ri.IsVisemeMesh = true;
-                                if (data.VisemeMesh == null) data.VisemeMesh = ri.Name;
-                            }
-                }
+                if (source != null) { data.VisemeSharedMesh = declared; break; }
             }
 
-            // ---- Guess route: the superset FBX, else the first scanned ----
-            if (source == null)
+            // How many DISTINCT FBXes any declared mesh joins — the ambiguity that actually decides work.
+            // Two sibling avatars in one family package each declare their own `Body`: same name, different
+            // asset, different FBX. Keyed on names that reads as agreement, keyed on assets it reads as an
+            // ordinary variant, and either way the run would name one sibling's FBX while the other is being
+            // owned. `own-base` graphs such families whole, so this must not pass silently.
+            foreach (var e in data.FbxEntries)
+                if (CarriesADeclaredMesh(e, data.VisemeDeclared)) data.VisemeJoinedFbxCount++;
+
+            if (source != null)
             {
+                data.AvatarFbxPath = source.Path;
+                data.VisemeBasis   = "descriptor";
+                foreach (var e in data.FbxEntries)
+                    foreach (var ri in e.Renderers)
+                        if (ri.Mesh == data.VisemeSharedMesh)
+                        {
+                            ri.IsVisemeMesh = true;
+                            if (data.VisemeMesh == null) data.VisemeMesh = ri.Name;
+                        }
+            }
+            else
+            {
+                // ---- Guess route: the superset FBX, else the first scanned ----
+                // Reached both when no descriptor declared anything AND when one did but named a mesh this
+                // package does not contain (ordinary for an outfit or hair package pointing at a base body).
                 foreach (var e in data.FbxEntries) if (e.IsSuperset) { source = e; break; }
                 if (source == null && data.FbxEntries.Count > 0) source = data.FbxEntries[0];
                 if (source == null) return;
@@ -313,11 +344,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // ---- Body pick: most blend shapes on the reference FBX that is not the face mesh ----
+            // Keyed on the route that ANSWERED, not on whether a descriptor exists. Keying on
+            // VisemeSharedMesh's nullity excluded nothing in the case where a descriptor declared a mesh that
+            // did not join: the identity test matched no renderer (that is why the join failed) while the
+            // name fallback stayed switched off, so the top renderer became bodyGuess as well as visemeMesh
+            // and the report named one mesh twice.
+            bool byIdentity = ExcludesFaceByIdentity(data.VisemeBasis);
             RendererInfo body = null;
             foreach (var ri in source.Renderers)
             {
-                bool isFace = data.VisemeSharedMesh != null && ri.Mesh == data.VisemeSharedMesh;
-                if (!isFace && data.VisemeSharedMesh == null) isFace = ri.Name == data.VisemeMesh;
+                bool isFace = byIdentity
+                    ? ri.Mesh == data.VisemeSharedMesh
+                    : ri.Name == data.VisemeMesh;
                 if (isFace) continue;
                 if (body == null || ri.BlendShapeCount > body.BlendShapeCount) body = ri;
             }
@@ -413,12 +451,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
           + "inventory by Mesh ASSET IDENTITY, not by name — avatarFbx is the FBX that mesh lives in, and is the "
           + "reference for bodyGuess. \"guess:most-blendshapes\" is the old heuristic, reported only where no "
           + "descriptor answered or the mesh it named is not in this package's FBX inventory (ordinary for an "
-          + "outfit or hair package pointing at a base body elsewhere) — verify it. isVisemeMesh is set only on "
-          + "the descriptor route. Read the two distinct-counts differently: visemeDistinctAssets > 1 is "
-          + "ORDINARY (a package shipping several body FBX variants gives each its own face-mesh asset, so "
-          + "identity differs while the answer does not) and only says which variant answered; "
-          + "visemeDistinctNames > 1 is the real ambiguity — descriptors naming differently-named renderers — "
-          + "and the first in path order was taken.";
+          + "outfit or hair package pointing at a base body elsewhere) — verify it. Every declared mesh is "
+          + "tried in prefab path order and the first that joins wins, so a package whose outfit prefab sorts "
+          + "ahead of its avatar still reports the avatar's own answer. isVisemeMesh rides a renderer only on "
+          + "the descriptor route; on the guess route it is absent rather than false, because nothing was "
+          + "established. Read the two counts differently: visemeDistinctAssets > 1 is ORDINARY (a package "
+          + "shipping several body FBX variants gives each its own face-mesh asset, so identity differs while "
+          + "the answer does not), while visemeJoinedFbxCount > 1 says several FBXes here each carry a declared "
+          + "face mesh — this package holds more than one candidate avatar, and avatarFbx names whichever "
+          + "joined first in path order. Ordinary for a PC/Android pair or a kisekae variant; the same reading "
+          + "is also what catches two sibling avatars in a family package, where the one named may not be the "
+          + "avatar being worked on. Check it against the avatar you are owning before trusting avatarFbx.";
 
         private const string BodyGuessNote =
             "A HEURISTIC on both routes — nothing in the substrate declares \"the body mesh\". It is the "
@@ -496,8 +539,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static void ScanPrefabs(List<string> prefabPaths, GraphData data)
         {
-            var seenVisemeAssets = new HashSet<Mesh>();
-            var seenVisemeNames  = new HashSet<string>(StringComparer.Ordinal);
             foreach (var path in prefabPaths)
             {
                 GameObject root;
@@ -517,7 +558,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // read (not the first), so a package that disagrees with itself is counted rather than
                     // silently resolved first-wins.
                     foreach (var desc in root.GetComponentsInChildren<VRCAvatarDescriptor>(true))
-                        NoteVisemeMesh(data, desc, seenVisemeAssets, seenVisemeNames);
+                        NoteVisemeMesh(data, desc);
 
                     foreach (var comp in root.GetComponentsInChildren<Component>(true))
                     {
@@ -796,6 +837,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static string WriteRunLog(GraphData data, string label)
         {
+            bool descriptorRoute = data.VisemeBasis == "descriptor";
             Directory.CreateDirectory(TransplantCore.RunLogDir);
             var sb = new StringBuilder();
             sb.Append("{\n");
@@ -813,7 +855,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("  \"avatarFbx\": ").Append(TransplantCore.Q(data.AvatarFbxPath)).Append(",\n");
             sb.Append("  \"visemeDescriptors\": ").Append(data.VisemeDescriptors).Append(",\n");
             sb.Append("  \"visemeDistinctAssets\": ").Append(data.VisemeDistinctAssets).Append(",\n");
-            sb.Append("  \"visemeDistinctNames\": ").Append(data.VisemeDistinctNames).Append(",\n");
+            sb.Append("  \"visemeJoinedFbxCount\": ").Append(data.VisemeJoinedFbxCount).Append(",\n");
             sb.Append("  \"visemeMeshNote\": ").Append(TransplantCore.Q(VisemeNote)).Append(",\n");
             sb.Append("  \"bodyGuess\": ").Append(TransplantCore.Q(data.BodyMesh)).Append(",\n");
             sb.Append("  \"bodyGuessHeuristic\": ")
@@ -862,7 +904,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                       .Append(", \"vertexCount\": ").Append(r.VertexCount)
                       .Append(", \"subMeshCount\": ").Append(r.SubMeshCount)
                       .Append(", \"blendShapeCount\": ").Append(r.BlendShapeCount)
-                      .Append(", \"isVisemeMesh\": ").Append(r.IsVisemeMesh ? "true" : "false")
+                      // Emitted only where a descriptor settled it. On the guess route the flag is OMITTED
+                      // rather than written false: a definite false is a claim, and the tool has established
+                      // nothing about which renderer is the face — including on the one it just named.
+                      .Append(descriptorRoute ? ", \"isVisemeMesh\": " + (r.IsVisemeMesh ? "true" : "false") : "")
                       .Append(", \"likelyBody\": ").Append(r.LikelyBody ? "true" : "false")
                       .Append(", \"hasToggle\": ").Append(r.HasToggle ? "true" : "false")
                       .Append(" }");
@@ -898,29 +943,37 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public string SupersetFbx;
 
             // ── Viseme (face) mesh: a FACT when a descriptor declares it, a labelled guess otherwise ──
-            /// <summary>The Mesh asset the descriptor names for visemes; null when no descriptor answered.
-            /// Held as the asset instance (not a name) because it is the join key — and it outlives the
-            /// prefab it was read from, being a persistent asset, exactly as the FX controller does.</summary>
+            /// <summary>Every face mesh a descriptor declared, in prefab path order, deduped. A LIST, not a
+            /// single winner: the first declared mesh need not be one this package's FBX inventory contains —
+            /// a family package's outfit prefab sorts before the avatar's and names a base body elsewhere —
+            /// and keeping only the first would discard a fact the package supplied and degrade to a guess.
+            /// Asset instances, because identity is the join key; they outlive the prefabs they were read
+            /// from, being persistent assets, exactly as the FX controller does.</summary>
+            public readonly List<Mesh> VisemeDeclared = new List<Mesh>();
+            /// <summary>The declared mesh that actually joined this inventory; null when none did.</summary>
             public Mesh   VisemeSharedMesh;
             /// <summary>Reported viseme/face mesh name, whatever the basis.</summary>
             public string VisemeMesh;
             /// <summary>How <see cref="VisemeMesh"/> was arrived at — <c>descriptor</c> or
-            /// <c>guess:most-blendshapes</c>. Rides the field in parens so one key never means two things.</summary>
+            /// <c>guess:most-blendshapes</c>. Rides the field in parens so one key never means two things,
+            /// and is what the body pick keys its face-exclusion on.</summary>
             public string VisemeBasis;
             /// <summary>Asset path of the FBX carrying the viseme mesh — the reference FBX for the body pick,
             /// and the handle the next step needs. Null when the descriptor route did not answer.</summary>
             public string AvatarFbxPath;
             /// <summary>Descriptors whose lipSync mode declares a face mesh.</summary>
             public int    VisemeDescriptors;
-            /// <summary>Distinct face-mesh ASSETS named across those descriptors. Routinely &gt;1 without
-            /// anything being wrong: a package shipping several body FBX variants gives each its own <c>Body</c>
-            /// mesh asset, so identity differs while the answer does not. RunLog only — it says which variant
-            /// answered, not that anything disagrees.</summary>
+            /// <summary>Distinct face-mesh ASSETS declared. Routinely &gt;1 without anything being wrong: a
+            /// package shipping several body FBX variants gives each its own <c>Body</c> mesh asset, so
+            /// identity differs while the answer does not. RunLog only.</summary>
             public int    VisemeDistinctAssets;
-            /// <summary>Distinct face-mesh NAMES. This is the one that means disagreement: the descriptors in
-            /// this package point at differently-named renderers, so which one is the face is genuinely
-            /// ambiguous and the first in path order was taken. Surfaced in the summary only when &gt;1.</summary>
-            public int    VisemeDistinctNames;
+            /// <summary>How many DISTINCT FBXes in this inventory the declared meshes join. This is the count
+            /// that means ambiguity, and it is deliberately neither of the other two: names are the wrong key
+            /// (a renamed prefab renderer differs from its FBX transform, which is why the join is by identity
+            /// at all), and assets over-fire on ordinary variants. What decides work is whether the package
+            /// settles WHICH FBX is the avatar's — two sibling avatars in one family package each declaring
+            /// their own <c>Body</c> is the case that must not pass silently. Surfaced when &gt;1.</summary>
+            public int    VisemeJoinedFbxCount;
 
             public string BodyMesh;
             public readonly List<FbxEntry> FbxEntries = new List<FbxEntry>();
