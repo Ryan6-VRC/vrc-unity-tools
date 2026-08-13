@@ -484,13 +484,24 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append("\n## Bake diff\n\n");
                 foreach (var l in bakeSection) sb.Append(l).Append('\n');
             }
-            else
-            {
-                sb.Append("\n## Scope\n\n");
+            // Scope is emitted in BOTH modes. It used to be the `else` arm of the bake section, so a bake
+            // artifact — the one whose heading promises composed truth — lost every scope rule while still
+            // rendering the whole Parameters table above, including its authored-only `synced` column.
+            sb.Append("\n## Scope\n\n");
+            if (bakeSection == null)
                 sb.Append("Plain mode reports what is AUTHORED. It makes no namespace-resolution claim: ").Append(ScopeAuthoredNames).Append(".\n");
-                sb.Append("An empty writers cell reads `").Append(ScopeWriters).Append("` because the writer set for a parameter is open — an empty cell is not a finding.\n");
-                sb.Append("Humanoid mapping is not read here; `CheckHumanoidRig.InspectAvatar` is the door that reports a humanoid-vs-skinned divergence.\n");
-            }
+            else
+                sb.Append("The **Bake diff** section is measured against a fresh build. Everything ABOVE it — the ")
+                  .Append("merge-surface, parameter and menu tables — is still the authored census, and the bake ")
+                  .Append("resolves only the names: read a row's build-time identity from the diff, not from the tables.\n");
+            sb.Append("An empty writers cell reads `").Append(ScopeWriters).Append("` because the writer set for a parameter is open — an empty cell is not a finding.\n");
+            if (bakeSection != null)
+                sb.Append("**The `synced` / `saved` / `default` columns are read from the authored parameters assets, and bake ")
+                  .Append("mode does not revisit them.** On an avatar whose synced bits overflow, the build re-plans sync ")
+                  .Append("entirely and a parameter can read un-synced while still replicating — `docs/runtime.md` ")
+                  .Append("§VRCFury build-time reshaping owns that trap and names where the build records what it did. ")
+                  .Append("Nothing in this artifact is evidence about sync state.\n");
+            sb.Append("Humanoid mapping is not read here; `CheckHumanoidRig.InspectAvatar` is the door that reports a humanoid-vs-skinned divergence.\n");
             return sb.ToString();
         }
 

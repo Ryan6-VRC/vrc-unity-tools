@@ -133,14 +133,20 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 var clone = bake.Clone;
                 string incomplete;
-                var built = BuiltDeclarations(clone, out incomplete);
+                var readNotes = new List<string>();
+                var built = BuiltDeclarations(clone, readNotes, out incomplete);
                 var diff = Diff(census, built, paramFilter, incomplete == null);
                 string summary = string.Format(CultureInfo.InvariantCulture,
-                    "[ReportComposition] {0}: surfaces={1} params={2} kept={3} renamed={4} dropped={5} merged={6} unattributed={7} notInScope={8} builtSideUnread={9} mode=bake => OK | log={10}",
+                    // `unattributed=` is deliberately GONE rather than kept with a narrower meaning: it used to
+                    // count ambiguity and built-only rows together, so preserving the key while the number moves
+                    // (145 → 8 on one measured avatar) would leave a reader comparing two artifacts with no
+                    // signal that the denominator changed. Renaming both halves makes the change visible.
+                    "[ReportComposition] {0}: surfaces={1} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} notInScope={9} builtSideUnread={10} mode=bake => OK | log={11}",
                     root.name, census.Surfaces.Count, census.Params.Count,
                     diff.Count(d => d.Category == "kept"), diff.Count(d => d.Category == "renamed"),
                     diff.Count(d => d.Category == "dropped"), diff.Count(d => d.Category == "merged"),
-                    diff.Count(d => d.Category == "unattributed"), diff.Count(d => d.Category == "not-in-scope"),
+                    diff.Count(d => d.Category == "ambiguous"), diff.Count(d => d.Category == "built-only"),
+                    diff.Count(d => d.Category == "not-in-scope"),
                     diff.Count(d => d.Category == "built-side-unread"), path);
 
                 var section = new List<string>
@@ -152,6 +158,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     section.Add("| `" + RunLogFormat.Cell(d.Authored) + "` | " + d.Category + " | `" + RunLogFormat.Cell(d.Built) + "` | "
                               + RunLogFormat.Cell(d.Surface) + " |");
                 section.Add("");
+                foreach (var n in readNotes) section.Add("> built-side read note: " + n);
                 if (incomplete != null)
                     section.Add("**The built read was incomplete: " + incomplete + ".** Exact matches and renames below "
                               + "are still measured facts; every unmatched authored name is reported "
@@ -161,16 +168,28 @@ namespace Ryan6Vrc.AgentTools.Editor
                           + "parameter on every controller the clone plays. Every category below is relative to that.");
                 section.Add("Categories: **kept** the built avatar declares the authored name unchanged; **renamed** exactly "
                           + "one built name is a prefixed form of it (the authored name behind a `/` or `_` separator); "
-                          + "**dropped** no built declaration was attributable; **merged** two or more authored names "
+                          + "**dropped** no built name is a prefixed form of it at all; **merged** two or more authored names "
                           + "resolved onto one built name, replacing their individual rows so the counts still sum; "
                           + "**built-side-unread** no match AND the built read was partial, so removal is not claimed; "
-                          + "**unattributed** either a BUILT name no authored one claims, or an authored name more than one "
-                          + "built name could be; **not-in-scope** a runtime-written name (physbone suffix, menu "
-                          + "sub-parameter) that nothing declares, so a declaration set cannot carry it and its absence "
-                          + "means nothing.");
-                section.Add("Attribution is inference, not a pinned grammar — an `unattributed` row is the honest answer and "
+                          + "**ambiguous** an authored name more than one built name could be, none attributed; "
+                          + "**built-only** a BUILT name no authored one claims — a measured fact, and the normal home of "
+                          + "build-minted internals and SDK-supplied names; **not-in-scope** a runtime-written name (physbone "
+                          + "suffix, menu sub-parameter) that nothing declares, so a declaration set cannot carry it and its "
+                          + "absence means nothing.");
+                section.Add("Attribution is inference, not a pinned grammar — an `ambiguous` row is the honest answer and "
                           + "beats a mapping the tool cannot support. The separator boundary is the whole of the rule; a "
                           + "bare suffix match would call authored `Toggle` a rename of built `Hair/HairToggle`.");
+                section.Add("**A built name already claimed by exact match is not another row's rename** — an exact match is "
+                          + "the stronger claim. That precedence is a tie-breaker only: where it would empty a candidate set "
+                          + "it is not applied, so `dropped` never rests on it. Where it decided a row, that row says so in "
+                          + "its own owning-surface cell and names what was excluded, because the reading it forecloses is "
+                          + "`merged`.");
+                section.Add("**The arithmetic.** Authored rows (`kept` + `renamed` + `dropped` + `ambiguous` + "
+                          + "`built-side-unread` + `not-in-scope`, plus each `merged` row standing in for the two or more it "
+                          + "replaced) sum to `params=`; `built-only` rows are additional and belong to no authored name. One "
+                          + "built name can appear BOTH inside an `A or B` cell and as its own `built-only` row: an ambiguous "
+                          + "match deliberately claims nothing, or a genuinely built-only parameter would be hidden inside a "
+                          + "cell belonging to an unrelated authored name. That is not double-counting.");
                 section.Add("Optimizers found on the root: "
                           + (census.Optimizers.Count == 0 ? "(none)" : string.Join(", ", census.Optimizers))
                           + ". The full chain is what ships and is what was measured; disable them yourself for a "
@@ -189,8 +208,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// UNION every parameter on every controller the clone plays. Both halves are needed. The expression
         /// asset alone is a synced-parameter budget, not the avatar's parameter set — a controller-only value
         /// (a driver scratch, a gesture built-in) never appears there, so diffing against it alone put every
-        /// such name in <c>dropped</c>, whose plain reading is "the build removed it".</summary>
-        internal static List<string> BuiltDeclarations(GameObject clone, out string incompleteReason)
+        /// such name in <c>dropped</c>, whose plain reading is "the build removed it".
+        /// <para>Two channels for an unreadable controller, and the split is deliberate.
+        /// <paramref name="incompleteReason"/> is set only for a <b>playable-layer slot</b> — the avatar's own
+        /// declaration set — because a non-null value downgrades every unmatched row on the avatar.
+        /// <paramref name="notes"/> takes anything else (a child <c>Animator</c> playing a controller this read
+        /// cannot resolve), naming it without downgrading a single category.</para></summary>
+        internal static List<string> BuiltDeclarations(GameObject clone, List<string> notes, out string incompleteReason)
         {
             incompleteReason = null;
             var names = new HashSet<string>(StringComparer.Ordinal);
@@ -199,11 +223,20 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (ep != null && ep.parameters != null)
                 foreach (var p in ep.parameters)
                     if (p != null && !string.IsNullOrEmpty(p.name)) names.Add(p.name);
+            // A controller here that cannot be read is NOTED, never a global downgrade: a nested
+            // AnimatorOverrideController on a child prop is legal and defeats the one-hop cast below, and
+            // downgrading a whole avatar's diff over one prop would be a far bigger lie than the prop's
+            // absent parameters. Only the descriptor's own playable layers carry the avatar's declaration set.
             foreach (var anim in clone.GetComponentsInChildren<Animator>(true))
             {
-                AddParams(anim != null ? anim.runtimeAnimatorController : null, names);
+                var rac = anim != null ? anim.runtimeAnimatorController : null;
+                if (!AddParams(rac, names) && notes != null)
+                    notes.Add("the `Animator` at `" + MergeSurfaces.PathOf(anim.gameObject) + "` plays `" + rac.name
+                            + "` (" + rac.GetType().Name + "), which this read cannot resolve to an AnimatorController — "
+                            + "its parameters are absent from the built side below. Not a partial read of the AVATAR's "
+                            + "declaration set (the playable layers carry that), so no category is downgraded.");
             }
-            int unreadableLayers = 0, authoredLayers = 0;
+            var unreadableSlots = new List<string>();
             if (d != null)
             {
                 foreach (var set in new[] { d.baseAnimationLayers, d.specialAnimationLayers })
@@ -211,32 +244,57 @@ namespace Ryan6Vrc.AgentTools.Editor
                     if (set == null) continue;
                     foreach (var l in set)
                     {
+                        // The `isDefault` guard stays. Measured post-bake, every slot reads isDefault=false with
+                        // a real controller, so it never fires — but the SDK keeps the flag and a non-null
+                        // controller mutually exclusive only along its INSPECTOR path, so a programmatic write
+                        // can leave a default-flagged slot holding a controller the built avatar does not play.
+                        // Reading that would union parameters from a controller nothing plays: a false `kept`
+                        // masking a real `dropped`, which is the failure direction that matters here.
                         if (l.isDefault) continue;
-                        authoredLayers++;
-                        if (l.animatorController == null) unreadableLayers++;
-                        else AddParams(l.animatorController, names);
+                        // An EMPTY slot declares nothing, and that is all it means. It used to be counted as
+                        // evidence the built side went unread — see the history note below.
+                        if (l.animatorController == null) continue;
+                        if (!AddParams(l.animatorController, names))
+                            unreadableSlots.Add(l.type + " → `" + l.animatorController.name + "` ("
+                                              + l.animatorController.GetType().Name + ")");
                     }
                 }
             }
-            // MEASURED, and it is the difference between a report and a false claim: after the preprocess
-            // chain the clone's playable-layer slots read null, so the built controllers are not reachable
-            // the way an authoring avatar's are. Every authored name would then fail to match and be
-            // reported `dropped` — "the build removed it" — when the truth is that this read never saw the
-            // built side. The count is surfaced so the diff can decline to make that claim rather than
-            // publishing it, and the door stays honest about a partial read instead of dressing it as one.
-            if (unreadableLayers > 0)
-                incompleteReason = unreadableLayers + " of " + authoredLayers + " non-default playable layers on the "
-                    + "built clone hold no controller, so the built side is a PARTIAL read (the preprocess chain "
-                    + "does not leave the built controllers in the descriptor's slots)";
+            // The one condition that makes this a genuinely PARTIAL read: a playable layer holds a controller
+            // whose parameters could not be read. Every authored name would then fail to match and be reported
+            // `dropped` — "the build removed it" — when the truth is that this read never saw them.
+            //
+            // It used to key on an empty non-default slot instead, explained as "the preprocess chain does not
+            // leave the built controllers in the descriptor's slots". That was true only of a clone read AFTER
+            // the paired OnPostprocessAvatar had swept its generated assets (atelier vrc-unity-tools#118 fixed
+            // the lifetime; AvatarBake's doc comment has the measurement). Measured after the fix: 8/8 slots
+            // hold real controllers under `Packages/nadena.dev.ndmf/__Generated/`, on a VRCFury avatar and an
+            // MA-only one alike. An empty slot is authoring state, and emptying one on a baked clone left the
+            // built name set IDENTICAL — nothing was unread — while the old arm downgraded every unmatched row
+            // on the avatar and suppressed the one claim bake mode exists to make.
+            if (unreadableSlots.Count > 0)
+                incompleteReason = unreadableSlots.Count + " playable-layer slot(s) hold a controller this read "
+                    + "could not resolve to an AnimatorController (" + string.Join("; ", unreadableSlots)
+                    + "), so their parameters are absent and the built side is a PARTIAL read";
             return names.ToList();
         }
 
-        private static void AddParams(RuntimeAnimatorController rac, HashSet<string> into)
+        /// <summary>Union <paramref name="rac"/>'s parameters into <paramref name="into"/>. Returns <b>false</b>
+        /// only when a controller was PRESENT and could not be read as an <c>AnimatorController</c> — the one
+        /// condition that makes a built read partial, and a silent return before this.
+        /// <para>A null controller returns true, deliberately: an absent controller declares nothing, and a
+        /// child <c>Animator</c> with no controller is the common case on any avatar — counting it would make
+        /// the incompleteness flag non-null essentially always and delete <c>dropped</c> as a category. An empty
+        /// parameter list returns true too: that read succeeded and found nothing.</para></summary>
+        private static bool AddParams(RuntimeAnimatorController rac, HashSet<string> into)
         {
+            if (rac == null) return true;
             var ac = rac as AnimatorController;
             if (ac == null && rac is AnimatorOverrideController ovr) ac = ovr.runtimeAnimatorController as AnimatorController;
-            if (ac == null || ac.parameters == null) return;
+            if (ac == null) return false;
+            if (ac.parameters == null) return true;
             foreach (var p in ac.parameters) if (!string.IsNullOrEmpty(p.name)) into.Add(p.name);
+            return true;
         }
 
         /// <summary>Is <paramref name="built"/> a prefixed form of <paramref name="authored"/>? The build
@@ -274,6 +332,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             var rowsByBuilt = new Dictionary<string, List<int>>(StringComparer.Ordinal);
             var rows = new List<DiffRow>();
 
+            // Pass 1 — every built name an authored row claims by EXACT match. The predicate is exactly the
+            // `kept` branch's own, and must stay that way: the natural shortcut ("census names ∩ built") lets a
+            // NON-diffable row in, and a non-diffable row claims nothing in pass 2 — so its name would be
+            // excluded from a candidate set while no row ever claims it, and one built name would read
+            // `dropped` ("the build removed it") AND `built-only` ("present, unclaimed") in the same table.
+            var exactClaim = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var p in census.Params)
+                if (p.Diffable && builtSet.Contains(p.Name)) exactClaim.Add(p.Name);
+
             void Claim(string b, string authored, int rowIndex)
             {
                 if (!claimedBy.TryGetValue(b, out var l)) claimedBy[b] = l = new List<string>();
@@ -300,11 +367,34 @@ namespace Ryan6Vrc.AgentTools.Editor
                     rows.Add(new DiffRow { Authored = p.Name, Built = p.Name, Category = "kept", Surface = p.Declared });
                     continue;
                 }
-                var candidates = built.Where(b => IsPrefixedForm(b, p.Name)).ToList();
+                var raw = built.Where(b => IsPrefixedForm(b, p.Name)).ToList();
+                // Pass 2 — a built name already claimed by exact match is not this row's rename: an exact match
+                // is a stronger claim than a prefix inference. Without this, a gimmick that declares its own
+                // internal `ObjectSync/D/Prop/PX/C` alongside the avatar's `Prop/PX/C` made every internal name
+                // a spurious candidate for the shorter one: 63 of 271 rows on the demo avatar reported ambiguous
+                // while the 63 real renames were orphaned as built-only. One defect, counted twice.
+                //
+                // But exclusion is a TIE-BREAKER, never evidence of removal — so it applies only while it leaves
+                // a candidate standing. Emptying the set and falling through to `dropped` would assert "the build
+                // removed it" on the ordinary idiom of an inner parameter exposed under a name the outer avatar
+                // also declares (MA `remapTo`): authored `Toggle` + `Hair/Toggle` onto built `Hair/Toggle` is a
+                // MERGE, and the fallback keeps it reported as one. `dropped` therefore still fires iff no built
+                // name is a prefixed form at all — precisely the pre-precedence condition, so this rule cannot
+                // manufacture a false removal.
+                var narrowed = raw.Where(b => !exactClaim.Contains(b)).ToList();
+                var candidates = narrowed.Count > 0 ? narrowed : raw;
                 if (candidates.Count == 1)
                 {
                     Claim(candidates[0], p.Name, rows.Count);
-                    rows.Add(new DiffRow { Authored = p.Name, Built = candidates[0], Category = "renamed", Surface = p.Declared });
+                    // Disclosed PER ROW, not once in the legend. Exclusion deletes the evidence of a possible
+                    // merge, so a row that reads as a confident rename because its rivals were excluded has to
+                    // carry that fact where a reader checking THIS row will see it — a legend sentence cannot be
+                    // checked against a specific row, and these are exactly the rows the rule is adopted for.
+                    rows.Add(new DiffRow
+                    {
+                        Authored = p.Name, Built = candidates[0], Category = "renamed",
+                        Surface = p.Declared + (candidates.Count == raw.Count ? "" : ExclusionNote(raw, narrowed)),
+                    });
                 }
                 else if (candidates.Count > 1)
                 {
@@ -314,7 +404,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // to an unrelated parameter.
                     rows.Add(new DiffRow
                     {
-                        Authored = p.Name, Built = string.Join(" or ", candidates), Category = "unattributed",
+                        Authored = p.Name, Built = string.Join(" or ", candidates), Category = "ambiguous",
                         Surface = p.Declared + " — more than one built name is a prefixed form of this one",
                     });
                 }
@@ -353,13 +443,32 @@ namespace Ryan6Vrc.AgentTools.Editor
             for (int i = 0; i < rows.Count; i++) if (!drop.Contains(i)) final.Add(rows[i]);
             final.AddRange(merged);
 
+            // A built name no authored one claims. This is a MEASURED fact, not an inference failure — which is
+            // why it no longer shares a category with ambiguity: build-minted internals and SDK-supplied names
+            // are the normal population here, and the note says so IN THE CELL, following the empty-writers-cell
+            // precedent, because a bare `(built only)` on a hundred rows reads as a hundred findings.
             foreach (var b in unclaimed)
-                final.Add(new DiffRow { Authored = "—", Built = b, Category = "unattributed", Surface = "(built only)" });
+                final.Add(new DiffRow
+                {
+                    Authored = "—", Built = b, Category = "built-only",
+                    Surface = "(built only — build-minted or SDK-supplied; nothing authored claims it, which is not a finding)",
+                });
 
             if (string.IsNullOrEmpty(paramFilter)) return final;
             return final.Where(r =>
                 (r.Authored != null && r.Authored.IndexOf(paramFilter, StringComparison.OrdinalIgnoreCase) >= 0) ||
                 (r.Built != null && r.Built.IndexOf(paramFilter, StringComparison.OrdinalIgnoreCase) >= 0)).ToList();
+        }
+
+        /// <summary>What a `renamed` row owes its reader when exclusion is what made it unambiguous: which
+        /// candidates were removed, why they were removable, and the alternative reading this row is NOT.</summary>
+        private static string ExclusionNote(List<string> raw, List<string> narrowed)
+        {
+            var excluded = raw.Where(b => !narrowed.Contains(b)).Select(b => "`" + b + "`");
+            return " — the single candidate only after excluding " + string.Join(", ", excluded)
+                 + ", each already claimed by an authored name of its own (an exact match beats a prefix "
+                 + "inference). If the build instead MERGED this name onto one of those, the truth is `merged` "
+                 + "and this row does not say so.";
         }
 
         private static string Refusal(string path, string stage, string name) =>
