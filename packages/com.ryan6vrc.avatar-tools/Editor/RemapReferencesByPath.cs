@@ -40,6 +40,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <paramref name="vendorToOwned"/> (<c>vendorName ⇒ ownedName</c>, injective, Ordinal — see
         /// <see cref="IndexedPath.ValidateRenameMap"/>) substitutes the destination-side segment name at the
         /// armature-root (and any other renamed) level. Empty/absent/null ⇒ byte-identical to today.
+        ///
+        /// <para>OBJECT references only, by design: the <c>referencePath</c> STRING half of a Modular Avatar
+        /// <c>AvatarObjectReference</c> is deliberately out of scope here and in every transplant tool. The path
+        /// is avatar-root-relative and the vendor side often has no avatar root at all (the prescribed copy
+        /// source is the standalone vendor prefab), so a rewrite would guess a frame this tool does not have.
+        /// Contract and consequences: <c>docs/unity-tools.md</c> §transplant kit; a path that resolves nowhere
+        /// after a transplant is named by <c>CheckAvatar</c>'s <c>MA-scene-ref</c> class.</para>
         /// </summary>
         public static Result Remap(SerializedObject so, Transform srcRoot, Transform dstRoot,
                                    IDictionary<string, string> vendorToOwned = null)
