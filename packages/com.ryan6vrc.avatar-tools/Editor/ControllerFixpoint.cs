@@ -763,6 +763,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // An entry is descended INTO as well as recorded — that is the point, since object-sync/y/ lives
         // inside the gated object-sync/. A walk that stopped at the first entry it found would pass every
         // other test in this file and still miss the shape the recursion exists for.
+        //
+        // NO REPARSE-POINT GUARD, deliberately — this recursion cannot run away. Windows refuses to resolve
+        // any path past 63 reparse traversals (ERROR_CANT_RESOLVE_FILENAME), so a junction or symlink aimed
+        // at one of its own ancestors bounds the walk at 63x the cycle's directory count, capped again by
+        // the path-length limit. GetDirectories then throws an ordinary IOException (HResult 0x80070781),
+        // which RunGate's walk guard catches into a [gate] entry walk failed line and exit 2. There is no
+        // StackOverflowException here to escape that catch. The bound is enforced by the filesystem call
+        // itself, below any managed runtime, so it does not turn on which .NET the Editor ships.
+        //
+        // Skipping reparse points would therefore guard nothing — the ReparsePoint attribute bit IS set, so
+        // the one-line skip works, it just has no failure to prevent — while newly hiding any entry someone
+        // mounted behind a junction.
         static void Descend(string dir, List<string> found)
         {
             foreach (var child in Directory.GetDirectories(dir))
