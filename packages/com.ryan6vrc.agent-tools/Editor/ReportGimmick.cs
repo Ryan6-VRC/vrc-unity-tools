@@ -57,7 +57,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// chain membership, exclusions already applied. What remains true, and stays said, is that
         /// membership is not the same claim as which bones actually move.
         /// </summary>
-        internal const string ChainSubtreeLegend = "_`chain subtree` = the bones the row's physbone itself reports as its chain (the SDK's own set, so the exclusions the component declares — `ignoreTransforms`, `ignoreOtherPhysBones` — are already applied; a virtual endpoint bone has no transform and is not counted): `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept over the avatar enclosing THAT ROW's physbone, so a mesh outside the reported chain still counts while a co-hosted neighbour avatar's does not; a row with no enclosing avatar descriptor falls back to its outermost ancestor), `hosting` how many carry a component besides Transform and this row's own physbone. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside it (a constraint reading it as a source) reads all-zero while load-bearing. Chain MEMBERSHIP is not a claim about which bones move — `multiChildType` and `endpointPosition` decide what is actually simulated._\n";
+        internal const string ChainSubtreeLegend = "_`chain subtree` = the bones the row's physbone itself reports as its chain (the SDK's own set, so the exclusions the component declares — `ignoreTransforms`, `ignoreOtherPhysBones` — are already applied; a virtual endpoint bone has no transform and is not counted): `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept over the avatar enclosing THAT ROW's physbone, so a mesh outside the reported chain still counts while a co-hosted neighbour avatar's does not; a row with no enclosing avatar descriptor falls back to its outermost ancestor), `hosting` how many carry a component besides Transform and this row's own physbone — counted over the bones the chain KEPT, so a nested chain excluded by `ignoreOtherPhysBones` is not among them and appears as its own row instead. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside it (a constraint reading it as a source) reads all-zero while load-bearing. Chain MEMBERSHIP is not a claim about which bones move — `multiChildType` and `endpointPosition` decide what is actually simulated._\n";
 
         /// <summary>
         /// The raycast-table legend, quoted once at the canon so a test can pin whole sentences rather than
@@ -909,27 +909,34 @@ namespace Ryan6Vrc.AgentTools.Editor
         // row the legend says must never be fabricated. `InitTransforms` settles all three, so it is called
         // instead, in the same spirit as EffectiveTarget delegating to `GetRootTransform()`.
         //
-        // Safe on a read-only door, measured over 82 vendor prefabs / 1561 physbones: zero throws, dirties
-        // nothing (no component, GameObject or scene flagged), idempotent across repeated calls. It corrected
-        // a real over-count of 289 transforms across 81 rows.
+        // Safe on a read-only door, measured in EDIT MODE over 82 vendor prefabs / 1561 physbones: zero
+        // throws, dirties nothing (no component, GameObject or scene flagged), idempotent across repeated
+        // calls. It corrected a real over-count of 289 transforms across 81 rows.
         //
-        // Still NOT a claim about which bones MOVE: `multiChildType` and `endpointPosition` decide whether a
-        // member is actually simulated. This counts membership, and the legend says membership.
+        // The re-init is edit-mode only, and that is correctness rather than caution. This door takes a scene
+        // path and play mode is a routine operating state here (docs/emulator.md drives play sessions), where
+        // these components are actively simulating and the runtime has already built the list — nothing to
+        // rebuild, and forcing it would poke a running simulation from a read-only report. In play mode the
+        // list is read as found, which is also the more accurate answer there.
+        //
+        // NOT a claim about which bones MOVE: `multiChildType` and `endpointPosition` decide whether a member
+        // is actually simulated. This counts membership, and the legend says membership.
         private static string ChainSubtreeCell(VRCPhysBone b, HashSet<Transform> skinned)
         {
             var chainRoot = EffectiveTarget(b);
             if (chainRoot == null) return "—";
 
-            b.InitTransforms(true);
+            if (!Application.isPlaying) b.InitTransforms(true);
             var chain = b.bones;
             if (chain == null) return "—";
 
             int total = 0, skinnedCount = 0, hosting = 0;
             foreach (var bone in chain)
             {
-                // An endpoint bone is virtual — `endpointPosition` adds a chain member with no transform
-                // behind it. There is nothing to count skinning or hosting against, so it is left out
-                // entirely rather than counted as an empty one.
+                // A member whose transform is gone (destroyed under a live edit) is skipped rather than
+                // counted as an empty one — there is nothing to test skinning or hosting against. Measured:
+                // `endpointPosition` does NOT introduce such an entry, so this guards a destroyed transform
+                // and not the endpoint.
                 var t = bone.transform;
                 if (t == null) continue;
                 total++;

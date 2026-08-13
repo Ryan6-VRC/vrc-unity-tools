@@ -242,7 +242,7 @@ public class ReportGimmickTests
     }
 
     // The census is verdict-free, and the legend is what keeps a reader from building the verdict anyway: a
-    // zero is not evidence, a nonzero is an upper bound.
+    // zero is not evidence, and membership is not motion.
     //
     // The emit is one branch (`bones.Length > 0`) shared with the table itself, so the companion no-physbones
     // test pins the other side of it.
@@ -299,6 +299,23 @@ public class ReportGimmickTests
         var report = ReadReport("Rig");
         StringAssert.Contains("bones=2", report);
         Assert.IsFalse(report.Contains("bones=4"), "the ignored transform's CHILD must be pruned with it");
+    }
+
+    // `endpointPosition` is the one input that could put a transform-less member in the chain, and the cell
+    // skips such a member rather than counting it. Asserted rather than reasoned about: the SDK's `Bone` is a
+    // struct, so a transform-less entry is a null FIELD and not a null element, and whether the endpoint
+    // produces one at all is a property of the SDK rather than of this code. Measured here it does not — the
+    // count is unchanged and nothing throws — which is what makes the skip a guard against a destroyed
+    // transform rather than against the endpoint.
+    [Test]
+    public void ChainSubtree_endpointPosition_changesNoCountAndDoesNotThrow()
+    {
+        var root = new GameObject("Rig");
+        var chain = Chain(root, "Tail", 3);
+        var pb = PhysBone(Child(root, "PB_tail"), chain);
+        pb.endpointPosition = new Vector3(0f, 0.05f, 0f);
+
+        StringAssert.Contains("bones=3", ReadReport("Rig"));
     }
 
     // The legend paragraph, isolated so the comparison is against the legend and nothing else: its tokens
