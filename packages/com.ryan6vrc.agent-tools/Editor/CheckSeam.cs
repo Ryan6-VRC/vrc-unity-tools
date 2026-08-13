@@ -521,7 +521,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         // iterates under its own try (catching a per-component throw and continuing the sweep). ClassifyReflect
         // maps each catch — Missing*/TypeLoad ⇒ ReflectError (API drift), everything else (incl. a null GetLinks,
         // which throws NullReferenceException) ⇒ UnresolvableReason (won't resolve onto this base). Validated
-        // end-to-end by the live corpus (Task 8), not by unit tests (the SDK-only TestEditor has no MA/VRCFury).
+        // end-to-end by the live corpus (Task 8) AND by unit tests: the TestEditor provisions MA/VRCFury/NDMF as
+        // required packages (tools/test-venue-common.ps1), so CheckSeamLiveTests drives the real VRCFury
+        // collector headlessly. This comment used to claim the opposite, which reads as "such a test cannot
+        // exist" to anyone extending the pin set.
         // CollectVrcfPairs also sets ScaleBakeReason on a scaled bake ⇒ REFUSE.
         internal static SeamResolution ResolveMergeMap(GameObject scopeGO, GameObject avatarGO)
         {
@@ -660,7 +663,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var pins = VendorReflect.ResolveVrcfArmatureLink();
             if (pins == null) return; // VRCFury not installed ⇒ no VRCFury seam
 
-            var avatarVfGo = VendorReflect.ToVfGameObject(pins.VfGoType, avatarGO);
+            var avatarVfGo = VendorReflect.ToVfGameObject(pins, avatarGO);
             object objectPaths = null, armatureCache = null; // lazy — see the collector comment above
 
             foreach (var comp in mergeGO.GetComponentsInChildren(pins.VrcfType, true))
@@ -705,8 +708,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                         if (item2 == null) throw new MissingFieldException(pt.Name, "Item2");
                         var mergeVf = item1.GetValue(pair); // prop/merge
                         var baseVf = item2.GetValue(pair);  // avatar/base
-                        res.Pairs.Add(new BonePair { Base = VendorReflect.FromVfGameObject(pins.VfGoType, baseVf),
-                                                     Merge = VendorReflect.FromVfGameObject(pins.VfGoType, mergeVf) });
+                        res.Pairs.Add(new BonePair { Base = VendorReflect.FromVfGameObject(pins, baseVf),
+                                                     Merge = VendorReflect.FromVfGameObject(pins, mergeVf) });
                     }
                 }
                 catch (Exception e) { ClassifyReflect(e, res); }

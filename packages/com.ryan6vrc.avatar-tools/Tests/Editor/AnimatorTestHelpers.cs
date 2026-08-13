@@ -12,35 +12,41 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 // reuses the grammar-agnostic fixture plumbing here (EnsureFolder, Save, etc.).
 public static class AnimatorTestHelpers
 {
-    // Sweep for suites that call the 2-arg ControllerEmit.Build door directly. That overload targets a
-    // throwaway scratch dir and NOTHING persists its EmitResult.Params, so every call mints a
-    // VRCExpressionParameters that outlives the test — and a survivor is not inert: leaked SDK
-    // ScriptableObjects in this assembly make ControllerEmit.AddStateMachineBehaviour return null and fail
-    // UNRELATED suites with NullReferenceExceptions pointing at untouched production code
+    // Sweep for suites that call the 2-arg ControllerEmit.Build door directly. That overload persists the
+    // CONTROLLER only, so every call mints side assets that outlive the test — and a survivor is not inert:
+    // leaked SDK ScriptableObjects in this assembly make ControllerEmit.AddStateMachineBehaviour return null
+    // and fail UNRELATED suites with NullReferenceExceptions pointing at untouched production code
     // (ControllerFixpointTests's `_made` field owns the measurement: leak → 551/600, destroy → 600/600).
     //
-    // DELTA, not a blanket destroy of every unowned instance: the domain legitimately holds unowned
-    // VRCExpressionParameters that a test did not create — the SDK's own, an open inspector's — and
-    // destroying one of those would break the editor out from under the run. Only what appeared between
-    // Begin and End is this test's to clean up.
+    // BOTH side-asset types, not just params: EmitResult carries Params AND the Menu tree, and a sweep over
+    // VRCExpressionParameters alone left every menu page unswept on this door. Latent while no 2-arg fixture
+    // authored a `menu:` block — the first one that did would have reproduced the cascade with nothing
+    // catching it. A fixture's own belt-and-braces is EmitResult.DestroyUnpersisted, which is the door the
+    // CALLER is supposed to use; this stays as the net for a fixture that forgets.
+    //
+    // DELTA, not a blanket destroy of every unowned instance: the domain legitimately holds unowned instances
+    // of both types that a test did not create — the SDK's own, an open inspector's — and destroying one of
+    // those would break the editor out from under the run. Only what appeared between Begin and End is this
+    // test's to clean up.
     //
     // Production code destroying its own side assets is CompileController's job and is covered by
     // SideAssetLifecycleTests; this is strictly the TEST-side half, for the door that has no owner at all.
-    public sealed class UnownedParamsSweep
+    public sealed class UnownedSideAssetSweep
     {
         private HashSet<int> _before;
 
-        private static IEnumerable<VRCExpressionParameters> Unowned() =>
-            Resources.FindObjectsOfTypeAll<VRCExpressionParameters>()
-                .Where(p => string.IsNullOrEmpty(AssetDatabase.GetAssetPath(p)));
+        private static IEnumerable<Object> Unowned() =>
+            Resources.FindObjectsOfTypeAll<VRCExpressionParameters>().Cast<Object>()
+                .Concat(Resources.FindObjectsOfTypeAll<VRCExpressionsMenu>())
+                .Where(o => string.IsNullOrEmpty(AssetDatabase.GetAssetPath(o)));
 
-        public void Begin() => _before = new HashSet<int>(Unowned().Select(p => p.GetInstanceID()));
+        public void Begin() => _before = new HashSet<int>(Unowned().Select(o => o.GetInstanceID()));
 
         public void End()
         {
             if (_before == null) return;
-            foreach (var p in Unowned().Where(p => !_before.Contains(p.GetInstanceID())).ToList())
-                Object.DestroyImmediate(p);
+            foreach (var o in Unowned().Where(o => !_before.Contains(o.GetInstanceID())).ToList())
+                Object.DestroyImmediate(o);
             _before = null;
         }
     }

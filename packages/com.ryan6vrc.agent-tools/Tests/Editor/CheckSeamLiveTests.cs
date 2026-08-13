@@ -226,6 +226,38 @@ public partial class CheckSeamLiveTests
         return AttachVrcfArmatureLink(mergeArm, baseArm, mergeArm, forceScale);
     }
 
+    // The two op_Implicit converter pins. VFGameObject declares FOUR op_Implicit taking VFGameObject — to
+    // GameObject, to Object, to Transform, and to BOOL — so a pin selected on the parameter alone can freeze
+    // the bool operator, and Type.GetMethods() order is unspecified by the CLR: the wrong pin would make every
+    // VRCFury seam check REFUSE at error severity, intermittently, blaming a vendor drift that never happened.
+    // This asserts the pin landed on a USABLE operator, which is the half that arity/parameter checks miss.
+    //
+    // Deliberately no AddComponent and no SerializedObject write on the round-trip subject: verify.md's
+    // EditMode rule (a mutation on a live object later destroyed corrupts Unity's object registry) means the
+    // fixture is a bare GameObject and nothing else.
+    [Test]
+    public void VrcfConverterPins_resolveToUsableOperators()
+    {
+        var pins = VendorReflect.ResolveVrcfArmatureLink();
+        if (pins == null) Assert.Ignore("VRCFury not installed — the pin set is legitimately null");
+
+        Assert.IsNotNull(pins.ToVfGo, "ToVfGo pin unresolved");
+        Assert.IsNotNull(pins.FromVfGo, "FromVfGo pin unresolved");
+        Assert.AreEqual(pins.VfGoType, pins.ToVfGo.ReturnType, "ToVfGo must return VFGameObject");
+        Assert.That(pins.FromVfGo.ReturnType, Is.EqualTo(typeof(Transform)).Or.EqualTo(typeof(GameObject)),
+                    "FromVfGo pinned an operator whose return type the converter cannot consume — the bool/Object arm");
+
+        var go = new GameObject("VfConverterRoundTrip");
+        try
+        {
+            var vfGo = VendorReflect.ToVfGameObject(pins, go);
+            Assert.IsNotNull(vfGo, "ToVfGameObject returned null for a live GameObject");
+            Assert.AreSame(go.transform, VendorReflect.FromVfGameObject(pins, vfGo),
+                           "round-trip through the pinned operators did not return the starting Transform");
+        }
+        finally { UnityEngine.Object.DestroyImmediate(go); }
+    }
+
     [Test]
     public void VrcfArmatureLink_coincident_pass()
     {

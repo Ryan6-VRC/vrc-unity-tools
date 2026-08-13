@@ -136,7 +136,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// order, and that order is load-bearing: each has its own throw site, so a release that drifts two
         /// of them names the earlier one, and reordering silently changes which member the operator is sent
         /// to. The three Type fields are not ordered — all five resolved types share one combined null check
-        /// and one message, so their order is unobservable.</summary>
+        /// and one message, so their order is unobservable. The two op_Implicit converter pins are ordered
+        /// with the rest and sit LAST, so a VFGameObject operator drift names itself after every service
+        /// handle has already resolved.</summary>
         internal sealed class VrcfArmatureLinkPins
         {
             internal Type VrcfType;                     // VF.Model.VRCFury — the component the collector sweeps for
@@ -148,6 +150,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             internal FieldInfo ContentField;            // VRCFury.content
             internal FieldInfo ForceOneWorldScaleField; // ArmatureLink.forceOneWorldScale
             internal MethodInfo GetScalingFactor;       // static (ArmatureLink, Links) → (float,float,float)
+            internal MethodInfo ToVfGo;                 // static op_Implicit(Transform|GameObject) → VFGameObject
+            internal bool ToVfGoTakesTransform;         // which arm ToVfGo resolved to — frozen with the pin
+            internal MethodInfo FromVfGo;               // static op_Implicit(VFGameObject) → Transform (preferred) | GameObject
         }
 
         /// <summary>Resolves the ArmatureLink pin set. <b>null means VRCFury is ABSENT</b> — the legitimate
@@ -198,6 +203,44 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (pins.GetScalingFactor == null || pins.GetScalingFactor.GetParameters().Length != 2
                 || pins.GetScalingFactor.GetParameters()[0].ParameterType != pins.ArmLinkType)
                 throw new MissingMethodException("ArmatureLinkService.GetScalingFactor(ArmatureLink, Links)");
+
+            // The two VFGameObject converters, pinned here rather than rescanned per call: CheckSeam invokes
+            // FromVfGo TWICE PER BONE PAIR, so a 60-bone seam paid ~120 full GetMethods() scans per check.
+            //
+            // BOTH pins are selected on the RETURN type as well as the parameter, and that is load-bearing, not
+            // belt-and-braces. VFGameObject declares FOUR op_Implicit taking VFGameObject — to GameObject, to
+            // Object, to Transform, and to BOOL. A per-call loop can afford to invoke each candidate and skip a
+            // result it can't use; a pin cannot, because Type.GetMethods() order is unspecified by the CLR. A
+            // pin selected on the parameter alone would therefore freeze the bool operator on some runs and not
+            // others, and FromVfGameObject would throw MissingMethodException into ClassifyReflect — every
+            // VRCFury seam check REFUSEing at error severity, blaming a vendor drift that never happened.
+            // Transform wins on BOTH pins, so neither depends on enumeration order. The `Object`-returning arm
+            // is deliberately refused rather than ranked third: its runtime result happens to be a GameObject
+            // today, so the old per-call loop consumed it, but pinning it would assert a return type the
+            // converter cannot check. A VRCFury release keeping ONLY that arm therefore fails here as named
+            // drift instead of working by luck — the trade this whole block exists to make.
+            foreach (var m in pins.VfGoType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (m.Name != "op_Implicit") continue;
+                var ps = m.GetParameters();
+                if (ps.Length != 1) continue;
+                if (m.ReturnType == pins.VfGoType)
+                {
+                    if (ps[0].ParameterType == typeof(Transform))
+                    { pins.ToVfGo = m; pins.ToVfGoTakesTransform = true; }
+                    else if (ps[0].ParameterType == typeof(GameObject) && pins.ToVfGo == null)
+                    { pins.ToVfGo = m; pins.ToVfGoTakesTransform = false; }
+                }
+                else if (ps[0].ParameterType == pins.VfGoType)
+                {
+                    if (m.ReturnType == typeof(Transform)) pins.FromVfGo = m;
+                    else if (m.ReturnType == typeof(GameObject) && pins.FromVfGo == null) pins.FromVfGo = m;
+                }
+            }
+            if (pins.ToVfGo == null)
+                throw new MissingMethodException("op_Implicit(Transform|GameObject) → VFGameObject");
+            if (pins.FromVfGo == null)
+                throw new MissingMethodException("op_Implicit(VFGameObject) → Transform|GameObject");
             return pins;
         }
 
@@ -214,36 +257,23 @@ namespace Ryan6Vrc.AgentTools.Editor
             return true;
         }
 
-        /// <summary>Transform/GameObject → VFGameObject via the explicit op_Implicit (reflection won't apply
-        /// it implicitly).</summary>
-        internal static object ToVfGameObject(Type vfGoType, GameObject go)
-        {
-            foreach (var m in vfGoType.GetMethods(BindingFlags.Public | BindingFlags.Static))
-            {
-                if (m.Name != "op_Implicit" || m.ReturnType != vfGoType) continue;
-                var ps = m.GetParameters();
-                if (ps.Length != 1) continue;
-                if (ps[0].ParameterType == typeof(Transform)) return m.Invoke(null, new object[] { go.transform });
-                if (ps[0].ParameterType == typeof(GameObject)) return m.Invoke(null, new object[] { go });
-            }
-            throw new MissingMethodException("op_Implicit(Transform|GameObject) → VFGameObject");
-        }
+        /// <summary>Transform/GameObject → VFGameObject through the pinned op_Implicit (reflection won't apply
+        /// it implicitly). The operator and its arm are resolved once, in
+        /// <see cref="ResolveVrcfArmatureLink"/>, which owns why the pin asserts the return type.</summary>
+        internal static object ToVfGameObject(VrcfArmatureLinkPins pins, GameObject go)
+            => pins.ToVfGo.Invoke(null, new object[] { pins.ToVfGoTakesTransform ? (object)go.transform : go });
 
-        /// <summary>VFGameObject → Transform via the explicit op_Implicit (either the Transform or the
-        /// GameObject operator).</summary>
-        internal static Transform FromVfGameObject(Type vfGoType, object vfGo)
+        /// <summary>VFGameObject → Transform through the pinned op_Implicit. The result-type branch stays even
+        /// though the pin already asserted the return type: the pin is the guarantee, this is the second line
+        /// of defence, and it costs one type check.</summary>
+        internal static Transform FromVfGameObject(VrcfArmatureLinkPins pins, object vfGo)
         {
             if (vfGo == null) return null;
-            foreach (var m in vfGoType.GetMethods(BindingFlags.Public | BindingFlags.Static))
-            {
-                if (m.Name != "op_Implicit") continue;
-                var ps = m.GetParameters();
-                if (ps.Length != 1 || ps[0].ParameterType != vfGoType) continue;
-                var result = m.Invoke(null, new object[] { vfGo });
-                if (result is Transform t) return t;
-                if (result is GameObject g) return g.transform;
-            }
-            throw new MissingMethodException("op_Implicit(VFGameObject) → Transform|GameObject");
+            var result = pins.FromVfGo.Invoke(null, new object[] { vfGo });
+            if (result is Transform t) return t;
+            if (result is GameObject g) return g.transform;
+            throw new MissingMethodException("op_Implicit(VFGameObject) → Transform|GameObject returned "
+                                            + (result?.GetType().Name ?? "null"));
         }
     }
 }
