@@ -567,7 +567,14 @@ namespace Ryan6Vrc.AgentTools.Editor
         // only that no path was written: the reactive family / BlendshapeSync / Mesh Settings resolve nothing,
         // while a MergeAnimator or MergeBlendTree relativePathRoot silently falls back to the component's own
         // GameObject (MergeAnimatorProcessor / MergeBlendTreePass) — a relocated binding frame rather than a
-        // dropped ref, and harmless only where the author meant that fallback.
+        // dropped ref, and harmless only where the author meant that fallback. Only MergeAnimator gets the
+        // R-K frame-caption (MaFrameUncertaintyNote) alongside that offender — TryMaFrame's type gate
+        // (CheckAnimator.cs) excludes MergeBlendTree, so its offender here carries no frame line today; read
+        // it as the same relocated-frame class anyway, not as uncaptioned-because-broken. If that gate is
+        // ever widened, MaFrameUncertaintyNote's hardcoded so.FindProperty("relativePathRoot") (lowercase)
+        // won't find it — ModularAvatarMergeBlendTree's field is RelativePathRoot (PascalCase), and
+        // FindProperty is case-sensitive, so it would silently take the field-drift branch on a field that is
+        // actually present.
         private static void ScanSceneRefs(Component c, GameObject avatarGO, Report rep)
         {
             SerializedObject so;
