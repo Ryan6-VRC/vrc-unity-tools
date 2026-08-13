@@ -1717,10 +1717,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         // (Merge Animator/Armature, Bone Proxy, Menu*, Parameters, Mesh Settings, VRChat Settings)
         // deliberately do NOT match — they carry no preview-resolution risk. Drives SettleNote's
         // cheap-first non-reactive short-circuit (the settle-state pre-filter).
+        //
+        // HAND-CURATED, and it has to be: NDMF exposes no reflectable registry of preview-participating
+        // component types, and MA's `ReactiveComponent` base covers only 5 of the 8. ReactiveMarkersTests
+        // fires on an entry that matches nothing, and cannot fire on a newly shipped type we failed to add —
+        // re-check the list against MA on upgrade. Tests/Editor/ReactiveMarkers.md is the canon for all of it.
         private static readonly string[] ReactiveMarkers =
         {
             "ShapeChanger", "BlendshapeSync", "MaterialSetter", "MaterialSwap", "ObjectToggle",
-            "MeshDeleter", "MeshCutter", "RemoveVertexColor", "ScaleAdjuster",
+            "MeshCutter", "RemoveVertexColor", "ScaleAdjuster",
         };
 
         // `armedBy` = hierarchy path of the FIRST matched reactive component's GameObject (null when none),
