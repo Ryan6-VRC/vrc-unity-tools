@@ -255,8 +255,12 @@ public class ReportGimmickTests
     // (b) Each load-bearing clause is present in the CONSTANT. This is what survives a reword (the wording may
     //     change freely) while failing a deletion, which (a) cannot do. `ReportGimmick`'s own docstring states
     //     both polarities are load-bearing: drop "all-zero is not a dead chain" and a reader deletes a
-    //     name-merged bone reading `skinned=0`; drop "upper bound" and they read the count as which bones MOVE,
-    //     with declared `ignoreTransforms` never subtracted.
+    //     name-merged bone reading `skinned=0`; drop the membership-vs-motion clause and they read the count
+    //     as which bones the chain MOVES, which `multiChildType` and `endpointPosition` still decide.
+    //
+    // The former "nonzero is an upper bound" clause is deliberately gone and its absence is asserted: the
+    // counts are the SDK's own chain membership now, exclusions already applied, so pinning that caveat would
+    // pin one the code no longer earns. The membership-vs-motion clause is the part of it that stayed true.
     [Test]
     public void ChainSubtree_CensusRowIsAccompaniedByItsLegend()
     {
@@ -266,7 +270,35 @@ public class ReportGimmickTests
         Assert.AreEqual(ReportGimmick.ChainSubtreeLegend.TrimEnd('\n'), LegendLine(ReadReport("Rig")));
 
         StringAssert.Contains("All-zero is NOT a dead chain", ReportGimmick.ChainSubtreeLegend);
-        StringAssert.Contains("nonzero is an upper bound", ReportGimmick.ChainSubtreeLegend);
+        StringAssert.Contains("not a claim about which bones move", ReportGimmick.ChainSubtreeLegend);
+        Assert.IsFalse(ReportGimmick.ChainSubtreeLegend.Contains("upper bound"),
+            "exclusions are applied now — an upper-bound caveat would be one the code no longer earns");
+    }
+
+    // The exclusions the old hierarchy walk could not see, now applied because the set comes from the
+    // component itself. `ignoreTransforms` prunes the listed transform AND its descendants (the field's own
+    // Inspector tooltip says so), which is exactly why a hand-rolled subtraction was rejected: the descendant
+    // half is what a naive "remove the listed transforms" gets wrong, and it gets it wrong in the direction
+    // that inflates the count back toward the hierarchy walk.
+    //
+    // Hierarchy subtree here is 4 (ChainRoot, Keep, Dropped, DroppedChild). The SDK's chain is 2. Asserting
+    // the absence of `bones=4` is what makes this a real discrimination rather than a coincidence — the old
+    // implementation would have printed it.
+    [Test]
+    public void ChainSubtree_countsTheSdkChain_notTheHierarchySubtree()
+    {
+        var root = new GameObject("Rig");
+        var chainRoot = Child(root, "ChainRoot");
+        Child(chainRoot, "Keep");
+        var dropped = Child(chainRoot, "Dropped");
+        Child(dropped, "DroppedChild");
+
+        var pb = chainRoot.AddComponent<VRCPhysBone>();
+        pb.ignoreTransforms = new List<Transform> { dropped.transform };
+
+        var report = ReadReport("Rig");
+        StringAssert.Contains("bones=2", report);
+        Assert.IsFalse(report.Contains("bones=4"), "the ignored transform's CHILD must be pruned with it");
     }
 
     // The legend paragraph, isolated so the comparison is against the legend and nothing else: its tokens

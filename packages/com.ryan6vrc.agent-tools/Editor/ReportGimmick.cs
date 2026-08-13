@@ -50,12 +50,14 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>
         /// The chain-subtree census legend, quoted once at the canon so a test can pin the WHOLE sentence
         /// instead of carving phrases out of it (`docs/tool-design.md`: verbatim strings are quoted once).
-        /// Both polarities are load-bearing and neither may be dropped by a prose pass: all-zero is not a
+        /// The all-zero clause is load-bearing and may not be dropped by a prose pass: all-zero is not a
         /// verdict (a pre-bake bone that will name-merge, or a chain read from outside its subtree, reads
-        /// zero while load-bearing), and a nonzero is an upper bound (declared `ignoreTransforms` exclusions
-        /// are not subtracted). A reader who takes either as a judgement deletes a live chain.
+        /// zero while load-bearing), and a reader who takes it as a judgement deletes a live chain.
+        /// The former upper-bound clause is gone with the walk that earned it — the set is now the SDK's own
+        /// chain membership, exclusions already applied. What remains true, and stays said, is that
+        /// membership is not the same claim as which bones actually move.
         /// </summary>
-        internal const string ChainSubtreeLegend = "_`chain subtree` = the row's `rootTransform` (else its own transform) and every descendant: `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept over the avatar enclosing THAT ROW's physbone, so a mesh outside the reported subtree still counts while a co-hosted neighbour avatar's does not; a row with no enclosing avatar descriptor falls back to its outermost ancestor), `hosting` how many carry a component besides Transform and this row's own physbone. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside its subtree (a constraint reading it as a source) reads all-zero while load-bearing. A nonzero is an upper bound — exclusions the component declares (`ignoreTransforms`) are not subtracted, so the set is the chain's hierarchy reach, not a claim about which bones it moves._\n";
+        internal const string ChainSubtreeLegend = "_`chain subtree` = the bones the row's physbone itself reports as its chain (the SDK's own set, so the exclusions the component declares — `ignoreTransforms`, `ignoreOtherPhysBones` — are already applied; a virtual endpoint bone has no transform and is not counted): `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept over the avatar enclosing THAT ROW's physbone, so a mesh outside the reported chain still counts while a co-hosted neighbour avatar's does not; a row with no enclosing avatar descriptor falls back to its outermost ancestor), `hosting` how many carry a component besides Transform and this row's own physbone. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside it (a constraint reading it as a source) reads all-zero while load-bearing. Chain MEMBERSHIP is not a claim about which bones move — `multiChildType` and `endpointPosition` decide what is actually simulated._\n";
 
         /// <summary>
         /// The raycast-table legend, quoted once at the canon so a test can pin whole sentences rather than
@@ -893,22 +895,43 @@ namespace Ryan6Vrc.AgentTools.Editor
             return skinned;
         }
 
-        // The §5.2 `chain subtree` census: three counts over ONE set — the chain's effective root transform
-        // and every descendant. A partial take (dropping some of a mergeable's pieces) leaves chains whose
-        // every count reads 0, and nothing else in the digest says so.
+        // The §5.2 `chain subtree` census: three counts over ONE set — the bones the component itself says
+        // are in its chain. A partial take (dropping some of a mergeable's pieces) leaves chains whose every
+        // count reads 0, and nothing else in the digest says so.
         //
-        // DRIVEN-SET SIMPLIFICATION, stated because it bounds what the numbers mean: the set is the root
-        // transform's hierarchy subtree, whole. Exclusions the component declares (`ignoreTransforms`) are
-        // not subtracted, and no chain boundary is modelled, so the set is a superset of the bones the chain
-        // moves. That direction is the safe one — it can only inflate `skinned`/`hosting`, never fabricate
-        // the all-zero row a reader would act on. The rendered legend says the same thing to the reader.
+        // THE SET IS THE SDK'S, NOT OURS. This used to walk the root transform's whole hierarchy subtree and
+        // declare the result an upper bound, because the component's own exclusions were not subtracted.
+        // Reimplementing those exclusions by hand would have been worse than the upper bound, not better:
+        // `ignoreTransforms` prunes each listed transform AND its children ("Ignored transforms automatically
+        // include any of that transform's children" — the field's own Inspector tooltip), `ignoreOtherPhysBones`
+        // prunes a nested chain's root along with everything under it, and an `ignoreTransforms` entry that IS
+        // the chain root is a no-op the SDK ignores — so a naive subtraction fabricates exactly the all-zero
+        // row the legend says must never be fabricated. `InitTransforms` settles all three, so it is called
+        // instead, in the same spirit as EffectiveTarget delegating to `GetRootTransform()`.
+        //
+        // Safe on a read-only door, measured over 82 vendor prefabs / 1561 physbones: zero throws, dirties
+        // nothing (no component, GameObject or scene flagged), idempotent across repeated calls. It corrected
+        // a real over-count of 289 transforms across 81 rows.
+        //
+        // Still NOT a claim about which bones MOVE: `multiChildType` and `endpointPosition` decide whether a
+        // member is actually simulated. This counts membership, and the legend says membership.
         private static string ChainSubtreeCell(VRCPhysBone b, HashSet<Transform> skinned)
         {
             var chainRoot = EffectiveTarget(b);
             if (chainRoot == null) return "—";
+
+            b.InitTransforms(true);
+            var chain = b.bones;
+            if (chain == null) return "—";
+
             int total = 0, skinnedCount = 0, hosting = 0;
-            foreach (var t in chainRoot.GetComponentsInChildren<Transform>(true))
+            foreach (var bone in chain)
             {
+                // An endpoint bone is virtual — `endpointPosition` adds a chain member with no transform
+                // behind it. There is nothing to count skinning or hosting against, so it is left out
+                // entirely rather than counted as an empty one.
+                var t = bone.transform;
+                if (t == null) continue;
                 total++;
                 if (skinned.Contains(t)) skinnedCount++;
                 if (HostsBeyondOwnChain(t, b)) hosting++;
