@@ -535,7 +535,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // (the tool broken against the installed package) => ReflectError (misuse/error). A seam that exists but
         // won't resolve onto this base => UnresolvableReason (valid abstain). This severity split is the
         // contract every vendor pin in VendorReflect throws into — it is why those pins must not swallow.
-        private static void ClassifyReflect(Exception e, SeamResolution res)
+        internal static void ClassifyReflect(Exception e, SeamResolution res)
         {
             // First carrier wins across BOTH fields. The pre-refactor single outer try aborted on the first
             // throw and set exactly one reason; because the per-collector/per-component guards now continue,
@@ -557,8 +557,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                 real is MissingMemberException || real is TypeLoadException)
                 res.ReflectError = real.GetType().Name + ": " + real.Message;
             else
-                res.UnresolvableReason = "seam present but does not resolve onto this base (likely an incompatible " +
-                    "or independent rig): " + real.GetType().Name + ": " + real.Message;
+                // The inner exception's own account of the failure, and nothing invented on top of it. This
+                // used to prepend "(likely an incompatible or independent rig)" — a guess at the cause,
+                // printed beside deterministic text that already named the real one. The live-corpus row in
+                // CheckSeam.md is the case in point: VRCFury reported that a `linkTo` path does not exist on
+                // this base, while the prefix asserted a different cause entirely. Which FIELD this lands in
+                // is decided by the type test above and never by this string, so dropping the guess changes
+                // an abstain's wording, not its classification.
+                res.UnresolvableReason = "seam present but does not resolve onto this base: " +
+                    real.GetType().Name + ": " + real.Message;
         }
 
         private static SeamResolution DefaultResolveSeam(GameObject baseGO, GameObject mergeGO)
@@ -594,8 +601,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             var maType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
             if (maType == null) return; // MA not installed ⇒ no MA seam
             // Shape asserted at pin time (every invoke pin here does this): a drifted signature must fail as
-            // Missing* → ReflectError, not land in ClassifyReflect's other arm as an "incompatible rig"
-            // abstain lying about API drift. The RETURN type is asserted too: a null from the `as IEnumerable`
+            // Missing* → ReflectError, not land in ClassifyReflect's abstain arm as a does-not-resolve
+            // reason lying about API drift. The RETURN type is asserted too: a null from the `as IEnumerable`
             // cast below is consumed as "mergeTarget does not resolve" — a drifted return type would emit
             // that specific, confidently wrong repair instruction for a component whose target is fine.
             var getMapping = maType.GetMethod("GetBonesMapping", BindingFlags.Public | BindingFlags.Instance);

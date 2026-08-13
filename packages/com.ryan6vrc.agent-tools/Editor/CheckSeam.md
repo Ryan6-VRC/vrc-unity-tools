@@ -13,7 +13,7 @@ The only validation of the reflection defaults **against authored assets**. `Che
 | Shinano_Stockings ← Shinano_kisekae | `a0f3ced80a65ee64cbc31500a497fe44` / 340mm | `1b101c73ea993b34e83816d8a7cb1aa7` | MA | **PASS** — `weightedHumanoid=50 offenders=0 context=2 dropped=8` |
 | CostumeBambino ← Personal_kisekae | `9bbab1857358e684a924c85b2174242a` / 334mm | `21abba6203db9ab4e89422db8bc5183c` | MA | **NOT-PASS** — `weightedHumanoid=6 offenders=6` (`edges`-scaled outfit, wrong base) |
 | Hair_Shiori ← Personal_kisekae | `9bbab1857358e684a924c85b2174242a` / 334mm | `a9808f9d78697104b8d6ee94419a900f` | VRCFury ×2 | **REFUSE** — `seams disagree on base bone 'Head' (…/Armature/…/Head vs …/Armature.Shiori/…/Head)` |
-| CarriedDoll_Prefab ← Personal_kisekae | `9bbab1857358e684a924c85b2174242a` / 334mm | `2c75de3f38a1da949a3b9bbe22b257cb` | VRCFury ×7 anchors | **REFUSE** (warning) — `seam present but does not resolve onto this base (likely an incompatible or independent rig): …Failed to find object at path 'Armature/…/Head_NoChop'` |
+| CarriedDoll_Prefab ← Personal_kisekae | `9bbab1857358e684a924c85b2174242a` / 334mm | `2c75de3f38a1da949a3b9bbe22b257cb` | VRCFury ×7 anchors | **REFUSE** (warning) — `seam present but does not resolve onto this base: …Failed to find object at path 'Armature/…/Head_NoChop'` |
 
 All four verdicts hit their expected token; the reflection defaults (`GetBonesMapping`, `GetLinks`, the scale/severity paths) are proven on real composed assets. The full model is covered: a scored PASS, a scored NOT-PASS, and both REFUSE flavours (conflict + unresolvable-abstain).
 
