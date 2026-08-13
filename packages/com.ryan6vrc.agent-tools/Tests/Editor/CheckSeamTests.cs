@@ -376,6 +376,57 @@ public class CheckSeamTests
         StringAssert.Contains("MissingMethodException: X", r);
     }
 
+    // ── ClassifyReflect itself ────────────────────────────────────────────────────────────────
+    //
+    // The REFUSE tests below stub ResolveSeam, so they exercise Check()'s severity dispatch and never reach
+    // the classifier — CheckSeam.cs records that it was validated end-to-end by the live corpus rather than
+    // by unit tests. These three cover it directly.
+    //
+    // The abstain arm used to prepend "(likely an incompatible or independent rig)" to the inner exception's
+    // own message: a guessed cause printed beside deterministic text that already named the real one. The
+    // live-corpus row shows both at once — VRCFury reporting a `linkTo` path missing from the base, under a
+    // prefix asserting a rig mismatch instead.
+
+    [Test]
+    public void ClassifyReflect_abstainArm_reportsTheInnerCauseWithoutGuessingOne()
+    {
+        var res = new CheckSeam.SeamResolution();
+        CheckSeam.ClassifyReflect(new TargetInvocationException(
+            new InvalidOperationException("Failed to find object at path 'Armature/Head_NoChop'")), res);
+
+        Assert.IsNull(res.ReflectError, "a non-Missing* inner exception is an abstain, not misuse");
+        StringAssert.Contains("does not resolve onto this base", res.UnresolvableReason);
+        StringAssert.Contains("Failed to find object at path", res.UnresolvableReason,
+            "the inner exception's own account of the cause is what the reader acts on");
+        Assert.IsFalse(res.UnresolvableReason.Contains("incompatible"),
+            "no invented cause: the classifier knows the seam failed, not why");
+    }
+
+    // The severity split is decided by exception TYPE, which is what makes dropping the guessed prose a
+    // wording change rather than a reclassification. Pinned so an edit to the message cannot quietly move a
+    // case between arms.
+    [Test]
+    public void ClassifyReflect_missingMemberArm_isMisuseNotAbstain()
+    {
+        var res = new CheckSeam.SeamResolution();
+        CheckSeam.ClassifyReflect(new TargetInvocationException(new MissingMethodException("GetBonesMapping")), res);
+
+        Assert.IsNull(res.UnresolvableReason, "API drift is misuse — it must not abstain");
+        StringAssert.Contains("MissingMethodException", res.ReflectError);
+    }
+
+    // First carrier wins across both fields: a later throw must not upgrade an earlier abstain to misuse.
+    [Test]
+    public void ClassifyReflect_firstCarrierWins_aLaterThrowDoesNotUpgradeAnAbstain()
+    {
+        var res = new CheckSeam.SeamResolution();
+        CheckSeam.ClassifyReflect(new TargetInvocationException(new InvalidOperationException("first")), res);
+        CheckSeam.ClassifyReflect(new TargetInvocationException(new MissingMethodException("later")), res);
+
+        Assert.IsNull(res.ReflectError);
+        StringAssert.Contains("first", res.UnresolvableReason);
+    }
+
     [Test]
     public void UnresolvableSeam_refusesAtWarning()
     {
