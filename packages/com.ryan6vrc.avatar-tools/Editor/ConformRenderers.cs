@@ -205,26 +205,83 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // just-assigned sourceMats — so scanning the source array in whatIf yields the identical
                 // verdict without mutating anything.
                 var slotsToScan = whatIf ? sourceMats : rend.sharedMaterials;
-                foreach (var mat in slotsToScan)
+                for (int slot = 0; slot < slotsToScan.Length; slot++)
                 {
+                    var mat = slotsToScan[slot];
                     if (mat == null)
                     {
                         data.NullSlots++;
                         // Tense follows the path: on execute the slot IS null on the renderer, on whatIf it is
                         // null in the source array we would have assigned. The verdict is the same either way,
                         // but a preview that says "after assignment" asserts a mutation that never happened.
-                        data.Offender("null-slot: renderer '" + rend.name + "' — " + (whatIf
+                        data.Offender("null-slot: renderer '" + rend.name + "' [" + slot + "] — " + (whatIf
                             ? "the source material set has a null slot; assigning it would leave this renderer with one"
                             : "null material slot after assignment"));
                     }
-                    else if (mat.name == "Default-Material")
+                    else if (IsBuiltinDefaultMaterial(mat))
                     {
                         data.DefaultMatSlots++;
-                        data.Offender("default-material: renderer '" + rend.name +
-                                      "' — slot contains Unity built-in Default-Material (likely unassigned)");
+                        // Slot index and asset path, not just the renderer: this offender FAILs the run on its
+                        // own, so the reader needs enough to adjudicate it rather than take the label's word.
+                        data.Offender("default-material: renderer '" + rend.name + "' [" + slot +
+                                      "] — slot holds Unity's built-in Default-Material (" +
+                                      AssetDatabase.GetAssetPath(mat) + "); remap this material and re-run");
                     }
                 }
             }
+        }
+
+        // ── Unity's built-in Default-Material: identity, not name ────────────────────────────────────
+
+        /// <summary>Asset path + GUID of the built-in material, quoted once here. The GUID is Unity's
+        /// well-known built-in-extra GUID; the localId is the material's slot within it.</summary>
+        private const string BuiltinExtraPath = "Resources/unity_builtin_extra";
+        private const string BuiltinExtraGuid = "0000000000000000f000000000000000";
+        private const long   DefaultMaterialLocalId = 10303;
+
+        /// <summary>Resolved once per domain, lazily. NOT a static field initializer: the built-in resolves
+        /// through the AssetDatabase, and resolving at type-load can run before it is ready.</summary>
+        private static Material _builtinDefaultMaterial;
+        private static bool     _builtinDefaultResolved;
+
+        /// <summary>
+        /// True when <paramref name="mat"/> IS Unity's built-in Default-Material.
+        ///
+        /// <para>This was a name compare (<c>mat.name == "Default-Material"</c>), which any project material
+        /// sharing that name satisfies — and since a nonzero <c>defaultMatSlots</c> FAILs the run on its own,
+        /// that made the gate carry a false-FAIL vector. Measured: an in-memory material named
+        /// <c>Default-Material</c> passes a name compare and fails this one.</para>
+        ///
+        /// <para>Reference compare is primary (built-in extras are session singletons, so it is exact) with a
+        /// GUID+localId fallback, because the built-in handle can fail to resolve. That fallback is the point:
+        /// comparing against a null handle would match nothing, <c>defaultMatSlots</c> would sit at 0 forever,
+        /// and a FAIL-capable gate would degrade into a silent no-op — the instrument failure
+        /// <c>docs/verify.md</c> exists to forbid. If neither route can answer, this says so loudly rather
+        /// than returning a confident false.</para>
+        ///
+        /// <para>Built-in RP only, which is all VRChat ships: under URP/HDRP the built-in still exists but is
+        /// not what a new renderer receives, so this predicate would under-fire. Do not port it blind.</para>
+        /// </summary>
+        internal static bool IsBuiltinDefaultMaterial(Material mat)
+        {
+            if (mat == null) return false;
+
+            if (!_builtinDefaultResolved)
+            {
+                _builtinDefaultMaterial = AssetDatabase.GetBuiltinExtraResource<Material>("Default-Material.mat");
+                _builtinDefaultResolved = true;
+                if (_builtinDefaultMaterial == null)
+                    Debug.LogWarning("[ConformRenderers] could not resolve Unity's built-in Default-Material; "
+                                   + "falling back to a GUID+localId identity test. If that also fails, the "
+                                   + "default-material gate cannot fire and this run's PASS does not cover it.");
+            }
+
+            if (_builtinDefaultMaterial != null) return mat == _builtinDefaultMaterial;
+
+            string guid; long localId;
+            if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(mat, out guid, out localId)) return false;
+            return guid == BuiltinExtraGuid && localId == DefaultMaterialLocalId
+                && AssetDatabase.GetAssetPath(mat) == BuiltinExtraPath;
         }
 
         /// <summary>
