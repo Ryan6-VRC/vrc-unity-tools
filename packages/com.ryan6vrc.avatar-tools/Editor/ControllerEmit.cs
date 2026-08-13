@@ -93,6 +93,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // where nothing here can tell a correct icon path from a wrong one; an in-project compile
             // adjudicates and throws instead. Each entry names the control and the path tried.
             public List<(string control, string path)> IconsOutsideProject = new List<(string control, string path)>();
+
+            /// <summary>Destroy the side assets this result still owns in memory — <see cref="Params"/>,
+            /// <see cref="Menu"/> and every <see cref="MenuChildren"/> page. The OWNER's door: the emit hands
+            /// these back unpersisted, and the caller is what has to end their life (the 2-arg
+            /// <see cref="Build(AnimDocument, out EmitResult)"/> door states that contract).
+            /// <para>A survivor is not inert. Leaked SDK ScriptableObjects in this assembly make
+            /// <c>AddStateMachineBehaviour</c> start returning null, failing UNRELATED suites with
+            /// NullReferenceExceptions that point at untouched production code — measured at 551/600 vs
+            /// 600/600 (<c>ControllerFixpointTests</c>'s <c>_made</c> field owns that measurement).</para>
+            /// <para>One-arg <c>DestroyImmediate</c> deliberately, and NOT guarded by an asset-path check:
+            /// these are never persisted, so if that invariant ever breaks Unity errors instead of silently
+            /// deleting a real asset. A skip-if-persisted guard would trade that tripwire for silence. The
+            /// two-arg form is for a genuine sub-asset and is not a precedent for this.</para>
+            /// Idempotent — the fields are nulled/cleared, so a second call is a no-op.</summary>
+            public void DestroyUnpersisted()
+            {
+                if (Params != null) UnityEngine.Object.DestroyImmediate(Params);
+                Params = null;
+                if (Menu != null) UnityEngine.Object.DestroyImmediate(Menu);
+                Menu = null;
+                if (MenuChildren != null)
+                {
+                    foreach (var child in MenuChildren)
+                        if (child != null) UnityEngine.Object.DestroyImmediate(child);
+                    MenuChildren.Clear();
+                }
+            }
         }
 
         // Fail-loud emission error, named so a coordinator/log points straight at the offending construct.
@@ -101,8 +128,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public EmitException(string message) : base(message) { }
         }
 
-        // Convenience door: emit to the scratch dir with NO provenance stamp (throwaway builds — see the
-        // 4-arg overload's null contract below). CompileController uses the 4-arg overload.
+        /// <summary>Convenience door: emit to the scratch dir with NO provenance stamp (throwaway builds — see
+        /// the 4-arg overload's null contract below). <c>CompileController</c> uses the 4-arg overload.
+        /// <para><b>THE CALLER OWNS the result's side assets</b> — <c>Params</c>, <c>Menu</c> and every
+        /// <c>MenuChildren</c> page — and must call <see cref="EmitResult.DestroyUnpersisted"/> when done. This
+        /// door persists the CONTROLLER only; nothing takes ownership of the rest, and a survivor is not inert
+        /// (that method owns the 551/600 measurement). The 4-arg door has an owner: <c>CompileController</c>
+        /// either persists them or destroys them on every exit.</para></summary>
         public static void Build(AnimDocument doc, out EmitResult result)
             => Build(doc, ScratchRoot, null, out result);
 
@@ -411,9 +443,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // Destroy the in-memory side assets this build minted. Failure path ONLY — on success these are
-            // handed to the caller inside the EmitResult, and CompileController owns them from there.
-            // Pages come from _menuPages, not _result.Menu/_result.MenuChildren, because those two only hold
-            // pages that were fully built; see the _menuPages comment.
+            // handed to the caller inside the EmitResult, whose EmitResult.DestroyUnpersisted is the OWNER's
+            // door (CompileController routes through it; the 2-arg Build door names it in its contract).
+            //
+            // This is deliberately NOT that public door, and must not be folded into it: pages come from
+            // _menuPages, not _result.Menu/_result.MenuChildren, because those two hold only pages that were
+            // fully BUILT (see the _menuPages comment) — and this path exists precisely for a throw mid-build.
+            // Calling the result-based door here would silently leak every partially-built page.
             private void DestroyUnpersistedSideAssets()
             {
                 if (_result.Params != null) UnityEngine.Object.DestroyImmediate(_result.Params);

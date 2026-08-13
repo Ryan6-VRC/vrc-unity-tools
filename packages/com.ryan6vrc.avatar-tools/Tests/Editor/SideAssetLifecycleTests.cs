@@ -211,4 +211,43 @@ menu:
         AnimatorTestHelpers.DeleteRefusalArtifact(summary);
         AssertNoneAdded(before, "a throw out of ControllerEmit.Build");
     }
+
+    [Test]
+    public void TwoArgBuildDoor_CallerDestroysUnpersisted_LeaksNothing()
+    {
+        // Site E — the 2-arg ControllerEmit.Build door, the one with no owner in production: it persists the
+        // CONTROLLER only and hands the side assets back, so EmitResult.DestroyUnpersisted is the CALLER's
+        // door and this is its oracle. Sites A-D cover CompileController, which owns its own.
+        //
+        // The document carries a menu WITH a submenu deliberately: params alone would pass with the Menu and
+        // MenuChildren lines of the door deleted — the half-coverage this file's header describes.
+        var src = AnimatorSchemaYaml.Parse(HeadWithMenu, "test");
+        var before = Snapshot();
+        ControllerEmit.Build(src, out var built);
+        try
+        {
+            // Preconditions, not decoration: if the door minted neither type there is nothing to leak and the
+            // case cannot fail. Both must be present BEFORE the destroy for the assertion after it to mean
+            // anything.
+            Assert.IsNotNull(built.Params, "2-arg door emitted no params asset — this case would test nothing");
+            Assert.IsNotNull(built.Menu, "2-arg door emitted no menu — the menu half would test nothing");
+            Assert.IsNotEmpty(built.MenuChildren, "no submenu page — MenuChildren is its own line of the destroy");
+
+            built.DestroyUnpersisted();
+            AssertNoneAdded(before, "the 2-arg Build door followed by EmitResult.DestroyUnpersisted");
+
+            // Idempotent: the fields are nulled, so a caller that sweeps twice — a finally under a catch that
+            // already swept — must neither fault nor double-destroy.
+            Assert.DoesNotThrow(() => built.DestroyUnpersisted(), "a second DestroyUnpersisted must be a no-op");
+            Assert.IsNull(built.Params, "Params must be nulled, not left dangling at a destroyed object");
+            Assert.IsNull(built.Menu, "Menu must be nulled, not left dangling at a destroyed object");
+            Assert.IsEmpty(built.MenuChildren, "MenuChildren must be cleared");
+        }
+        finally
+        {
+            // This door persists the controller into ControllerEmit's OWN scratch dir, not OutDir, so
+            // TearDown's TestRoot delete does not reach it.
+            AssetDatabase.DeleteAsset("Assets/Agent/Scratch/emit/S_Fx.controller");
+        }
+    }
 }

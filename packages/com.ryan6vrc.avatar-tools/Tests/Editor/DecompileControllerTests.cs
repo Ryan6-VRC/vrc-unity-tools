@@ -42,9 +42,9 @@ public class DecompileControllerTests
     }
 
     // ControllerEmit.Build's 2-arg door mints a VRCExpressionParameters nobody persists; see
-    // AnimatorTestHelpers.UnownedParamsSweep for why a survivor breaks unrelated suites.
-    private readonly AnimatorTestHelpers.UnownedParamsSweep _paramSweep =
-        new AnimatorTestHelpers.UnownedParamsSweep();
+    // AnimatorTestHelpers.UnownedSideAssetSweep for why a survivor breaks unrelated suites.
+    private readonly AnimatorTestHelpers.UnownedSideAssetSweep _paramSweep =
+        new AnimatorTestHelpers.UnownedSideAssetSweep();
 
     [SetUp]
     public void SetUp()

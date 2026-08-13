@@ -19,9 +19,9 @@ public class ControllerEmitTests
     private const string ScratchFolder = "Assets/Agent/Scratch/emit";
 
     // ControllerEmit.Build's 2-arg door mints a VRCExpressionParameters nobody persists — 32 calls in this
-    // file. See AnimatorTestHelpers.UnownedParamsSweep for why a survivor breaks unrelated suites.
-    private readonly AnimatorTestHelpers.UnownedParamsSweep _paramSweep =
-        new AnimatorTestHelpers.UnownedParamsSweep();
+    // file. See AnimatorTestHelpers.UnownedSideAssetSweep for why a survivor breaks unrelated suites.
+    private readonly AnimatorTestHelpers.UnownedSideAssetSweep _paramSweep =
+        new AnimatorTestHelpers.UnownedSideAssetSweep();
 
     [SetUp]
     public void BeginParamSweep() => _paramSweep.Begin();
