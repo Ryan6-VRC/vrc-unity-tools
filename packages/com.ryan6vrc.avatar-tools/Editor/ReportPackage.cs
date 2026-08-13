@@ -68,8 +68,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // 4. Superset detection across FBXes
                 ComputeSuperset(data);
 
-                // 5. Head vs body flag (blendShapeCount heuristic)
-                ComputeHeadBody(data);
+                // 5. Viseme (face) mesh — the descriptor's declaration where there is one, a labelled
+                //    most-blendshapes guess where there is not — plus the body pick, which stays a heuristic.
+                ResolveVisemeAndBody(data);
 
                 // No content verdict: fbx/prefab counts are facts the digest states, not a gate.
                 // An empty package (fbx=0 prefab=0) is reported as-is, not a failure.
@@ -86,11 +87,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // returned above). Otherwise the summary is a verdict-free descriptive digest.
             bool errored = data.Error != null;
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[ReportPackage] {0}: fbx={1} prefab={2} constraints={3} nonSdkNs={4} toggles={5} headGuess={6} bodyGuess={7} superset={8}{9}{10}{11} => {12} | log={13}",
+                "[ReportPackage] {0}: fbx={1} prefab={2} constraints={3} nonSdkNs={4} toggles={5} visemeMesh={6} bodyGuess={7} superset={8}{9}{10}{11}{12} => {13} | log={14}",
                 label, data.FbxEntries.Count, data.PrefabCount, data.Constraints,
                 NonSdkSummary(data.NonSdk), data.ToggleSummary ?? "?",
-                data.HeadMesh ?? "?", data.BodyMesh ?? "?",
+                VisemeField(data), data.BodyMesh ?? "?",
                 data.SupersetFbx ?? "none",
+                data.VisemeDistinctNames > 1 ? " visemeDisagreement=" + data.VisemeDistinctNames : "",
                 data.UnresolvedScripts > 0 ? " unresolvedScripts=" + data.UnresolvedScripts : "",
                 data.LoadErrors > 0 ? " loadErrors=" + data.LoadErrors : "",
                 errored ? " error=" + data.Error : "",
@@ -140,6 +142,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return new RendererInfo
             {
                 Name = name,
+                // The Mesh instance is kept for the viseme join in ResolveVisemeMesh: the descriptor names its
+                // face renderer on a PREFAB, whose GameObject name is free to differ from the FBX transform's,
+                // so joining the two by name would reintroduce exactly the guess this field exists to replace.
+                // Both sides load the same Mesh asset instance, which is what makes the join an identity test.
+                Mesh            = mesh,
                 VertexCount     = mesh != null ? mesh.vertexCount     : -1,
                 SubMeshCount    = mesh != null ? mesh.subMeshCount    : -1,
                 BlendShapeCount = mesh != null ? mesh.blendShapeCount : -1,
@@ -178,52 +185,148 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (winner != null) winner.IsSuperset = true;
         }
 
-        // ── Head / body detection ─────────────────────────────────────────────────────────────
+        // ── Viseme (face) mesh + body pick ────────────────────────────────────────────────────
 
         /// <summary>
-        /// Heuristic: renderer with the most blend shapes is the face/head mesh; second-most is
-        /// body. Uses the superset FBX as the reference so all mesh names are present.
+        /// The <c>visemeMesh=</c> field: the mesh name with its basis in parens, one key for one concept on
+        /// both routes. Emitting a different key per route (a <c>visemeMesh=</c> here, a <c>headGuess=</c>
+        /// there) would make every reader parse two names for one thing. Shape matches <c>toggles=</c>, which
+        /// already carries value-then-mechanism the same way.
         /// </summary>
-        private static void ComputeHeadBody(GraphData data)
+        internal static string VisemeSummary(string meshName, string basis)
         {
-            // Prefer the superset FBX as the reference for the heuristic
+            if (meshName == null) return "?";
+            return meshName + "(" + (basis ?? "unknown") + ")";
+        }
+
+        private static string VisemeField(GraphData data)
+        {
+            return VisemeSummary(data.VisemeMesh, data.VisemeBasis);
+        }
+
+        /// <summary>
+        /// The lipSync modes that actually declare a face mesh. The inspector's mode popup only switches
+        /// which fields it DRAWS — it never clears <c>VisemeSkinnedMesh</c> — so a descriptor left on
+        /// <c>JawFlapBone</c>, <c>Default</c> or <c>VisemeParameterOnly</c> can still carry a live pointer to
+        /// whatever face mesh was selected before the switch. Reporting that as a fact is precisely the
+        /// failure this door exists to remove, so the mode gates the read and everything else degrades.
+        /// </summary>
+        internal static bool DeclaresFaceMesh(VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle style)
+        {
+            return style == VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.VisemeBlendShape
+                || style == VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.JawFlapBlendShape;
+        }
+
+        /// <summary>
+        /// Records a descriptor's declared face mesh. First in path order wins.
+        ///
+        /// <para>Two counts, because they answer different questions and only one is a warning. Distinct
+        /// ASSETS is routinely &gt;1 on a healthy package — several body FBX variants each carry their own
+        /// <c>Body</c> mesh, so identity differs while the answer does not (measured: 4 of 14 local vendor
+        /// packages, none of them ambiguous). Distinct NAMES is the real disagreement: descriptors pointing at
+        /// differently-named renderers means which one is the face is genuinely unsettled. Counting only
+        /// identity would cry wolf on a third of the corpus.</para>
+        /// </summary>
+        private static void NoteVisemeMesh(GraphData data, VRCAvatarDescriptor desc,
+                                           HashSet<Mesh> seenAssets, HashSet<string> seenNames)
+        {
+            if (desc == null || !DeclaresFaceMesh(desc.lipSync)) return;
+            var smr = desc.VisemeSkinnedMesh;
+            if (smr == null) return;
+            var mesh = smr.sharedMesh;
+            if (mesh == null) return;
+
+            data.VisemeDescriptors++;
+            seenAssets.Add(mesh);
+            seenNames.Add(smr.name);
+            data.VisemeDistinctAssets = seenAssets.Count;
+            data.VisemeDistinctNames  = seenNames.Count;
+
+            if (data.VisemeSharedMesh == null) data.VisemeSharedMesh = mesh;
+        }
+
+        /// <summary>
+        /// Resolves the face mesh and the body pick, and names which of the two routes answered.
+        ///
+        /// <para>DESCRIPTOR route (a fact): the avatar's own <c>VRCAvatarDescriptor</c> declares its viseme
+        /// mesh, so the mesh — and with it WHICH FBX is the avatar's — is read rather than inferred. The join
+        /// back to the FBX inventory is by Mesh asset identity, never by name.</para>
+        ///
+        /// <para>GUESS route (labelled): where no descriptor answered, or the mesh it named is not in this
+        /// package's FBX inventory, fall back to the most-blendshapes reading and SAY SO in the field. The
+        /// out-of-inventory case is ordinary rather than exotic — an outfit or hair package's descriptor
+        /// routinely points at a base-body FBX in another package folder, while the FBX scan only reaches
+        /// <c>t:Model</c> under this one.</para>
+        ///
+        /// <para>The body pick is a heuristic on BOTH routes and keeps its hedge: nothing in the substrate
+        /// declares "the body mesh". What the descriptor buys it is the right reference FBX and a known mesh
+        /// to exclude. Its standing limit is structural, not the rare tie — it names the next-most-blendshapes
+        /// renderer, so on a base whose single body mesh also carries the visemes it necessarily names
+        /// something else, sometimes a prop.</para>
+        /// </summary>
+        private static void ResolveVisemeAndBody(GraphData data)
+        {
             FbxEntry source = null;
-            foreach (var e in data.FbxEntries) if (e.IsSuperset) { source = e; break; }
-            if (source == null && data.FbxEntries.Count > 0) source = data.FbxEntries[0];
-            if (source == null) return;
 
-            RendererInfo head = null;
-            RendererInfo body = null;
-
-            foreach (var ri in source.Renderers)
+            // ---- Descriptor route: identity-join the declared mesh into the FBX inventory ----
+            if (data.VisemeSharedMesh != null)
             {
-                if (head == null || ri.BlendShapeCount > head.BlendShapeCount)
+                foreach (var e in data.FbxEntries)
                 {
-                    body = head;
-                    head = ri;
+                    foreach (var ri in e.Renderers)
+                        if (ri.Mesh == data.VisemeSharedMesh) { source = e; break; }
+                    if (source != null) break;
                 }
-                else if (body == null || ri.BlendShapeCount > body.BlendShapeCount)
+
+                if (source != null)
                 {
-                    body = ri;
+                    data.AvatarFbxPath = source.Path;
+                    data.VisemeBasis   = "descriptor";
+                    foreach (var e in data.FbxEntries)
+                        foreach (var ri in e.Renderers)
+                            if (ri.Mesh == data.VisemeSharedMesh)
+                            {
+                                ri.IsVisemeMesh = true;
+                                if (data.VisemeMesh == null) data.VisemeMesh = ri.Name;
+                            }
                 }
             }
 
-            // Honesty guard: if even the top mesh has no readable mesh (blendShapeCount < 0,
-            // i.e. all renderers had a null sharedMesh), don't name a sentinel mesh as head/body.
-            if (head == null || head.BlendShapeCount < 0) return;
+            // ---- Guess route: the superset FBX, else the first scanned ----
+            if (source == null)
+            {
+                foreach (var e in data.FbxEntries) if (e.IsSuperset) { source = e; break; }
+                if (source == null && data.FbxEntries.Count > 0) source = data.FbxEntries[0];
+                if (source == null) return;
 
-            data.HeadMesh = head.Name;
-            data.BodyMesh = body != null ? body.Name : null;
+                RendererInfo top = null;
+                foreach (var ri in source.Renderers)
+                    if (top == null || ri.BlendShapeCount > top.BlendShapeCount) top = ri;
 
-            // Two hedge vocabularies, by design: top-level headGuess/bodyGuess name the single mesh this
-            // heuristic picked; the per-renderer likelyHead/likelyBody booleans mark that same pick across
-            // every FBX renderer. They are the same guess viewed two ways, not drift.
+                // Honesty guard: every renderer had a null sharedMesh (blendShapeCount < 0) ⇒ name nothing.
+                if (top == null || top.BlendShapeCount < 0) return;
+
+                data.VisemeMesh  = top.Name;
+                data.VisemeBasis = "guess:most-blendshapes";
+                // IsVisemeMesh deliberately stays false on this route — a guess does not get to wear a
+                // fact's name on a per-renderer flag.
+            }
+
+            // ---- Body pick: most blend shapes on the reference FBX that is not the face mesh ----
+            RendererInfo body = null;
+            foreach (var ri in source.Renderers)
+            {
+                bool isFace = data.VisemeSharedMesh != null && ri.Mesh == data.VisemeSharedMesh;
+                if (!isFace && data.VisemeSharedMesh == null) isFace = ri.Name == data.VisemeMesh;
+                if (isFace) continue;
+                if (body == null || ri.BlendShapeCount > body.BlendShapeCount) body = ri;
+            }
+            if (body == null || body.BlendShapeCount < 0) return;
+
+            data.BodyMesh = body.Name;
             foreach (var e in data.FbxEntries)
                 foreach (var ri in e.Renderers)
-                {
-                    ri.LikelyHead = data.HeadMesh != null && ri.Name == data.HeadMesh;
-                    ri.LikelyBody = data.BodyMesh != null && ri.Name == data.BodyMesh;
-                }
+                    ri.LikelyBody = ri.Name == data.BodyMesh;
         }
 
         // ── Prefab scan: constraints + the non-SDK component census ───────────────────────────
@@ -304,6 +407,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
           + "read it\", never \"supported\". Global-namespace components key on their type name instead. Read "
           + "unresolvedScripts before treating this list as complete.";
 
+        private const string VisemeNote =
+            "The face mesh, with visemeMeshBasis naming how it was arrived at. \"descriptor\" is a FACT: a "
+          + "VRCAvatarDescriptor whose lipSync mode declares a face mesh named it, and it was joined to this "
+          + "inventory by Mesh ASSET IDENTITY, not by name — avatarFbx is the FBX that mesh lives in, and is the "
+          + "reference for bodyGuess. \"guess:most-blendshapes\" is the old heuristic, reported only where no "
+          + "descriptor answered or the mesh it named is not in this package's FBX inventory (ordinary for an "
+          + "outfit or hair package pointing at a base body elsewhere) — verify it. isVisemeMesh is set only on "
+          + "the descriptor route. Read the two distinct-counts differently: visemeDistinctAssets > 1 is "
+          + "ORDINARY (a package shipping several body FBX variants gives each its own face-mesh asset, so "
+          + "identity differs while the answer does not) and only says which variant answered; "
+          + "visemeDistinctNames > 1 is the real ambiguity — descriptors naming differently-named renderers — "
+          + "and the first in path order was taken.";
+
+        private const string BodyGuessNote =
+            "A HEURISTIC on both routes — nothing in the substrate declares \"the body mesh\". It is the "
+          + "most-blendshapes renderer on the reference FBX excluding the face mesh, so on a base whose single "
+          + "body mesh also carries the visemes it necessarily names something else, sometimes a prop. A tie is "
+          + "broken by source order. Verify before anything hangs on it.";
+
         private const string UnresolvedScriptsNote =
             "Components whose script did not resolve, counted rather than skipped: an unresolvable component is by "
           + "definition a framework this census cannot name. Any nonzero count means nonSdkNamespaces is incomplete and "
@@ -374,6 +496,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static void ScanPrefabs(List<string> prefabPaths, GraphData data)
         {
+            var seenVisemeAssets = new HashSet<Mesh>();
+            var seenVisemeNames  = new HashSet<string>(StringComparer.Ordinal);
             foreach (var path in prefabPaths)
             {
                 GameObject root;
@@ -386,6 +510,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 try
                 {
+                    // Viseme resolution rides THIS walk, not FindFxController's: that one returns at the first
+                    // prefab yielding an FX layer, so it is not a full walk, and reusing it would mean deleting
+                    // that early return and paying LoadPrefabContents N times over. This walk already visits
+                    // every prefab in path order, and runs before the viseme/body resolve. Every descriptor is
+                    // read (not the first), so a package that disagrees with itself is counted rather than
+                    // silently resolved first-wins.
+                    foreach (var desc in root.GetComponentsInChildren<VRCAvatarDescriptor>(true))
+                        NoteVisemeMesh(data, desc, seenVisemeAssets, seenVisemeNames);
+
                     foreach (var comp in root.GetComponentsInChildren<Component>(true))
                     {
                         // A missing script slot is counted, not skipped: it is exactly the case where a
@@ -675,10 +808,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("  \"fbxCount\": ").Append(data.FbxEntries.Count).Append(",\n");
             sb.Append("  \"prefabCount\": ").Append(data.PrefabCount).Append(",\n");
             sb.Append("  \"supersetFbx\": ").Append(TransplantCore.Q(data.SupersetFbx ?? "none")).Append(",\n");
-            sb.Append("  \"headGuess\": ").Append(TransplantCore.Q(data.HeadMesh)).Append(",\n");
+            sb.Append("  \"visemeMesh\": ").Append(TransplantCore.Q(data.VisemeMesh)).Append(",\n");
+            sb.Append("  \"visemeMeshBasis\": ").Append(TransplantCore.Q(data.VisemeBasis)).Append(",\n");
+            sb.Append("  \"avatarFbx\": ").Append(TransplantCore.Q(data.AvatarFbxPath)).Append(",\n");
+            sb.Append("  \"visemeDescriptors\": ").Append(data.VisemeDescriptors).Append(",\n");
+            sb.Append("  \"visemeDistinctAssets\": ").Append(data.VisemeDistinctAssets).Append(",\n");
+            sb.Append("  \"visemeDistinctNames\": ").Append(data.VisemeDistinctNames).Append(",\n");
+            sb.Append("  \"visemeMeshNote\": ").Append(TransplantCore.Q(VisemeNote)).Append(",\n");
             sb.Append("  \"bodyGuess\": ").Append(TransplantCore.Q(data.BodyMesh)).Append(",\n");
-            sb.Append("  \"headBodyHeuristic\": ")
-              .Append(data.HeadMesh != null ? TransplantCore.Q("most-blendshapes renderer = face; verify") : "null")
+            sb.Append("  \"bodyGuessHeuristic\": ")
+              .Append(data.BodyMesh != null ? TransplantCore.Q(BodyGuessNote) : "null")
               .Append(",\n");
             sb.Append("  \"fxController\": ").Append(TransplantCore.Q(data.FxControllerPath)).Append(",\n");
             sb.Append("  \"toggles\": ").Append(TransplantCore.Q(data.ToggleStatus)).Append(",\n");
@@ -723,7 +862,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                       .Append(", \"vertexCount\": ").Append(r.VertexCount)
                       .Append(", \"subMeshCount\": ").Append(r.SubMeshCount)
                       .Append(", \"blendShapeCount\": ").Append(r.BlendShapeCount)
-                      .Append(", \"likelyHead\": ").Append(r.LikelyHead ? "true" : "false")
+                      .Append(", \"isVisemeMesh\": ").Append(r.IsVisemeMesh ? "true" : "false")
                       .Append(", \"likelyBody\": ").Append(r.LikelyBody ? "true" : "false")
                       .Append(", \"hasToggle\": ").Append(r.HasToggle ? "true" : "false")
                       .Append(" }");
@@ -757,7 +896,32 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public string ToggleSummary;
             public string ToggleCaveat;
             public string SupersetFbx;
-            public string HeadMesh;
+
+            // ── Viseme (face) mesh: a FACT when a descriptor declares it, a labelled guess otherwise ──
+            /// <summary>The Mesh asset the descriptor names for visemes; null when no descriptor answered.
+            /// Held as the asset instance (not a name) because it is the join key — and it outlives the
+            /// prefab it was read from, being a persistent asset, exactly as the FX controller does.</summary>
+            public Mesh   VisemeSharedMesh;
+            /// <summary>Reported viseme/face mesh name, whatever the basis.</summary>
+            public string VisemeMesh;
+            /// <summary>How <see cref="VisemeMesh"/> was arrived at — <c>descriptor</c> or
+            /// <c>guess:most-blendshapes</c>. Rides the field in parens so one key never means two things.</summary>
+            public string VisemeBasis;
+            /// <summary>Asset path of the FBX carrying the viseme mesh — the reference FBX for the body pick,
+            /// and the handle the next step needs. Null when the descriptor route did not answer.</summary>
+            public string AvatarFbxPath;
+            /// <summary>Descriptors whose lipSync mode declares a face mesh.</summary>
+            public int    VisemeDescriptors;
+            /// <summary>Distinct face-mesh ASSETS named across those descriptors. Routinely &gt;1 without
+            /// anything being wrong: a package shipping several body FBX variants gives each its own <c>Body</c>
+            /// mesh asset, so identity differs while the answer does not. RunLog only — it says which variant
+            /// answered, not that anything disagrees.</summary>
+            public int    VisemeDistinctAssets;
+            /// <summary>Distinct face-mesh NAMES. This is the one that means disagreement: the descriptors in
+            /// this package point at differently-named renderers, so which one is the face is genuinely
+            /// ambiguous and the first in path order was taken. Surfaced in the summary only when &gt;1.</summary>
+            public int    VisemeDistinctNames;
+
             public string BodyMesh;
             public readonly List<FbxEntry> FbxEntries = new List<FbxEntry>();
         }
@@ -774,10 +938,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private class RendererInfo
         {
             public string Name;
+            public Mesh   Mesh;
             public int    VertexCount;
             public int    SubMeshCount;
             public int    BlendShapeCount;
-            public bool   LikelyHead;
+            /// <summary>True only where the descriptor's own viseme mesh IS this renderer's mesh (identity).
+            /// Emitted only on the descriptor route — on the degraded route the flag is omitted entirely
+            /// rather than shipped as a guess wearing a fact's name.</summary>
+            public bool   IsVisemeMesh;
             public bool   LikelyBody;
             public bool   HasToggle;
         }

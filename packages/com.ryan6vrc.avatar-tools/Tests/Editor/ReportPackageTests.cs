@@ -231,4 +231,43 @@ public class ReportPackageTests
 
         Assert.AreEqual(expected, ReportPackage.NonSdkSummary(census));
     }
+
+    // ── Viseme mesh: the lipSync mode gate ────────────────────────────────────────────────────
+
+    // The gate exists because VisemeSkinnedMesh is NOT cleared when the mode changes — the inspector only
+    // switches which fields it draws. So a descriptor sitting on JawFlapBone can still hold a live pointer to
+    // whatever face mesh was chosen before the switch, and reading it there would report a stale guess under a
+    // field that claims to be a fact. Both polarities are pinned: widening this set silently re-admits that
+    // stale read, and narrowing it silently demotes every JawFlapBlendShape avatar to the guess route.
+    [TestCase(VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.VisemeBlendShape,   true)]
+    [TestCase(VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.JawFlapBlendShape,  true)]
+    [TestCase(VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.JawFlapBone,        false)]
+    [TestCase(VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.VisemeParameterOnly, false)]
+    [TestCase(VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.Default,           false)]
+    public void DeclaresFaceMesh_admits_only_the_modes_that_draw_a_face_mesh(
+        VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle style, bool expected)
+    {
+        Assert.AreEqual(expected, ReportPackage.DeclaresFaceMesh(style));
+    }
+
+    // ── Viseme mesh: one key, basis in parens ─────────────────────────────────────────────────
+
+    // The two routes must not emit two different KEYS — a reader would then have to parse both to learn one
+    // thing. The basis rides the value instead, the same shape `toggles=` already uses. The unresolved case
+    // stays "?" so it reads as absent rather than as a mesh named "unknown".
+    [TestCase("Body",  "descriptor",             "Body(descriptor)")]
+    [TestCase("Body",  "guess:most-blendshapes", "Body(guess:most-blendshapes)")]
+    [TestCase(null,    "descriptor",             "?")]
+    public void VisemeSummary_carries_the_basis_beside_the_value(string mesh, string basis, string expected)
+    {
+        Assert.AreEqual(expected, ReportPackage.VisemeSummary(mesh, basis));
+    }
+
+    // A named mesh with no basis is a bug in the caller, not a silent "trust me": the field still says the
+    // basis is unknown rather than presenting the name bare, which would read as the descriptor route.
+    [Test]
+    public void VisemeSummary_never_presents_a_bare_name_as_if_it_were_a_fact()
+    {
+        Assert.AreEqual("Body(unknown)", ReportPackage.VisemeSummary("Body", null));
+    }
 }
