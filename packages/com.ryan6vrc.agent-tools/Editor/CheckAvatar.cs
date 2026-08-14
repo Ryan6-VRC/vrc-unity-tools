@@ -518,10 +518,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             rep.Notes.Add(FailLoudNotePrefix + msg.Substring("[CheckAvatar] ".Length));
         }
 
-        // A surface this door can see but cannot walk. Same fail-loud contract as the note above, and the
-        // same reason: a clean verdict that silently skipped a live merged controller is the false PASS this
-        // door exists to prevent. Its bindings are NOT checked, and the note says so rather than letting the
-        // verdict imply a coverage it does not have.
+        // A surface this door can see but cannot walk. Same fail-loud contract as above: a clean verdict
+        // that silently skipped a live merged controller is the false PASS this door exists to prevent.
         private static void SurfaceUnlintable(Component c, string what, Report rep)
         {
             string msg = "[CheckAvatar] surface @ " + PathOf(c.gameObject) + " mounts " + what
@@ -778,10 +776,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             int mergeConflict = rep.MergeConflicts.Count;
             string result = (maSceneRef > 0 || clipBinding > 0 || anchorSeam > 0 || mergeConflict > 0) ? "CLASSIFY" : "PASS";
 
-            // The count rides the SUMMARY, not only the body: a surface this run could not walk is exactly
-            // the case where a bare `=> PASS` is read as coverage it does not have. It is not folded into the
-            // verdict — an unwalkable surface is a gap in reach, not a reference break, and blurring the two
-            // would make CLASSIFY stop meaning "an offender is named below".
+            // On the SUMMARY, not just the body — a bare `=> PASS` would read as coverage this run lacks.
+            // Not folded into the verdict: a gap in reach is not a reference break, and blurring them would
+            // make CLASSIFY stop meaning "an offender is named below".
             string unlintablePart = rep.UnlintableSurfaces > 0
                 ? string.Format(CultureInfo.InvariantCulture, " unlintableSurfaces={0}", rep.UnlintableSurfaces) : "";
             string summary = string.Format(CultureInfo.InvariantCulture,

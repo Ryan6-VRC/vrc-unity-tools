@@ -193,15 +193,13 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         internal enum FrameKind { DescriptorLayer, MA, VRCF }
 
-        /// <summary>Describe a runtime controller these doors cannot lint, or null when the object is one
-        /// they can (or is genuinely absent). An <c>AnimatorOverrideController</c> is not an
-        /// <c>AnimatorController</c> — they are siblings under <c>RuntimeAnimatorController</c> — so every
-        /// <c>as AnimatorController</c> in this file reads a live override controller as an empty slot.
-        /// The base is named because it is where a caller reads next; the override count is of NON-NULL
-        /// entries, since <c>overridesCount</c> is the whole base clip table and would report every clip
-        /// as an override. A base that is itself an override is said so rather than followed.</summary>
-        /// <param name="includeSelfPath">false when the caller already named this asset (the asset doors
-        /// echo the handle they were given), so the path is not printed twice in one sentence.</param>
+        /// <summary>Describe a runtime controller these doors cannot lint, or null for one they can (or
+        /// for genuine absence). An <c>AnimatorOverrideController</c> is a SIBLING of
+        /// <c>AnimatorController</c> under <c>RuntimeAnimatorController</c>, so every <c>as
+        /// AnimatorController</c> here reads a live one as an empty slot. The base is named because it is
+        /// where a caller reads next; the count is of NON-NULL entries, <c>overridesCount</c> being the
+        /// whole base clip table. A base that is itself an override is said so, not followed.</summary>
+        /// <param name="includeSelfPath">false when the caller already echoed this handle.</param>
         internal static string DescribeUnlintableController(UnityEngine.Object rac, bool includeSelfPath = true)
         {
             var ovr = rac as AnimatorOverrideController;

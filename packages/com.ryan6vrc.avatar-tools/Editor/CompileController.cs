@@ -217,13 +217,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // document with no `menu:` block reads exactly as it did before the surface existed.
             string menuPart = !emittedMenu ? "" :
                 string.Format(CultureInfo.InvariantCulture, " menu={0}c/{1}p", CountControls(doc.Menu), built.MenuChildren.Count + 1);
-            // An unresolved motion ref is emitted as a null slot (ControllerEmit), and a null slot is the
-            // clean-empty idiom every downstream lint is whitelisted against — so the rebuilt controller
-            // reports missingMotion=0 where its source reported the break. The asset cannot carry the
-            // dangling ref (no C# API writes a broken PPtr), so the VERDICT carries it instead: CLASSIFY,
-            // a finding for the agent to route, never a tool failure — the same grammar CheckAvatar and
-            // CheckHumanoidRig use. `=> OK` here would certify a drop this door just made.
-            // `animator.md` owns why a round-tripped controller is verdict-cleaner than its source.
+            // The null slot ControllerEmit writes is the clean-empty idiom every lint is whitelisted
+            // against, so the rebuild reports missingMotion=0 where its source reported the break, and no
+            // C# API can write the dangling ref back. The VERDICT carries it instead — CLASSIFY, a finding
+            // to route, CheckAvatar's grammar — because `=> OK` would certify a drop this door just made.
             string verdict = unresolvedRefs.Count > 0 ? "CLASSIFY" : "OK";
             string unresolvedPart = unresolvedRefs.Count > 0
                 ? string.Format(CultureInfo.InvariantCulture, " unresolvedRefs={0}", unresolvedRefs.Count) : "";

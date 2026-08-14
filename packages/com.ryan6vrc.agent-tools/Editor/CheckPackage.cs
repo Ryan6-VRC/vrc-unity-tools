@@ -208,11 +208,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// path — and it is the only one whose target key can over-count, having nothing but the
         /// in-memory handle to key on.
         ///
-        /// <paramref name="assetExists"/> is why a path alone cannot word this: a deleted or moved-away
-        /// asset's GUID keeps resolving to its old path (<see cref="RunLogFormat.AssetGuidResolves"/>),
-        /// so wording every non-empty path as "resolves to X, which holds no object with fileID N" states
-        /// a sub-asset is missing from a file that is itself gone — and routes the reader to hunt the
-        /// wrong thing.</summary>
+        /// <paramref name="assetExists"/> is why a path alone cannot word this: a deleted asset's GUID
+        /// keeps resolving to its old path (<see cref="RunLogFormat.AssetGuidResolves"/>), so wording every
+        /// non-empty path as "holds no object with fileID N" hunts a sub-asset in a file that is gone.</summary>
         internal static string DescribeTarget(int instanceId, bool mapped, string guid, long fileId, string assetPath,
                                               bool assetExists)
         {

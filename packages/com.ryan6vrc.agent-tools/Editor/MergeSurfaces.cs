@@ -74,11 +74,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             Action<Component, FrameResult> onMaFrame = null,
             Action<Component, string> onUnlintable = null)
         {
-            // A surface whose controller none of these doors can walk (an AnimatorOverrideController) is
-            // reported through this channel and deliberately NOT returned as a Surface: Surface.Controller is
-            // typed AnimatorController and every consumer runs rules on it unconditionally, so admitting one
-            // would turn a silent drop into a silent false inclusion — the worse of the two. Callers that
-            // count surfaces walked must not count these.
+            // Reported here and deliberately NOT returned as a Surface: Surface.Controller is typed
+            // AnimatorController and every consumer runs rules on it unconditionally, so admitting one
+            // would turn a silent drop into a silent false inclusion. Don't count these as walked.
             void Unlintable(Component site, List<string> descriptions)
             {
                 if (descriptions == null || onUnlintable == null) return;

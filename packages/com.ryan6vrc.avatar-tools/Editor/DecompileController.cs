@@ -149,12 +149,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// can therefore read the same and collapse into one row. That is a gap in how refusals are LOCATED, not
         /// one this join introduces — it neither adds nor removes information the un-joined verdict carried.</para>
         /// </summary>
-        /// <summary>How much of the controller the refusal actually implicates. Deliberately NOT phrased as
-        /// a clean/dirty split: nothing decompiled, so a "3 clean" reads as partial success and invites a
-        /// fix-one-and-retry that fails again. "Refused" means <i>carries at least one refusal</i>, which is
-        /// not the same as absent from the document — a synced layer refuses and is skipped, while an iKPass
-        /// layer refuses and is still decoded. Document-scope refusals (a parameter, the controller itself)
-        /// belong to no layer and are counted apart rather than filed under layer 0.</summary>
+        /// <summary>How much of the controller the refusal implicates. NOT a clean/dirty split: nothing
+        /// decompiled, so "3 clean" would read as partial success. "Refused" means <i>carries a refusal</i>,
+        /// not <i>absent from the document</i> — a synced layer refuses and is skipped, an iKPass layer
+        /// refuses and is still decoded. Refusals owned by no layer are counted apart, not filed under
+        /// layer 0.</summary>
         private static string RefusalScope(ControllerDecompile.WalkResult walk)
         {
             var layers = new System.Collections.Generic.HashSet<int>();
