@@ -159,5 +159,28 @@ namespace Ryan6Vrc.AgentTools.Editor
             var path = string.IsNullOrEmpty(guidPath) ? handle : guidPath;
             return AssetDatabase.LoadAssetAtPath<T>(path);
         }
+
+        /// <summary>Does the asset behind this GUID exist? The liveness test every dangling-reference
+        /// sweep needs, and <see cref="AssetDatabase.GUIDToAssetPath"/> is NOT it: a GUID the editor has
+        /// ever known keeps resolving to its old path after the asset is deleted (measured; survives a
+        /// <c>ForceUpdate</c>), so only a NEVER-known GUID reads as dangling on the path test — which
+        /// misses the ordinary case and hits only the foreign-project one.
+        ///
+        /// TYPE-AGNOSTIC deliberately: <c>LoadAssetAtPath&lt;Motion&gt;</c> reads an FBX-embedded clip
+        /// (main asset a <c>GameObject</c>) and a controller sub-asset as dangling — both routine on
+        /// vendor avatars, so a typed probe invents broken motions on healthy rigs.
+        ///
+        /// It asks the DATABASE, not the loader. <c>LoadMainAssetAtPath</c> would materialize the whole
+        /// asset — for an FBX-embedded clip, the model hierarchy and its meshes — once per distinct GUID on
+        /// read-only lint paths, and it also answers "won't load" rather than "isn't there", so a project
+        /// mid-reimport would read as a pile of broken motions. Callers wording this for a human should say
+        /// "no longer resolves", not "was deleted": this cannot tell the two apart, and neither can the
+        /// GUID.</summary>
+        public static bool AssetGuidResolves(string guid)
+        {
+            if (string.IsNullOrEmpty(guid)) return false;
+            var path = AssetDatabase.GUIDToAssetPath(guid);
+            return !string.IsNullOrEmpty(path) && AssetDatabase.GetMainAssetTypeAtPath(path) != null;
+        }
     }
 }

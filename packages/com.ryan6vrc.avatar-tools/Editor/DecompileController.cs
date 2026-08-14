@@ -54,16 +54,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (string.IsNullOrEmpty(outPath)) return Fail(failLabel, controllerPath, "outPath is empty");
 
             var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
-            if (controller == null) return Fail(failLabel, controllerPath, "controller not found at: " + controllerPath);
+            // Shared with the agent-tools asset doors: an override controller is a present asset, and
+            // "controller not found" sends the caller hunting a missing file.
+            if (controller == null) return Fail(failLabel, controllerPath, ReportController.RefuseWhy(controllerPath));
 
             // ── Reachability walk ─────────────────────────────────────────────────────────────────────
             ControllerDecompile.WalkResult walk;
             try { walk = ControllerDecompile.Walk(controller, stripLayout); }
             catch (Exception e) { return Fail(failLabel, controllerPath, "walk: " + e.GetType().Name + ": " + e.Message); }
 
-            // A refusal is fail-loud: name every out-of-vocabulary construct, write no .yaml.
+            // A refusal is fail-loud: name every out-of-vocabulary construct, write no .yaml. The scope is
+            // the whole DOCUMENT and stays that way — emitting only the clean layers would produce a valid,
+            // recompilable YAML that silently drops a layer, and the round trip's contract is that the
+            // rebuilt controller is a pure function of the document (`animator.md`). What the refusal owes
+            // instead is scale and a next move, both below.
             if (walk.Refusals.Count > 0)
-                return Fail(failLabel, controllerPath, JoinRefusals(walk.Refusals));
+                return Fail(failLabel, controllerPath, RefusalScope(walk) + JoinRefusals(walk.Refusals) + RefusalRoute(walk));
 
             var doc = walk.Doc;
 
@@ -145,6 +151,38 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// can therefore read the same and collapse into one row. That is a gap in how refusals are LOCATED, not
         /// one this join introduces — it neither adds nor removes information the un-joined verdict carried.</para>
         /// </summary>
+        /// <summary>How much of the controller the refusal implicates. NOT a clean/dirty split: nothing
+        /// decompiled, so "3 clean" would read as partial success. "Refused" means <i>carries a refusal</i>,
+        /// not <i>absent from the document</i> — a synced layer refuses and is skipped, an iKPass layer
+        /// refuses and is still decoded. Refusals owned by no layer are counted apart, not filed under
+        /// layer 0.</summary>
+        private static string RefusalScope(ControllerDecompile.WalkResult walk)
+        {
+            var layers = new System.Collections.Generic.HashSet<int>();
+            int document = 0;
+            foreach (var idx in walk.RefusalLayers) { if (idx < 0) document++; else layers.Add(idx); }
+            string s = "refusedLayers=" + layers.Count + "/" + walk.LayerCount;
+            if (document > 0) s += " documentScope=" + document;
+            return s + " — ";
+        }
+
+        /// <summary>The next move, because a refusal that only names constructs leaves the agent to guess
+        /// between owning the graph and abandoning it. Keyed on the SAME scope the line above reports: a
+        /// document-scope refusal (a parameter, the controller itself) is caused by no layer, so the
+        /// trim-the-layer route is a dead end there and must not be offered. Compressed; `animator.md`
+        /// owns the round-trip.</summary>
+        private static string RefusalRoute(ControllerDecompile.WalkResult walk)
+        {
+            bool anyLayer = walk.RefusalLayers.Any(i => i >= 0);
+            string route = "  [route: to READ this controller use ReportController — decompile is for OWNING it.";
+            route += anyLayer
+                ? " To own the rest, drop the named layer(s) first (CleanController trims by layer NAME without "
+                + "parsing contents), then re-decompile"
+                : " The refusal is not a layer's, so trimming layers will not clear it — repair the named "
+                + "construct on the controller itself, then re-decompile";
+            return route + "; `animator.md` owns the round-trip.]";
+        }
+
         private static string JoinRefusals(System.Collections.Generic.List<string> refusals)
         {
             var order = new System.Collections.Generic.List<string>();

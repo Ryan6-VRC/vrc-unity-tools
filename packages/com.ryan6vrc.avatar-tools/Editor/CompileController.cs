@@ -217,9 +217,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // document with no `menu:` block reads exactly as it did before the surface existed.
             string menuPart = !emittedMenu ? "" :
                 string.Format(CultureInfo.InvariantCulture, " menu={0}c/{1}p", CountControls(doc.Menu), built.MenuChildren.Count + 1);
+            // The null slot ControllerEmit writes is the clean-empty idiom every lint is whitelisted
+            // against, so the rebuild reports missingMotion=0 where its source reported the break, and no
+            // C# API can write the dangling ref back. The VERDICT carries it instead — CLASSIFY, a finding
+            // to route, CheckAvatar's grammar — because `=> OK` would certify a drop this door just made.
+            string verdict = unresolvedRefs.Count > 0 ? "CLASSIFY" : "OK";
+            string unresolvedPart = unresolvedRefs.Count > 0
+                ? string.Format(CultureInfo.InvariantCulture, " unresolvedRefs={0}", unresolvedRefs.Count) : "";
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CompileController] {0}: layers={1} states={2} params={3}{4} => OK{5}",
-                name, doc.Layers.Count, states, doc.Parameters.Count, menuPart, whatIf ? " (whatIf)" : "");
+                "[CompileController] {0}: layers={1} states={2} params={3}{4}{5} => {6}{7}",
+                name, doc.Layers.Count, states, doc.Parameters.Count, menuPart, unresolvedPart, verdict,
+                whatIf ? " (whatIf)" : "");
 
             string body = BuildBody(doc, finalPath, lint, frameLatency, unresolvedRefs, oscUnsafeNames, outsideIcons, whatIf);
 
@@ -421,11 +429,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
               .Append(" params=").Append(doc.Parameters.Count).Append("  \n");
 
             sb.Append("\n## Post-emit graph lint\n\n");
+            // Derived, not a literal: this line reads as the lint's verdict, and the gates that make PASS
+            // true here enumerate rule counts by hand (BrokenBinding among the omissions), so a hardcoded
+            // token would state a verdict the counts printed beside it can contradict.
             sb.Append("missingMotion=").Append(lint.MissingMotion)
               .Append(" undeclaredParam=").Append(lint.UndeclaredParam)
               .Append(" entryShadow=").Append(lint.EntryShadow)
               .Append(" deadTransition=").Append(lint.DeadTransition)
-              .Append(" (errors ").Append(lint.Errors.Count).Append(") — PASS\n");
+              .Append(" (errors ").Append(lint.Errors.Count).Append(") — ")
+              .Append(lint.Errors.Count == 0 ? "PASS" : "FAIL").Append('\n');
             if (lint.Advisories.Count > 0)
                 foreach (var o in lint.Advisories)
                     sb.Append("- advisory: **").Append(o.Kind).Append("** ").Append(o.Where).Append(" — ").Append(o.Detail).Append('\n');

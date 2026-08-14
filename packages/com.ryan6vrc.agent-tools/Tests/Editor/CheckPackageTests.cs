@@ -7,7 +7,7 @@ using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 
 // CheckPackage proof obligations, scoped to the empty-vs-dangling verdict its PASS/FAIL rests on:
-//   • DescribeTarget(...) — the target-naming wording, pure, so all three shapes are asserted directly
+//   • DescribeTarget(...) — the target-naming wording, pure, so all four shapes are asserted directly
 //     rather than by hunting an asset state that produces each one.
 //   • The false-alarm trap — a clean-zero slot stays EMPTY and stays PASS.
 //   • Distinct-target collapse — N slots dangling at one target report N missing, 1 target. This is the
@@ -46,7 +46,8 @@ public class CheckPackageTests
     [Test]
     public void DescribeTarget_unmapped_namesTheInstanceIdAndClaimsNoGuid()
     {
-        var s = CheckPackage.DescribeTarget(487710, mapped: false, guid: null, fileId: 0, assetPath: null);
+        var s = CheckPackage.DescribeTarget(487710, mapped: false, guid: null, fileId: 0, assetPath: null,
+                                            assetExists: false);
         StringAssert.Contains("487710", s);
         StringAssert.Contains("no guid mapping", s);
     }
@@ -54,7 +55,8 @@ public class CheckPackageTests
     [Test]
     public void DescribeTarget_guidWithNoAsset_saysAbsentFromProject()
     {
-        var s = CheckPackage.DescribeTarget(1, mapped: true, guid: "deadbeef", fileId: 2100000, assetPath: "");
+        var s = CheckPackage.DescribeTarget(1, mapped: true, guid: "deadbeef", fileId: 2100000, assetPath: "",
+                                            assetExists: false);
         StringAssert.Contains("deadbeef", s);
         StringAssert.Contains("absent from this project", s);
         // The remedy differs from the resolves-but-lacks-the-sub-object case, so the two must not blur.
@@ -65,10 +67,24 @@ public class CheckPackageTests
     public void DescribeTarget_guidResolves_namesTheFileAndTheMissingFileId()
     {
         var s = CheckPackage.DescribeTarget(1, mapped: true, guid: "deadbeef", fileId: 2100000,
-                                            assetPath: "Assets/Vendor/Outfits/X/Models/x.fbx");
+                                            assetPath: "Assets/Vendor/Outfits/X/Models/x.fbx", assetExists: true);
         StringAssert.Contains("Assets/Vendor/Outfits/X/Models/x.fbx", s);
         StringAssert.Contains("2100000", s);
         StringAssert.Contains("holds no object", s);
+    }
+
+    [Test]
+    public void DescribeTarget_pathIsStale_saysTheAssetIsGoneNotTheSubObject()
+    {
+        // A deleted asset's guid keeps resolving to its old path, so the path alone cannot tell these
+        // apart — and the remedies are opposite (find the sub-asset vs. restore the asset).
+        var s = CheckPackage.DescribeTarget(1, mapped: true, guid: "deadbeef", fileId: 2100000,
+                                            assetPath: "Assets/Vendor/Outfits/X/Models/x.fbx", assetExists: false);
+        StringAssert.Contains("Assets/Vendor/Outfits/X/Models/x.fbx", s);
+        StringAssert.Contains("no longer resolves", s);
+        // Not "deleted": a failed import reaches here too, and the GUID cannot tell the two apart.
+        Assert.IsFalse(s.Contains("no longer exists"), "must not assert deletion it cannot establish: " + s);
+        Assert.IsFalse(s.Contains("holds no object"), "a gone file must not read as a present one: " + s);
     }
 
     // ── The verdict the counts drive ───────────────────────────────────────────────────────────────────

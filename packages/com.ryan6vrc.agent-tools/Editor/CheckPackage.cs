@@ -191,7 +191,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // Serialized identity, not the in-memory handle: counting distinct targets is only
                     // meaningful against what the file records. An unmapped id has nothing else to key on.
                     Key = mapped ? guid + "/" + fileId : "instanceID:" + instanceId,
-                    Detail = DescribeTarget(instanceId, mapped, guid, fileId, mapped ? AssetDatabase.GUIDToAssetPath(guid) : null)
+                    Detail = DescribeTarget(instanceId, mapped, guid, fileId,
+                        mapped ? AssetDatabase.GUIDToAssetPath(guid) : null,
+                        mapped && RunLogFormat.AssetGuidResolves(guid))
                 };
                 r.TargetCache[instanceId] = t;
             }
@@ -200,17 +202,23 @@ namespace Ryan6Vrc.AgentTools.Editor
             return t.Detail;
         }
 
-        /// <summary>Pure wording for the three shapes the answer takes, so each is assertable without
+        /// <summary>Pure wording for the four shapes the answer takes, so each is assertable without
         /// having to provoke a real dangling reference. A guid mapping does survive for an instance id
         /// whose object fails to load, so the unmapped branch is rare residue rather than the normal
         /// path — and it is the only one whose target key can over-count, having nothing but the
-        /// in-memory handle to key on.</summary>
-        internal static string DescribeTarget(int instanceId, bool mapped, string guid, long fileId, string assetPath)
+        /// in-memory handle to key on.
+        ///
+        /// <paramref name="assetExists"/> is why a path alone cannot word this: a deleted asset's GUID
+        /// keeps resolving to its old path (<see cref="RunLogFormat.AssetGuidResolves"/>), so wording every
+        /// non-empty path as "holds no object with fileID N" hunts a sub-asset in a file that is gone.</summary>
+        internal static string DescribeTarget(int instanceId, bool mapped, string guid, long fileId, string assetPath,
+                                              bool assetExists)
         {
             if (!mapped) return "instanceID " + instanceId + " has no guid mapping";
-            return string.IsNullOrEmpty(assetPath)
-                ? "guid " + guid + " is absent from this project"
-                : "guid " + guid + " resolves to " + assetPath + ", which holds no object with fileID " + fileId;
+            if (string.IsNullOrEmpty(assetPath)) return "guid " + guid + " is absent from this project";
+            return assetExists
+                ? "guid " + guid + " resolves to " + assetPath + ", which holds no object with fileID " + fileId
+                : "guid " + guid + " was " + assetPath + ", which no longer resolves (deleted, moved, or failed to import)";
         }
 
         // An FBX's external-material remap is applied only at import time, so a model imported before its

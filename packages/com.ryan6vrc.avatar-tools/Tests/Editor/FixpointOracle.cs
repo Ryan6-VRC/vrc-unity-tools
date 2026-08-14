@@ -32,7 +32,14 @@ namespace Ryan6Vrc.AvatarTools.Tests
             string outDir = testRoot + "/out_" + name + "_" + tag;
             AnimatorTestHelpers.EnsureFolder(outDir);
             string res = CompileController.Compile(y, outDir, whatIf: false);
-            StringAssert.Contains("=> OK", res, "compile (" + tag + ") is clean");
+            // CLASSIFY is a clean compile that carries a finding to route, not a failure — a source
+            // controller with dangling motion refs earns it and still round-trips (GoGoLoco's
+            // GoLocoBaseFullPoses ships 4). The fixpoint property is stability, so demanding OK here would
+            // pin "the corpus has no broken motions", which is not a fact about this compiler. FAIL is still
+            // a failure; the count's own stability across c1/c2 is asserted by the callers' text compare.
+            StringAssert.DoesNotContain("=> FAIL", res, "compile (" + tag + ") did not fail");
+            Assert.IsTrue(res.Contains("=> OK") || res.Contains("=> CLASSIFY"),
+                "compile (" + tag + ") is clean or classifies: " + res);
             var c = AssetDatabase.LoadAssetAtPath<AnimatorController>(outDir + "/" + name + ".controller");
             Assert.IsNotNull(c, "compiled controller (" + tag + ") loads");
             return c;

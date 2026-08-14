@@ -44,11 +44,24 @@ namespace Ryan6Vrc.AgentTools.Editor
             var controller = RunLogFormat.LoadByPathOrGuid<AnimatorController>(controllerPathOrGuid);
             if (controller == null)
             {
-                var err = "[ReportController] FAIL: no AnimatorController at '" + controllerPathOrGuid + "' — expects an asset path or GUID";
+                var err = "[ReportController] FAIL: " + RefuseWhy(controllerPathOrGuid);
                 Debug.LogError(err);
                 return err;
             }
             return Report(controller);
+        }
+
+        /// <summary>Why a handle that named no <c>AnimatorController</c> was refused. An
+        /// <c>AnimatorOverrideController</c> is the case worth separating: it is a live asset at that exact
+        /// path, so "no AnimatorController at '…'" reads as a missing file and sends the caller hunting one.
+        /// The base is named because that is where the caller reads next — and the omission is named with
+        /// it, because reading the base is NOT reading this asset's behaviour.</summary>
+        public static string RefuseWhy(string handle)
+        {
+            var any = RunLogFormat.LoadByPathOrGuid<RuntimeAnimatorController>(handle);
+            var what = CheckAnimator.DescribeUnlintableController(any, includeSelfPath: false);
+            if (what != null) return "'" + handle + "' is an " + what;
+            return "no AnimatorController at '" + handle + "' — expects an asset path or GUID";
         }
 
         /// <summary>Digest <paramref name="controller"/> to markdown under Snapshots/. Returns a one-line
@@ -541,7 +554,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var mm = Regex.Match(line, @"m_Motion:\s*\{fileID:\s*-?\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}");
                     if (!mm.Success) continue;
                     var g = mm.Groups[1].Value;
-                    if (!string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(g))) continue; // resolves ⇒ not dangling
+                    if (RunLogFormat.AssetGuidResolves(g)) continue; // resolves ⇒ not dangling
                     if (seen.Add(g)) result.Add(g);
                     if (!byBlock.TryGetValue(curFileId, out var lst)) byBlock[curFileId] = lst = new List<string>();
                     if (!lst.Contains(g)) lst.Add(g);

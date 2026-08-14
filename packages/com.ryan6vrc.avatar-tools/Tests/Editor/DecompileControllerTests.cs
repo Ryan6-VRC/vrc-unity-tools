@@ -191,7 +191,9 @@ public class DecompileControllerTests
     // bogus path the not-found guard would fire first and the case would prove nothing about outPath.
     [TestCase("", "/x.yaml", "controllerPath is empty")]
     [TestCase("REAL", "", "outPath is empty")]
-    [TestCase("/nope.controller", "/x.yaml", "controller not found")]
+    // Shared with the agent-tools asset doors (ReportController.RefuseWhy), so an override controller —
+    // a PRESENT asset — is named as one instead of reading as a missing file. One wording, three doors.
+    [TestCase("/nope.controller", "/x.yaml", "no AnimatorController at")]
     public void Arg_Guard_Failures_Name_Their_Reason(string ctrlSpec, string outSpec, string reason)
     {
         string ctrlPath;
