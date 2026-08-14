@@ -288,16 +288,23 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("no SkinnedMeshRenderer with blendshapes", r);
     }
 
+    // A healthy mesh with nothing co-active is an ANSWER, not a refusal: all three sources are optional by
+    // contract and the tool assembles the set itself, so "nothing is on together here" is what the caller
+    // asked. It used to share the bad-input FAIL envelope, which also denied the caller a RunLog path —
+    // the artifact the compose checkpoint requires — so a legitimate empty read could not be recorded.
     [Test]
-    public void Report_emptyShapeNames_fails()
+    public void Report_emptyCoActiveSet_isAnAnswerNotARefusal()
     {
-        LogAssert.Expect(LogType.Error, FailRe);
         var m = MakeMesh(20);
         AddSpan(m, "A", 0, 9, 0.05f);
-        var go = NewSkinnedObject("Body", m);
+        var go = NewSkinnedObject("Body", m);   // shape exists, worn at 0, no outfitRoot passed
         var r = Report(Path(go), new string[0]);
-        StringAssert.StartsWith("[ReportShapeOverlap] FAIL:", r);
-        StringAssert.Contains("candidate co-active set", r);
+        StringAssert.Contains("=> OK", r);
+        StringAssert.Contains("shapes=0/0", r);
+        StringAssert.Contains("log=", r);       // the artifact a bare FAIL never wrote
+        // The zero is only readable if the run says which sources it consulted, and the reaction source is
+        // the one a caller most often forgets — so the omission is named, not implied.
+        StringAssert.Contains("NOT scanned — no outfitRoot passed", r);
     }
 
     // A null (or blank) shape-name element is malformed input, not a MISSING shape: reject it in the FAIL
