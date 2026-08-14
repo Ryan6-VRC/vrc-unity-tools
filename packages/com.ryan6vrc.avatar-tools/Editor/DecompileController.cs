@@ -61,9 +61,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             try { walk = ControllerDecompile.Walk(controller, stripLayout); }
             catch (Exception e) { return Fail(failLabel, controllerPath, "walk: " + e.GetType().Name + ": " + e.Message); }
 
-            // A refusal is fail-loud: name every out-of-vocabulary construct, write no .yaml.
+            // A refusal is fail-loud: name every out-of-vocabulary construct, write no .yaml. The scope is
+            // the whole DOCUMENT and stays that way — emitting only the clean layers would produce a valid,
+            // recompilable YAML that silently drops a layer, and the round trip's contract is that the
+            // rebuilt controller is a pure function of the document (`animator.md`). What the refusal owes
+            // instead is scale and a next move, both below.
             if (walk.Refusals.Count > 0)
-                return Fail(failLabel, controllerPath, JoinRefusals(walk.Refusals));
+                return Fail(failLabel, controllerPath, RefusalScope(walk) + JoinRefusals(walk.Refusals) + RefusalRoute());
 
             var doc = walk.Doc;
 
@@ -145,6 +149,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// can therefore read the same and collapse into one row. That is a gap in how refusals are LOCATED, not
         /// one this join introduces — it neither adds nor removes information the un-joined verdict carried.</para>
         /// </summary>
+        /// <summary>How much of the controller the refusal actually implicates. Deliberately NOT phrased as
+        /// a clean/dirty split: nothing decompiled, so a "3 clean" reads as partial success and invites a
+        /// fix-one-and-retry that fails again. "Refused" means <i>carries at least one refusal</i>, which is
+        /// not the same as absent from the document — a synced layer refuses and is skipped, while an iKPass
+        /// layer refuses and is still decoded. Document-scope refusals (a parameter, the controller itself)
+        /// belong to no layer and are counted apart rather than filed under layer 0.</summary>
+        private static string RefusalScope(ControllerDecompile.WalkResult walk)
+        {
+            var layers = new System.Collections.Generic.HashSet<int>();
+            int document = 0;
+            foreach (var idx in walk.RefusalLayers) { if (idx < 0) document++; else layers.Add(idx); }
+            string s = "refusedLayers=" + layers.Count + "/" + walk.LayerCount;
+            if (document > 0) s += " documentScope=" + document;
+            return s + " — ";
+        }
+
+        /// <summary>The next move, because a refusal that only names constructs leaves the agent to guess
+        /// between owning the graph and abandoning it. Compressed; `animator.md` owns the round-trip.</summary>
+        private static string RefusalRoute()
+            => "  [route: to READ this controller use ReportController — decompile is for OWNING it. To own the "
+             + "rest, drop the named layer(s) first (CleanController trims by layer NAME without parsing "
+             + "contents), then re-decompile; `animator.md` owns the round-trip.]";
+
         private static string JoinRefusals(System.Collections.Generic.List<string> refusals)
         {
             var order = new System.Collections.Generic.List<string>();

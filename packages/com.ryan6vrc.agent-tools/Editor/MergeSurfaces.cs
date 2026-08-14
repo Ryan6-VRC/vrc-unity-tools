@@ -63,12 +63,27 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// fails to reflect — the controller is still returned, never dropped, so drift cannot yield a false
         /// clean read. <paramref name="onMaFrame"/> fires for every MA frame discovered, BEFORE the dedup —
         /// a door captioning its offenders needs one caption per authored component, not per surviving
-        /// surface, or two components mounting one controller at one mount silently lose a caveat.</summary>
+        /// surface, or two components mounting one controller at one mount silently lose a caveat.
+        /// <paramref name="onUnlintable"/> receives (site, description) for a surface that really mounts a
+        /// controller these doors cannot walk — an <c>AnimatorOverrideController</c>. Such a surface is NOT
+        /// returned in the list (see the note at the top of the body), so a caller reporting coverage must
+        /// treat it as a gap rather than as one of the surfaces it walked.</summary>
         internal static List<Surface> Enumerate(
             GameObject root, VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor,
             bool vrcfOnly, Action<Component, string> onUnreflected,
-            Action<Component, FrameResult> onMaFrame = null)
+            Action<Component, FrameResult> onMaFrame = null,
+            Action<Component, string> onUnlintable = null)
         {
+            // A surface whose controller none of these doors can walk (an AnimatorOverrideController) is
+            // reported through this channel and deliberately NOT returned as a Surface: Surface.Controller is
+            // typed AnimatorController and every consumer runs rules on it unconditionally, so admitting one
+            // would turn a silent drop into a silent false inclusion — the worse of the two. Callers that
+            // count surfaces walked must not count these.
+            void Unlintable(Component site, List<string> descriptions)
+            {
+                if (descriptions == null || onUnlintable == null) return;
+                foreach (var d in descriptions) onUnlintable(site, d);
+            }
             var pairs = new List<Surface>();
             var seen = new HashSet<(int ctrl, int root, int kind)>();
             void Add(AnimatorController c, GameObject mount, List<GameObject> roots, Component site,
@@ -90,7 +105,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (descriptor != null && !vrcfOnly)
                 CollectDescriptorLayers(descriptor, root, (c, label) => Add(
                     c, root, new List<GameObject> { root }, null, FrameKind.DescriptorLayer, label, null, false,
-                    new FrameResult { Root = root, Kind = FrameKind.DescriptorLayer }));
+                    new FrameResult { Root = root, Kind = FrameKind.DescriptorLayer }),
+                    (label, what) => onUnlintable?.Invoke(descriptor, label + ": " + what));
 
             // (b)/(c) Every MA MergeAnimator + VRCFury FullController in the subtree.
             foreach (var c in root.GetComponentsInChildren<Component>(true))
@@ -101,6 +117,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     string anchor = FrameAnchorOverride(maFrame.UnreflectedAnchor);
                     if (anchor != null) onUnreflected(c, anchor);
+                    Unlintable(c, maFrame.Unlintable);
                     onMaFrame?.Invoke(c, maFrame);
                     var mount = maFrame.Root ?? root;
                     // MA declares one frame for the whole controller and carries no path-rewrite rules.
@@ -112,6 +129,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     string anchor = FrameAnchorOverride(vrcfFrame.UnreflectedAnchor);
                     if (anchor != null) onUnreflected(c, anchor);
+                    Unlintable(c, vrcfFrame.Unlintable);
                     var mount = vrcfFrame.Root ?? c.gameObject;
                     var roots = AncestorChain(mount, root);
                     // vrcfFrame.PathRewrite is THIS component's rewriteBindings only — applied before the
@@ -128,7 +146,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static void CollectDescriptorLayers(
             VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor, GameObject avatarGO,
-            Action<AnimatorController, string> add)
+            Action<AnimatorController, string> add, Action<string, string> unlintable)
         {
             void Walk(VRC.SDK3.Avatars.Components.VRCAvatarDescriptor.CustomAnimLayer[] layers, string which)
             {
@@ -142,7 +160,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // than vanishing from every door at once.
                     if (layer.isDefault) continue;
                     var c = layer.animatorController as AnimatorController;
-                    if (c == null) continue;
+                    if (c == null)
+                    {
+                        // Same fail-loud reasoning as the isDefault note above: a slot holding a controller
+                        // these doors cannot walk must not vanish from every door at once, or an avatar-wide
+                        // verdict comes back clean having linted nothing.
+                        var what = CheckAnimator.DescribeUnlintableController(layer.animatorController);
+                        if (what != null) unlintable?.Invoke("descriptor " + which + " layer " + layer.type, what);
+                        continue;
+                    }
                     add(c, "descriptor " + which + " layer " + layer.type);
                 }
             }

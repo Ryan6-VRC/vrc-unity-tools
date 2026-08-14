@@ -135,6 +135,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             public readonly List<string> Notes = new List<string>();
             public readonly List<string> Other = new List<string>(); // tier-2 census: components no table read
             public int MenuAssetsWalked;
+            // Surfaces that really mount a controller no table below could read. Counted apart from
+            // Surfaces so `surfaces=N` keeps meaning "walked", and reported on the summary so a bare
+            // surfaces=0 cannot be read as "nothing merges here".
+            public int UnlintableSurfaces;
         }
 
         internal static CensusResult Census(GameObject root,
@@ -149,6 +153,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                              + " did not reflect — the surface is reported anyway (not dropped); its frame is best-effort.";
                     Debug.LogWarning(m);
                     res.Notes.Add(m.Substring("[ReportComposition] ".Length));
+                },
+                onUnlintable: (c, what) =>
+                {
+                    string m = "surface @ " + MergeSurfaces.PathOf(c.gameObject) + " mounts " + what
+                             + " — its parameters are NOT in the tables below.";
+                    Debug.LogWarning("[ReportComposition] " + m);
+                    res.Notes.Add(m);
+                    res.UnlintableSurfaces++;
                 });
 
             var rows = new Dictionary<string, ParamRow>(StringComparer.Ordinal);
@@ -431,9 +443,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal static string EmitPlain(GameObject root, CensusResult c, string paramFilter)
         {
             var body = RenderBody(root, c, paramFilter, "plain (authored census)", null);
+            string unlintable = c.UnlintableSurfaces > 0
+                ? string.Format(CultureInfo.InvariantCulture, " unlintableSurfaces={0}", c.UnlintableSurfaces) : "";
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[ReportComposition] {0}: surfaces={1} params={2} menuControls={3} optimizers={4} other={5} mode=plain => OK",
-                root.name, c.Surfaces.Count, c.Params.Count, c.Menu.Count, c.Optimizers.Count, c.Other.Count);
+                "[ReportComposition] {0}: surfaces={1}{6} params={2} menuControls={3} optimizers={4} other={5} mode=plain => OK",
+                root.name, c.Surfaces.Count, c.Params.Count, c.Menu.Count, c.Optimizers.Count, c.Other.Count, unlintable);
             string res = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "composition_" + RunLogFormat.Sanitize(root.name),
                 summary, body, ".md");
             Debug.Log(res + "\n" + Window(c, paramFilter));

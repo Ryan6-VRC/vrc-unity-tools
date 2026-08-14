@@ -377,7 +377,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             var rep = new Report { Root = avatarGO };
             var pairs = MergeSurfaces.Enumerate(avatarGO, descriptor, vrcfOnly: false,
                 (c, anchor) => SurfaceUnreflected(c, anchor, rep),
-                (c, frame) => { var n = MaFrameUncertaintyNote(c, avatarGO, frame); if (n != null) rep.FrameUncertain.Add(n); });
+                (c, frame) => { var n = MaFrameUncertaintyNote(c, avatarGO, frame); if (n != null) rep.FrameUncertain.Add(n); },
+                (c, what) => SurfaceUnlintable(c, what, rep));
 
             // ---- MA scene-ref detection (D3) — generic over EVERY component ----------------------------
             foreach (var c in avatarGO.GetComponentsInChildren<Component>(true))
@@ -481,7 +482,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             var rep = new Report { Root = root };
             var anchors = CollectAnchors(root);
             var pairs = MergeSurfaces.Enumerate(root, null, vrcfOnly: true,
-                (c, anchor) => SurfaceUnreflected(c, anchor, rep));
+                (c, anchor) => SurfaceUnreflected(c, anchor, rep),
+                onUnlintable: (c, what) => SurfaceUnlintable(c, what, rep));
 
             // Keyed on the anchor too: one controller mounted on two FullControllers with different anchors is
             // two distinct repairs, and a key without it reports only whichever was walked first.
@@ -514,6 +516,19 @@ namespace Ryan6Vrc.AgentTools.Editor
                        + " did not reflect — surfacing the merged animator anyway (not dropped); its frame is best-effort.";
             Debug.LogWarning(msg);
             rep.Notes.Add(FailLoudNotePrefix + msg.Substring("[CheckAvatar] ".Length));
+        }
+
+        // A surface this door can see but cannot walk. Same fail-loud contract as the note above, and the
+        // same reason: a clean verdict that silently skipped a live merged controller is the false PASS this
+        // door exists to prevent. Its bindings are NOT checked, and the note says so rather than letting the
+        // verdict imply a coverage it does not have.
+        private static void SurfaceUnlintable(Component c, string what, Report rep)
+        {
+            string msg = "[CheckAvatar] surface @ " + PathOf(c.gameObject) + " mounts " + what
+                       + " — its bindings were NOT checked by this run.";
+            Debug.LogWarning(msg);
+            rep.Notes.Add(FailLoudNotePrefix + msg.Substring("[CheckAvatar] ".Length));
+            rep.UnlintableSurfaces++;
         }
 
         // R-K: the frame caveat that rides beside an MA MergeAnimator whose relativePathRoot did not resolve.
@@ -763,9 +778,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             int mergeConflict = rep.MergeConflicts.Count;
             string result = (maSceneRef > 0 || clipBinding > 0 || anchorSeam > 0 || mergeConflict > 0) ? "CLASSIFY" : "PASS";
 
+            // The count rides the SUMMARY, not only the body: a surface this run could not walk is exactly
+            // the case where a bare `=> PASS` is read as coverage it does not have. It is not folded into the
+            // verdict — an unwalkable surface is a gap in reach, not a reference break, and blurring the two
+            // would make CLASSIFY stop meaning "an offender is named below".
+            string unlintablePart = rep.UnlintableSurfaces > 0
+                ? string.Format(CultureInfo.InvariantCulture, " unlintableSurfaces={0}", rep.UnlintableSurfaces) : "";
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CheckAvatar] {0}: maSceneRef={1} clipBinding={2} anchorSeam={3} mergeConflict={4} => {5}",
-                rep.Root.name, maSceneRef, clipBinding, anchorSeam, mergeConflict, result);
+                "[CheckAvatar] {0}: maSceneRef={1} clipBinding={2} anchorSeam={3} mergeConflict={4}{5} => {6}",
+                rep.Root.name, maSceneRef, clipBinding, anchorSeam, mergeConflict, unlintablePart, result);
 
             var sb = new StringBuilder();
             sb.Append("# CheckAvatar: ").Append(rep.Root.name).Append('\n');
@@ -933,6 +954,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public readonly List<MergeConflict> MergeConflicts = new List<MergeConflict>();
             public readonly List<string> FrameUncertain = new List<string>(); // R-K frame caveats (uncertain AND certain-but-captioned)
             public readonly List<string> Notes = new List<string>();          // R-H fail-loud + degrade notes
+            public int UnlintableSurfaces;                                    // surfaces mounting a controller this door cannot walk
         }
     }
 }

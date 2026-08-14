@@ -184,6 +184,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                           + "and reading a dozen of them as unexplained build output is the misread; **not-in-scope** a runtime-written name (physbone "
                           + "suffix, menu sub-parameter) that nothing declares, so a declaration set cannot carry it and its "
                           + "absence means nothing.");
+                section.Add("**One parameter can occupy two rows, and they say so.** A runtime-written name the build carries "
+                          + "verbatim is `not-in-scope` on the authored side (it declares nothing to diff) and `built-only` on "
+                          + "the built side (no row can claim it). Both are true; neither is a finding. Each names the other, so "
+                          + "the identical string is read as one parameter rather than as a drop beside an unexplained addition.");
                 section.Add("Attribution is inference, not a pinned grammar — an `ambiguous` row is the honest answer and "
                           + "beats a mapping the tool cannot support. The separator boundary is the whole of the rule; a "
                           + "bare suffix match would call authored `Toggle` a rename of built `Hair/HairToggle`.");
@@ -319,6 +323,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             if (rac == null) return true;
             var ac = rac as AnimatorController;
+            // Deliberate divergence from the asset doors, which REFUSE an override controller by name rather
+            // than unwrapping it (they report a named asset, so silently reporting a different one would
+            // mislead). Here the subject is the built avatar's parameter SET, not a named asset, and an
+            // override controller declares no parameters of its own — every one it can carry comes from the
+            // base — so unwrapping reads the right set rather than a substitute for it.
             if (ac == null && rac is AnimatorOverrideController ovr) ac = ovr.runtimeAnimatorController as AnimatorController;
             if (ac == null) return false;
             if (ac.parameters == null) return true;
@@ -375,6 +384,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var p in census.Params)
                 if (p.Diffable && builtSet.Contains(p.Name)) exactClaim.Add(p.Name);
 
+            // The non-diffable half of that same intersection: authored names the build carries verbatim
+            // that no row can claim. Collected so the two rows describing one parameter can point at each
+            // other — see the not-in-scope branch below.
+            var notInScopeNames = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var p in census.Params)
+                if (!p.Diffable && builtSet.Contains(p.Name)) notInScopeNames.Add(p.Name);
+
             void Claim(string b, string authored, int rowIndex)
             {
                 if (!claimedBy.TryGetValue(b, out var l)) claimedBy[b] = l = new List<string>();
@@ -388,10 +404,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 if (!p.Diffable)
                 {
+                    // A non-diffable name that the built avatar ALSO carries, byte-identical, is the one
+                    // shape this table used to leave the reader to join by eye: two rows, one string, two
+                    // dispositions (`not-in-scope` here and `built-only` below), nothing saying they are
+                    // the same parameter. Neither row is wrong — nothing authored declares it, and nothing
+                    // authored claims it — so the fix is the cross-reference, not a category change, and
+                    // the exact-claim set above stays diffable-only for the reason its own comment gives.
+                    bool alsoBuilt = builtSet.Contains(p.Name);
                     rows.Add(new DiffRow
                     {
-                        Authored = p.Name, Built = "—", Category = "not-in-scope",
-                        Surface = "runtime-written (physbone suffix / menu sub-parameter) — nothing declares it, so a declaration set cannot carry it",
+                        Authored = p.Name, Built = alsoBuilt ? p.Name + " (see its built-only row)" : "—",
+                        Category = "not-in-scope",
+                        Surface = "runtime-written (physbone suffix / menu sub-parameter) — nothing declares it, so a declaration set cannot carry it"
+                                + (alsoBuilt ? "; the build DOES carry this exact name — the two rows are one parameter, not two findings" : ""),
                     });
                     continue;
                 }
@@ -508,8 +533,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                     }
                     : new DiffRow
                     {
-                        Authored = "—", Built = b, Category = "built-only",
-                        Surface = "(built only — build-minted or SDK-supplied; nothing authored claims it, which is not a finding)",
+                        Authored = notInScopeNames.Contains(b) ? b + " (see its not-in-scope row)" : "—",
+                        Built = b, Category = "built-only",
+                        Surface = notInScopeNames.Contains(b)
+                            ? "(built only — no authored row CLAIMS it, because the authored row carrying this exact "
+                            + "name is not-in-scope: runtime-written, so it declares nothing to diff. One parameter, two rows)"
+                            : "(built only — build-minted or SDK-supplied; nothing authored claims it, which is not a finding)",
                     });
 
             if (string.IsNullOrEmpty(paramFilter)) return final;

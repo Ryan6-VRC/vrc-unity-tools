@@ -159,5 +159,25 @@ namespace Ryan6Vrc.AgentTools.Editor
             var path = string.IsNullOrEmpty(guidPath) ? handle : guidPath;
             return AssetDatabase.LoadAssetAtPath<T>(path);
         }
+
+        /// <summary>Does the asset behind this GUID actually exist? The liveness test every
+        /// dangling-reference sweep needs, and <see cref="AssetDatabase.GUIDToAssetPath"/> is NOT it:
+        /// a GUID the editor has ever known keeps resolving to its old path after the asset is deleted
+        /// or moved away — measured, and it survives a <c>ForceUpdate</c> refresh — so a non-empty path
+        /// is not evidence the asset is there. Only a GUID that was never known returns empty, which is
+        /// why a sweep written on the path test recovers a foreign-project reference and silently misses
+        /// the ordinary deleted-asset case.
+        ///
+        /// The probe is deliberately TYPE-AGNOSTIC. A typed load (<c>LoadAssetAtPath&lt;Motion&gt;</c>)
+        /// reads two live shapes as dangling: an FBX-embedded clip (<c>type: 3</c>), whose main asset is a
+        /// <c>GameObject</c>, and a motion sub-asset of another controller, whose main asset is an
+        /// <c>AnimatorController</c> — both routine on vendor avatars, so a typed probe manufactures broken
+        /// motions on healthy rigs.</summary>
+        public static bool AssetGuidResolves(string guid)
+        {
+            if (string.IsNullOrEmpty(guid)) return false;
+            var path = AssetDatabase.GUIDToAssetPath(guid);
+            return !string.IsNullOrEmpty(path) && AssetDatabase.LoadMainAssetAtPath(path) != null;
+        }
     }
 }

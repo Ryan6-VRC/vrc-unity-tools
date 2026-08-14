@@ -51,7 +51,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             var controller = RunLogFormat.LoadByPathOrGuid<AnimatorController>(controllerPathOrGuid);
             if (controller == null)
-                return Refuse("no AnimatorController at '" + controllerPathOrGuid + "' — expects an asset path or GUID");
+                return Refuse(ReportController.RefuseWhy(controllerPathOrGuid)); // one wording for both asset doors
             return Lint(controller, basis, mergeSite, avatarRoot, mountRoot);
         }
 
@@ -193,12 +193,44 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         internal enum FrameKind { DescriptorLayer, MA, VRCF }
 
+        /// <summary>Describe a runtime controller these doors cannot lint, or null when the object is one
+        /// they can (or is genuinely absent). An <c>AnimatorOverrideController</c> is not an
+        /// <c>AnimatorController</c> — they are siblings under <c>RuntimeAnimatorController</c> — so every
+        /// <c>as AnimatorController</c> in this file reads a live override controller as an empty slot.
+        /// The base is named because it is where a caller reads next; the override count is of NON-NULL
+        /// entries, since <c>overridesCount</c> is the whole base clip table and would report every clip
+        /// as an override. A base that is itself an override is said so rather than followed.</summary>
+        /// <param name="includeSelfPath">false when the caller already named this asset (the asset doors
+        /// echo the handle they were given), so the path is not printed twice in one sentence.</param>
+        internal static string DescribeUnlintableController(UnityEngine.Object rac, bool includeSelfPath = true)
+        {
+            var ovr = rac as AnimatorOverrideController;
+            if (ovr == null) return null;
+            var overrides = new List<KeyValuePair<AnimationClip, AnimationClip>>();
+            try { ovr.GetOverrides(overrides); } catch { /* report what we can */ }
+            int set = 0;
+            foreach (var kv in overrides) if (kv.Value != null) set++;
+            var b = ovr.runtimeAnimatorController;
+            string bas = b == null ? "no base"
+                : b is AnimatorOverrideController ? "base is itself an override controller: '" + AssetDatabase.GetAssetPath(b) + "'"
+                : "base '" + AssetDatabase.GetAssetPath(b) + "'";
+            return "AnimatorOverrideController" + (includeSelfPath ? " '" + AssetDatabase.GetAssetPath(ovr) + "'" : "")
+                 + " (" + bas + ", " + set + " clip substitutions) — not lintable here; the base is a separate "
+                 + "asset and reading it omits those substitutions";
+        }
+
         internal struct FrameResult
         {
             public GameObject Root;       // the binding-basis root (mount, or avatar root for Absolute)
             public FrameKind Kind;
             public bool IsAbsolute;       // MA Absolute pathMode (basis is the avatar root, not a mount)
             public string UnreflectedAnchor; // non-null ⇒ a required frame field or vendor invoke failed to reflect (fail loud)
+            // Controllers this surface really mounts that none of these doors can lint — today an
+            // AnimatorOverrideController, which is a SIBLING of AnimatorController under
+            // RuntimeAnimatorController, so every `as AnimatorController` reads it as absent. Dropping it
+            // silently would let an avatar-wide verdict come back clean having walked nothing, so the
+            // surface is named here instead. One entry per unlintable controller.
+            public List<string> Unlintable;
             // VRCF only: the FullController's "Path Rewrite Rules" (rewriteBindings) as a path transform,
             // applied to each binding path BEFORE the nearest-match ancestor walk (the build applies them in
             // that order). null ⇒ identity (no rules). Returns null for a path a delete-rule drops (the
@@ -243,7 +275,19 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return true;
             }
             controller = animProp.objectReferenceValue as AnimatorController;
-            if (controller == null) return false; // present-but-null: intentional empty, not drift
+            if (controller == null)
+            {
+                // An override controller here is NOT the intentional-empty case: the component really merges
+                // a controller, and returning false would drop the whole MA frame from every door at once.
+                string unlintable = DescribeUnlintableController(animProp.objectReferenceValue);
+                if (unlintable == null) return false; // present-but-null: intentional empty, not drift
+                frame = new FrameResult
+                {
+                    Root = avatarGO, Kind = FrameKind.MA, IsAbsolute = false,
+                    Unlintable = new List<string> { unlintable },
+                };
+                return true;
+            }
 
             var pathModeProp = so.FindProperty("pathMode");
             string unreflected = pathModeProp == null ? "MA.pathMode" : null; // required frame field absent (drift)
@@ -380,6 +424,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Typed as FullController but the controllers list can't decode (field renamed / not an array) is
             // drift — anchor it. An empty-but-present array is a legit zero-controller FullController (stays quiet).
             string unreflected = null;
+            List<string> vrcfUnlintable = null;
             var controllersProp = content.FindPropertyRelative("controllers");
             if (controllersProp == null || !controllersProp.isArray)
             {
@@ -393,6 +438,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var ctrl = el.FindPropertyRelative("controller");
                     var objRef = ctrl != null ? ctrl.FindPropertyRelative("objRef") : null;
                     if (objRef != null && objRef.objectReferenceValue is AnimatorController ac) controllers.Add(ac);
+                    else if (objRef != null)
+                    {
+                        string unlintable = DescribeUnlintableController(objRef.objectReferenceValue);
+                        if (unlintable != null) (vrcfUnlintable ?? (vrcfUnlintable = new List<string>())).Add(unlintable);
+                    }
                 }
             }
 
@@ -410,6 +460,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 Root = root, Kind = FrameKind.VRCF, IsAbsolute = false, UnreflectedAnchor = unreflected,
                 PathRewrite = pathRewrite, // this component's rules only — no cross-controller bleed
                 RootBindingsApplyToAvatar = rootToAvatar != null && rootToAvatar.boolValue,
+                Unlintable = vrcfUnlintable,
             };
             return true;
         }
@@ -701,7 +752,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 surfaces = MergeSurfaces.Enumerate(avatarGO, avatarGO.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>(),
                     vrcfOnly: false, (c, anchor) => notes.Add("merge-site scan: frame field '" + anchor + "' on "
-                        + c.GetType().Name + " @ " + PathOf(c.gameObject) + " did not reflect — the site count below is best-effort."));
+                        + c.GetType().Name + " @ " + PathOf(c.gameObject) + " did not reflect — the site count below is best-effort."),
+                    onUnlintable: (c, what) => notes.Add("merge-site scan: surface @ " + PathOf(c.gameObject)
+                        + " mounts " + what + " — it is not counted among the merge sites below."));
             }
             catch (Exception e)
             {

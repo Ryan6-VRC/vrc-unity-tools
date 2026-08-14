@@ -785,10 +785,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 var text = File.ReadAllText(path);
                 var seen = new HashSet<string>();
-                foreach (Match m in Regex.Matches(text, @"m_Motion:\s*\{fileID:\s*\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}"))
+                // fileID is signed: an FBX-embedded clip's localID is often NEGATIVE (referenced type: 3).
+                // Matching only unsigned drops those, leaving a real broken motion unnamed in the offender.
+                foreach (Match m in Regex.Matches(text, @"m_Motion:\s*\{fileID:\s*-?\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}"))
                 {
                     var g = m.Groups[1].Value;
-                    if (seen.Add(g) && string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(g)))
+                    if (seen.Add(g) && !RunLogFormat.AssetGuidResolves(g))
                         result.Add(g);
                 }
             }

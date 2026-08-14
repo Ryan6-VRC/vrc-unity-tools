@@ -164,8 +164,15 @@ public class CompileControllerTests
 
     // An `unresolved: true` motion ref must NOT fail the compile — it emits a null motion and the RunLog
     // body carries an advisory naming the state + the verbatim GUID (round-trip note).
+    //
+    // But it must not report `=> OK` either. A null motion slot is the clean-empty idiom every downstream
+    // lint is whitelisted against, so the rebuilt controller reports missingMotion=0 where its source
+    // reported the break: an `OK` here certifies a drop this door just made, and the source's own FAIL
+    // stops being reachable from anything downstream. The verdict carries it instead — CLASSIFY, a finding
+    // to route, never a tool failure — plus the count on the summary line, which is the only part an agent
+    // reading one line ever sees.
     [Test]
-    public void Compile_With_Unresolved_Ref_Is_OK_And_Advises()
+    public void Compile_With_Unresolved_Ref_Classifies_And_Advises()
     {
         string src = TestRoot + "/Dangle_Fx.yaml";
         File.WriteAllText(src,
@@ -177,7 +184,9 @@ public class CompileControllerTests
         string outDir = TestRoot + "/out_unresolved";
         string result = CompileController.Compile(src, outDir, whatIf: false);
 
-        StringAssert.Contains("=> OK", result);
+        StringAssert.Contains("=> CLASSIFY", result);
+        StringAssert.Contains("unresolvedRefs=1", result);
+        StringAssert.DoesNotContain("=> OK", result, "an OK here would certify the dropped motion");
 
         const string marker = "| log=";
         int i = result.IndexOf(marker, System.StringComparison.Ordinal);

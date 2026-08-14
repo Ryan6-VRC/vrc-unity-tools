@@ -45,6 +45,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public List<string> UnresolvedGuids = new List<string>();
             public List<string> Refusals = new List<string>();   // out-of-vocabulary constructs, named + located
             public List<string> Notes = new List<string>();      // tolerances applied, informational
+            // Parallel to Refusals: the index of the layer each one belongs to, or -1 for a refusal that is
+            // not a layer's (a parameter, or the controller as a whole). Kept alongside rather than folded
+            // into the string because ~70 assertions and two callers read Refusals as plain text.
+            public List<int> RefusalLayers = new List<int>();
+            public int LayerCount;
         }
 
         // stripLayout (opt-in, default off) suppresses ALL per-machine layout capture — the own-a-vendor-
@@ -81,7 +86,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // time. The index is the loop variable over _controller.layers, so it keeps matching the
             // controller's own numbering even where a refused layer is never decoded.
             private string _currentLayer;
-            private int _layerIndex;
+            // -1 whenever the walk is not inside the per-layer loop — DecodeParameters runs BEFORE it, and a
+            // parameter refusal filed against layer 0 would misattribute the offender and inflate the
+            // refused-layer count. The loop sets it; everything outside must leave it at -1.
+            private int _layerIndex = -1;
+
+            // The one funnel every refusal goes through, so each is filed against the layer that owns it
+            // without 39 call sites having to remember.
+            private void Refuse(string text)
+            {
+                _result.Refusals.Add(text);
+                _result.RefusalLayers.Add(_layerIndex);
+            }
 
             // Dangling motion GUIDs recovered from the controller YAML (assets that no longer resolve),
             // keyed by the OWNING serialized object's local fileID so each null motion slot recovers its OWN
@@ -127,11 +143,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         // A synced layer re-skins another layer's states with override motions/behaviours — a
                         // distinct construct the schema has no vocabulary for yet.
-                        _result.Refusals.Add($"layer '{layer.name}': synced layer (syncedLayerIndex={layer.syncedLayerIndex}) is out of vocabulary");
+                        Refuse($"layer '{layer.name}': synced layer (syncedLayerIndex={layer.syncedLayerIndex}) is out of vocabulary");
                         continue;
                     }
                     _doc.Layers.Add(DecodeLayer(layer));
                 }
+                _layerIndex = -1; // out of the loop: anything refused below belongs to the document
+                _result.LayerCount = _controller.layers.Length;
                 _doc.Clips.AddRange(_clips.Values);
 
                 _result.OrphanCount = CountOrphans();
@@ -155,7 +173,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             spec.Type = AnimParamType.Int; spec.Default = p.defaultInt; break;
                         case AnimatorControllerParameterType.Trigger:
                             // No schema vocabulary for a trigger param (the SDK/compiler surface is bool/int/float).
-                            _result.Refusals.Add($"parameter '{p.name}': Trigger type is out of vocabulary");
+                            Refuse($"parameter '{p.name}': Trigger type is out of vocabulary");
                             continue;
                         default:
                             spec.Type = AnimParamType.Float; spec.Default = p.defaultFloat; break;
@@ -183,12 +201,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // An IK-pass layer runs a humanoid IK solve pass the schema has no vocabulary for; decoding
                 // it silently would drop the pass on recompile. Refuse (named + located).
                 if (layer.iKPass)
-                    _result.Refusals.Add($"layer '{layer.name}': IK pass (iKPass) is out of vocabulary");
+                    Refuse($"layer '{layer.name}': IK pass (iKPass) is out of vocabulary");
 
                 if (layer.stateMachine == null)
                 {
                     // A malformed controller: a layer with no state machine has no reachable graph to decode.
-                    _result.Refusals.Add($"layer '{layer.name}': has no state machine (null root) — malformed controller");
+                    Refuse($"layer '{layer.name}': has no state machine (null root) — malformed controller");
                     return model; // empty Root, WriteDefaults left null (no states to derive a policy from)
                 }
                 BuildAddressMaps(layer.stateMachine);
@@ -307,7 +325,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // above would drop it and let the rebuild silently boot the first-added state. Same shape as
                 // HasDanglingMotion: a live instanceID with a null managed ref.
                 if (sm.defaultState == null && HasDanglingDefaultState(sm))
-                    _result.Refusals.Add($"{MachineLabel(sm)}: the default state reference is broken (the state it "
+                    Refuse($"{MachineLabel(sm)}: the default state reference is broken (the state it "
                         + "named no longer exists) — a decompile would drop it and the rebuild would boot a "
                         + "different state; repair or clear the default in the animator window");
 
@@ -375,7 +393,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (_statePath.TryGetValue(sm.defaultState, out var dpath))
                         model.DefaultStatePath = AddressPath.Split(dpath).Count == 1 ? "/" + dpath : dpath;
                     else
-                        _result.Refusals.Add($"{MachineLabel(sm)}: the default state '{sm.defaultState.name}' is not "
+                        Refuse($"{MachineLabel(sm)}: the default state '{sm.defaultState.name}' is not "
                             + "reachable from this layer's root state machine, so the schema cannot address it — "
                             + "a decompile would drop it and the rebuild would boot a different state");
                 }
@@ -394,7 +412,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         // the class of silent drop the rest of this walk refuses.
                         string dloc = "Entry in " + MachineLabel(sm);
                         if (entries[i].mute || entries[i].solo)
-                            _result.Refusals.Add($"transition from {dloc}: the default sub-machine rung carries "
+                            Refuse($"transition from {dloc}: the default sub-machine rung carries "
                                 + "mute/solo, which a `default:` cannot express — it would recompile as a live "
                                 + "unconditional default");
                         if (!string.IsNullOrEmpty(entries[i].name))
@@ -496,7 +514,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var stateNames = new HashSet<string>(sm.states.Where(x => x.state != null).Select(x => x.state.name));
                 foreach (var child in sm.stateMachines)
                     if (child.stateMachine != null && stateNames.Contains(child.stateMachine.name))
-                        _result.Refusals.Add(
+                        Refuse(
                             $"{MachineLabel(sm)}: a direct state and a direct sub-machine are both named " +
                             $"'{child.stateMachine.name}' — a bare target or default can't disambiguate them (states resolve first)");
             }
@@ -509,7 +527,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var reported = new HashSet<string>();
                 foreach (var n in list) // iterate the list (not the dict) so refusal order is deterministic
                     if (counts[n] > 1 && reported.Add(n))
-                        _result.Refusals.Add(
+                        Refuse(
                             $"{MachineLabel(sm)}: {counts[n]} sibling {kind}s are named '{n}' — " +
                             "identical sibling names serialize as duplicate keys and cannot round-trip");
             }
@@ -530,7 +548,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (cs.state == null) continue;
                     string key = cs.state.name.Trim();
                     if (byTrim.TryGetValue(key, out var list) && list.Count > 1 && list[0] == cs.state.name)
-                        _result.Refusals.Add(
+                        Refuse(
                             $"{MachineLabel(sm)}: sibling states {string.Join(", ", list.Select(n => "'" + n + "'"))} " +
                             $"collide on trimmed name '{key}' — they differ only by surrounding whitespace");
                 }
@@ -557,9 +575,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         st.MotionTimeParam = ast.timeParameter;
                 }
                 if (ast.mirrorParameterActive)
-                    _result.Refusals.Add($"{StateLabel(ast)}: mirror-parameter binding '{ast.mirrorParameter}' is out of vocabulary");
+                    Refuse($"{StateLabel(ast)}: mirror-parameter binding '{ast.mirrorParameter}' is out of vocabulary");
                 if (ast.cycleOffsetParameterActive)
-                    _result.Refusals.Add($"{StateLabel(ast)}: cycleOffset-parameter binding '{ast.cycleOffsetParameter}' is out of vocabulary");
+                    Refuse($"{StateLabel(ast)}: cycleOffset-parameter binding '{ast.cycleOffsetParameter}' is out of vocabulary");
 
                 if (ast.motion != null)
                     st.Motion = DecodeMotion(ast.motion, StateLabel(ast), ControllerEmit.AutoTreeName(ast.name));
@@ -712,7 +730,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             // the run refuses and writes no yaml.
                             // An empty `kind` means `loc` already names what it is (StateLabel's
                             // "layer L state 'S'"), so prefixing a noun would double it.
-                            _result.Refusals.Add($"{(kind.Length == 0 ? loc : kind + " " + loc)}: field "
+                            Refuse($"{(kind.Length == 0 ? loc : kind + " " + loc)}: field "
                                 + $"'{Strip(n)}'{shown} is set, and no schema "
                                 + "field binds it — a decompile would lose it, so this run refuses instead");
                     }
@@ -823,7 +841,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // vendor entry transition's cosmetic name is tolerated (ignored, via EntryTransitionAware), not
                 // refused, unlike mute/solo which the entry rung genuinely cannot express.
                 if (t.mute || t.solo)
-                    _result.Refusals.Add($"transition from {loc}: entry transition carries mute/solo, which the entry ladder cannot express");
+                    Refuse($"transition from {loc}: entry transition carries mute/solo, which the entry ladder cannot express");
                 // The drop stays (see the tolerance comment above), but it stops being invisible. A Note, not a
                 // Refusal: refusing would make a legitimate vendor controller undecompilable over a field
                 // nothing reads at runtime — 40 of the 694 entry-class transitions in the local corpus carry one,
@@ -845,13 +863,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var tr = new Transition();
                 string loc = "onExit of sub-machine '" + childSm.name + "' in " + MachineLabel(parentSm);
                 if (t.mute || t.solo)
-                    _result.Refusals.Add($"transition from {loc}: carries mute/solo, which an onExit list cannot express");
+                    Refuse($"transition from {loc}: carries mute/solo, which an onExit list cannot express");
                 // The entry ladder TOLERATES a cosmetic name (ignored via EntryTransitionAware). onExit refuses
                 // one instead, because that tolerance rests on vendor entry rungs being unnamed and this
                 // construct has no such evidence behind it — a silent drop here would be new loss, not
                 // inherited. Widen to a decoded `name:` if a real controller turns out to carry one.
                 if (!string.IsNullOrEmpty(t.name))
-                    _result.Refusals.Add($"transition from {loc}: carries the name '{t.name}', which an onExit list does not yet bind");
+                    Refuse($"transition from {loc}: carries the name '{t.name}', which an onExit list does not yet bind");
                 SetTarget(tr, t, parentSm, loc);
                 tr.When = DecodeConditions(t.conditions, loc);
                 CompletenessSweep(t, EntryTransitionAware, "transition from", loc);
@@ -868,7 +886,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // between the two is not something to guess at from a decompiler. Refuse and name both halves.
                 if (t.isExit && (t.destinationState != null || t.destinationStateMachine != null))
                 {
-                    _result.Refusals.Add($"transition from {loc}: carries isExit AND a destination "
+                    Refuse($"transition from {loc}: carries isExit AND a destination "
                         + $"('{(t.destinationState != null ? t.destinationState.name : t.destinationStateMachine.name)}') — "
                         + "contradictory, and only a script can author it; clear one of the two on the source asset");
                     tr.ToExit = true;
@@ -878,7 +896,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (t.destinationState != null) { tr.To = StateTargetName(t.destinationState, srcSm, loc); return; }
                 if (t.destinationStateMachine != null) { tr.To = SmTargetName(t.destinationStateMachine, srcSm, loc); return; }
                 // A dangling target (neither state, sub-machine, nor Exit) — cannot be addressed.
-                _result.Refusals.Add($"transition from {loc}: target resolves to no state/sub-machine/Exit");
+                Refuse($"transition from {loc}: target resolves to no state/sub-machine/Exit");
             }
 
             // Every emitted target is per-segment escaped (a '/' in a name survives as '\/'), so ResolveName can
@@ -888,7 +906,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (_stateOwner.TryGetValue(dest, out var owner) && owner == srcSm) return BareTarget(dest.name, loc); // same machine ⇒ bare
                 if (_statePath.TryGetValue(dest, out var path))
                     return AddressPath.Split(path).Count == 1 ? "/" + path : path;
-                _result.Refusals.Add($"transition from {loc}: target state '{dest.name}' not found in the layer");
+                Refuse($"transition from {loc}: target state '{dest.name}' not found in the layer");
                 return dest.name;
             }
 
@@ -900,7 +918,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 string enc = AddressPath.EscapeSegment(name);
                 if (enc == "Exit")
-                    _result.Refusals.Add($"transition from {loc}: target '{name}' encodes to the reserved token 'Exit' — a bare 'Exit' target reads as an exit transition on recompile");
+                    Refuse($"transition from {loc}: target '{name}' encodes to the reserved token 'Exit' — a bare 'Exit' target reads as an exit transition on recompile");
                 return enc;
             }
 
@@ -912,7 +930,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // default" — addressed by the bare '/' anchor. A top-level machine is a single segment,
                     // anchored '/'; a multi-segment path is already root-relative.
                     return path.Length == 0 ? "/" : (AddressPath.Split(path).Count == 1 ? "/" + path : path);
-                _result.Refusals.Add($"transition from {loc}: target sub-machine '{dest.name}' not found in the layer");
+                Refuse($"transition from {loc}: target sub-machine '{dest.name}' not found in the layer");
                 return dest.name;
             }
 
@@ -936,7 +954,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         default:
                             // An unknown/future/corrupt mode — refuse rather than approximate as `Is true`
                             // (consistent with MapTreeKind / MapInterruption, which refuse their unknowns).
-                            _result.Refusals.Add($"transition from {loc}: condition on '{c.parameter}' has an unknown mode '{c.mode}' — out of vocabulary");
+                            Refuse($"transition from {loc}: condition on '{c.parameter}' has an unknown mode '{c.mode}' — out of vocabulary");
                             continue;
                     }
                     // A condition must survive its own serialized form: render it exactly as emit will and
@@ -946,7 +964,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // there is no character list to drift out of sync with the grammar.
                     string bad = ConditionSelfCheckFailure(cond);
                     if (bad != null)
-                        _result.Refusals.Add($"transition from {loc}: condition on '{cond.Param}' {bad}");
+                        Refuse($"transition from {loc}: condition on '{cond.Param}' {bad}");
                     list.Add(cond);
                 }
                 return list;
@@ -1006,7 +1024,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (m is BlendTree bt)
                     return new MotionRef { Tree = DecodeTree(bt, loc, expectedTreeName) };
 
-                _result.Refusals.Add($"motion in {loc}: unsupported Motion type '{m.GetType().Name}'");
+                Refuse($"motion in {loc}: unsupported Motion type '{m.GetType().Name}'");
                 return null;
             }
 
@@ -1082,7 +1100,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // clip carrying the same name ⇒ the name-keyed clips: map would collapse them (the second's
                     // curves lost) — refuse loudly (named + located) instead.
                     if (!ReferenceEquals(existing, clip))
-                        _result.Refusals.Add(
+                        Refuse(
                             $"inline clip name '{clip.name}' (referenced from {loc}) is shared by two DISTINCT embedded clips — " +
                             "the schema keys clips by name, which would collapse them");
                     return;
@@ -1111,7 +1129,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // around them would silently drop the swap on recompile. Refuse (named + located).
                 var pptr = AnimationUtility.GetObjectReferenceCurveBindings(clip);
                 foreach (var b in pptr)
-                    _result.Refusals.Add($"inline clip '{clip.name}': object-reference (PPtr) curve on "
+                    Refuse($"inline clip '{clip.name}': object-reference (PPtr) curve on "
                         + $"'{b.path}/{(b.type == null ? "<missing script>" : b.type.Name)}.{b.propertyName}' is out of "
                         + "vocabulary — no schema form animates asset references");
 
@@ -1121,7 +1139,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (bindings.Length == 0)
                 {
                     if (pptr.Length == 0)
-                        _result.Refusals.Add($"inline clip '{clip.name}': has no animatable content (zero curve bindings) — malformed");
+                        Refuse($"inline clip '{clip.name}': has no animatable content (zero curve bindings) — malformed");
                     return spec;
                 }
 
@@ -1142,7 +1160,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (target == null || curve == null || curve.length == 0) continue;
                     if (seenTargets.TryGetValue(target, out var prior))
                     {
-                        _result.Refusals.Add($"inline clip '{clip.name}': two different bindings both address "
+                        Refuse($"inline clip '{clip.name}': two different bindings both address "
                             + $"'{target}' in the schema — {DescribeBinding(prior)} and {DescribeBinding(b)}. The "
                             + "clip grammar keys curves by that text, so one would silently overwrite the other; "
                             + "rename the declared parameter so it cannot also read as a 'path/Component.property' "
@@ -1159,7 +1177,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var cls = ClassifyTangents(curve);
                     if (cls == null)
                     {
-                        _result.Refusals.Add($"inline clip '{clip.name}': curve '{target}' uses a tangent shape "
+                        Refuse($"inline clip '{clip.name}': curve '{target}' uses a tangent shape "
                             + "the schema can't round-trip (not flat/linear/stepped -- auto/clamped-auto are "
                             + "Unity-recomputed, free carries explicit tangent values the [t,v] form can't "
                             + "express); author it as a hand-owned .anim");
@@ -1280,7 +1298,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // as MonoBehaviour — both refused via the oracle), so this guard is defensive.
                 if (b.type == null || roundtrip != b.type)
                 {
-                    _result.Refusals.Add($"inline clip '{clipName}': binding "
+                    Refuse($"inline clip '{clipName}': binding "
                         + (b.path.Length == 0 ? "" : $"'{b.path}' ")
                         + $"on component type '{(b.type == null ? "<unresolved type>" : b.type.FullName)}' is out of "
                         + "vocabulary — the compiler could not re-emit it (schema §clips namespace allowlist)");
@@ -1296,7 +1314,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (smb == null)
                 {
-                    _result.Refusals.Add($"behaviour on {loc}: missing script (null SMB)");
+                    Refuse($"behaviour on {loc}: missing script (null SMB)");
                     return;
                 }
                 switch (smb)
@@ -1309,7 +1327,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case VRC_AnimatorPlayAudio pa: into.Add(DecodePlayAudio(pa, loc)); break;
                     case VRC_AnimatorLayerControl lyc: into.Add(DecodeLayerControl(lyc, loc)); break;
                     default:
-                        _result.Refusals.Add($"behaviour on {loc}: unsupported SMB type '{smb.GetType().Name}' is out of vocabulary");
+                        Refuse($"behaviour on {loc}: unsupported SMB type '{smb.GetType().Name}' is out of vocabulary");
                         break;
                 }
                 SweepSmb(smb, loc);
@@ -1384,7 +1402,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                 break;
                             default:
                                 // An unknown/future ChangeType would be dropped from all four buckets — refuse it.
-                                _result.Refusals.Add($"behaviour on {loc}: driver operation on '{p.name}' has an unknown ChangeType '{p.type}' — out of vocabulary");
+                                Refuse($"behaviour on {loc}: driver operation on '{p.name}' has an unknown ChangeType '{p.type}' — out of vocabulary");
                                 break;
                         }
                     }
@@ -1453,7 +1471,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                               + "type — Add accumulates, Set and Copy do not."
                             : $"The two entries carry DIFFERENT operands ({DriverOperand(first)} then "
                               + $"{DriverOperand(p)}), which the single-entry form cannot express at all.";
-                        _result.Refusals.Add(
+                        Refuse(
                             $"behaviour on {loc}: driver repeats operation {p.type} '{p.name}' — the schema holds " +
                             "one entry per parameter, so a recompile would not reproduce this driver as authored. " +
                             detail + " Resolve it on the controller (hand-own the behaviour, or delete the " +
@@ -1462,7 +1480,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     else seen[(p.type, p.name)] = p;
                 }
                 if (interleaved)
-                    _result.Refusals.Add(
+                    Refuse(
                         $"behaviour on {loc}: driver operations interleave change-types (Set/Add/Copy/Random) — the schema re-applies them grouped by type, which would change their apply order");
             }
 
@@ -1614,7 +1632,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         if (clip == null)
                         {
-                            _result.Refusals.Add($"behaviour on {loc}: playAudio has a null clip entry (a since-deleted AudioClip)");
+                            Refuse($"behaviour on {loc}: playAudio has a null clip entry (a since-deleted AudioClip)");
                             continue;
                         }
                         paths.Add(AssetDatabase.GetAssetPath(clip));
@@ -1701,7 +1719,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private string Token<TEnum>(Dictionary<TEnum, string> rev, TEnum v, string loc)
             {
                 if (rev.TryGetValue(v, out var s)) return s;
-                _result.Refusals.Add($"{loc}: SDK value '{v}' has no schema token (out of vocabulary)");
+                Refuse($"{loc}: SDK value '{v}' has no schema token (out of vocabulary)");
                 return v.ToString();
             }
 
@@ -1715,7 +1733,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case BlendTreeType.FreeformCartesian2D: return TreeKind.FreeformCartesian2D;
                     case BlendTreeType.Direct: return TreeKind.Direct;
                     default:
-                        _result.Refusals.Add($"{loc}: blend-tree type '{t}' is out of vocabulary");
+                        Refuse($"{loc}: blend-tree type '{t}' is out of vocabulary");
                         return TreeKind.Direct;
                 }
             }
@@ -1730,7 +1748,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case TransitionInterruptionSource.SourceThenDestination: return TransitionInterruption.SourceThenDestination;
                     case TransitionInterruptionSource.DestinationThenSource: return TransitionInterruption.DestinationThenSource;
                     default:
-                        _result.Refusals.Add($"{loc}: transition interruption source '{s}' is out of vocabulary");
+                        Refuse($"{loc}: transition interruption source '{s}' is out of vocabulary");
                         return TransitionInterruption.None;
                 }
             }
@@ -1782,7 +1800,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     foreach (Match m in Regex.Matches(block, @"m_Motion:\s*\{fileID:\s*-?\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}"))
                     {
                         var g = m.Groups[1].Value;
-                        if (!string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(g))) continue; // still resolves — not dangling
+                        // Not a path test: a deleted asset's GUID keeps resolving to its old path, so the path
+                        // test skips the ordinary dangling case and the slot degrades to "unknown" below.
+                        if (Ryan6Vrc.AgentTools.Editor.RunLogFormat.AssetGuidResolves(g)) continue; // still resolves — not dangling
                         if (!map.TryGetValue(fileId, out var q)) { q = new Queue<string>(); map[fileId] = q; }
                         q.Enqueue(g);
                     }
