@@ -2,7 +2,7 @@
 
 Counter naming: the *protocol* in this doc is V4 (successor to the V3 detector); the *code's freshness layer* (canary + reload guard) is V5 in commit titles. They advance independently.
 
-Re-run this whenever RenderAvatar's freshness code changes (`forcedRebake`, the settle gate, the change-horizon sweep, proxy isolation, the reload guard, the freshness canary). It is the live half of the headless canaries in `RenderAvatarFreshnessTests.cs`; batchmode has no SceneView, preview scene, or play mode, so this gate runs against a live, MA-composed avatar over `execute_code`.
+Re-run this whenever RenderAvatar's freshness code changes (`forcedRebake`, the settle gate, the change-horizon sweep, proxy isolation, the reload guard, the freshness canary, the sync-compile shading guard). It is the live half of the headless canaries in `RenderAvatarFreshnessTests.cs`; batchmode has no SceneView, preview scene, or play mode, so this gate runs against a live, MA-composed avatar over `execute_code`.
 
 ## The two-depth model (all measured 2026-07-29, AvatarProject)
 
@@ -23,6 +23,7 @@ This is why the canary certifies the *outcome* (nudge one drawn original → pix
 - **Pending reload**: `EditorApplication.LockReloadAssemblies()`, write + `ImportAsset` a scratch `.cs` under `Assets/Agent/Scratch/`, confirm `InternalEditorUtility.IsScriptReloadRequested()` is true. **Always unlock + delete the script after** — a leaked lock leaves the editor parked for everyone. **Flaky**: the compile can park at `isCompiling=True` without ever requesting the reload (seen 2026-07-29, second attempt, same recipe) — that sub-state measured *fresh* (canary corroborated by a real trip), so the cell is **inconclusive** when the request flag never flips; re-arm later rather than reporting either verdict.
 - **Post-play**: enter and exit play mode with the editor unfocused (the whole session unfocused, including the exit), with **≥10 s in play and at least one in-play render** — an instant enter/exit round trip measured un-armed (2026-07-29, fresh + canary=live).
 - **Unfocused domain reload**: a script recompile whose reload lands while the editor is unfocused re-armed a just-cured editor (2026-07-29) — the likely reason agent sessions (refresh + script edits mid-wave) hit this family so often. Not deliberately summoned yet; treat any canary-FAIL right after your own recompile as this, not as a code regression.
+- **Unresolved shading** (2026-08-13): `AssetDatabase.ImportAsset("Packages/jp.lilxyzw.liltoon/Shader/lts.shader", ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport)`, then grab **in the same call**. The placeholder is drawn only for variants still compiling and the compile is queued by the grab's own repaint, so a separate-call grab arrives after it cleared — this is the one cell whose arming and measurement must share a call. Unlike every recipe above it is **deterministic, ~335 ms, and self-clears in one grab**, making it the cheapest cell here. Focus state is irrelevant. Any lilToon-family shader works; `lts.shader` is named because it is the measured one.
 - Editor must be **unfocused for every cell** — abort any call that reads `InternalEditorUtility.isApplicationActive == true`, and set the `Ryan6VRC.AgentTools.RenderAvatar.DisableFocusKick` EditorPref for the run (unset after) so the gate's own kick doesn't fight the venue.
 
 ## Protocol (all `execute_code`, separate calls)
@@ -39,8 +40,15 @@ Parameters: `<AVATAR>` MA-composed scene root; `<BODY>` an SMR under it with liv
 6. **BakeMesh ground truth rides every cell**: pixel evidence without a `BakeMesh` vertex delta lets a failed edit masquerade as a freeze (and vice versa).
 7. **Self-noise**: three consecutive `Capture` calls on a reactive target, separate calls, healthy editor — none may settle-FAIL (the canary's nudge+restore is a pair of scene writes NDMF could observe; measured clean 2026-07-29, re-verify when the canary's write pattern changes).
 8. **No-probe surface**: `Capture` a blendshape-less SMR prop → summary must carry the `canary unavailable` note, never `canary=live` and never a FAIL — the tool declares what it cannot certify.
+9. **Shading cell** — the only proof the sync-compile guard holds, since batchmode cannot see a rendered pixel. **Two revisions, because the guard is unconditional**: a caller on this code cannot produce an unguarded grab, so the control has to come from the parent commit, not from a flag.
+   - *Control*, on the commit before the guard: arm per §Arming on demand, `Capture` in that same call, count exact `#00FFFF` — must be **> 0**, else the arming didn't take and the cell proves nothing (measured 2026-08-13, Sandbox: 32,618 px at 1 angle/512, 453,750 at 4 angles/1024).
+   - *Measure*, on the guarded code, same avatar and same angles: **must be 0**.
+
+   The floor is **0**, not a tuned threshold — a healthy 2048² sheet of an MA-composed avatar measured exactly zero. Treat a hit as a finding to resolve by re-grab rather than proof by itself: an unlit or emissive material could legitimately render exact cyan, which no fixture here does. Do not filter to flat blob interiors — the partial case (64 px on a sheet that reads healthy, same avatar, cleared by the guard) has **no** interior pixels and is invisible to that filter.
 
 ## Traps
+
+- **On any future flat-cyan sighting, read `ShaderUtil.anythingCompiling` in the same call, immediately after the grab.** `True` confirms the async-compile placeholder — the mechanism the guard addresses, so the finding is that the guard missed a path (a shader *asset* mid-import has no compiled variant to block on and is the known open edge). `False` on a cyan sheet is a **different, unidentified mechanism** and the guard is not the fix — measure before assuming. The read only works after the grab: the render is what queues the compile, so the same probe reads `False` beforehand. This standing check exists because the trigger coverage is inference, not measurement — the reproduction above is a shader reimport, while the sighting that motivated the work was mid-NDMF-settle (plausibly fresh proxy materials → fresh variants → the same producer).
 
 - The parked state **survives domain reloads** (two recompile/reload cycles measured, 2026-07-29) — recompiling is not a cure, and a canary-FAIL after your own script edit is the same state, not a new one.
 
