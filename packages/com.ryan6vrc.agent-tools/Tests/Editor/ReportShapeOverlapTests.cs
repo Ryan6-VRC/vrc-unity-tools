@@ -302,8 +302,24 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("=> OK", r);
         StringAssert.Contains("shapes=0/0", r);
         StringAssert.Contains("log=", r);       // the artifact a bare FAIL never wrote
-        // The zero is only readable if the run says which sources it consulted, and the reaction source is
-        // the one a caller most often forgets — so the omission is named, not implied.
+        // The zero is only readable if the run says whether the reaction source was consulted at all.
+        StringAssert.Contains("NOT scanned — no outfitRoot passed", r);
+        StringAssert.DoesNotContain("meshCutters=", r, "nothing was counted, so no count may print");
+    }
+
+    // The note is gated on the SCAN, not on an empty result: this is the common call shape — a
+    // caller-supplied set, no outfitRoot — where `reacted=0` would otherwise be indistinguishable from
+    // "scanned, and nothing reacts". It regressed exactly here once.
+    [Test]
+    public void Report_shapesPassedWithoutOutfitRoot_stillNamesTheUnscannedSource()
+    {
+        var m = MakeMesh(20);
+        AddSpan(m, "A", 0, 9, 0.05f);
+        AddSpan(m, "B", 5, 14, 0.05f);
+        var go = NewSkinnedObject("Body", m);
+        var r = Report(Path(go), new[] { "A", "B" });
+        StringAssert.Contains("shapes=2/2", r);
+        StringAssert.Contains("reacted=0", r);
         StringAssert.Contains("NOT scanned — no outfitRoot passed", r);
     }
 
