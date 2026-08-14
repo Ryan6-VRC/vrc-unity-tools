@@ -168,12 +168,19 @@ namespace Ryan6Vrc.AgentTools.Editor
         ///
         /// TYPE-AGNOSTIC deliberately: <c>LoadAssetAtPath&lt;Motion&gt;</c> reads an FBX-embedded clip
         /// (main asset a <c>GameObject</c>) and a controller sub-asset as dangling — both routine on
-        /// vendor avatars, so a typed probe invents broken motions on healthy rigs.</summary>
+        /// vendor avatars, so a typed probe invents broken motions on healthy rigs.
+        ///
+        /// It asks the DATABASE, not the loader. <c>LoadMainAssetAtPath</c> would materialize the whole
+        /// asset — for an FBX-embedded clip, the model hierarchy and its meshes — once per distinct GUID on
+        /// read-only lint paths, and it also answers "won't load" rather than "isn't there", so a project
+        /// mid-reimport would read as a pile of broken motions. Callers wording this for a human should say
+        /// "no longer resolves", not "was deleted": this cannot tell the two apart, and neither can the
+        /// GUID.</summary>
         public static bool AssetGuidResolves(string guid)
         {
             if (string.IsNullOrEmpty(guid)) return false;
             var path = AssetDatabase.GUIDToAssetPath(guid);
-            return !string.IsNullOrEmpty(path) && AssetDatabase.LoadMainAssetAtPath(path) != null;
+            return !string.IsNullOrEmpty(path) && AssetDatabase.GetMainAssetTypeAtPath(path) != null;
         }
     }
 }

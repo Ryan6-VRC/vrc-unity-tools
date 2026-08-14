@@ -54,7 +54,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (string.IsNullOrEmpty(outPath)) return Fail(failLabel, controllerPath, "outPath is empty");
 
             var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
-            if (controller == null) return Fail(failLabel, controllerPath, "controller not found at: " + controllerPath);
+            // Shared with the agent-tools asset doors: an override controller is a present asset, and
+            // "controller not found" sends the caller hunting a missing file.
+            if (controller == null) return Fail(failLabel, controllerPath, ReportController.RefuseWhy(controllerPath));
 
             // ── Reachability walk ─────────────────────────────────────────────────────────────────────
             ControllerDecompile.WalkResult walk;
@@ -67,7 +69,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // rebuilt controller is a pure function of the document (`animator.md`). What the refusal owes
             // instead is scale and a next move, both below.
             if (walk.Refusals.Count > 0)
-                return Fail(failLabel, controllerPath, RefusalScope(walk) + JoinRefusals(walk.Refusals) + RefusalRoute());
+                return Fail(failLabel, controllerPath, RefusalScope(walk) + JoinRefusals(walk.Refusals) + RefusalRoute(walk));
 
             var doc = walk.Doc;
 
@@ -165,11 +167,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>The next move, because a refusal that only names constructs leaves the agent to guess
-        /// between owning the graph and abandoning it. Compressed; `animator.md` owns the round-trip.</summary>
-        private static string RefusalRoute()
-            => "  [route: to READ this controller use ReportController — decompile is for OWNING it. To own the "
-             + "rest, drop the named layer(s) first (CleanController trims by layer NAME without parsing "
-             + "contents), then re-decompile; `animator.md` owns the round-trip.]";
+        /// between owning the graph and abandoning it. Keyed on the SAME scope the line above reports: a
+        /// document-scope refusal (a parameter, the controller itself) is caused by no layer, so the
+        /// trim-the-layer route is a dead end there and must not be offered. Compressed; `animator.md`
+        /// owns the round-trip.</summary>
+        private static string RefusalRoute(ControllerDecompile.WalkResult walk)
+        {
+            bool anyLayer = walk.RefusalLayers.Any(i => i >= 0);
+            string route = "  [route: to READ this controller use ReportController — decompile is for OWNING it.";
+            route += anyLayer
+                ? " To own the rest, drop the named layer(s) first (CleanController trims by layer NAME without "
+                + "parsing contents), then re-decompile"
+                : " The refusal is not a layer's, so trimming layers will not clear it — repair the named "
+                + "construct on the controller itself, then re-decompile";
+            return route + "; `animator.md` owns the round-trip.]";
+        }
 
         private static string JoinRefusals(System.Collections.Generic.List<string> refusals)
         {

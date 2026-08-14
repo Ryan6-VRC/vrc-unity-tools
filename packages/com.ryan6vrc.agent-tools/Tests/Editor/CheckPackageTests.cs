@@ -74,14 +74,16 @@ public class CheckPackageTests
     }
 
     [Test]
-    public void DescribeTarget_pathIsStale_saysTheFileIsGoneNotTheSubObject()
+    public void DescribeTarget_pathIsStale_saysTheAssetIsGoneNotTheSubObject()
     {
         // A deleted asset's guid keeps resolving to its old path, so the path alone cannot tell these
-        // apart — and the remedies are opposite (find the sub-asset vs. restore the file).
+        // apart — and the remedies are opposite (find the sub-asset vs. restore the asset).
         var s = CheckPackage.DescribeTarget(1, mapped: true, guid: "deadbeef", fileId: 2100000,
                                             assetPath: "Assets/Vendor/Outfits/X/Models/x.fbx", assetExists: false);
         StringAssert.Contains("Assets/Vendor/Outfits/X/Models/x.fbx", s);
-        StringAssert.Contains("no longer exists", s);
+        StringAssert.Contains("no longer resolves", s);
+        // Not "deleted": a failed import reaches here too, and the GUID cannot tell the two apart.
+        Assert.IsFalse(s.Contains("no longer exists"), "must not assert deletion it cannot establish: " + s);
         Assert.IsFalse(s.Contains("holds no object"), "a gone file must not read as a present one: " + s);
     }
 

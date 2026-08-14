@@ -56,7 +56,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// path, so "no AnimatorController at '…'" reads as a missing file and sends the caller hunting one.
         /// The base is named because that is where the caller reads next — and the omission is named with
         /// it, because reading the base is NOT reading this asset's behaviour.</summary>
-        internal static string RefuseWhy(string handle)
+        public static string RefuseWhy(string handle)
         {
             var any = RunLogFormat.LoadByPathOrGuid<RuntimeAnimatorController>(handle);
             var what = CheckAnimator.DescribeUnlintableController(any, includeSelfPath: false);

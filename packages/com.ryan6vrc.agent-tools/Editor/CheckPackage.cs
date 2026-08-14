@@ -218,7 +218,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (string.IsNullOrEmpty(assetPath)) return "guid " + guid + " is absent from this project";
             return assetExists
                 ? "guid " + guid + " resolves to " + assetPath + ", which holds no object with fileID " + fileId
-                : "guid " + guid + " was " + assetPath + ", which no longer exists (deleted or moved away)";
+                : "guid " + guid + " was " + assetPath + ", which no longer resolves (deleted, moved, or failed to import)";
         }
 
         // An FBX's external-material remap is applied only at import time, so a model imported before its

@@ -141,14 +141,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // count ambiguity and built-only rows together, so preserving the key while the number moves
                     // (145 → 8 on one measured avatar) would leave a reader comparing two artifacts with no
                     // signal that the denominator changed. Renaming both halves makes the change visible.
-                    "[ReportComposition] {0}: surfaces={1} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} mode=bake => OK | log={12}",
+                    // unlintableSurfaces rides here too, not only EmitPlain: bake is the EXACTNESS mode, so a
+                    // surface this run could not walk is where the omission costs most.
+                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} mode=bake => OK | log={12}",
                     root.name, census.Surfaces.Count, census.Params.Count,
                     diff.Count(d => d.Category == "kept"), diff.Count(d => d.Category == "renamed"),
                     diff.Count(d => d.Category == "dropped"), diff.Count(d => d.Category == "merged"),
                     diff.Count(d => d.Category == "ambiguous"), diff.Count(d => d.Category == "built-only"),
                     diff.Count(d => d.Category == "vrc-reserved"),
                     diff.Count(d => d.Category == "not-in-scope"),
-                    diff.Count(d => d.Category == "built-side-unread"), path);
+                    diff.Count(d => d.Category == "built-side-unread"), path,
+                    census.UnlintableSurfaces > 0 ? " unlintableSurfaces=" + census.UnlintableSurfaces : "");
 
                 var section = new List<string>
                 {
@@ -328,7 +331,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             // mislead). Here the subject is the built avatar's parameter SET, not a named asset, and an
             // override controller declares no parameters of its own — every one it can carry comes from the
             // base — so unwrapping reads the right set rather than a substitute for it.
-            if (ac == null && rac is AnimatorOverrideController ovr) ac = ovr.runtimeAnimatorController as AnimatorController;
+            //
+            // Chains unwrap too: an override OF an override is legal, and stopping at one hop would read
+            // nothing and mark the built side incomplete. Depth-capped because the chain is data, and a
+            // cycle in it must not hang the bake.
+            for (int hop = 0; ac == null && rac is AnimatorOverrideController ovr && hop < 8; hop++)
+            {
+                ac = ovr.runtimeAnimatorController as AnimatorController;
+                rac = ovr.runtimeAnimatorController;
+            }
             if (ac == null) return false;
             if (ac.parameters == null) return true;
             foreach (var p in ac.parameters) if (!string.IsNullOrEmpty(p.name)) into.Add(p.name);
