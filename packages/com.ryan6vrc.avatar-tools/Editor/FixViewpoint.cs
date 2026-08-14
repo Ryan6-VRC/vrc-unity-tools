@@ -143,6 +143,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public float rotationMm;         // mm the applied frame rotation moves the viewpoint — the VERIFY gate
             public string failReason;   // set (ok == false) on any named FAIL condition
             public string note;         // human-readable state line for the host log (success/unchanged)
+            // Which basis each side's eyes came from, per side. Reported so a viewpoint computed from
+            // caller-supplied transforms is never read as one the rig itself declared — the two are equally
+            // valid inputs and only one of them is checkable later from the rig alone.
+            public string eyeSrc;
         }
 
         /// <summary>
@@ -167,7 +171,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// re-run where an owned descriptor already holds a stale VP. False (standalone door): the baseline is
         /// the owned descriptor's current VP.</param>
         internal static ViewpointResult Recompute(GameObject ownedRoot, GameObject referenceRoot, bool whatIf,
-                                                  bool referenceVpIsBaseline = false)
+                                                  bool referenceVpIsBaseline = false,
+                                                  Transform ownedLeftEye = null, Transform ownedRightEye = null,
+                                                  Transform referenceLeftEye = null, Transform referenceRightEye = null)
         {
             var r = new ViewpointResult();
 
@@ -192,8 +198,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Transform refFrame   = refDesc.transform;
             Transform ownedFrame = ownedDesc != null ? ownedDesc.transform : ownedRoot.transform;
 
-            if (!ResolveEyesHead(referenceRoot, "reference", out Vector3 refLW, out Vector3 refRW, out Vector3 refHeadPW, out Quaternion refHeadW, out r.failReason)) return r;
-            if (!ResolveEyesHead(ownedRoot,     "owned",     out Vector3 owLW,  out Vector3 owRW,  out Vector3 owHeadPW,  out Quaternion owHeadW,  out r.failReason)) return r;
+            // Per side, because the mixed case is the likely one — a vendor reference with unmapped eyes
+            // beside an owned rig that maps them, or the reverse after a re-export.
+            if (!ResolveEyesHead(referenceRoot, "reference", out Vector3 refLW, out Vector3 refRW, out Vector3 refHeadPW, out Quaternion refHeadW, out r.failReason, out string refEyeSrc, referenceLeftEye, referenceRightEye)) return r;
+            if (!ResolveEyesHead(ownedRoot,     "owned",     out Vector3 owLW,  out Vector3 owRW,  out Vector3 owHeadPW,  out Quaternion owHeadW,  out r.failReason, out string owEyeSrc, ownedLeftEye, ownedRightEye)) return r;
+            r.eyeSrc = "eyeSrc=owned:" + owEyeSrc + "/reference:" + refEyeSrc;
 
             // World → descriptor-local. Every landmark is a POSITION about the frame; the head bone rotations
             // are converted too, but only to report how far the two rigs' bone bases disagree (see below) —
@@ -279,7 +288,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 ? string.Format(CultureInfo.InvariantCulture,
                     "viewpoint recomputed: {0} → {1} (deltaMm={2:F2}, s={3:F4})",
                     Fmt(r.oldVP), Fmt(r.newVP), deltaMm, r.interocularRatio)
-                : "viewpoint unchanged (< ε)") + basis;
+                : "viewpoint unchanged (< ε)") + basis + " " + r.eyeSrc;
             r.ok = true;
             return r;
         }
@@ -294,7 +303,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <param name="ownedRoot">Our owned avatar root (its VRCAvatarDescriptor's ViewPosition is written).</param>
         /// <param name="referenceRoot">REQUIRED known-good baseline (vendor source, or the pre-reshape prior
         /// version) whose descriptor + eyes/head the offset is derived from.</param>
-        public static string Run(GameObject ownedRoot, GameObject referenceRoot, bool whatIf = false)
+        /// <param name="ownedLeftEye">Explicit eye transforms for a HUMANOID rig whose eyes are unmapped —
+        /// live vendor config, not a broken rig. Both of a side's eyes are required together (the
+        /// interocular axis is built from the pair, so a midpoint cannot serve); Head stays humanoid-resolved,
+        /// so a non-humanoid rig still FAILs. Omit them and behaviour is unchanged. Nothing is guessed here:
+        /// identifying which transforms are the eyes is the caller's assertion, which is exactly the
+        /// resolution this door's no-name-guessing stance says belongs to the caller.</param>
+        public static string Run(GameObject ownedRoot, GameObject referenceRoot, bool whatIf = false,
+                                 Transform ownedLeftEye = null, Transform ownedRightEye = null,
+                                 Transform referenceLeftEye = null, Transform referenceRightEye = null)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
             var log = new RunLog("fix-viewpoint")
@@ -311,7 +328,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return TransplantCore.Finish(log, label);
             }
 
-            var r = Recompute(ownedRoot, referenceRoot, whatIf);
+            var r = Recompute(ownedRoot, referenceRoot, whatIf, referenceVpIsBaseline: false,
+                              ownedLeftEye, ownedRightEye, referenceLeftEye, referenceRightEye);
             if (!r.ok)
             {
                 log.result = "FAIL";
@@ -336,14 +354,26 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Head is a required humanoid bone; eyes are optional and may be null even on a humanoid rig — a
         /// missing eye/head is a named FAIL (no name-based guess: a name-guessed "eye" viewpoint is worse than
         /// a loud FAIL, and the driving LLM resolves a genuinely-missing-eyes case better than a code fallback).
+        ///
+        /// <paramref name="leftEyeOverride"/>/<paramref name="rightEyeOverride"/> are that resolution's door.
+        /// Eyes unmapped while the eye OBJECTS exist is live vendor config, not a broken rig, and the agent can
+        /// identify them where a name rule cannot — so it hands them in rather than hand-computing the whole
+        /// similarity transform. This does NOT soften the stance above: nothing is guessed, the caller asserts.
+        /// Both eyes are required together (<see cref="HeadFrame"/> builds its X axis from
+        /// <c>rightEye - leftEye</c>, so a midpoint cannot serve), and they are consulted only AFTER the
+        /// humanoid and Head checks, because Head stays humanoid-resolved — a non-humanoid rig still FAILs.
+        /// <paramref name="eyeSrc"/> reports which basis was used, so a viewpoint computed from caller-supplied
+        /// refs is never mistaken for one the rig declared.
         /// </summary>
         static bool ResolveEyesHead(GameObject root, string which,
                                     out Vector3 leftEyeW, out Vector3 rightEyeW, out Vector3 headPosW,
-                                    out Quaternion headW, out string failReason)
+                                    out Quaternion headW, out string failReason, out string eyeSrc,
+                                    Transform leftEyeOverride = null, Transform rightEyeOverride = null)
         {
             leftEyeW = rightEyeW = headPosW = Vector3.zero;
             headW = Quaternion.identity;
             failReason = null;
+            eyeSrc = "rig";
 
             var animator = root.GetComponent<Animator>() ?? root.GetComponentInChildren<Animator>(true);
             bool isHumanoid = animator != null && animator.avatar != null && animator.avatar.isHuman;
@@ -354,11 +384,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             Transform head  = animator.GetBoneTransform(HumanBodyBones.Head);
+            if (head == null)  { failReason = which + " Head unmapped"; return false; }
+
             Transform left  = animator.GetBoneTransform(HumanBodyBones.LeftEye);
             Transform right = animator.GetBoneTransform(HumanBodyBones.RightEye);
-            if (head == null)  { failReason = which + " Head unmapped"; return false; }
-            if (left == null)  { failReason = which + " LeftEye unmapped"; return false; }
-            if (right == null) { failReason = which + " RightEye unmapped"; return false; }
+            // One override without the other is a caller error, not a half-basis to blend: taking one
+            // supplied eye beside one mapped eye would compute an interocular axis across two frames.
+            if ((leftEyeOverride == null) != (rightEyeOverride == null))
+            {
+                failReason = which + " eye override needs BOTH eyes (the interocular axis is built from the pair)";
+                return false;
+            }
+            if (leftEyeOverride != null)
+            {
+                left = leftEyeOverride;
+                right = rightEyeOverride;
+                eyeSrc = "explicit";
+            }
+            if (left == null)  { failReason = which + " LeftEye unmapped — map it, or pass explicit eye transforms"; return false; }
+            if (right == null) { failReason = which + " RightEye unmapped — map it, or pass explicit eye transforms"; return false; }
 
             leftEyeW  = left.position;
             rightEyeW = right.position;

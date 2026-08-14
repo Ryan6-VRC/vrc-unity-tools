@@ -339,7 +339,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            string Report(bool go, string failReason)
+            // The channel splits by WHAT went wrong, not by the verdict. A preflight is a dry run: it mutates
+            // nothing and its job is to answer go/no-go, so a no-go is the tool WORKING — routing it to
+            // Debug.LogError plants an error entry that every later ReportConsole error read has to discount,
+            // which is how a real fault gets lost in a scan. Misuse is different: a caller who passed a scene
+            // instance where an FBX root belongs has not received an answer at all, and that stays an error.
+            //
+            // The verdict token and the RunLog `result` do NOT move with the channel. Diverging them would
+            // make a `=> FAIL` sweep — the common agent gate — disagree with the artifact, and forcing both
+            // to PASS would print `preconditions=no-go => PASS`, a line that argues with itself.
+            string Report(bool go, string failReason, bool misuse = false)
             {
                 string result = go ? "PASS" : "FAIL";
                 string logPath = WriteLog(result, failReason);
@@ -347,38 +356,41 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     + " => " + result
                     + (go ? "" : " " + failReason)
                     + (logPath != null ? " | log=" + logPath : "");
-                if (go) Debug.Log(summary); else Debug.LogError(summary);
+                if (go) Debug.Log(summary);
+                else if (misuse) Debug.LogError(summary);
+                else Debug.LogWarning(summary);
                 return summary;
             }
 
             // ── Precondition checks (each a no-go FAIL with a named reason; set NO importer fields) ──
+            // The first six are MISUSE — the caller's arguments are wrong, so no answer was produced.
             if (string.IsNullOrEmpty(ourFbxPath))
-                return Report(false, "ourFbxPath is null or empty.");
+                return Report(false, "ourFbxPath is null or empty.", misuse: true);
 
             var ourImp = AssetImporter.GetAtPath(ourFbxPath) as ModelImporter;
             if (ourImp == null)
                 return Report(false, "No ModelImporter at ourFbxPath: " + ourFbxPath
-                    + " — is the path correct and does the file exist in the AssetDatabase?");
+                    + " — is the path correct and does the file exist in the AssetDatabase?", misuse: true);
 
             if (vendorAvatarSource == null)
-                return Report(false, "vendorAvatarSource is null.");
+                return Report(false, "vendorAvatarSource is null.", misuse: true);
 
             vendorPath = AssetDatabase.GetAssetPath(vendorAvatarSource);
             if (string.IsNullOrEmpty(vendorPath))
-                return Report(false, "vendor has no asset path (pass the FBX model root, not a scene instance).");
+                return Report(false, "vendor has no asset path (pass the FBX model root, not a scene instance).", misuse: true);
 
             var vendorImp = AssetImporter.GetAtPath(vendorPath) as ModelImporter;
             if (vendorImp == null)
                 return Report(false, "No ModelImporter at vendor path: " + vendorPath
-                    + " — vendorAvatarSource must be the root of a model (FBX) asset.");
+                    + " — vendorAvatarSource must be the root of a model (FBX) asset.", misuse: true);
 
             var vendorHuman = vendorImp.humanDescription.human ?? new HumanBone[0];
             if (vendorHuman.Length == 0)
-                return Report(false, "vendor avatar is not configured Humanoid (humanDescription.human is empty).");
+                return Report(false, "vendor avatar is not configured Humanoid (humanDescription.human is empty).", misuse: true);
 
             var ourModel = AssetDatabase.LoadAssetAtPath<GameObject>(ourFbxPath);
             if (ourModel == null)
-                return Report(false, "Could not load model at " + ourFbxPath + " to read bones.");
+                return Report(false, "Could not load model at " + ourFbxPath + " to read bones.", misuse: true);
 
             // Build name → occurrence count over our model's transforms (ambiguity = count > 1).
             var nameCount = new Dictionary<string, int>(StringComparer.Ordinal);
