@@ -475,18 +475,31 @@ namespace Ryan6Vrc.AgentTools.Editor
         ///
         /// They match the FAMILY, not a safe subset of it — a real failure from one of these sources is
         /// dropped along with its chatter. `[MACS]` takes that package's `Failed to apply patch` too
-        /// (deliberately: the whole source is noise here); the other three match the callstack as well
+        /// (deliberately: the whole source is noise here); the others match the callstack as well
         /// as the body, so an exception routed through one of those frames goes with them. That is the
         /// accepted cost of a default-on strip, and the reason the summary always reports the counts:
         /// when one of these families is implicated in a real failure, the count is the trace that says
         /// to re-run with <c>stripBenign: false</c>. `ReportConsoleTests` pins the collisions by name.
+        ///
+        /// A family is keyed on the patch/asset TARGET it fails against, never on the patching LIBRARY.
+        /// Measured 2026-08-13: NDMF, Modular Avatar and VRCFury all apply Harmony patches from
+        /// <c>[InitializeOnLoadMethod]</c>, so a family keyed on <c>HarmonyLib</c> frames at startup would
+        /// strip a failed VRCFury patch — which changes what every later build does — by default, under a
+        /// one-line count. A library is not a source.
         /// </summary>
         public static string BenignLabel(string full)
         {
             string s = full ?? string.Empty;
             // Third-party load chatter (com.mcardellje.macs), Error-typed and Log-typed alike.
             if (s.Contains("[MACS]")) return "MACS third-party load noise";
-            if (s.Contains("DestroyBlendTreeRecursive")) return "DestroyBlendTreeRecursive";
+            // MACS's Harmony patch failure at editor startup. It carries NO [MACS] token — it is a bare
+            // HarmonyLib exception — so the family is keyed on the patch target it names. That target is a
+            // real UnityEditor API, so the bare name alone would eat any genuine error mentioning it
+            // (our own controller tooling included); the "Parameter … not found in method" co-token is what
+            // scopes this to a failing patch application. MACS is a human/UI convenience and reaches no
+            // agent workflow (operator, 2026-08-13), which is why the whole source is noise.
+            if (s.Contains("DestroyBlendTreeRecursive") && s.Contains("not found in method"))
+                return "MACS Harmony startup patch failure";
             // Bare "inconsistent result" would eat unrelated errors — require an importer co-token.
             if (s.Contains("inconsistent result")
                 && (s.IndexOf("fbx", StringComparison.OrdinalIgnoreCase) >= 0
