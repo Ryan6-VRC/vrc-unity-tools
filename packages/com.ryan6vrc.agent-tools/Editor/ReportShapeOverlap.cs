@@ -20,12 +20,10 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// graph the agent reads, not on the deltas. The agent supplies the candidate co-active set; the tool
     /// returns which pairs geometrically collide, and the agent adjudicates wanted-vs-defect.
     ///
-    /// Concretely that is the house Report envelope, and the two tokens are not the same kind of thing: every
-    /// run that measured something ends <c>=&gt; OK</c>, while a bad input returns a bare trailer-less
-    /// <c>FAIL:</c> — a refusal to run, not a verdict on the mesh (the grammar CheckAvatar and CheckPackage
-    /// use). An empty co-active set is therefore <c>=&gt; OK</c> with <c>shapes=0</c>, not a refusal: all
-    /// three sources are optional and the tool assembles the set itself, so "nothing is co-active" is a
-    /// finding the caller asked for.
+    /// The two tokens are different kinds of thing (CheckAvatar's grammar): a run that measured something
+    /// ends <c>=&gt; OK</c>, while bad input returns a bare trailer-less <c>FAIL:</c> — a refusal to run,
+    /// not a verdict. An empty co-active set is <c>=&gt; OK shapes=0</c>: all three sources are optional and
+    /// the tool assembles the set, so "nothing is co-active" is the answer, not a misuse.
     ///
     /// Method (per <see cref="Analyze"/>): the authored per-vertex deltas of each shape's last frame
     /// (weight-independent) define a <i>touched set</i> — vertices moved past a two-tier noise floor
@@ -131,11 +129,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             // The set fed to Analyze is the co-active union: caller-passed ∪ scene-worn ∪ MA ShapeChanger
             // reactions that write THIS mesh (weight 0 at edit time, so the caller can't see them).
             var ingested = BuildAnalyzeSet(smr, passed, outfitGO);
-            // An empty union on a mesh that RESOLVED is an answer, not misuse: all three sources are
-            // optional by contract and the tool assembles the set itself, so "nothing is co-active here"
-            // is true and useful — a shape map needs it to rule a mesh out. Routing it through Fail()
-            // gave it the bad-input envelope (bare FAIL, no RunLog), which also denied the caller the
-            // artifact path the compose checkpoint asks for. The genuine misuse cases above keep Fail().
+            // An empty union on a mesh that RESOLVED is an answer, not misuse — a shape map needs it to
+            // rule a mesh out. Fail() would give it the bad-input envelope (bare FAIL, no RunLog), which
+            // also denies the caller the artifact the compose checkpoint asks for.
             var analysis = Analyze(mesh, ingested.Names);
             return Emit(go, smr, mesh, analysis, ingested, outfitGO != null, passed.Length > 0);
         }
@@ -171,18 +167,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>How many MA <c>MeshCutter</c>s under <paramref name="outfitRoot"/> cut
-        /// <paramref name="bodyGO"/>. Census only — nothing here reads what a cutter removes.
-        ///
-        /// It exists because <c>reacted=0</c> is ambiguous: a cutter anti-clips by vertex FILTER, not by
-        /// blendshape, so an outfit can be fully anti-clipped with no ShapeChanger row at all, and this
-        /// tool sees ShapeChanger rows and nothing else. `outfits.md` owns that fact; the count is here so
-        /// the zero is readable at the moment it is printed rather than only in a doc.
-        ///
-        /// Two scope rules, or the number lies in the direction that matters. It is filtered to
-        /// <paramref name="bodyGO"/> exactly as ShapeChanger ingestion is — a cutter aimed at another
-        /// renderer says nothing about this mesh, and counting it would manufacture a false all-clear.
-        /// And a cutter with no sibling filter is skipped, because MA's own reaction analyzer skips one
-        /// too: it removes nothing, so counting it would report anti-clip that does not happen.</summary>
+        /// <paramref name="bodyGO"/> — a census, never a read of what one removes. It makes
+        /// <c>reacted=0</c> legible where it prints: a cutter anti-clips by vertex FILTER, so an outfit can
+        /// be fully anti-clipped with no ShapeChanger row at all (`outfits.md`). Two scope rules keep the
+        /// number honest — filtered to <paramref name="bodyGO"/> as ShapeChanger ingestion is (a cutter on
+        /// another renderer would read as a false all-clear), and a filterless cutter is skipped, as MA's
+        /// own analyzer skips it.</summary>
         private static int CountMeshCutters(GameObject outfitRoot, GameObject bodyGO)
         {
             var mcType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarMeshCutter");
@@ -589,10 +579,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (isWorn && !Covers(ingested, name)) mismatchCount++;
             }
 
-            // An empty union is a real answer, and the only way to read it is to know which sources were
-            // asked. Naming them here is what stops "nothing co-active" being read as "nothing to find":
-            // the reaction source is the one the caller most often omits, and `unity-tools.md` owns why
-            // omitting it silently narrows the set to the other two.
+            // An empty union is only readable if you know which sources were asked — the reaction source
+            // being the one callers omit (`unity-tools.md`).
             string emptyNote = ingested.Names.Count > 0 ? "" :
                 " | note: no co-active shapes — consulted: caller-passed(" + (shapesPassed ? "given" : "none")
                 + "), worn-nonzero(none), MA reactions(" + (outfitRootPassed ? "scanned" : "NOT scanned — no outfitRoot passed")
