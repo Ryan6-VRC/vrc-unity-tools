@@ -362,7 +362,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // ── Precondition checks (each a no-go FAIL with a named reason; set NO importer fields) ──
-            // The first six are MISUSE — the caller's arguments are wrong, so no answer was produced.
+            // The first six are MISUSE — the caller's arguments are wrong, so no answer was produced. A
+            // non-Humanoid vendor counts: it cannot serve as the mapping source, so naming it is the error.
             if (string.IsNullOrEmpty(ourFbxPath))
                 return Report(false, "ourFbxPath is null or empty.", misuse: true);
 
@@ -389,7 +390,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             var ourModel = AssetDatabase.LoadAssetAtPath<GameObject>(ourFbxPath);
             if (ourModel == null)
-                return Report(false, "Could not load model at " + ourFbxPath + " to read bones.", misuse: true);
+                // NOT misuse: a ModelImporter exists at this path, so the argument was right and the import
+                // is broken. That is a blocker the preflight found, not a question the caller asked wrong.
+                return Report(false, "Could not load model at " + ourFbxPath + " to read bones.");
 
             // Build name → occurrence count over our model's transforms (ambiguity = count > 1).
             var nameCount = new Dictionary<string, int>(StringComparer.Ordinal);
