@@ -104,9 +104,24 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// path the tool is back to serving a placeholder sheet. The only in-band tell is a note when
     /// <c>ShaderUtil.anythingCompiling</c> still reads true after the last frame — evidence something escaped,
     /// never proof that a note-free sheet is clean. Proving THAT needs a pixel scan of the tiles, which this
-    /// tool does not do; a healthy sheet measures exactly zero <c>#00FFFF</c> px, so the scan's floor is 0
-    /// rather than a tuned threshold. The live cell in Tests/Editor/RenderAvatarFreshnessGate.md is the only
-    /// thing that proves the guard holds — batchmode cannot see a rendered pixel.
+    /// tool does not do; a healthy sheet measures exactly zero <c>#00FFFF</c> px for the measured fixtures,
+    /// so the scan's floor is 0 rather than a tuned threshold — though an unlit or emissive material could
+    /// legitimately render exact cyan, making any hit a finding to resolve by re-grab rather than proof on
+    /// its own. The live cell in Tests/Editor/RenderAvatarFreshnessGate.md is the only thing that proves the
+    /// guard holds — batchmode cannot see a rendered pixel.
+    /// <b>The guard's cost IS the guard:</b> a first grab of a freshly imported avatar compiles cold variants
+    /// with the editor frozen for the whole call, and there is no progress bar possible (progress UI needs
+    /// the main thread, which this synchronous call holds). Measured warm at 836 ms against a ~550 ms
+    /// baseline; a cold lilToon/Poiyomi avatar is unmeasured and could be far worse, up to an
+    /// <c>execute_code</c> timeout that presents as a hang. Slow and true beats fast and false, but read a
+    /// stalled first grab as this before diagnosing it as anything else.
+    /// <b>Only Scene-View capture needs this.</b> A bespoke <c>Camera.Render()</c> — avatar-tools'
+    /// RenderThumbnail, or any scratch-camera readback — compiles synchronously already:
+    /// <c>ShaderUtil.allowAsyncCompilation</c> reads false at rest and a manual render honours it, while this
+    /// path takes the project pref instead. Measured 2026-08-13 under the arming that reliably poisons this
+    /// one: an offscreen camera drew 20,616 foreground px and ZERO placeholder px, <c>anythingCompiling</c>
+    /// false throughout. Do not mirror this guard into the thumbnail door — it would be cargo-cult, and it
+    /// would flip a global pref for a path that was never exposed.
     ///
     /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
     /// (target upright, facing world +Z, unrotated). A target rotated in the scene shows the scene's
@@ -143,7 +158,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const int OverlayPad = 12;     // px cleared below the detected floating-overlay band
         private const int FgThreshold = 35;    // per-pixel sum |channel-bg| above which a pixel is foreground
 
-        private const int ManifestSchema = 1;  // <png>.cam.json schema; bumped on any field rename (diff FAILs on mismatch)
+        // <png>.cam.json schema; bumped on any field rename (diff FAILs on mismatch, naming "re-grab frame A").
+        // 2: no field changed — the bump retires every frame A grabbed BEFORE the sync-compile shading guard.
+        // Such an A may be flat #00FFFF placeholder in places, which manufactures `changed` px against an
+        // honest B or hides a real change under a flat fill, so the diff COUNT is the thing in doubt and no
+        // note on B can repair it. A poisoned baseline silently corrupting every later diff is the whole
+        // reason this guard exists, so pre-guard baselines refuse rather than diff. `toolVersion` cannot carry
+        // this: it reads Assembly.GetName().Version, which is 0.0.0.0 for a Unity package assembly with no
+        // AssemblyVersion attribute, so it never varies and its own "pre-fix grab" note has never once fired.
+        private const int ManifestSchema = 2;
         private static readonly string ToolVersion = typeof(RenderAvatar).Assembly.GetName().Version.ToString();
 
         // Descendants excluded from every grab, merged with the caller's `hide`. The non-destructive
@@ -326,16 +349,22 @@ namespace Ryan6Vrc.AgentTools.Editor
         // The capture forces synchronous shader compilation (see the config block in CaptureCore), so a
         // placeholder frame should be unreachable. Nothing in the summary certifies that, though — this is a
         // MECHANISM, and this file's whole history is mechanisms being defeated by editor states nobody
-        // predicted. So the grab reads ShaderUtil.anythingCompiling once, right after the last frame: in the
-        // broken state that flips true exactly there (measured 2026-08-13 — false before the grab, true
-        // after, because the render is what queues the compile). True here means something still compiled
-        // despite the flip, and the sheet may carry flat #00FFFF regions.
-        // A NOTE, never a verdict: an unrelated background import also reads true, so this cannot FAIL a
-        // grab without failing honest ones. It does not prove the sheet is clean when absent — proving that
-        // needs the pixel scan this deliberately does not do (see the tool's owed follow-on).
+        // predicted. So the grab reads ShaderUtil.anythingCompiling once, right after the last frame: on an
+        // UNGUARDED grab that flips true exactly there (measured 2026-08-13 on main — false before, true
+        // after, because the render is what queues the compile). Note the limit of that measurement: it
+        // establishes the probe's timing on the defect, not its behaviour in the guard-escape case it now
+        // exists to catch, which is inferred.
+        // The signal is editor-global and UNATTRIBUTED — it cannot say the compilation was this grab's, and
+        // an unrelated background import trips it identically. So it is a NOTE, never a verdict: made to FAIL
+        // it would fail honest grabs. Its absence proves nothing either, since a variant can draw a
+        // placeholder and finish compiling before the probe reads. Proving a sheet clean needs the pixel scan
+        // this deliberately does not do (the tool's owed follow-on). The text below must claim exactly that
+        // much and no more — an earlier draft asserted "the guard did not cover some path", an attribution
+        // this probe cannot support.
         internal const string ShaderCompilingNote =
-            " | note=shader compilation still in flight after the grab — the sync-compile guard did not cover "
-            + "some path, so this sheet may contain flat #00FFFF placeholder regions; re-grab and compare";
+            " | note=shader compilation still in flight after the grab — this signal is editor-global and "
+            + "cannot be attributed to this grab (an unrelated import trips it too), so shading is NOT "
+            + "certified here and the sheet may carry flat #00FFFF placeholder regions; re-grab and compare";
 
         // Top-CanaryMaxTries blendshapes of a mesh by max vertex delta, cached per mesh — the delta scan
         // is O(shapes × verts) and capture-hot. Normals/tangents are not read, so null is passed for
@@ -1036,23 +1065,25 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             finally
             {
-                // Restore the freshness re-bake flags first (null-guarded — SMRs can be NDMF-owned), before the
+                // The async-compile pref goes FIRST, ahead of every other restore — this ordering is
+                // load-bearing, not incidental. It is the only restored state here that is PROJECT-WIDE and
+                // DURABLE: EditorSettings is a serialized asset, so a leaked `false` persists into
+                // ProjectSettings/EditorSettings.asset at the next save and makes the whole project compile
+                // synchronously forever — presenting as a hung editor on any new material, in a venue where
+                // nothing diffs it. Everything else in this finally can throw (SceneVisibilityManager calls
+                // on a destroyed object, the sceneViewState setter, the AnnotationUtility writes, Selection,
+                // and even the null-guarded re-bake loop below), and every one of those throws would skip it.
+                // Restored here, the persisted content is unchanged — the value is back before any flush.
+                // The reverse leak needs the caller to flip this mid-call: no code path in this repo does,
+                // though RepaintImmediately does enter Scene-view GUI callbacks, so it is not structurally
+                // impossible. The closing RepaintImmediately below then redraws the operator's restored view
+                // with async compilation back on, which is what they want.
+                EditorSettings.asyncShaderCompilation = oAsyncShaderCompile;
+
+                // Restore the freshness re-bake flags (null-guarded — SMRs can be NDMF-owned), before the
                 // synchronous repaint below, so the frame left on the operator's screen bakes with original flags.
                 foreach (var kv in forcedRebake)
                     if (kv.Key != null) kv.Key.forceMatrixRecalculationPerRender = kv.Value;
-
-                // Then the async-compile pref, BEFORE the visibility/view restores below — their order is
-                // load-bearing, not incidental. Everything after this line can throw (SceneVisibilityManager
-                // calls on a destroyed object, the sceneViewState setter, the AnnotationUtility writes,
-                // Selection), and this pref is the one piece of restored state that is PROJECT-WIDE and
-                // durable: EditorSettings is a serialized asset, so a leaked `false` persists into
-                // ProjectSettings/EditorSettings.asset at the next save and makes the whole project compile
-                // synchronously forever — presenting as a hung editor on any new material, in a venue where
-                // nothing diffs it. Restored here, the persisted content is unchanged (the value is back
-                // before any flush). The reverse leak is unreachable: the caller cannot flip this mid-call,
-                // because the call holds the main thread. The closing RepaintImmediately below then redraws
-                // the operator's restored view with async compilation back on, which is what they want.
-                EditorSettings.asyncShaderCompilation = oAsyncShaderCompile;
 
                 // Restore visibility COARSELY: every subtree this grab hid (hide-list / DefaultHide /
                 // ancestor siblings, and the other scene roots) returns to its own recorded self-state.

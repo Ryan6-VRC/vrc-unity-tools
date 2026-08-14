@@ -286,15 +286,21 @@ public class RenderAvatarFreshnessTests
 
     // The shading guard is a mechanism with no verdict token, so this note is the ONLY in-band trace it
     // leaves. Same reasoning as the canary-unavailable constant above: no code path decides on it, only its
-    // wording is load-bearing. Two phrases are the payload — the placeholder colour, because that is what an
-    // operator matches against a suspect sheet by eye, and the admission that the guard was escaped rather
-    // than a bare "still compiling", which reads as routine editor chatter and gets skimmed past.
+    // wording is load-bearing. Three things are the payload: the placeholder colour, because that is what an
+    // operator matches against a suspect sheet by eye; that shading is NOT certified, rather than a bare
+    // "still compiling" that reads as routine editor chatter and gets skimmed past; and the non-attribution,
+    // which is the honesty constraint — ShaderUtil.anythingCompiling is editor-global and cannot tell this
+    // grab's compilation from an unrelated import's. An earlier draft claimed "the guard did not cover some
+    // path", asserting an attribution the probe cannot make; this pins the corrected claim so a future
+    // rewrite cannot quietly restore the over-claim.
     [Test]
-    public void ShaderCompilingNote_NamesThePlaceholderColourAndTheEscape()
+    public void ShaderCompilingNote_NamesTheColourAndClaimsNoAttribution()
     {
         StringAssert.Contains("#00FFFF", RenderAvatar.ShaderCompilingNote);
-        StringAssert.Contains("did not cover", RenderAvatar.ShaderCompilingNote);
+        StringAssert.Contains("cannot be attributed", RenderAvatar.ShaderCompilingNote);
+        StringAssert.Contains("NOT", RenderAvatar.ShaderCompilingNote);
         StringAssert.Contains("re-grab", RenderAvatar.ShaderCompilingNote);
+        StringAssert.DoesNotContain("did not cover", RenderAvatar.ShaderCompilingNote);
         // It must never read as a verdict: an unrelated background import also trips the probe, so a note
         // that said FAIL would fail honest grabs.
         StringAssert.DoesNotContain("FAIL", RenderAvatar.ShaderCompilingNote);
