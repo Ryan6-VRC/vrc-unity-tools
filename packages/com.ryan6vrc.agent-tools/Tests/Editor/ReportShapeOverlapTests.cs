@@ -304,7 +304,104 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("log=", r);       // the artifact a bare FAIL never wrote
         // The zero is only readable if the run says whether the reaction source was consulted at all.
         StringAssert.Contains("NOT scanned — no outfitRoot passed", r);
-        StringAssert.DoesNotContain("meshCutters=", r, "nothing was counted, so no count may print");
+        StringAssert.DoesNotContain("meshCutters=", r, "the cutter scan never ran, so no verdict on it may print");
+    }
+
+    // Presence, and the whole reason the token exists: a cutter anti-clips by vertex FILTER, so this outfit is
+    // anti-clipped with no ShapeChanger row anywhere — `reacted=0` alone would read as "nothing anti-clips".
+    // Typed AddComponent, not reflection: the test asmdef references MA, so an upstream rename breaks the
+    // BUILD here rather than quietly asserting against a fixture that was never created.
+    [Test]
+    public void Report_meshCutterUnderOutfitRoot_saysPresentBesideReacted()
+    {
+        var avatar = NewAvatarRoot("Av");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+        var cutter = new GameObject("Cutter");                  // under the root; no ShapeChanger anywhere
+        cutter.transform.SetParent(avatar.transform, false);
+        cutter.AddComponent<ModularAvatarMeshCutter>();
+
+        var r = Report(Path(body), new string[0], Path(avatar));
+        StringAssert.Contains("reacted=0", r);
+        StringAssert.Contains("meshCutters=present", r);
+        // Beside reacted=, not merely somewhere on the line: the token's only job is to qualify that number,
+        // and a reader scanning for the zero must meet the qualification at the same glance.
+        StringAssert.IsMatch(@"reacted=0 meshCutters=present", r);
+    }
+
+    // The clean scan. `absent` is the tell that the scan RAN — distinct from the no-outfitRoot case above,
+    // which prints no token at all. Scoped, per CutterPresence: "none under this root", never "nothing cuts".
+    [Test]
+    public void Report_noMeshCutter_saysAbsentSoTheScanIsLegible()
+    {
+        var avatar = NewAvatarRoot("Av");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Body", m);
+
+        var r = Report(Path(body), new string[0], Path(avatar));
+        StringAssert.Contains("meshCutters=absent", r);
+        StringAssert.DoesNotContain("WITHHELD", r);
+        StringAssert.DoesNotContain("NOT scanned", r, "outfitRoot was passed — the scan ran");
+    }
+
+    // The branch no scene fixture can reach (MA always resolves in a live Editor) and the one the shipped
+    // census had no test for at all. Pure over its inputs, so it is assertable directly.
+    [Test]
+    public void DecideCutterState_typeDriftWithMaInstalled_isDriftUnknownNeverAbsent()
+    {
+        Assert.AreEqual(ReportShapeOverlap.CutterState.DriftUnknown,
+            ReportShapeOverlap.DecideCutterState(null, maInstalled: true, anyCutterFound: false),
+            "MA present with the type unresolved is drift; rendering it as a clean `absent` is the exact " +
+            "false all-clear this signal exists to prevent");
+    }
+
+    // The other half of the same ambiguity: MA genuinely absent is the honest silent floor, NOT a withholding.
+    [Test]
+    public void DecideCutterState_maAbsent_isAbsentNotWithheld()
+    {
+        Assert.AreEqual(ReportShapeOverlap.CutterState.Absent,
+            ReportShapeOverlap.DecideCutterState(null, maInstalled: false, anyCutterFound: false));
+    }
+
+    // The state->string mapping, asserted directly. Without this the drift path is covered only as an ENUM,
+    // while the text an agent actually reads goes unexercised — the same gap this change was made to close,
+    // one level of indirection down.
+    [Test]
+    public void MeshCutterPart_rendersEachStateExactly()
+    {
+        Assert.AreEqual(" meshCutters=present", ReportShapeOverlap.MeshCutterPart(ReportShapeOverlap.CutterState.Present));
+        Assert.AreEqual(" meshCutters=absent", ReportShapeOverlap.MeshCutterPart(ReportShapeOverlap.CutterState.Absent));
+        // Both non-answers print NO token — an unanswered question must never render as a value. DriftUnknown
+        // is carried by its WITHHELD note instead (WithheldNotes_..., below).
+        Assert.AreEqual("", ReportShapeOverlap.MeshCutterPart(ReportShapeOverlap.CutterState.DriftUnknown));
+        Assert.AreEqual("", ReportShapeOverlap.MeshCutterPart(ReportShapeOverlap.CutterState.NotScanned));
+    }
+
+    // Both MA drift paths withhold on the SUMMARY, not only to the console. Neither is reachable from a scene
+    // fixture (MA always resolves in a live Editor), and the reactions one shipped silent for exactly that
+    // reason: a drifted ShapeChanger type produced `reacted=0` indistinguishable from a clean scan. Asserted
+    // on the rendering directly, and asserted TOGETHER, because the two types share a namespace — the
+    // realistic rename sets both, and one door confessing while its twin stays quiet is the defect.
+    [Test]
+    public void WithheldNotes_spellsEveryDriftTheSameWay()
+    {
+        var clean = new ReportShapeOverlap.Ingested();
+        Assert.AreEqual("", ReportShapeOverlap.WithheldNotes(clean), "a clean run withholds nothing");
+
+        var both = new ReportShapeOverlap.Ingested
+        {
+            ReactionsUnknown = true,
+            MeshCutters = ReportShapeOverlap.CutterState.DriftUnknown,
+        };
+        var notes = ReportShapeOverlap.WithheldNotes(both);
+        StringAssert.Contains("| note: reactions signal WITHHELD (MA ShapeChanger drift)", notes);
+        StringAssert.Contains("| note: meshCutters signal WITHHELD (MA MeshCutter type drift)", notes);
+
+        var actives = new ReportShapeOverlap.Ingested { ActiveStateUnknown = true };
+        StringAssert.Contains("signal WITHHELD", ReportShapeOverlap.WithheldNotes(actives),
+            "the third signal predates this change and must keep the shared spelling");
     }
 
     // The note is gated on the SCAN, not on an empty result: this is the common call shape — a
