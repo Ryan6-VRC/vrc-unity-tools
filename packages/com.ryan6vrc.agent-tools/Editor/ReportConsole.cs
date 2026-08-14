@@ -475,18 +475,28 @@ namespace Ryan6Vrc.AgentTools.Editor
         ///
         /// They match the FAMILY, not a safe subset of it — a real failure from one of these sources is
         /// dropped along with its chatter. `[MACS]` takes that package's `Failed to apply patch` too
-        /// (deliberately: the whole source is noise here); the other three match the callstack as well
+        /// (deliberately: the whole source is noise here); the others match the callstack as well
         /// as the body, so an exception routed through one of those frames goes with them. That is the
         /// accepted cost of a default-on strip, and the reason the summary always reports the counts:
         /// when one of these families is implicated in a real failure, the count is the trace that says
         /// to re-run with <c>stripBenign: false</c>. `ReportConsoleTests` pins the collisions by name.
+        ///
+        /// A family keys on the TARGET it fails against, never the patching LIBRARY: NDMF, MA and VRCFury
+        /// all Harmony-patch from <c>[InitializeOnLoadMethod]</c> (measured 2026-08-13), so a
+        /// <c>HarmonyLib</c>-keyed family would strip a failed VRCFury patch by default.
         /// </summary>
         public static string BenignLabel(string full)
         {
             string s = full ?? string.Empty;
             // Third-party load chatter (com.mcardellje.macs), Error-typed and Log-typed alike.
             if (s.Contains("[MACS]")) return "MACS third-party load noise";
-            if (s.Contains("DestroyBlendTreeRecursive")) return "DestroyBlendTreeRecursive";
+            // MACS's Harmony patch failure at startup: a bare HarmonyLib exception carrying NO [MACS]
+            // token, so it keys on the patch target it names. That target is a real UnityEditor API our
+            // own tooling calls, so the co-token is what scopes this to a failing patch application rather
+            // than to any error mentioning it. MACS is a human/UI convenience no agent workflow reaches
+            // (operator, 2026-08-13) — hence the whole source is noise.
+            if (s.Contains("DestroyBlendTreeRecursive") && s.Contains("not found in method"))
+                return "MACS Harmony startup patch failure";
             // Bare "inconsistent result" would eat unrelated errors — require an importer co-token.
             if (s.Contains("inconsistent result")
                 && (s.IndexOf("fbx", StringComparison.OrdinalIgnoreCase) >= 0

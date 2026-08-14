@@ -228,8 +228,12 @@ public class ReportConsoleTests
     {
         Assert.AreEqual("MACS third-party load noise",
             ReportConsole.BenignLabel("<color=#007076>[MACS]</color>: Applying patches"));
-        Assert.AreEqual("DestroyBlendTreeRecursive",
-            ReportConsole.BenignLabel("something\nDestroyBlendTreeRecursive at foo"));
+        // The real specimen, captured off a live console (AvatarProject, 2026-08-13). It carries no
+        // [MACS] token at all — a bare HarmonyLib exception — which is why it needs its own family.
+        Assert.AreEqual("MACS Harmony startup patch failure",
+            ReportConsole.BenignLabel("Exception: Parameter \"\" not found in method static System.Void "
+                + "UnityEditor.Animations.MecanimUtilities::DestroyBlendTreeRecursive("
+                + "UnityEditor.Animations.BlendTree blendTree)\nHarmonyLib.MethodPatcher.EmitCallParameter"));
         Assert.AreEqual("FBX importer inconsistent-result noise",
             ReportConsole.BenignLabel("Import of Foo.fbx gave an inconsistent result"));
         Assert.AreEqual("VRCFury build-progress",
@@ -260,9 +264,24 @@ public class ReportConsoleTests
             ReportConsole.BenignLabel("Import of avatar.fbx failed: inconsistent result in mesh topology"));
         Assert.AreEqual("VRCFury build-progress",
             ReportConsole.BenignLabel("VF.Exceptions: build failed during Progress (4/9)"));
-        // Matched via the CALLSTACK, not the body: an exception routed through this frame goes too.
-        Assert.AreEqual("DestroyBlendTreeRecursive",
-            ReportConsole.BenignLabel("NullReferenceException\nVF.DestroyBlendTreeRecursive (at X.cs:1)"));
+    }
+
+    // The family is keyed on the patch TARGET plus a patch-application co-token, so the target's bare
+    // name stays signal. That name is a real UnityEditor API our own controller tooling calls, and the
+    // old bare-substring form ate any error mentioning it — including, in the field, this very MACS
+    // failure, which was then counted under a label naming a VRCFury frame that does not exist:
+    // measured 2026-08-13, zero occurrences of DestroyBlendTreeRecursive anywhere in the venue's
+    // packages, VRCFury included. A library-keyed family would be worse still — see BenignLabel.
+    [Test]
+    public void BenignLabel_patchTargetNameAloneIsSignal()
+    {
+        Assert.IsNull(ReportConsole.BenignLabel("NullReferenceException\nVF.DestroyBlendTreeRecursive (at X.cs:1)"));
+        Assert.IsNull(ReportConsole.BenignLabel("DestroyBlendTreeRecursive threw while cleaning our blend tree"));
+        // ...and a Harmony startup failure from a package that DOES reach the build is never stripped.
+        Assert.IsNull(ReportConsole.BenignLabel(
+            "Exception: patching failed\nHarmonyLib.PatchProcessor.Patch\nnadena.dev.ndmf.Patcher"));
+        Assert.IsNull(ReportConsole.BenignLabel(
+            "Exception: patching failed\nHarmonyLib.PatchProcessor.Patch\nVF.Hooks.VFInitHook"));
     }
 
     // Stripping must be visible in the summary. A dropped entry whose count is not reported is the
