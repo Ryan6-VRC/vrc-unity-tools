@@ -339,15 +339,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // The channel splits by WHAT went wrong, not by the verdict. A preflight is a dry run: it mutates
-            // nothing and its job is to answer go/no-go, so a no-go is the tool WORKING — routing it to
-            // Debug.LogError plants an error entry that every later ReportConsole error read has to discount,
-            // which is how a real fault gets lost in a scan. Misuse is different: a caller who passed a scene
-            // instance where an FBX root belongs has not received an answer at all, and that stays an error.
+            // The channel splits by WHAT went wrong, not by the verdict. A no-go is this dry run WORKING, and
+            // an error entry for it is one every later ReportConsole error read must discount — which is how
+            // a real fault gets lost in a scan. Misuse (a scene instance where an FBX root belongs) produced
+            // no answer at all, so it stays an error.
             //
-            // The verdict token and the RunLog `result` do NOT move with the channel. Diverging them would
-            // make a `=> FAIL` sweep — the common agent gate — disagree with the artifact, and forcing both
-            // to PASS would print `preconditions=no-go => PASS`, a line that argues with itself.
+            // The token and the RunLog `result` do NOT move with the channel: diverging them would make a
+            // `=> FAIL` sweep disagree with the artifact, and forcing both to PASS would print
+            // `preconditions=no-go => PASS`, a line that argues with itself.
             string Report(bool go, string failReason, bool misuse = false)
             {
                 string result = go ? "PASS" : "FAIL";

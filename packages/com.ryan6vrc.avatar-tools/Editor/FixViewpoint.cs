@@ -304,11 +304,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <param name="referenceRoot">REQUIRED known-good baseline (vendor source, or the pre-reshape prior
         /// version) whose descriptor + eyes/head the offset is derived from.</param>
         /// <param name="ownedLeftEye">Explicit eye transforms for a HUMANOID rig whose eyes are unmapped —
-        /// live vendor config, not a broken rig. Both of a side's eyes are required together (the
-        /// interocular axis is built from the pair, so a midpoint cannot serve); Head stays humanoid-resolved,
-        /// so a non-humanoid rig still FAILs. Omit them and behaviour is unchanged. Nothing is guessed here:
-        /// identifying which transforms are the eyes is the caller's assertion, which is exactly the
-        /// resolution this door's no-name-guessing stance says belongs to the caller.</param>
+        /// live vendor config. Both of a side together; Head stays humanoid-resolved, so a non-humanoid rig
+        /// still FAILs. Omit them and behaviour is unchanged. See <c>ResolveEyesHead</c>.</param>
         public static string Run(GameObject ownedRoot, GameObject referenceRoot, bool whatIf = false,
                                  Transform ownedLeftEye = null, Transform ownedRightEye = null,
                                  Transform referenceLeftEye = null, Transform referenceRightEye = null)
@@ -355,15 +352,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// missing eye/head is a named FAIL (no name-based guess: a name-guessed "eye" viewpoint is worse than
         /// a loud FAIL, and the driving LLM resolves a genuinely-missing-eyes case better than a code fallback).
         ///
-        /// <paramref name="leftEyeOverride"/>/<paramref name="rightEyeOverride"/> are that resolution's door.
-        /// Eyes unmapped while the eye OBJECTS exist is live vendor config, not a broken rig, and the agent can
-        /// identify them where a name rule cannot — so it hands them in rather than hand-computing the whole
-        /// similarity transform. This does NOT soften the stance above: nothing is guessed, the caller asserts.
-        /// Both eyes are required together (<see cref="HeadFrame"/> builds its X axis from
-        /// <c>rightEye - leftEye</c>, so a midpoint cannot serve), and they are consulted only AFTER the
-        /// humanoid and Head checks, because Head stays humanoid-resolved — a non-humanoid rig still FAILs.
-        /// <paramref name="eyeSrc"/> reports which basis was used, so a viewpoint computed from caller-supplied
-        /// refs is never mistaken for one the rig declared.
+        /// <paramref name="leftEyeOverride"/>/<paramref name="rightEyeOverride"/> are that resolution's door —
+        /// unmapped eyes with the eye OBJECTS present is live vendor config, and the agent identifies them
+        /// where a name rule cannot. Nothing is guessed; the caller asserts. Both eyes are required together
+        /// (<see cref="HeadFrame"/>'s X axis is <c>rightEye - leftEye</c>, so a midpoint cannot serve) and are
+        /// consulted only AFTER the humanoid and Head checks, Head staying humanoid-resolved — a non-humanoid
+        /// rig still FAILs. <paramref name="eyeSrc"/> reports which basis was used.
         /// </summary>
         static bool ResolveEyesHead(GameObject root, string which,
                                     out Vector3 leftEyeW, out Vector3 rightEyeW, out Vector3 headPosW,
