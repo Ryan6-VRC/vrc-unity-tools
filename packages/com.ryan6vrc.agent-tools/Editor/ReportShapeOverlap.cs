@@ -181,10 +181,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 // Same doctrine as ShapeChanger: absent MA is the silent floor, drifted MA is loud —
                 // a silently-zero count here reads exactly like "no other mechanism", the misread it exists to stop.
-                if (VendorReflect.ModularAvatarInstalled())
-                    Debug.LogWarning("[ReportShapeOverlap] MA is installed but ModularAvatarMeshCutter did not resolve " +
-                        "(type renamed/moved); meshCutters NOT counted — a reacted=0 on this mesh is unqualified.");
-                return 0;
+                if (!VendorReflect.ModularAvatarInstalled()) return 0; // no MA ⇒ genuinely no cutters
+                Debug.LogWarning("[ReportShapeOverlap] MA is installed but ModularAvatarMeshCutter did not resolve " +
+                    "(type renamed/moved); meshCutters NOT counted — a reacted=0 on this mesh is unqualified.");
+                return -1; // drift is NOT COUNTED, never a counted zero
             }
             var objProp = mcType.GetProperty("Object", BindingFlags.Public | BindingFlags.Instance);
             var aorType = VendorReflect.FindType("nadena.dev.modular_avatar.core.AvatarObjectReference");
