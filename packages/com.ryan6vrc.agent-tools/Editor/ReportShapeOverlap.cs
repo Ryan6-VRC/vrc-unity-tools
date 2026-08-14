@@ -15,10 +15,15 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// composed outfit's <c>ShapeChanger</c> drives its own shrink over the SAME body vertices — the two
     /// subtractions stack into an inverted limb, invisible to the render sheet and to CheckSeam/CheckAvatar.
     ///
-    /// This is a <b>Report, not a Check</b>: it measures geometry and flags candidate pairs, but never emits a
-    /// PASS/FAIL verdict — whether an overlap is a bug or a wanted coupling depends on the FX / ShapeChanger
+    /// This is a <b>Report, not a Check</b>: it measures geometry and flags candidate pairs, but never grades
+    /// what it found — whether an overlap is a bug or a wanted coupling depends on the FX / ShapeChanger
     /// graph the agent reads, not on the deltas. The agent supplies the candidate co-active set; the tool
     /// returns which pairs geometrically collide, and the agent adjudicates wanted-vs-defect.
+    ///
+    /// The two tokens are different kinds of thing (CheckAvatar's grammar): a run that measured something
+    /// ends <c>=&gt; OK</c>, while bad input returns a bare trailer-less <c>FAIL:</c> — a refusal to run,
+    /// not a verdict. An empty co-active set is <c>=&gt; OK shapes=0</c>: all three sources are optional and
+    /// the tool assembles the set, so "nothing is co-active" is the answer, not a misuse.
     ///
     /// Method (per <see cref="Analyze"/>): the authored per-vertex deltas of each shape's last frame
     /// (weight-independent) define a <i>touched set</i> — vertices moved past a two-tier noise floor
@@ -79,7 +84,22 @@ namespace Ryan6Vrc.AgentTools.Editor
             // ones. The active-state signal is then WITHHELD rather than guessed: a wrong guess here invents
             // MISMATCH rows, and inventing offenders is worse than the blind spot this signal closes.
             public bool ActiveStateUnknown;
+            // The ShapeChanger type itself drifted, so the reaction sweep returned nothing for a reason that is
+            // NOT "nothing reacts". Withheld on the same channel as ActiveStateUnknown, because a silently-empty
+            // reacted= is the same false all-clear MeshCutters below exists to prevent — and the two MA types
+            // live in one namespace, so a realistic rename takes both at once. Neither door may confess alone.
+            public bool ReactionsUnknown;
+            // Whether ANY MA MeshCutter sits under outfitRoot: the other anti-clip mechanism, which this tool
+            // cannot read and whose presence is what makes reacted=0 ambiguous. Presence, not a census —
+            // deliberately NOT scoped to this mesh (see CutterPresence).
+            public CutterState MeshCutters = CutterState.NotScanned;
         }
+
+        /// <summary>Whether another anti-clip mechanism is present, as far as this tool can tell.
+        /// <c>NotScanned</c> (no <c>outfitRoot</c>) and <c>DriftUnknown</c> both mean NOT ANSWERED and must stay
+        /// distinguishable from <c>Absent</c> — an unanswered question rendered as "none" is the false all-clear
+        /// this signal exists to prevent.</summary>
+        internal enum CutterState { NotScanned, Absent, Present, DriftUnknown }
         internal class Analysis
         {
             public int VertexCount;
@@ -121,11 +141,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             // The set fed to Analyze is the co-active union: caller-passed ∪ scene-worn ∪ MA ShapeChanger
             // reactions that write THIS mesh (weight 0 at edit time, so the caller can't see them).
             var ingested = BuildAnalyzeSet(smr, passed, outfitGO);
-            if (ingested.Names.Count == 0)
-                return Fail("no shape names — pass the candidate co-active set (the shapes you believe are on together)");
-
+            // An empty union on a mesh that RESOLVED is an answer, not misuse — a shape map needs it to
+            // rule a mesh out. Fail() would give it the bad-input envelope (bare FAIL, no RunLog), which
+            // also denies the caller the artifact the compose checkpoint asks for.
             var analysis = Analyze(mesh, ingested.Names);
-            return Emit(go, smr, mesh, analysis, ingested);
+            return Emit(go, smr, mesh, analysis, ingested, outfitGO != null);
         }
 
         // ── Ingestion: assemble the co-active shape-name union fed to Analyze ────────────────────────────────
@@ -150,9 +170,67 @@ namespace Ryan6Vrc.AgentTools.Editor
                         Add(mesh.GetBlendShapeName(i));
 
             if (outfitRoot != null)
+            {
                 IngestShapeChangers(outfitRoot, smr.gameObject, result, Add);
+                result.MeshCutters = CutterPresence(outfitRoot);
+            }
 
             return result;
+        }
+
+        /// <summary>Whether ANY MA <c>MeshCutter</c> sits under <paramref name="outfitRoot"/> — presence, never
+        /// a count and never a read of what one removes. It exists to make <c>reacted=0</c> legible where it
+        /// prints: a cutter anti-clips by vertex FILTER, so an outfit can be fully anti-clipped with no
+        /// ShapeChanger row at all (`outfits.md`).
+        ///
+        /// <para><b>What <c>Absent</c> means, exactly: no cutter under <paramref name="outfitRoot"/> — NOT
+        /// "nothing cuts this mesh."</b> A cutter cuts whatever its <c>Object</c> reference names and its own
+        /// placement is unconstrained; MA explicitly supports cutters parented UNDER their target mesh (its
+        /// 1.15.0 constant-on rule), so a cutter living on the base body and cutting the torso under a dress is
+        /// a sanctioned layout this root-scoped scan cannot see. That is a real under-warn and the reason the
+        /// summary word is scoped, not absolute. The limit is inherited, not introduced here; widening it needs
+        /// a second root argument, not a tighter filter.</para>
+        ///
+        /// <para>Within the root the probe deliberately OVER-warns — unscoped to the mesh, and counting a
+        /// filterless (MA-inert) cutter as present. That is the safe direction for a signal whose only job is to
+        /// stop a zero being over-read: an over-warn costs one extra look, an under-warn restores the false
+        /// all-clear. An implementer who "fixes" this by re-adding the target filter should read the three
+        /// paragraphs above first — the previous census did exactly that and was WORSE, because
+        /// <c>AvatarObjectReference.Get</c> returns null when the container has no avatar root among its
+        /// parents, so on a staging scene or an isolated prefab every row was skipped and it printed a counted
+        /// zero indistinguishable from a real one. Its filterless check was also never faithful (MA skips on an
+        /// empty resolved filter LIST, which a registered-provider miss also produces), and the interface it
+        /// pinned declares itself "Unstable API for now" upstream. One type pin replaces three.</para>
+        ///
+        /// <para>Scope of the word: this is a MeshCutter-FAMILY signal, not "geometry removal". A
+        /// <c>ShapeChanger</c> in Delete mode also removes geometry, but Delete rows are ShapeChanger rows and
+        /// already land in <c>reacted=</c>.</para></summary>
+        private static CutterState CutterPresence(GameObject outfitRoot)
+        {
+            var mcType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarMeshCutter");
+            bool found = false;
+            if (mcType != null)
+                // includeInactive: a cutter on a disabled object is the normal MENU-TOGGLED cut — MA builds a
+                // condition from ancestor activeSelf rather than skipping it — so it is live anti-clip, not dead weight.
+                foreach (var comp in outfitRoot.GetComponentsInChildren(mcType, true))
+                    if (comp != null) { found = true; break; }
+
+            var state = DecideCutterState(mcType, VendorReflect.ModularAvatarInstalled(), found);
+            if (state == CutterState.DriftUnknown)
+                Debug.LogWarning("[ReportShapeOverlap] MA is installed but ModularAvatarMeshCutter did not resolve " +
+                    "(type renamed/moved); meshCutters signal WITHHELD — reacted=0 under this outfitRoot is " +
+                    "unqualified (outfits.md anti-clip idioms; unity-tools.md ReportShapeOverlap).");
+            return state;
+        }
+
+        /// <summary>The presence verdict, pure over its inputs so every branch is assertable without building an
+        /// MA graph (the <see cref="FindInactiveAncestor"/> pattern). The scan and the warning stay with the
+        /// caller. MA absent is the honest silent floor — <c>Absent</c>, not withheld; MA present with the type
+        /// unresolved is drift, and must never render as a clean <c>Absent</c>.</summary>
+        internal static CutterState DecideCutterState(Type mcType, bool maInstalled, bool anyCutterFound)
+        {
+            if (mcType == null) return maInstalled ? CutterState.DriftUnknown : CutterState.Absent;
+            return anyCutterFound ? CutterState.Present : CutterState.Absent;
         }
 
         // Reflectively read MA ModularAvatarShapeChanger rows under `outfitRoot` and ingest the ShapeName of every
@@ -177,9 +255,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // runtime assembly — far more stable than any one type's FullName — so the drifted case is loud,
                 // not a silent `=> OK` with every reaction dropped (the worst outcome for this tool).
                 if (VendorReflect.ModularAvatarInstalled())
+                {
+                    // The warning alone left the SUMMARY silent, so a drifted run read exactly like a clean one
+                    // (`reacted=0`, no note) — the defect the MeshCutter door is fixed for. Withhold on the line too.
+                    result.ReactionsUnknown = true;
                     Debug.LogWarning("[ReportShapeOverlap] MA is installed but ModularAvatarShapeChanger did not resolve " +
-                        "(type renamed/moved, or its assembly failed to load types); reactions NOT ingested. The co-active " +
+                        "(type renamed/moved, or its assembly failed to load types); reactions signal WITHHELD. The co-active " +
                         "set may be missing weight-0 ShapeChanger shapes.");
+                }
                 return;
             }
 
@@ -195,9 +278,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             var getMethod = aorType == null ? null : VendorReflect.ResolveAorGetOverload(aorType); // strict pin: Get(Component)→GameObject
             if (shapesProp == null || objField == null || nameField == null || ctField == null || valField == null || getMethod == null)
             {
+                result.ReactionsUnknown = true; // member drift withholds on the summary too — see the type-drift branch
                 Debug.LogWarning("[ReportShapeOverlap] MA ShapeChanger reflection drift — a member (Shapes / " +
                     "ChangedShape.Object|ShapeName|ChangeType|Value / AvatarObjectReference.Get) did not resolve; reactions " +
-                    "NOT ingested. The co-active set may be missing weight-0 ShapeChanger shapes.");
+                    "signal WITHHELD. The co-active set may be missing weight-0 ShapeChanger shapes.");
                 return;
             }
 
@@ -483,12 +567,37 @@ namespace Ryan6Vrc.AgentTools.Editor
             return a;
         }
 
+        /// <summary>The cutter-presence token, printed beside <c>reacted=</c> because its whole job is to
+        /// qualify that number. Reported, not judged: <c>present</c> says another mechanism is under the outfit
+        /// root, never that the mesh is correctly anti-clipped — and <c>absent</c> is scoped to that root
+        /// (<see cref="CutterPresence"/>), never "nothing cuts this mesh".
+        ///
+        /// <para>Drift takes the NOTE channel rather than a third token value. This file already spells unknown
+        /// two ways — <c>UNKNOWN(n)</c> for an out-of-range ChangeType and a bare <c>unknown</c> in the
+        /// resolved-target cell — so a third synonym at a third scope would be the break; the established
+        /// spelling for a signal we refuse to guess at is <c>| note: … WITHHELD</c>, as
+        /// <c>ActiveStateUnknown</c> uses. Tokens here stay two-valued and parseable.</para></summary>
+        internal static string MeshCutterPart(CutterState state)
+            => state == CutterState.Present ? " meshCutters=present"
+             : state == CutterState.Absent ? " meshCutters=absent"
+             : ""; // NotScanned and DriftUnknown print no token — the latter rides the WITHHELD note
+
+        /// <summary>The WITHHELD notes, one per signal, in the order the summary reads them. All three drifts
+        /// are spelled the same way ON PURPOSE: the MA types live in one namespace, so a realistic rename takes
+        /// reactions and cutters together, and a reader must not have to learn which door confesses how.</summary>
+        internal static string WithheldNotes(Ingested ingested)
+            => (ingested.ActiveStateUnknown ? " | note: active-state signal WITHHELD (ObjectToggle probe drifted)" : "")
+             + (ingested.ReactionsUnknown ? " | note: reactions signal WITHHELD (MA ShapeChanger drift)" : "")
+             + (ingested.MeshCutters == CutterState.DriftUnknown
+                    ? " | note: meshCutters signal WITHHELD (MA MeshCutter type drift)" : "");
+
         // ── Output (Report envelope: summary + markdown body + WriteRunLog to Snapshots; no verdict token) ──
         // Beyond the geometric footprint/pairwise digest, Emit renders the RESOLUTION view the de-conflict skill
         // reads: per union shape its reaction, current static weight, resolved-target, and overlap — plus a full
         // weight audit and the worn-but-undeclared MISMATCH flag. It stays a Report: the table states facts and
         // marks worn-but-undeclared rows for the reader; the accept-vs-CaptureDiff decision lives in the skill.
-        private static string Emit(GameObject go, SkinnedMeshRenderer smr, Mesh mesh, Analysis a, Ingested ingested)
+        private static string Emit(GameObject go, SkinnedMeshRenderer smr, Mesh mesh, Analysis a, Ingested ingested,
+                                   bool outfitRootPassed)
         {
             int requested = a.Footprints.Count;
             int resolved = requested - a.Missing.Count;
@@ -508,11 +617,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (isWorn && !Covers(ingested, name)) mismatchCount++;
             }
 
+            // `reacted=0` has two causes and must say which. Gated on the SCAN, not on an empty result:
+            // the common call is a caller-supplied shape set with no outfitRoot, where `shapes=2/2
+            // reacted=0` is otherwise indistinguishable from "scanned, nothing reacts". When the scan did run,
+            // `meshCutters=present|absent` prints and is itself the tell — except on MeshCutter drift, where the
+            // token withholds and its WITHHELD note carries the same "the scan ran" information instead.
+            string emptyNote = outfitRootPassed ? "" : " | note: reactions NOT scanned — no outfitRoot passed";
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[ReportShapeOverlap] {0}: shapes={1}/{2} reacted={3} inactiveDeclared={4} worn={5} mismatch={6} pairs={7} flagged={8} missing={9} => OK{10}{11}",
+                "[ReportShapeOverlap] {0}: shapes={1}/{2} reacted={3}{11} inactiveDeclared={4} worn={5} mismatch={6} pairs={7} flagged={8} missing={9} => OK{10}{12}{13}",
                 mesh.name, resolved, requested, reacted, inactiveDeclared, worn, mismatchCount, a.Pairs.Count, pairFlagged, a.Missing.Count,
                 ingested.OutfitRootInactive ? " | note: outfitRoot itself is inactive — not charged to any row" : "",
-                ingested.ActiveStateUnknown ? " | note: active-state signal WITHHELD (ObjectToggle probe drifted)" : "");
+                MeshCutterPart(ingested.MeshCutters), WithheldNotes(ingested), emptyNote);
 
             var sb = new StringBuilder();
             sb.Append("# ReportShapeOverlap: ").Append(mesh.name).Append('\n');
