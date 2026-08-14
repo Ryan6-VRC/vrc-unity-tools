@@ -86,14 +86,42 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// reads focused while still parked (measured), so a focus skip would certify stale one call after
     /// the canary's own kick.
     ///
+    /// <b>Freshness — the shading axis.</b> Both layers above are about DEFORM: whether the geometry drawn is
+    /// current. Shading is a third axis neither touches. Unity draws a flat <c>#00FFFF</c> placeholder for any
+    /// shader variant still compiling, and the capture's own synchronous repaint is what QUEUES that compile —
+    /// so no pre-grab probe can see it, and the layers above certify the sheet anyway (a placeholder's pixels
+    /// move under the canary's nudge exactly like a real surface's). Measured 2026-08-13: a settled,
+    /// <c>canary=live</c> grab drew a whole silhouette flat cyan on an avatar whose hair texture means
+    /// (233,226,224), and a second avatar drew 64 placeholder px on a sheet that read healthy — the corruption
+    /// is partial as often as total. This path is unusually exposed because its headlight/no-skybox framing
+    /// config requests a keyword set the operator's viewport never draws, so the capture is what warms those
+    /// variants. The grab therefore forces synchronous shader compilation for its duration (project pref,
+    /// restored in the finally), covering the canary's frames too — with async compilation live across the
+    /// canary's baseline/nudge pair, a variant finishing between them moves pixels wholesale and would certify
+    /// <c>canary=live</c> off shader completion rather than off deform.
+    /// <b>This is a MECHANISM, and no summary token certifies the outcome.</b> That is the deliberate limit:
+    /// this file's history is mechanisms defeated by editor states nobody predicted, so if the pref misses a
+    /// path the tool is back to serving a placeholder sheet. The only in-band tell is a note when
+    /// <c>ShaderUtil.anythingCompiling</c> still reads true after the last frame — evidence something escaped,
+    /// never proof that a note-free sheet is clean. Proving THAT needs a pixel scan of the tiles, which this
+    /// tool does not do; a healthy sheet measures exactly zero <c>#00FFFF</c> px, so the scan's floor is 0
+    /// rather than a tuned threshold. The live cell in Tests/Editor/RenderAvatarFreshnessGate.md is the only
+    /// thing that proves the guard holds — batchmode cannot see a rendered pixel.
+    ///
     /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
     /// (target upright, facing world +Z, unrotated). A target rotated in the scene shows the scene's
     /// front — a documented limitation; the upside is it also works on a child or a non-avatar object.
     ///
-    /// INSPECTION-class, with one declared exception: the freshness canary WRITES scene data — a
+    /// INSPECTION-class, with two declared exceptions. First, the freshness canary WRITES scene data — a
     /// blendshape weight swing on one drawn renderer — and restores the exact prior value in the same
     /// call; if the swing dirtied a previously-clean scene the flag is cleared best-effort (internal
-    /// API), and an in-band note says so when it could not be. Everything else mutates only transient
+    /// API), and an in-band note says so when it could not be. Second, the shading guard flips ONE
+    /// EDITOR-GLOBAL pref (<c>EditorSettings.asyncShaderCompilation</c>) for the grab's duration — neither
+    /// scene data nor the Scene-View state below, but process-wide for those milliseconds, so any other
+    /// window compiles synchronously too. Restored in the finally BEFORE the view restores, because
+    /// <c>EditorSettings</c> is a serialized asset: a leak would persist to disk at the next save and make the
+    /// whole project compile synchronously indefinitely. Restored, the persisted content is unchanged.
+    /// Everything else mutates only transient
     /// Scene-View state (view transform, display toggles, selection, and SceneVisibilityManager
     /// hides) and restores it in a finally. Visibility restore is COARSE: each subtree this grab hid returns to its own self-state,
     /// so a nested eye-hide the operator set *under* a subtree the grab hid is not preserved (the same
@@ -294,6 +322,21 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const string CanaryDirtyNote =
             " | note=canary nudge left the scene dirty (ClearSceneDirtiness drifted) — save or revert manually";
 
+        // ----- Shading: the residual tell ----------------------------------------------------------
+        // The capture forces synchronous shader compilation (see the config block in CaptureCore), so a
+        // placeholder frame should be unreachable. Nothing in the summary certifies that, though — this is a
+        // MECHANISM, and this file's whole history is mechanisms being defeated by editor states nobody
+        // predicted. So the grab reads ShaderUtil.anythingCompiling once, right after the last frame: in the
+        // broken state that flips true exactly there (measured 2026-08-13 — false before the grab, true
+        // after, because the render is what queues the compile). True here means something still compiled
+        // despite the flip, and the sheet may carry flat #00FFFF regions.
+        // A NOTE, never a verdict: an unrelated background import also reads true, so this cannot FAIL a
+        // grab without failing honest ones. It does not prove the sheet is clean when absent — proving that
+        // needs the pixel scan this deliberately does not do (see the tool's owed follow-on).
+        internal const string ShaderCompilingNote =
+            " | note=shader compilation still in flight after the grab — the sync-compile guard did not cover "
+            + "some path, so this sheet may contain flat #00FFFF placeholder regions; re-grab and compare";
+
         // Top-CanaryMaxTries blendshapes of a mesh by max vertex delta, cached per mesh — the delta scan
         // is O(shapes × verts) and capture-hot. Normals/tangents are not read, so null is passed for
         // both (same call shape as ReportShapeOverlap). Non-readable and shape-less meshes cache empty.
@@ -402,7 +445,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 r.label, string.Join(",", r.manifest.angles), r.manifest.views.Length, r.manifest.tileRes,
                 r.manifest.margin.ToString("0.##", CultureInfo.InvariantCulture), showGizmos ? "on" : "off",
                 r.hiddenCount, r.excludedCount, proxyInfo, r.gate, r.canaryToken,
-                r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + r.hideNote, png);
+                r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + r.shaderNote + r.hideNote, png);
             Debug.Log(summary);
             return summary;
         }
@@ -490,7 +533,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public Color32[] sheet; public int sheetW, sheetH;
             public CamManifest manifest; public string label;
             public int hiddenCount, excludedCount, proxiesKept, proxiesHidden;
-            public string proxyNote = "", horizonNote = "", settleNote = "", gate = "", canaryToken = "", canaryNote = "", hideNote = "";
+            public string proxyNote = "", horizonNote = "", settleNote = "", gate = "", canaryToken = "", canaryNote = "", hideNote = "", shaderNote = "";
         }
         private static CoreResult Failed(string msg) => new CoreResult { ok = false, fail = msg };
         private static CoreResult CoreFail(string label, string reason) => Failed(Fail(label, reason));
@@ -642,6 +685,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var oSel = Selection.objects; var oActive = Selection.activeGameObject;
             bool oOutline = PiOutline != null && (bool)PiOutline.GetValue(null, null);
             bool oWire = PiWire != null && (bool)PiWire.GetValue(null, null);
+            bool oAsyncShaderCompile = EditorSettings.asyncShaderCompilation;
 
             var rts = new List<RenderTexture>();
             // Freshness: SMRs whose forceMatrixRecalculationPerRender we flip true for the capture's duration
@@ -769,6 +813,24 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sv.drawGizmos = false;
                 svState.showSkybox = false; svState.showFog = false; svState.showImageEffects = false;
                 sv.sceneViewState = svState;
+
+                // ----- Shading: compile shader variants synchronously for the capture ---------
+                // Unity draws a flat #00FFFF placeholder for any shader variant still compiling, and the
+                // capture's own RepaintImmediately is what QUEUES that compile — so nothing probed BEFORE a
+                // grab can see it, and every freshness layer above certifies the sheet regardless (the canary
+                // moves a placeholder's pixels as happily as a real surface). Measured 2026-08-13, Sandbox:
+                // a settled, canary-live grab of an avatar whose hair texture means (233,226,224) drew the
+                // whole silhouette flat cyan; a second avatar drew 64 placeholder px on a sheet that read
+                // healthy at a glance — the corruption is partial as often as total. The headlight/no-skybox
+                // config just above is why this path hits cold variants at all: it requests a keyword set the
+                // operator's own viewport never draws, so the capture warms variants nothing else does.
+                // Off for the grab's duration = the synchronous repaint compiles what it needs and draws the
+                // truth. This MUST also cover the canary's grabs below: with async compilation live across the
+                // baseline/nudge pair, a variant finishing between those two frames moves pixels wholesale and
+                // would certify canary=live off shader completion rather than off deform.
+                // ShaderUtil.allowAsyncCompilation is NOT the lever — it already reads false at rest and this
+                // path does not consult it (measured: armed grab still 453,750 placeholder px).
+                EditorSettings.asyncShaderCompilation = false;
 
                 // ----- Per-angle capture -----------------------------------------------------
                 int n = pin ? opts.pinned.views.Length : resolvedAngles.Length;
@@ -944,6 +1006,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                     }
                 }
 
+                // ----- Shading: read the residual tell (see ShaderCompilingNote) ---------------
+                // Last thing after the final frame — including the canary's — because the compile is queued
+                // BY a render, so an earlier read reports the state of the previous grab, not this one.
+                string shaderNote = ShaderUtil.anythingCompiling ? ShaderCompilingNote : "";
+
                 // ----- Contact sheet + manifest ----------------------------------------------
                 var sheet = Compose(tiles, tileRes, cols, rows, out int sheetW, out int sheetH);
                 var manifest = new CamManifest
@@ -960,6 +1027,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     proxiesKept = proxiesKept, proxiesHidden = proxiesHidden,
                     proxyNote = proxyNote, horizonNote = horizonNote, settleNote = SettleNote(reactive),
                     gate = GateToken(reactive, settle), canaryToken = canaryToken, canaryNote = canaryNote,
+                    shaderNote = shaderNote,
                 };
             }
             catch (Exception e)
@@ -972,6 +1040,19 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // synchronous repaint below, so the frame left on the operator's screen bakes with original flags.
                 foreach (var kv in forcedRebake)
                     if (kv.Key != null) kv.Key.forceMatrixRecalculationPerRender = kv.Value;
+
+                // Then the async-compile pref, BEFORE the visibility/view restores below — their order is
+                // load-bearing, not incidental. Everything after this line can throw (SceneVisibilityManager
+                // calls on a destroyed object, the sceneViewState setter, the AnnotationUtility writes,
+                // Selection), and this pref is the one piece of restored state that is PROJECT-WIDE and
+                // durable: EditorSettings is a serialized asset, so a leaked `false` persists into
+                // ProjectSettings/EditorSettings.asset at the next save and makes the whole project compile
+                // synchronously forever — presenting as a hung editor on any new material, in a venue where
+                // nothing diffs it. Restored here, the persisted content is unchanged (the value is back
+                // before any flush). The reverse leak is unreachable: the caller cannot flip this mid-call,
+                // because the call holds the main thread. The closing RepaintImmediately below then redraws
+                // the operator's restored view with async compilation back on, which is what they want.
+                EditorSettings.asyncShaderCompilation = oAsyncShaderCompile;
 
                 // Restore visibility COARSELY: every subtree this grab hid (hide-list / DefaultHide /
                 // ancestor siblings, and the other scene roots) returns to its own recorded self-state.
@@ -1127,6 +1208,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 ? " | note=frame A grabbed by tool v" + A.toolVersion + " (now v" + ToolVersion + "); a pre-fix grab may be stale-baked" : "";
             // Carry B's freshness/settle notes — an unsettled or horizon-incomplete B undercuts the whole
             // "empty diff ⇒ immaterial GIVEN freshness" premise, so the caveat must ride the diff summary too.
+            // B's shader note rides for a sharper reason: a placeholder region under a diff is not merely
+            // uncertain, it manufactures `changed` px against an honestly-shaded A (or hides a real change
+            // under a flat fill), so the count itself is the thing in doubt. A is pinned but not re-probed —
+            // its own grab carried this note if it applied.
             // The sheet is bottom-origin and RenderDiff reports raw buffer coords, so bbox y grows UPWARD from
             // the bottom edge. Reading it as top-down inverts every localization — a reader chasing a
             // top-of-frame change concludes "nothing there". Stated once, as its own token rather than inside
@@ -1134,7 +1219,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             string originNote = identical == r.manifest.views.Length ? "" : " bboxOrigin=bottom";
             string summary = "[RenderAvatar] CaptureDiff " + label + " against=" + Path.GetFileName(against)
                 + " angles=" + string.Join(",", r.manifest.angles) + " => OK gate=" + r.gate + r.canaryToken + " diff=[" + string.Join("; ", parts) + "] identical="
-                + identical + "/" + r.manifest.views.Length + originNote + r.hideNote + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + versionNote + " | png=" + pngB;
+                + identical + "/" + r.manifest.views.Length + originNote + r.hideNote + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + r.shaderNote + versionNote + " | png=" + pngB;
             Debug.Log(summary);
             return summary;
         }

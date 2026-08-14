@@ -284,6 +284,22 @@ public class RenderAvatarFreshnessTests
         StringAssert.Contains("cannot be ruled out", RenderAvatar.CanaryUnavailableNote);
     }
 
+    // The shading guard is a mechanism with no verdict token, so this note is the ONLY in-band trace it
+    // leaves. Same reasoning as the canary-unavailable constant above: no code path decides on it, only its
+    // wording is load-bearing. Two phrases are the payload — the placeholder colour, because that is what an
+    // operator matches against a suspect sheet by eye, and the admission that the guard was escaped rather
+    // than a bare "still compiling", which reads as routine editor chatter and gets skimmed past.
+    [Test]
+    public void ShaderCompilingNote_NamesThePlaceholderColourAndTheEscape()
+    {
+        StringAssert.Contains("#00FFFF", RenderAvatar.ShaderCompilingNote);
+        StringAssert.Contains("did not cover", RenderAvatar.ShaderCompilingNote);
+        StringAssert.Contains("re-grab", RenderAvatar.ShaderCompilingNote);
+        // It must never read as a verdict: an unrelated background import also trips the probe, so a note
+        // that said FAIL would fail honest grabs.
+        StringAssert.DoesNotContain("FAIL", RenderAvatar.ShaderCompilingNote);
+    }
+
     [Test]
     public void ReloadPendingFailReason_NamesTheLockOnlyWhenHeld()
     {
