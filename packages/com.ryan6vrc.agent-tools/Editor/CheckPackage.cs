@@ -278,10 +278,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             var boundHere = new HashSet<Material>();
             foreach (var rend in model.GetComponentsInChildren<Renderer>(true))
             {
-                if (rend is ParticleSystemRenderer) continue;
+                // The ParticleSystemRenderer exclusion applies to the EMPTY count only. Its null slot
+                // is routine and carries no signal, but a material bound THERE is still bound on this
+                // model — excluding it from the set would report a remap entry as "landed nowhere" and
+                // prescribe a reimport that cannot change anything.
+                bool slotsAreEvidence = !(rend is ParticleSystemRenderer);
                 foreach (var m in rend.sharedMaterials)
                 {
-                    if (m == null) empty++; else boundHere.Add(m);
+                    if (m == null) { if (slotsAreEvidence) empty++; }
+                    else boundHere.Add(m);
                 }
             }
             if (empty == 0) return;
@@ -337,11 +342,20 @@ namespace Ryan6Vrc.AgentTools.Editor
                      + ") — restore or import those material assets, THEN force-reimport the FBX. A reimport alone "
                      + "cannot fix this: the targets do not exist yet";
 
-            if (notBound != null && notBound.Count > 0)
+            // No partition supplied: say only what an unpartitioned caller established. Claiming
+            // "all N are already bound" here would assert a reading nobody took.
+            if (notBound == null)
+                return emptySlots + " empty renderer slot(s) despite " + mappedCount
+                     + " resolvable external-material remap entries (" + NameList(mapped ?? new List<string>())
+                     + ") — force-reimport the FBX. If a reimport does not clear it, the empty slots are "
+                     + "not the mapped ones and this model is fine";
+
+            if (notBound.Count > 0)
                 return emptySlots + " empty renderer slot(s); " + notBound.Count + " of " + mappedCount
                      + " resolvable external-material remap entries are on no renderer of this model ("
                      + NameList(notBound) + ") — force-reimport the FBX. The other "
-                     + (mappedCount - notBound.Count) + " bound fine and are not the problem";
+                     + (mappedCount - notBound.Count) + " bound fine and are not the problem. If a reimport "
+                     + "does not clear it, those entries name no submesh this mesh carries and this model is fine";
 
             return emptySlots + " empty renderer slot(s), but all " + mappedCount
                  + " resolvable external-material remap entries are already bound on this model ("

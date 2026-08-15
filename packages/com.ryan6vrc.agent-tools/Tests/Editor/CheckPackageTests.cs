@@ -258,6 +258,9 @@ public class CheckPackageTests
         StringAssert.Contains("force-reimport", s);
         // Naming absent targets here would send a caller off to restore something that already resolves.
         StringAssert.DoesNotContain("restore or import", s);
+        // A model-level assertion can legitimately survive a reimport — say so, or the caller loops
+        // on the one branch that prescribes the reimport.
+        StringAssert.Contains("this model is fine", s);
     }
 
     [Test]
@@ -275,13 +278,15 @@ public class CheckPackageTests
     }
 
     [Test]
-    public void DescribeRemap_staleWithNoPartition_stillReadsAsTheAllBoundCase()
+    public void DescribeRemap_staleWithNoPartition_claimsNoPartitionItDidNotCompute()
     {
-        // The partition is optional on the signature; a caller that omits it must not get a message
-        // implying entries were named when none were.
+        // The partition is optional on the signature. A caller that omits it must not be told
+        // "all N are already bound" — that is a positive reading nobody took.
         var s = CheckPackage.DescribeRemap(CheckPackage.RemapVerdict.Stale,
             mappedCount: 4, unresolved: new System.Collections.Generic.List<string>(), emptySlots: 3);
         StringAssert.Contains("not the mapped ones", s);
+        StringAssert.Contains("this model is fine", s);
+        StringAssert.DoesNotContain("already bound", s);
     }
 
     [Test]
