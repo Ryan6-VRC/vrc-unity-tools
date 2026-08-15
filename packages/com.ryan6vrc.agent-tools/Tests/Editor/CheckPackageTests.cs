@@ -207,15 +207,35 @@ public class CheckPackageTests
     }
 
     [Test]
-    public void ClassifyRemap_allEntriesResolveYetSlotsEmpty_isStale()
+    public void ClassifyRemap_everyEntryBoundYetSlotsEmpty_isSilent()
     {
-        Assert.AreEqual(CheckPackage.RemapVerdict.Stale, CheckPackage.ClassifyRemap(4, 0, 3));
+        // Retired class, measured before retiring: zero instances across 119 map-carrying models in three
+        // projects. Every resolvable entry landed, so the empty slots are other submeshes and a reimport is
+        // a no-op — the state ScanHierarchy still counts into `empty=`, with no verdict to carry.
+        Assert.AreEqual(CheckPackage.RemapVerdict.None, CheckPackage.ClassifyRemap(4, 0, 3, notBoundCount: 0));
+    }
+
+    [Test]
+    public void ClassifyRemap_someEntryLandedNowhere_isStale()
+    {
+        // The surviving stale case, and the one the remedy is written for: entries resolve, some never
+        // bound, a force-reimport is what fixes it.
+        Assert.AreEqual(CheckPackage.RemapVerdict.Stale, CheckPackage.ClassifyRemap(4, 0, 3, notBoundCount: 2));
     }
 
     [Test]
     public void ClassifyRemap_anyUnresolvedEntry_isUnresolved()
     {
         Assert.AreEqual(CheckPackage.RemapVerdict.Unresolved, CheckPackage.ClassifyRemap(2, 2, 10));
+    }
+
+    [Test]
+    public void ClassifyRemap_unresolvedSurvivesAnEmptyPartition()
+    {
+        // The regression guard on the partition parameter. An unresolved entry never enters the target map,
+        // so it can never populate notBound — reading that 0 as "nothing to report" would silence the class
+        // whose remedy (import the pack FIRST) is the one a reimport cannot substitute for.
+        Assert.AreEqual(CheckPackage.RemapVerdict.Unresolved, CheckPackage.ClassifyRemap(2, 2, 10, notBoundCount: 0));
     }
 
     [Test]
@@ -261,20 +281,6 @@ public class CheckPackageTests
         // A model-level assertion can legitimately survive a reimport — say so, or the caller loops
         // on the one branch that prescribes the reimport.
         StringAssert.Contains("this model is fine", s);
-    }
-
-    [Test]
-    public void DescribeRemap_staleWithEveryEntryBound_saysTheSlotsAreOtherSubmeshes()
-    {
-        // The verdict still FAILs (demoting it would trade a false alarm for a silent miss), so the message
-        // is the only thing standing between the reader and a reimport loop that cannot clear anything.
-        var s = CheckPackage.DescribeRemap(CheckPackage.RemapVerdict.Stale,
-            mappedCount: 2, unresolved: new System.Collections.Generic.List<string>(), emptySlots: 7,
-            mapped: new System.Collections.Generic.List<string> { "m_body", "m_hair" },
-            notBound: new System.Collections.Generic.List<string>());
-        StringAssert.Contains("not the mapped ones", s);
-        StringAssert.Contains("will not clear", s);
-        StringAssert.DoesNotContain("restore or import", s);
     }
 
     [Test]

@@ -239,13 +239,24 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Scope bound, stated because the message cannot: this asserts "the model carries an external-material
         // map AND has empty slots", not "this particular slot is the one the map should have filled" — the
         // importer's source-material list does not index-align with renderer slots (measured: 2 entries against
-        // 10 empty slots), so a per-slot attribution would be an assumption, not a reading. Censused at 15/69
-        // map-carrying models, every one a genuine miss.
+        // 10 empty slots), so a per-slot attribution would be an assumption, not a reading. The 15/69 census
+        // taken when this check first ran was one untextured outfit family, every member the UNRESOLVED class.
         //
         // What IS readable is the entry: a mapped material either appears on some renderer of this model or it
         // does not, and the walk below already has both halves in hand. So the message names the entries that
         // landed nowhere rather than every entry in the map — with a dozen entries and two genuine misses, the
         // undifferentiated list left the reader to re-derive the partition the scan had already computed.
+        //
+        // An all-bound model — every resolvable entry landed somewhere, yet slots are still empty — is NOT a
+        // class here, because the empty slots are then other submeshes and the remedy is a no-op. It was
+        // measured before being retired: zero instances across 119 map-carrying models in three projects, and
+        // no importer-driven path constructs it (binding is applied by NAME at import, so a key whose name
+        // exists binds and a key whose name does not has no submesh to leave empty; the staleness above is
+        // all-or-nothing per import, which is why a real one lands in the not-bound partition). Those empty
+        // slots are still reported — ScanHierarchy runs on the same model asset and counts every one into
+        // `empty=` — they simply do not carry a verdict. Do not re-add the class without a measured instance:
+        // `notBound` is a model-wide material-identity test, so on a map aiming several keys at one material
+        // one bound occurrence marks them all bound, and a per-slot check is what such an instance would need.
         //
         // `materialImportMode == None` is excluded: materials are deliberately not imported there, so every
         // slot is empty by design and an empty count carries no signal at all.
@@ -291,15 +302,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             if (empty == 0) return;
 
-            var verdict = ClassifyRemap(mapped.Count, unresolved.Count, empty);
-            if (verdict == RemapVerdict.None) return;
-
+            // Partition first: the verdict now depends on it, since an all-bound model is not a class.
             var notBound = new List<string>();
             foreach (var name in mapped)
             {
                 Material t;
                 if (target.TryGetValue(name, out t) && t != null && !boundHere.Contains(t)) notBound.Add(name);
             }
+
+            var verdict = ClassifyRemap(mapped.Count, unresolved.Count, empty, notBound.Count);
+            if (verdict == RemapVerdict.None) return;
 
             if (verdict == RemapVerdict.Unresolved) r.RemapUnresolved += empty; else r.RemapStale += empty;
             r.Offenders.Add(new Offender
@@ -316,11 +328,18 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>The remap decision, pure so every branch is asserted directly rather than by hunting a
         /// binary FBX whose importer happens to produce it. A partly-missing pack classifies as
         /// <c>Unresolved</c>: import-first is the remedy that fixes it, and force-reimporting alone would
-        /// leave the unresolved half exactly as it was.</summary>
-        internal static RemapVerdict ClassifyRemap(int mappedCount, int unresolvedCount, int emptySlots)
+        /// leave the unresolved half exactly as it was.
+        ///
+        /// <paramref name="notBoundCount"/> is what makes the stale class say something: empty slots on a model
+        /// whose every resolvable entry already landed are other submeshes, so there is nothing to prescribe
+        /// and no verdict to carry. It defaults to 0 — a caller that has not partitioned gets <c>None</c> for
+        /// the stale case rather than a FAIL it cannot word.</summary>
+        internal static RemapVerdict ClassifyRemap(int mappedCount, int unresolvedCount, int emptySlots,
+                                                   int notBoundCount = 0)
         {
             if (mappedCount == 0 || emptySlots == 0) return RemapVerdict.None;
-            return unresolvedCount > 0 ? RemapVerdict.Unresolved : RemapVerdict.Stale;
+            if (unresolvedCount > 0) return RemapVerdict.Unresolved;
+            return notBoundCount > 0 ? RemapVerdict.Stale : RemapVerdict.None;
         }
 
         /// <summary>Pure wording for the two remap classes, kept beside the decision so a reader comparing
@@ -330,9 +349,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// remap entries where two never landed, and naming all twelve leaves the reader to find the two.
         /// An entry is "not bound" when its material appears on NO renderer of this model — an observation,
         /// unlike a per-slot attribution, which the importer's list cannot support (see ScanModelRemap).
-        /// Empty means every mapped material did land, so the empty slots are other submeshes; that is
-        /// still reported rather than swallowed, because demoting the verdict on it would trade a false
-        /// alarm for a silent miss on evidence nobody has measured.</summary>
+        /// A stale verdict now implies a non-empty partition, so the wording states it unconditionally; a
+        /// direct call with an empty one degenerates to a vacuous "0 of N" and is not a live case.</summary>
         internal static string DescribeRemap(RemapVerdict verdict, int mappedCount, List<string> unresolved, int emptySlots,
                                             List<string> mapped = null, List<string> notBound = null)
         {
@@ -350,17 +368,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                      + ") — force-reimport the FBX. If a reimport does not clear it, the empty slots are "
                      + "not the mapped ones and this model is fine";
 
-            if (notBound.Count > 0)
-                return emptySlots + " empty renderer slot(s); " + notBound.Count + " of " + mappedCount
-                     + " resolvable external-material remap entries are on no renderer of this model ("
-                     + NameList(notBound) + ") — force-reimport the FBX. The other "
-                     + (mappedCount - notBound.Count) + " bound fine and are not the problem. If a reimport "
-                     + "does not clear it, those entries name no submesh this mesh carries and this model is fine";
-
-            return emptySlots + " empty renderer slot(s), but all " + mappedCount
-                 + " resolvable external-material remap entries are already bound on this model ("
-                 + NameList(mapped ?? new List<string>()) + ") — the empty slots are other submeshes, "
-                 + "not the mapped ones, and a force-reimport will not clear them";
+            return emptySlots + " empty renderer slot(s); " + notBound.Count + " of " + mappedCount
+                 + " resolvable external-material remap entries are on no renderer of this model ("
+                 + NameList(notBound) + ") — force-reimport the FBX. The other "
+                 + (mappedCount - notBound.Count) + " bound fine and are not the problem. If a reimport "
+                 + "does not clear it, those entries name no submesh this mesh carries and this model is fine";
         }
 
         /// <summary>Comma-joined names, capped so a many-material FBX names a readable few and counts the rest
