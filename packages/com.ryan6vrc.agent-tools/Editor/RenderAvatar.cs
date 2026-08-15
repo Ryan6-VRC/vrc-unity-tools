@@ -163,11 +163,14 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Such an A may be flat #00FFFF placeholder in places, which manufactures `changed` px against an
         // honest B or hides a real change under a flat fill, so the diff COUNT is the thing in doubt and no
         // note on B can repair it. A poisoned baseline silently corrupting every later diff is the whole
-        // reason this guard exists, so pre-guard baselines refuse rather than diff. `toolVersion` cannot carry
-        // this: it reads Assembly.GetName().Version, which is 0.0.0.0 for a Unity package assembly with no
-        // AssemblyVersion attribute, so it never varies and its own "pre-fix grab" note has never once fired.
+        // reason this guard exists, so pre-guard baselines refuse rather than diff.
+        //
+        // The bump is the ONLY staleness instrument here, and deliberately so: a tool-version field cannot do
+        // this job. A Unity package assembly carries no AssemblyVersion, so Assembly.GetName().Version is
+        // 0.0.0.0 for every build, and package.json's version is a hand-maintained constant — either way an
+        // advisory "this baseline may be stale" note fires never or always, and a baseline in real doubt must
+        // REFUSE rather than carry a note the reader may discount.
         private const int ManifestSchema = 2;
-        private static readonly string ToolVersion = typeof(RenderAvatar).Assembly.GetName().Version.ToString();
 
         // Descendants excluded from every grab, merged with the caller's `hide`. The non-destructive
         // build adds a ~10 km "Culling" mesh (visible in play mode) that renders as a huge pale surface
@@ -547,7 +550,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         [Serializable] private class CamView { public string angle; public Vector3 pivot; public Quaternion rot; public float orthoSize; public int cropX, cropY, side; }
         [Serializable] private class CamManifest
         {
-            public int schema; public string toolVersion; public string label;
+            public int schema; public string label;
             public string[] angles; public string[] hide; public bool showGizmos;
             public int cols, rows, tileRes, resolution; public float margin;
             public CamFrame frame; public CamView[] views;
@@ -1044,7 +1047,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var sheet = Compose(tiles, tileRes, cols, rows, out int sheetW, out int sheetH);
                 var manifest = new CamManifest
                 {
-                    schema = ManifestSchema, toolVersion = ToolVersion, label = label,
+                    schema = ManifestSchema, label = label,
                     angles = resolvedAngles, hide = hide ?? Array.Empty<string>(), showGizmos = showGizmos,
                     cols = cols, rows = rows, tileRes = tileRes, resolution = resolution, margin = margin,
                     frame = frame, views = views
@@ -1235,8 +1238,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 parts.Add(r.manifest.views[i].angle + ":changed=" + changed + ",bbox="
                     + (changed == 0 ? "-" : "(" + bb.x + "," + bb.y + "," + bb.width + "," + bb.height + ")"));
             }
-            string versionNote = A.toolVersion != ToolVersion
-                ? " | note=frame A grabbed by tool v" + A.toolVersion + " (now v" + ToolVersion + "); a pre-fix grab may be stale-baked" : "";
             // Carry B's freshness/settle notes — an unsettled or horizon-incomplete B undercuts the whole
             // "empty diff ⇒ immaterial GIVEN freshness" premise, so the caveat must ride the diff summary too.
             // B's shader note rides for a sharper reason: a placeholder region under a diff is not merely
@@ -1250,7 +1251,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             string originNote = identical == r.manifest.views.Length ? "" : " bboxOrigin=bottom";
             string summary = "[RenderAvatar] CaptureDiff " + label + " against=" + Path.GetFileName(against)
                 + " angles=" + string.Join(",", r.manifest.angles) + " => OK gate=" + r.gate + r.canaryToken + " diff=[" + string.Join("; ", parts) + "] identical="
-                + identical + "/" + r.manifest.views.Length + originNote + r.hideNote + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + r.shaderNote + versionNote + " | png=" + pngB;
+                + identical + "/" + r.manifest.views.Length + originNote + r.hideNote + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + r.shaderNote + " | png=" + pngB;
             Debug.Log(summary);
             return summary;
         }

@@ -244,15 +244,49 @@ public class CheckPackageTests
     }
 
     [Test]
-    public void DescribeRemap_stale_prescribesReimportAndNotThePack()
+    public void DescribeRemap_stale_namesOnlyTheEntriesThatLandedNowhere()
     {
+        // The defect this closes: naming all four sent the reader hunting for the two that matter.
         var s = CheckPackage.DescribeRemap(CheckPackage.RemapVerdict.Stale,
-            mappedCount: 4, unresolved: new System.Collections.Generic.List<string>(), emptySlots: 3);
+            mappedCount: 4, unresolved: new System.Collections.Generic.List<string>(), emptySlots: 3,
+            mapped: new System.Collections.Generic.List<string> { "m_body", "m_hair", "m_eye", "m_cloth" },
+            notBound: new System.Collections.Generic.List<string> { "m_eye", "m_cloth" });
+        StringAssert.Contains("m_eye", s);
+        StringAssert.Contains("m_cloth", s);
+        StringAssert.DoesNotContain("m_body", s);
+        StringAssert.DoesNotContain("m_hair", s);
         StringAssert.Contains("force-reimport", s);
         // Naming absent targets here would send a caller off to restore something that already resolves.
         StringAssert.DoesNotContain("restore or import", s);
-        // Model-level assertion, so a reimport can legitimately not clear it — say so, or the caller loops.
+        // A model-level assertion can legitimately survive a reimport — say so, or the caller loops
+        // on the one branch that prescribes the reimport.
+        StringAssert.Contains("this model is fine", s);
+    }
+
+    [Test]
+    public void DescribeRemap_staleWithEveryEntryBound_saysTheSlotsAreOtherSubmeshes()
+    {
+        // The verdict still FAILs (demoting it would trade a false alarm for a silent miss), so the message
+        // is the only thing standing between the reader and a reimport loop that cannot clear anything.
+        var s = CheckPackage.DescribeRemap(CheckPackage.RemapVerdict.Stale,
+            mappedCount: 2, unresolved: new System.Collections.Generic.List<string>(), emptySlots: 7,
+            mapped: new System.Collections.Generic.List<string> { "m_body", "m_hair" },
+            notBound: new System.Collections.Generic.List<string>());
         StringAssert.Contains("not the mapped ones", s);
+        StringAssert.Contains("will not clear", s);
+        StringAssert.DoesNotContain("restore or import", s);
+    }
+
+    [Test]
+    public void DescribeRemap_staleWithNoPartition_claimsNoPartitionItDidNotCompute()
+    {
+        // The partition is optional on the signature. A caller that omits it must not be told
+        // "all N are already bound" — that is a positive reading nobody took.
+        var s = CheckPackage.DescribeRemap(CheckPackage.RemapVerdict.Stale,
+            mappedCount: 4, unresolved: new System.Collections.Generic.List<string>(), emptySlots: 3);
+        StringAssert.Contains("not the mapped ones", s);
+        StringAssert.Contains("this model is fine", s);
+        StringAssert.DoesNotContain("already bound", s);
     }
 
     [Test]
