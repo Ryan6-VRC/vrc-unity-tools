@@ -145,9 +145,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (s.isDirty || string.IsNullOrEmpty(s.path))
                     unsaved.Add(string.IsNullOrEmpty(s.name) ? "<untitled>" : s.name);
             }
+            // Naming the fix matters more here than in most refusals: a scene commonly reads dirty with no edit
+            // behind it (Modular Avatar stamps a version tag and cached object references into a prefab
+            // instance's overrides on load), so an agent reads this refusal as spurious and reaches for a
+            // discarding reopen — the one move that does lose work. Saving is the safe DIRECTION, not safe
+            // outright: it is scene-wide, so the same ignorance that makes the discard unsafe means the save
+            // commits any real edit too. Canon: unity.md §Sharp edges.
             if (unsaved.Count > 0)
-                return Fail("unsaved/unsaved-to-disk scene(s) loaded: [" + string.Join(",", unsaved) + "] — save or "
-                    + "close them first; End() restores the scene setup from disk and would lose the edits");
+                return Fail("unsaved/unsaved-to-disk scene(s) loaded: [" + string.Join(",", unsaved) + "] — "
+                    + "save them (manage_scene save), or close them; an <untitled> scene has no disk path, so "
+                    + "closing is its only answer. End() restores the scene setup from disk and would lose the "
+                    + "edits. A scene here often reads dirty from Modular Avatar stamping cache state on load "
+                    + "rather than from an edit of yours: saving that is the safe direction and settles it "
+                    + "permanently — but a save is scene-wide, so it commits any real edit in that scene too. "
+                    + "Do NOT clear it by reopening from disk: that discards whatever the flag was standing "
+                    + "for. Ask before saving a scene that is not yours");
 
             // BEFORE any session state exists. Creating the RunLog dir leaves the AssetDatabase blind to it, so
             // the first write pays a full Refresh — and a Refresh with a compile pending reloads the domain,
