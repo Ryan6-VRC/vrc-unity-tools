@@ -342,11 +342,55 @@ public class RenderAvatarFreshnessTests
             StringAssert.Contains("64", s);
             StringAssert.DoesNotContain("did not cover", s);
         }
-        StringAssert.Contains("not attributable", compiling);
-        StringAssert.Contains("re-grab", compiling);
-        StringAssert.Contains("NOT the known producer", quiet);
-        StringAssert.Contains("measure the mechanism", quiet);
+        StringAssert.Contains("cannot be attributed", compiling);
+        StringAssert.Contains("re-grab first", compiling);
+        StringAssert.Contains("not indicated", quiet);
+        StringAssert.Contains("Measure the mechanism", quiet);
         Assert.AreNotEqual(compiling, quiet, "the two arms must not collapse to one remedy");
+
+        // The terminal case has to end somewhere the reader can act: floor 0 with no opt-out means an
+        // authored cyan surface would otherwise leave a target permanently un-grabbable. Both arms carry it,
+        // and the doc route is a resolvable PATH — a console reader has the string, not the class doc.
+        foreach (var s in new[] { compiling, quiet })
+        {
+            StringAssert.Contains("showGizmos:false", s);
+            StringAssert.Contains("hide", s);
+            StringAssert.Contains("RenderAvatarFreshnessGate.md", s);
+        }
+    }
+
+    // The counter is exercised through the real decode path, not just over hand-built buffers: the gate
+    // doc's live Measure row can only report "the grab returned OK", which is circular as proof, so what is
+    // assertable headlessly is that an encoded-then-decoded sheet still counts exactly. A scan reading a
+    // mis-strided or wrong-format buffer fails here rather than in a green live cell.
+    [Test]
+    public void CountPlaceholderPx_SurvivesThePngRoundTrip()
+    {
+        const int w = 64, h = 64;
+        var tex = new Texture2D(w, h, TextureFormat.RGBA32, false, false);
+        try
+        {
+            var px = new Color32[w * h];
+            for (int i = 0; i < px.Length; i++) px[i] = new Color32(60, 60, 60, 255);
+            for (int y = 0; y < 8; y++)
+                for (int x = 0; x < 8; x++)
+                    px[(10 + y) * w + (10 + x)] = new Color32(0, 255, 255, 255);
+            Assert.AreEqual(64, RenderAvatar.CountPlaceholderPx(px), "precondition: the source buffer");
+
+            tex.SetPixels32(px);
+            tex.Apply(false, false);
+            var png = ImageConversion.EncodeToPNG(tex);
+
+            var round = new Texture2D(2, 2, TextureFormat.RGBA32, false, false);
+            try
+            {
+                Assert.IsTrue(ImageConversion.LoadImage(round, png), "PNG must decode");
+                Assert.AreEqual(64, RenderAvatar.CountPlaceholderPx(round.GetPixels32()),
+                    "PNG is lossless, so the count must survive encode+decode exactly");
+            }
+            finally { UnityEngine.Object.DestroyImmediate(round); }
+        }
+        finally { UnityEngine.Object.DestroyImmediate(tex); }
     }
 
     // Frame A is a prior grab off disk: the live compile probe says nothing about it, so its reason must
