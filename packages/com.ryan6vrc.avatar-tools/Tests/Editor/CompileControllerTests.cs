@@ -39,7 +39,7 @@ public class CompileControllerTests
     public void WhatIf_Writes_Nothing_To_OutDir()
     {
         string outDir2 = TestRoot + "/out2";
-        string result = CompileController.Compile(_srcPath, outDir2, whatIf: true);
+        string result = CompileController.Run(_srcPath, outDir2, whatIf: true);
 
         StringAssert.Contains("=> OK (whatIf)", result);
         Assert.IsFalse(File.Exists(outDir2 + "/Debounce_Fx.controller"), "whatIf leaves no asset in outDir");
@@ -55,7 +55,7 @@ public class CompileControllerTests
         // The door reports a refusal via Debug.LogError; declare it so the test framework doesn't count the
         // intentional error log as a failure.
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*validation failed.*=> FAIL"));
-        string result = CompileController.Compile(badSrc, outDir, whatIf: false);
+        string result = CompileController.Run(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
         Assert.IsFalse(File.Exists(outDir + "/Debounce_Fx.controller"), "no controller on validation failure");
@@ -85,7 +85,7 @@ public class CompileControllerTests
 
         string outDir = TestRoot + "/out_boolcurve";
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*post-emit graph lint.*=> FAIL"));
-        string result = CompileController.Compile(badSrc, outDir, whatIf: false);
+        string result = CompileController.Run(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result, "a bool parameter curve must fail the compile, not warn");
         StringAssert.Contains("nonFloatParamCurve", result, "the refusal names the rule");
@@ -104,7 +104,7 @@ public class CompileControllerTests
 
         string outDir = TestRoot + "/out_driveraap";
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*post-emit graph lint.*=> FAIL"));
-        string result = CompileController.Compile(badSrc, outDir, whatIf: false);
+        string result = CompileController.Run(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result, "a driver op on a clip-bound param must fail the compile");
         StringAssert.Contains("driverOnAnimatedParam", result, "the refusal names the rule");
@@ -118,7 +118,7 @@ public class CompileControllerTests
         string path = outDir + "/Debounce_Fx.controller";
 
         // A good compile first.
-        CompileController.Compile(_srcPath, outDir, whatIf: false);
+        CompileController.Run(_srcPath, outDir, whatIf: false);
         string guid1 = AssetDatabase.AssetPathToGUID(path);
         int layersBefore = AssetDatabase.LoadAssetAtPath<AnimatorController>(path).layers.Length;
         Assert.IsNotEmpty(guid1);
@@ -134,7 +134,7 @@ public class CompileControllerTests
             "layers:\n  - name: L\n    states:\n      S:\n        transitions:\n          - { to: NoSuchState }\n    default: S\n");
         // The failing recompile reports its refusal via Debug.LogError; declare it as expected.
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*emit:.*=> FAIL"));
-        string result = CompileController.Compile(badSrc, outDir, whatIf: false);
+        string result = CompileController.Run(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
         Assert.IsTrue(File.Exists(path), "prior controller survives a failing recompile");
@@ -151,11 +151,11 @@ public class CompileControllerTests
         string outDir = TestRoot + "/out_idem";
         string path = outDir + "/Debounce_Fx.controller";
 
-        CompileController.Compile(_srcPath, outDir, whatIf: false);
+        CompileController.Run(_srcPath, outDir, whatIf: false);
         string guid1 = AssetDatabase.AssetPathToGUID(path);
         Assert.IsTrue(File.Exists(path), "controller written to disk");
 
-        CompileController.Compile(_srcPath, outDir, whatIf: false);
+        CompileController.Run(_srcPath, outDir, whatIf: false);
         string guid2 = AssetDatabase.AssetPathToGUID(path);
 
         Assert.IsNotEmpty(guid1, "controller has a GUID after the first compile");
@@ -182,7 +182,7 @@ public class CompileControllerTests
             "    default: S\n");
 
         string outDir = TestRoot + "/out_unresolved";
-        string result = CompileController.Compile(src, outDir, whatIf: false);
+        string result = CompileController.Run(src, outDir, whatIf: false);
 
         StringAssert.Contains("=> CLASSIFY", result);
         StringAssert.Contains("unresolvedRefs=1", result);
@@ -209,7 +209,7 @@ public class CompileControllerTests
     {
         string src = TestRoot + "/" + leaf + ".yaml";
         File.WriteAllText(src, yaml);
-        string result = CompileController.Compile(src, TestRoot + "/out_" + leaf, whatIf: false);
+        string result = CompileController.Run(src, TestRoot + "/out_" + leaf, whatIf: false);
         StringAssert.Contains("=> OK", result);
 
         const string marker = "| log=";

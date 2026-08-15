@@ -134,7 +134,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// walk structure unchanged. The <c>guid</c>/<c>fileId</c> identity fold-in on asset refs is
         /// unconditional either way.
         /// </summary>
-        public static string Snapshot(string hierarchyPath, bool includeChildren = true, bool followAssets = false)
+        public static string Run(string hierarchyPath, bool includeChildren = true, bool followAssets = false)
         {
             var go = FindByHierarchyPath(hierarchyPath);
             if (go == null)
@@ -188,7 +188,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (bytes <= ReadCapBytes) return note;
             return note + " (past the ~" + (ReadCapBytes / 1024) + "KB read cap — narrow it: "
                  + (includeChildren
-                    ? "Snapshot(\"" + hierarchyPath + "\", includeChildren: false" + (followAssets ? ", followAssets: false" : "") + "), or snapshot a deeper path"
+                    ? "Run(\"" + hierarchyPath + "\", includeChildren: false" + (followAssets ? ", followAssets: false" : "") + "), or snapshot a deeper path"
                     : followAssets ? "re-run with followAssets: false, or snapshot a deeper path"
                                    : "snapshot a deeper path — this call is already at its narrowest flags")
                  + ")";

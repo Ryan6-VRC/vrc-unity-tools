@@ -79,7 +79,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// series, since there the identical repeats ARE the signal. Repeats need not be adjacent: a group folds
         /// onto its newest position, so a read taken to establish SEQUENCE should pass false. Distinct from Unity's own Console "Collapse"
         /// toggle, which hides entries from this read entirely and shows up as <c>UNREACHED=</c>.</param>
-        public static string Report(
+        public static string Run(
             string types = "all",
             string filterText = null,
             int count = 20,

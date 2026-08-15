@@ -61,7 +61,7 @@ public class CompileControllerRobustnessTests
         File.WriteAllText(src, sb.ToString());
 
         string outDir = TestRoot + "/out_big";
-        string result = CompileController.Compile(src, outDir, whatIf: false);
+        string result = CompileController.Run(src, outDir, whatIf: false);
 
         StringAssert.Contains("=> OK", result); // oversized layer still compiles — advisory is not a failure
         string body = ReadRunLogBody(result);
@@ -92,7 +92,7 @@ public class CompileControllerRobustnessTests
 
         LogAssert.Expect(LogType.Warning,
             new Regex(@"\[CompileController\] overwriting .*Debounce_Fx\.controller.*provenance"));
-        string result = CompileController.Compile(src, outDir, whatIf: false);
+        string result = CompileController.Run(src, outDir, whatIf: false);
 
         StringAssert.Contains("=> OK", result); // warn-only: the compile still succeeds
     }
@@ -112,7 +112,7 @@ public class CompileControllerRobustnessTests
 
         string outDir = TestRoot + "/out_ui";
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*emit:.*Image.*=> FAIL"));
-        string result = CompileController.Compile(src, outDir, whatIf: false);
+        string result = CompileController.Run(src, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
         StringAssert.Contains("UnityEngine", result,
@@ -137,7 +137,7 @@ public class CompileControllerRobustnessTests
             "layers:\n  - name: L\n    states:\n      S:\n        transitions:\n          - { to: NoSuchState }\n    default: S\n");
 
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*emit:.*=> FAIL"));
-        string result = CompileController.Compile(badSrc, outDir, whatIf: false);
+        string result = CompileController.Run(badSrc, outDir, whatIf: false);
 
         StringAssert.Contains("FAIL", result);
         Assert.IsFalse(AssetDatabase.IsValidFolder(outDir), "freshly-created leaf folder removed on a failed compile");

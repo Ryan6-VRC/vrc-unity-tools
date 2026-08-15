@@ -9,7 +9,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
     // ResolvePose).
     // Everything expression-side resolves against a BAKED avatar, so it is a scene object verified live
     // (execute_code) by the coordinator, never in NUnit. No test here may create a GameObject,
-    // add a VRC_AvatarDescriptor, or call RenderThumbnail.Render — that class of EditMode test
+    // add a VRC_AvatarDescriptor, or call RenderThumbnail.Run — that class of EditMode test
     // SIGSEGV-crashes this project's suite. In-memory AnimationClips are fine (no scene object).
     //
     // The pose tests are deliberately GLOB-DRIVEN, never naming a specific RTPose_*: the bundled set is

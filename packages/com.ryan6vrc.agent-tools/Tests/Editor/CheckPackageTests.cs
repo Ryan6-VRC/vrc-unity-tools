@@ -94,7 +94,7 @@ public class CheckPackageTests
     {
         SavePrefab("empty", new Material[1]); // one slot, never assigned
 
-        var summary = CheckPackage.VerifyFolder(TmpDir);
+        var summary = CheckPackage.Run(TmpDir);
 
         StringAssert.Contains("empty=1", summary);
         StringAssert.Contains("MISSING=0", summary);
@@ -112,7 +112,7 @@ public class CheckPackageTests
         AssetDatabase.Refresh();
 
         LogAssert.Expect(LogType.Error, ErrRe); // FAIL logs at Error
-        var summary = CheckPackage.VerifyFolder(TmpDir);
+        var summary = CheckPackage.Run(TmpDir);
 
         // If this precondition fails the synthesis is suspect, not the feature: deleting the material is
         // what is meant to leave the prefab's two serialized references non-zero and unresolvable.
@@ -135,7 +135,7 @@ public class CheckPackageTests
         AssetDatabase.Refresh();
 
         LogAssert.Expect(LogType.Error, ErrRe);
-        var summary = CheckPackage.VerifyFolder(TmpDir);
+        var summary = CheckPackage.Run(TmpDir);
 
         StringAssert.Contains("dangling: 2 ref(s) at 2 distinct target(s)", summary);
     }
@@ -157,7 +157,7 @@ public class CheckPackageTests
         AssetDatabase.Refresh();
 
         LogAssert.Expect(LogType.Error, ErrRe);
-        var summary = CheckPackage.VerifyFolder(TmpDir);
+        var summary = CheckPackage.Run(TmpDir);
 
         // The tally spans both dangling classes, so a mesh-only break must still report a target.
         StringAssert.Contains("meshMISSING=1", summary);
@@ -174,7 +174,7 @@ public class CheckPackageTests
     {
         SavePrefab("empty", new Material[1]);
 
-        var logPath = CheckPackage.VerifyFolder(TmpDir).Split(new[] { "log=" }, 2, System.StringSplitOptions.None)[1];
+        var logPath = CheckPackage.Run(TmpDir).Split(new[] { "log=" }, 2, System.StringSplitOptions.None)[1];
 
         var json = File.ReadAllText(logPath);
         var materials = MaterialsObject(json);
@@ -305,7 +305,7 @@ public class CheckPackageTests
     {
         // Two counters, two names: a single fused remap number would hide which remedy applies.
         SavePrefab("empty", new Material[1]);
-        var summary = CheckPackage.VerifyFolder(TmpDir);
+        var summary = CheckPackage.Run(TmpDir);
         StringAssert.Contains("remapSTALE=0", summary);
         StringAssert.Contains("remapUNRESOLVED=0", summary);
     }

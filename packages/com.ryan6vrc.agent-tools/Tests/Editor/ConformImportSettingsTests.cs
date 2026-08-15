@@ -45,7 +45,7 @@ public class ConformImportSettingsTests
     [Test]
     public void NonFolderPath_IsBareFail_WithNoTrailer()
     {
-        var s = ConformImportSettings.RunFolder("Assets/DoesNotExist");
+        var s = ConformImportSettings.Run("Assets/DoesNotExist");
         Assert.That(s, Does.StartWith("[ConformImportSettings] FAIL:"));
         Assert.That(s, Does.Not.Contain("| log="), "a bad-input early return must not claim a RunLog");
     }
@@ -53,7 +53,7 @@ public class ConformImportSettingsTests
     [Test]
     public void EmptyPath_IsBareFail()
     {
-        Assert.That(ConformImportSettings.RunFolder(""), Does.StartWith("[ConformImportSettings] FAIL:"));
+        Assert.That(ConformImportSettings.Run(""), Does.StartWith("[ConformImportSettings] FAIL:"));
     }
 
     [Test]
@@ -66,12 +66,12 @@ public class ConformImportSettingsTests
         // invalid-folder message — refused either way, which is what matters.
         foreach (var root in new[] { "Assets", "Assets/", "Packages", "Packages/com.vrchat.avatars" })
         {
-            var s = ConformImportSettings.RunFolder(root);
+            var s = ConformImportSettings.Run(root);
             Assert.That(s, Does.StartWith("[ConformImportSettings] FAIL:"), "root not refused: " + root);
             Assert.That(s, Does.Not.Contain("| log="), "a refusal must not claim a RunLog: " + root);
         }
         foreach (var root in new[] { "Assets", "Packages/com.vrchat.avatars" })
-            Assert.That(ConformImportSettings.RunFolder(root), Does.Contain("pass the specific"),
+            Assert.That(ConformImportSettings.Run(root), Does.Contain("pass the specific"),
                 "a refusal on a real folder must name the fix: " + root);
     }
 
@@ -80,7 +80,7 @@ public class ConformImportSettingsTests
     [Test]
     public void FolderWithNothingToConform_PassesWithNoRows()
     {
-        var s = ConformImportSettings.RunFolder(TmpDir);
+        var s = ConformImportSettings.Run(TmpDir);
         Assert.That(s, Does.Contain("conformed: none"));
         Assert.That(s, Does.Contain("=> PASS"));
         Assert.That(s, Does.Contain("| log="), "a real run must carry its RunLog path in-band");
@@ -96,7 +96,7 @@ public class ConformImportSettingsTests
         Assert.That(before.mipmapEnabled, Is.True, "fixture premise: mipmaps on by default");
         Assert.That(before.streamingMipmaps, Is.False, "fixture premise: streaming off by default");
 
-        var s = ConformImportSettings.RunFolder(TmpDir);
+        var s = ConformImportSettings.Run(TmpDir);
         Assert.That(s, Does.Contain("mip-streaming=1"));
         Assert.That(s, Does.Contain("=> PASS"));
         Assert.That(((TextureImporter)AssetImporter.GetAtPath(path)).streamingMipmaps, Is.True);
@@ -107,7 +107,7 @@ public class ConformImportSettingsTests
     {
         var path = WritePng("preview.png");
 
-        var s = ConformImportSettings.RunFolder(TmpDir, whatIf: true);
+        var s = ConformImportSettings.Run(TmpDir, whatIf: true);
         Assert.That(s, Does.Contain("(whatIf)"));
         Assert.That(s, Does.Contain("would conform: mip-streaming=1"));
         Assert.That(((TextureImporter)AssetImporter.GetAtPath(path)).streamingMipmaps, Is.False,
@@ -128,7 +128,7 @@ public class ConformImportSettingsTests
         AssetDatabase.WriteImportSettingsIfDirty(path);
         AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
 
-        var s = ConformImportSettings.RunFolder(TmpDir);
+        var s = ConformImportSettings.Run(TmpDir);
         Assert.That(s, Does.Contain("max-texture-size=1"));
         Assert.That(s, Does.Not.Contain("CAPPED BELOW SOURCE"),
             "a cap above a small source loses no pixels — reporting it would cry wolf on every hit");
@@ -145,7 +145,7 @@ public class ConformImportSettingsTests
         Assert.That(mi, Is.Not.Null, "fixture premise: a plain-text .obj gets a ModelImporter");
         Assert.That(mi.isReadable, Is.False, "fixture premise: read/write off by default");
 
-        var s = ConformImportSettings.RunFolder(TmpDir);
+        var s = ConformImportSettings.Run(TmpDir);
         Assert.That(s, Does.Contain("mesh-readable=1"));
         Assert.That(((ModelImporter)AssetImporter.GetAtPath(path)).isReadable, Is.True);
     }
@@ -161,7 +161,7 @@ public class ConformImportSettingsTests
             "fixture premise: Unity's default is Calculate, which is what makes this row fire at all");
         Assert.That(ReadLegacyFlag(path), Is.False, "fixture premise: legacy off by default");
 
-        var s = ConformImportSettings.RunFolder(TmpDir);
+        var s = ConformImportSettings.Run(TmpDir);
         Assert.That(s, Does.Contain("legacy-blendshape-normals=1"));
         Assert.That(s, Does.Contain("=> PASS"),
             "this row writes through a reflected private member — a setter that fails to dirty the .meta lands as NOT-PASS");
@@ -177,7 +177,7 @@ public class ConformImportSettingsTests
         // setting ever shipped, and the only alternative remedy (importBlendShapeNormals off Calculate) is a
         // different authoring decision this door does not make. A warning here would be undischargeable.
         WriteObj("normals-only.obj");
-        var s = ConformImportSettings.RunFolder(TmpDir, whatIf: true);
+        var s = ConformImportSettings.Run(TmpDir, whatIf: true);
         Assert.That(s, Does.Contain("legacy-blendshape-normals=1"));
         Assert.That(s, Does.Not.Contain("CAPPED BELOW SOURCE"));
         Assert.That(s, Does.Not.Contain("render check"));
@@ -202,7 +202,7 @@ public class ConformImportSettingsTests
         AssetDatabase.WriteImportSettingsIfDirty(path);
         AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
 
-        var s = ConformImportSettings.RunFolder(TmpDir, whatIf: true);
+        var s = ConformImportSettings.Run(TmpDir, whatIf: true);
         Assert.That(s, Does.Not.Contain("legacy-blendshape-normals"),
             "the SDK gates this row on Calculate; ours must too, or we rewrite settings the SDK accepts");
     }
@@ -218,7 +218,7 @@ public class ConformImportSettingsTests
         Assert.That(clip.loadType, Is.EqualTo(AudioClipLoadType.DecompressOnLoad), "fixture premise");
         Assert.That(clip.loadInBackground, Is.False, "fixture premise");
 
-        var s = ConformImportSettings.RunFolder(TmpDir);
+        var s = ConformImportSettings.Run(TmpDir);
         Assert.That(s, Does.Contain("audio-background-load=1"));
         Assert.That(((AudioImporter)AssetImporter.GetAtPath(path)).loadInBackground, Is.True);
         Assert.That(AssetDatabase.LoadAssetAtPath<AudioClip>(path).loadInBackground, Is.True,
@@ -234,7 +234,7 @@ public class ConformImportSettingsTests
         WriteObj("all.obj");
         WriteWav("all.wav");
 
-        var s = ConformImportSettings.RunFolder(TmpDir);
+        var s = ConformImportSettings.Run(TmpDir);
         Assert.That(s, Does.Contain("mip-streaming=1"));
         Assert.That(s, Does.Contain("mesh-readable=1"));
         Assert.That(s, Does.Contain("audio-background-load=1"));
@@ -247,9 +247,9 @@ public class ConformImportSettingsTests
     {
         WritePng("idem.png");
         WriteObj("idem.obj");
-        ConformImportSettings.RunFolder(TmpDir);
+        ConformImportSettings.Run(TmpDir);
 
-        var s = ConformImportSettings.RunFolder(TmpDir);
+        var s = ConformImportSettings.Run(TmpDir);
         Assert.That(s, Does.Contain("conformed: none"),
             "the door is re-runnable by design — a second pass on a clean folder must be a no-op");
     }

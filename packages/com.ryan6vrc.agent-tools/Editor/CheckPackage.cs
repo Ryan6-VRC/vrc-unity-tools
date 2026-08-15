@@ -52,7 +52,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Verify every prefab under an asset folder. Returns a one-line PASS/FAIL summary;
         /// when a verification run was performed it ends with the RunLog path (<c>… => RESULT | log=&lt;path&gt;</c>) —
         /// a bad-input early return is a bare <c>[CheckPackage] FAIL: …</c> with no trailer.</summary>
-        public static string VerifyFolder(string assetFolderPath)
+        public static string Run(string assetFolderPath)
         {
             if (string.IsNullOrEmpty(assetFolderPath) || !AssetDatabase.IsValidFolder(assetFolderPath))
                 return "[CheckPackage] FAIL: not a valid asset folder: " + assetFolderPath;

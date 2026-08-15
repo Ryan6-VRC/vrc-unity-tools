@@ -74,7 +74,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// the artifact path in-band (<c>… =&gt; OK | log=&lt;path&gt;</c>); a null/empty/unresolved
         /// <paramref name="rootPath"/> is a bare-FAIL with no trailer (nothing was written). A valid but
         /// component-empty subtree is an honest zero-count artifact, not a refusal.</summary>
-        public static string Report(string rootPath)
+        public static string Run(string rootPath)
         {
             if (string.IsNullOrEmpty(rootPath)) return Refuse("rootPath is null/empty");
             var root = FindByHierarchyPath(rootPath);
@@ -714,7 +714,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static int AppendOther(StringBuilder sb, GameObject root, HashSet<Component> tier1)
         {
             sb.Append("\n## Other components\n\n");
-            sb.Append("_generic shallow inventory — type, host, object-reference attachments, and top-level scalar fields; for exhaustive/nested/asset depth use `AgentInspector.Snapshot(<host path>)`._\n\n");
+            sb.Append("_generic shallow inventory — type, host, object-reference attachments, and top-level scalar fields; for exhaustive/nested/asset depth use `AgentInspector.Run(<host path>)`._\n\n");
             int count = 0;
             var rows = new StringBuilder();
             foreach (var t in root.GetComponentsInChildren<Transform>(true))

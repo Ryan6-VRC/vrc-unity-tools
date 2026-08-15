@@ -20,7 +20,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
         }
 
         // Write yaml to an OS temp file, compile into a fresh asset sub-folder under testRoot, return the loaded
-        // controller. The yaml deliberately does NOT live under Assets/: CompileController.Compile takes a
+        // controller. The yaml deliberately does NOT live under Assets/: CompileController.Run takes a
         // filesystem path, reads it with File.ReadAllText and otherwise only uses it for error labels, so an
         // Assets/ path buys nothing and costs one asset import per compile — ~45 of them across the fixpoint
         // suites. Only outDir must be an Assets/-relative asset folder, and EnsureFolder registers it via
@@ -31,7 +31,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
             File.WriteAllText(y, yaml);
             string outDir = testRoot + "/out_" + name + "_" + tag;
             AnimatorTestHelpers.EnsureFolder(outDir);
-            string res = CompileController.Compile(y, outDir, whatIf: false);
+            string res = CompileController.Run(y, outDir, whatIf: false);
             // CLASSIFY is a clean compile that carries a finding to route, not a failure — a source
             // controller with dangling motion refs earns it and still round-trips (GoGoLoco's
             // GoLocoBaseFullPoses ships 4). The fixpoint property is stability, so demanding OK here would

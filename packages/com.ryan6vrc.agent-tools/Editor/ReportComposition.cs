@@ -31,12 +31,12 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// that build-time renames are outside what it can see. <c>bake:true</c> measures the composed truth
     /// instead, by building a throwaway clone through the real VRC SDK preprocess chain and diffing it
     /// against that census. The flag only upgrades exactness — same subject, same question — which is why
-    /// this is a <c>Report</c> with a completeness flag and not a <c>Compare</c>: a <c>Compare</c> takes two
+    /// this is a <c>Run</c> with a completeness flag and not a <c>Compare</c>: a <c>Compare</c> takes two
     /// subjects from the caller, and here the caller supplies one and the tool derives the second view.
     ///
     /// Boundary against <see cref="AgentInspector"/>: that door dumps a menu asset's raw serialized fields
     /// generically and leaves decoding to you; this one reports the authored control SET across every
-    /// installer, typed and merged, and dumps no raw fields. Drop to <c>AgentInspector.Snapshot</c> for a
+    /// installer, typed and merged, and dumps no raw fields. Drop to <c>AgentInspector.Run</c> for a
     /// control's nested structs. Humanoid mapping is not here either — that divergence is
     /// <c>CheckHumanoidRig.InspectAvatar</c>'s, named in output rather than called, because it lives in
     /// <c>avatar-tools</c> and the dependency arrow runs the other way.
@@ -60,7 +60,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// two-phase for that reason (see <see cref="Verify"/>). Default off: cheap and safe is the default,
         /// exactness is opt-in. <paramref name="paramFilter"/> narrows every parameter table to names
         /// containing it, for chasing one parameter without paying for the whole avatar.</summary>
-        public static string Report(string avatarRoot, bool bake = false, string paramFilter = null)
+        public static string Run(string avatarRoot, bool bake = false, string paramFilter = null)
         {
             var root = FindByHierarchyPath(avatarRoot);
             if (root == null) return Refuse("avatarRoot '" + (avatarRoot ?? "(null)") + "' did not resolve to a GameObject");
@@ -74,7 +74,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>Re-read the verdict of a <c>bake:true</c> run from its artifact. The bake outlives the
-        /// MCP transport window, so <see cref="Report"/> returns a stable path before doing the work and the
+        /// MCP transport window, so <see cref="Run"/> returns a stable path before doing the work and the
         /// result is read back here — a timed-out call loses nothing and must not be re-run.</summary>
         public static string Verify(string avatarRoot)
         {

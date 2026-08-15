@@ -137,7 +137,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         static AnimatorController CompileToTemp(string yamlPath, string tempAssetsDir)
         {
             Directory.CreateDirectory(Path.GetFullPath(tempAssetsDir));
-            var msg = CompileController.Compile(yamlPath, ToAssetsRelative(tempAssetsDir));
+            var msg = CompileController.Run(yamlPath, ToAssetsRelative(tempAssetsDir));
             if (msg == null || msg.IndexOf("=> OK", StringComparison.Ordinal) < 0)
                 throw new Exception("compile failed: " + msg);
             AssetDatabase.Refresh();
@@ -546,7 +546,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // controllers, yaml, and README ride along for GUID resolution but are never load-checked (a
         // dangling controller ref does not fail a prefab load, so widening the copy set masks nothing).
         // The anchor-seam class (CheckAvatar) over one entry prefab, instantiated so the scan walks a real
-        // scene hierarchy rather than the asset. Gate tier is FAIL where CheckAvatar.Inspect is CLASSIFY for
+        // scene hierarchy rather than the asset. Gate tier is FAIL where CheckAvatar.Run is CLASSIFY for
         // the same predicate, and the asymmetry is deliberate: an entry in THIS library is ours and
         // CONVENTIONS.md forbids the shape outright, while a composed avatar carries mergeables that are not
         // ours to rule on. An instantiation that yields nothing FAILS rather than reporting a clean prefab —

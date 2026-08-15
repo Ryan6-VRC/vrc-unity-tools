@@ -54,7 +54,7 @@ public class CompileClipsTests
     [Test]
     public void Emits_visible_anim_per_clip_with_ref_handles()
     {
-        string s = CompileClips.Compile(WriteYaml(TwoPoses), Out);
+        string s = CompileClips.Run(WriteYaml(TwoPoses), Out);
         StringAssert.Contains("=> PASS", s);
         Assert.AreEqual(2, AnimatorTestHelpers.Count(s, "emitted"));
         var wave = AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim");
@@ -66,18 +66,18 @@ public class CompileClipsTests
     [Test]
     public void Recompile_is_guid_stable()
     {
-        CompileClips.Compile(WriteYaml(TwoPoses), Out);
+        CompileClips.Run(WriteYaml(TwoPoses), Out);
         string g1 = AssetDatabase.AssetPathToGUID(Out + "/Wave.anim");
-        CompileClips.Compile(WriteYaml(TwoPoses), Out);
+        CompileClips.Run(WriteYaml(TwoPoses), Out);
         Assert.AreEqual(g1, AssetDatabase.AssetPathToGUID(Out + "/Wave.anim"));
     }
 
     [Test]
     public void Residual_binding_removed_on_recompile()
     {
-        CompileClips.Compile(WriteYaml(TwoPoses), Out);
+        CompileClips.Run(WriteYaml(TwoPoses), Out);
         string mutated = TwoPoses.Replace("blendShape.Wave", "blendShape.Salute");
-        CompileClips.Compile(WriteYaml(mutated), Out);
+        CompileClips.Run(WriteYaml(mutated), Out);
         Assert.IsFalse(ClipHasProp(Out + "/Wave.anim", "blendShape.Wave"));
         Assert.IsTrue(ClipHasProp(Out + "/Wave.anim", "blendShape.Salute"));
     }
@@ -92,9 +92,9 @@ public class CompileClipsTests
     [Test]
     public void Absent_clip_is_not_pruned()
     {
-        CompileClips.Compile(WriteYaml(TwoPoses), Out);
+        CompileClips.Run(WriteYaml(TwoPoses), Out);
         string onlyWave = Head + "clips:\n  Wave: { set: { \"Arm/SkinnedMeshRenderer.blendShape.Wave\": 100 } }\n";
-        CompileClips.Compile(WriteYaml(onlyWave), Out);
+        CompileClips.Run(WriteYaml(onlyWave), Out);
         Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Point.anim"));
     }
 
@@ -103,7 +103,7 @@ public class CompileClipsTests
     {
         string withLayers = TwoPoses + "layers:\n  - name: L\n    states: { Idle: {} }\n";
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("CompileController"));
-        string s = CompileClips.Compile(WriteYaml(withLayers), Out);
+        string s = CompileClips.Run(WriteYaml(withLayers), Out);
         StringAssert.Contains("FAIL", s);
         StringAssert.Contains("CompileController", s);
     }
@@ -117,7 +117,7 @@ public class CompileClipsTests
             "  Good: { set: { \"Arm/SkinnedMeshRenderer.blendShape.Wave\": 100 } }\n" +
             "  Bad:  { set: { \"Arm/UI.Image.enabled\": 1 } }\n";
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("clip build failed"));
-        string s = CompileClips.Compile(WriteYaml(body), Out);
+        string s = CompileClips.Run(WriteYaml(body), Out);
         StringAssert.Contains("FAIL", s);
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Good.anim"));
     }
@@ -131,7 +131,7 @@ public class CompileClipsTests
             "  \"Wave Left\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.A\": 100 } }\n" +
             "  \"Wave_Left\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.B\": 100 } }\n";
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("collision"));
-        string s = CompileClips.Compile(WriteYaml(body), Out);
+        string s = CompileClips.Run(WriteYaml(body), Out);
         StringAssert.Contains("FAIL", s);
         StringAssert.Contains("Wave Left", s);
         StringAssert.Contains("Wave_Left", s);
@@ -149,7 +149,7 @@ public class CompileClipsTests
             "  \"Wave\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.Wave\": 100 } }\n" +
             "  \"wave\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.Wave\": 100 } }\n";
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("collision"));
-        string s = CompileClips.Compile(WriteYaml(body), Out);
+        string s = CompileClips.Run(WriteYaml(body), Out);
         StringAssert.Contains("FAIL", s);
         StringAssert.Contains("Wave", s);
         StringAssert.Contains("wave", s);
@@ -163,12 +163,12 @@ public class CompileClipsTests
         EnsureVendor();
         string vendorOut = VendorRoot + "/out";
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("read-only outDir"));
-        string fail = CompileClips.Compile(WriteYaml(TwoPoses), vendorOut);
+        string fail = CompileClips.Run(WriteYaml(TwoPoses), vendorOut);
         StringAssert.Contains("FAIL", fail);
         StringAssert.Contains("read-only outDir", fail);
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(vendorOut + "/Wave.anim"), "nothing written without force");
 
-        string forced = CompileClips.Compile(WriteYaml(TwoPoses), vendorOut, force: true);
+        string forced = CompileClips.Run(WriteYaml(TwoPoses), vendorOut, force: true);
         StringAssert.Contains("=> PASS", forced);
         StringAssert.Contains("read-only outDir override (force)", forced);
         Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(vendorOut + "/Wave.anim"), "force writes into vendor outDir");
@@ -177,7 +177,7 @@ public class CompileClipsTests
     [Test]
     public void WhatIf_writes_nothing()
     {
-        string s = CompileClips.Compile(WriteYaml(TwoPoses), Out, force: false, whatIf: true);
+        string s = CompileClips.Run(WriteYaml(TwoPoses), Out, force: false, whatIf: true);
         StringAssert.Contains("=> PASS", s);
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim"));
     }
@@ -185,15 +185,15 @@ public class CompileClipsTests
     [Test]
     public void Content_hash_is_stable_and_edit_sensitive()
     {
-        CompileClips.Compile(WriteYaml(TwoPoses), Out);
+        CompileClips.Run(WriteYaml(TwoPoses), Out);
         string h1 = CompileClips.ReadContentStamp(Out + "/Wave.anim");
         Assert.IsFalse(string.IsNullOrEmpty(h1), "stamp written on emit");
-        CompileClips.Compile(WriteYaml(TwoPoses), Out);                 // identical recompile
+        CompileClips.Run(WriteYaml(TwoPoses), Out);                 // identical recompile
         Assert.AreEqual(h1, CompileClips.ReadContentStamp(Out + "/Wave.anim"), "stable for identical content");
         var c = AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim");
         Assert.AreEqual(h1, CompileClips.HashClipContent(c), "hash of the on-disk clip matches its stamp");
         string mutated = TwoPoses.Replace("blendShape.Wave", "blendShape.Salute");
-        CompileClips.Compile(WriteYaml(mutated), Out);                  // recompile with changed YAML: the on-disk clip still matches its stamp (no human edit), so it is NOT diverged and overwrites without force; the new content changes the hash
+        CompileClips.Run(WriteYaml(mutated), Out);                  // recompile with changed YAML: the on-disk clip still matches its stamp (no human edit), so it is NOT diverged and overwrites without force; the new content changes the hash
         Assert.AreNotEqual(h1, CompileClips.ReadContentStamp(Out + "/Wave.anim"), "hash changes when content changes");
     }
 
@@ -203,7 +203,7 @@ public class CompileClipsTests
         // A weighted-tangent toggle (a common smoothing hand-edit) changes serialized content WITHOUT touching
         // any pre-F3 hashed field. The fuller hash (weightedMode/inWeight/outWeight) must now catch it as a
         // divergence and refuse — else a no-force recompile would silently clobber the smoothing.
-        CompileClips.Compile(WriteYaml(TwoPoses), Out);                  // emit + stamp Wave (PASS)
+        CompileClips.Run(WriteYaml(TwoPoses), Out);                  // emit + stamp Wave (PASS)
         var wave = AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim");
         var binding = AnimationUtility.GetCurveBindings(wave)[0];
         var curve = AnimationUtility.GetEditorCurve(wave, binding);
@@ -214,7 +214,7 @@ public class CompileClipsTests
         AnimatorTestHelpers.Save(wave, Out + "/Wave.anim");            // edit lands on disk (stamp now stale)
 
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("refusing to clobber"));
-        string s = CompileClips.Compile(WriteYaml(TwoPoses), Out);      // no-force recompile
+        string s = CompileClips.Run(WriteYaml(TwoPoses), Out);      // no-force recompile
         StringAssert.Contains("FAIL", s);
         StringAssert.Contains("Wave", s);
 
@@ -226,7 +226,7 @@ public class CompileClipsTests
     [Test]
     public void Refuses_to_clobber_a_hand_edit()
     {
-        CompileClips.Compile(WriteYaml(TwoPoses), Out);                  // emit + stamp Wave (a PASS)
+        CompileClips.Run(WriteYaml(TwoPoses), Out);                  // emit + stamp Wave (a PASS)
         var wave = AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim");
         AnimatorTestHelpers.AddFloatCurve(wave, "HandEdited", typeof(Transform), "m_LocalPosition.x");
         AnimatorTestHelpers.Save(wave, Out + "/Wave.anim");             // human edit lands on disk (stamp now stale)
@@ -234,12 +234,12 @@ public class CompileClipsTests
         // No-force recompile: Wave's on-disk hash no longer matches its stamp → refuse, write nothing. Point's
         // does match → not named. FAIL routes through Finish's Debug.LogError.
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("refusing to clobber"));
-        string s = CompileClips.Compile(WriteYaml(TwoPoses), Out);
+        string s = CompileClips.Run(WriteYaml(TwoPoses), Out);
         StringAssert.Contains("FAIL", s);
         StringAssert.Contains("Wave", s);
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(Out + "/Wave.anim", "HandEdited"), "hand-edit preserved (refused, nothing written)");
 
-        string s2 = CompileClips.Compile(WriteYaml(TwoPoses), Out, force: true);   // force overrides → overwrite + re-stamp
+        string s2 = CompileClips.Run(WriteYaml(TwoPoses), Out, force: true);   // force overrides → overwrite + re-stamp
         StringAssert.Contains("=> PASS", s2);
         Assert.IsFalse(AnimatorTestHelpers.ClipHasBinding(Out + "/Wave.anim", "HandEdited"), "force reverts to YAML content");
     }
@@ -253,7 +253,7 @@ public class CompileClipsTests
         AnimatorTestHelpers.Save(pre, Out + "/Wave.anim");             // pre-existing human .anim, never stamped by us
         // ReadContentStamp == null → diverged → refuse; nothing written (Point never created either).
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("refusing to clobber"));
-        string s = CompileClips.Compile(WriteYaml(TwoPoses), Out);
+        string s = CompileClips.Run(WriteYaml(TwoPoses), Out);
         StringAssert.Contains("FAIL", s);
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(Out + "/Wave.anim", "Human"), "unstamped human .anim protected (nothing written)");
     }
@@ -264,7 +264,7 @@ public class CompileClipsTests
     public void Controller_resolves_an_external_clip_by_ref_path()
     {
         string one = Head + "clips:\n  Wave: { set: { \"Arm/SkinnedMeshRenderer.blendShape.Wave\": 100 } }\n";
-        CompileClips.Compile(WriteYaml(one), Out);
+        CompileClips.Run(WriteYaml(one), Out);
         string animPath = Out + "/Wave.anim";
         Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<AnimationClip>(animPath), "external clip emitted");
 
@@ -277,7 +277,7 @@ public class CompileClipsTests
         File.WriteAllText(cyPath, ctrlYaml);
         try
         {
-            string res = CompileController.Compile(cyPath, Out);
+            string res = CompileController.Run(cyPath, Out);
             StringAssert.Contains("=> OK", res);
             var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(Out + "/FxExt.controller");
             Assert.IsNotNull(ctrl, "controller compiled");
@@ -313,7 +313,7 @@ public class CompileClipsTests
         // doc.Clips.Count==0 guard refuses before any folder is created.
         string body = "schema: 1\nbasis: avatar-root\ncontroller: Empty\nparameters:\n  P: { type: float }\n";
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("no clips")); // Finish logs Debug.LogError on FAIL
-        string s = CompileClips.Compile(WriteYaml(body), Out);
+        string s = CompileClips.Run(WriteYaml(body), Out);
         StringAssert.Contains("FAIL", s);
         StringAssert.Contains("no clips", s);
         Assert.IsFalse(AssetDatabase.IsValidFolder(Out), "nothing emitted");

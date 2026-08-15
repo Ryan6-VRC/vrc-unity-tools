@@ -13,7 +13,7 @@ using Ryan6Vrc.AgentTools.Editor;
 
 // CheckSeam proof obligations.
 //
-// CheckSeam.Check resolves scene paths against the ACTIVE scene (its local Resolve/FindByHierarchyPath), so —
+// CheckSeam.Run resolves scene paths against the ACTIVE scene (its local Resolve/FindByHierarchyPath), so —
 // like CheckAvatarTests — fixtures live in a throwaway ADDITIVE scene set active in SetUp and torn down in
 // place; nothing is ever saved to the real project. The pure-core logic is exercised by injecting fake seams
 // (ResolveSeam / ResolveHumanoid) via reflection (Tests is a separate assembly), the same seams that carry the
@@ -245,7 +245,7 @@ public class CheckSeamTests
     {
         // A bare REFUSE logs at Error (Refuse → Debug.LogError); consume it so the test doesn't flag it.
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] REFUSE:"));
-        var r = CheckSeam.Check("no-such-base", "no-such-merge");
+        var r = CheckSeam.Run("no-such-base", "no-such-merge");
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("no-such-base", r);
         Assert.IsFalse(r.Contains("| log="), "refusal carries no RunLog trailer");
@@ -261,7 +261,7 @@ public class CheckSeamTests
         var baseGO = NewChild(_root, "Base");     // plain GO, no humanoid Animator
         var mergeGO = NewChild(_root, "Merge");
         CheckSeam.ResolveHumanoid = _ => new CheckSeam.HumanoidMap(); // empty ⇒ REFUSE upstream
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("no humanoid", r);
     }
@@ -277,7 +277,7 @@ public class CheckSeamTests
         LogAssert.Expect(LogType.Warning, RefuseRe); // no seam ⇒ valid-abstain ⇒ warning
         SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
         CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution(); // empty Pairs, no BoneProxy on Merge
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("no seam component", r);
         StringAssert.Contains("bare prop", r); // names the route (own-mergeable), opposite the proxy route
@@ -294,7 +294,7 @@ public class CheckSeamTests
         Assert.IsNotNull(bpType, "TestEditor must have Modular Avatar installed (setup-test-editor copies it)");
         mergeGO.AddComponent(bpType); // a BoneProxy maps no humanoid bones ⇒ zero scorable pairs
         CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution();
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("bone-proxy attachment", r);
         StringAssert.Contains("verify the baked result", r);
@@ -314,7 +314,7 @@ public class CheckSeamTests
         Assert.IsNotNull(maType, "TestEditor must have Modular Avatar installed (setup-test-editor copies it)");
         mergeGO.AddComponent(maType); // present, but the injected resolution matched nothing
         CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution();
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("matched zero bones", r);
         StringAssert.Contains("prefix/suffix", r);           // the naming-mismatch shape
@@ -336,7 +336,7 @@ public class CheckSeamTests
                 new CheckSeam.BonePair { Base = baseBone, Merge = m1.transform },
                 new CheckSeam.BonePair { Base = baseBone, Merge = m2.transform } }
         };
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("seams disagree", r);
         // Two same-base-bone merges are disambiguated by hierarchy path, not bare name.
@@ -355,7 +355,7 @@ public class CheckSeamTests
         {
             Pairs = { new CheckSeam.BonePair { Base = baseBone, Merge = stray.transform } }
         };
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("different avatar", r);
     }
@@ -371,7 +371,7 @@ public class CheckSeamTests
         LogAssert.Expect(LogType.Error, RefuseRe); // genuine API drift ⇒ misuse ⇒ error
         SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
         CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution { ReflectError = "MissingMethodException: X" };
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("MissingMethodException: X", r);
     }
@@ -436,7 +436,7 @@ public class CheckSeamTests
         {
             UnresolvableReason = "seam present but does not resolve onto this base: InvalidOperationException: boom"
         };
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("does not resolve onto this base", r);
     }
@@ -452,7 +452,7 @@ public class CheckSeamTests
         SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
         CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution { ScaleBakeReason = "scaled at bake — test" };
         LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex("REFUSE: scaled at bake"));
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("scaled at bake", r);
     }
@@ -467,7 +467,7 @@ public class CheckSeamTests
         LogAssert.Expect(LogType.Warning, RefuseRe); // ≤1 proxy ⇒ valid-abstain ⇒ warning
         // Head-only hair: 1 humanoid weighted bone ⇒ offset-tolerant proxy ⇒ REFUSE.
         BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Head" }, weights: new[] { ("Head", 1.0f) });
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("single humanoid attachment", r);
         StringAssert.Contains("Head", r);
@@ -497,7 +497,7 @@ public class CheckSeamTests
         seam.Pairs.Add(new CheckSeam.BonePair { Base = bHead, Merge = mHead });
         CheckSeam.ResolveSeam = (_, __) => seam;
 
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("single humanoid attachment", r); // count collapses to 1, NOT a ≥2 gate PASS
         StringAssert.Contains("Head", r);
@@ -511,7 +511,7 @@ public class CheckSeamTests
         // GetAllBoneWeights returns the normalized per-vertex view, so a lone sub-1 influence would read as 1.0).
         // 0.09 case: Spine is 9% of its vertex, below the 0.1 threshold ⇒ dropped ⇒ 1 weighted ⇒ proxy REFUSE.
         BuildThresholdFixture(0.09f, out var b1, out var m1);
-        var r1 = CheckSeam.Check(Path(b1), Path(m1));
+        var r1 = CheckSeam.Run(Path(b1), Path(m1));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r1);
         StringAssert.Contains("single humanoid attachment", r1);
 
@@ -523,7 +523,7 @@ public class CheckSeamTests
         UnityEngine.Object.DestroyImmediate(m1);
 
         BuildThresholdFixture(0.11f, out var b2, out var m2);
-        var r2 = CheckSeam.Check(Path(b2), Path(m2));
+        var r2 = CheckSeam.Run(Path(b2), Path(m2));
         StringAssert.Contains("weightedHumanoid=2", r2);
         StringAssert.Contains("=> PASS", r2);
         ReadLog(r2); // records the PASS RunLog for TearDown's batched delete
@@ -607,7 +607,7 @@ public class CheckSeamTests
         seam.Pairs.Add(new CheckSeam.BonePair { Base = bSpine, Merge = mSpine });
         CheckSeam.ResolveSeam = (_, __) => seam;
 
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("weightedHumanoid=2", r); // the 5th influence (Spine@0.12) participates
         StringAssert.Contains("=> PASS", r);
         ReadLog(r);
@@ -630,7 +630,7 @@ public class CheckSeamTests
         var chest = FindBone(mergeGO, "Chest");
 
         // (a) Coincident: both bones at their root origin ⇒ delta 0.
-        var r0 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r0 = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> PASS", r0);
         StringAssert.Contains("| log=", r0);
         StringAssert.Contains("weightedHumanoid=2", r0);
@@ -646,14 +646,14 @@ public class CheckSeamTests
         // {Chest 0.6, Spine 0.0} ⇒ max 0.60, median (0.0+0.6)/2 = 0.30. Guards against an empty-list /
         // stuck-0 / wrong-set / broken-Median bug that the coincident all-0.00 PASS above leaves green.
         chest.localPosition = new Vector3(0.0006f, 0f, 0f);
-        var r1 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r1 = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> PASS", r1);
         StringAssert.Contains("maxWithinEps=0.60mm (median 0.30mm)", r1);
         ReadLog(r1);
 
         // (c) 1.2mm > ε ⇒ NOT-PASS, one offender, its magnitude on the one-liner and its bone in the body.
         chest.localPosition = new Vector3(0.0012f, 0f, 0f);
-        var r2 = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r2 = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r2);
         StringAssert.Contains("offenders=1", r2);
         StringAssert.Contains("maxOffset=1.2mm", r2); // G37: worst-offender magnitude on the one-liner
@@ -704,7 +704,7 @@ public class CheckSeamTests
         seam.Pairs.Add(new CheckSeam.BonePair { Base = bTail, Merge = mTail });
         CheckSeam.ResolveSeam = (_, __) => seam;
 
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("weightedHumanoid=2", r);
         StringAssert.Contains("offenders=0", r);
         StringAssert.Contains("context=1 dropped=1", r);
@@ -750,7 +750,7 @@ public class CheckSeamTests
 
         // Seam door, real resolver: MA/VRCFury types resolve, but this fixture carries no seam component,
         // so the collectors find nothing ⇒ zero pairs ⇒ the bare-prop abstain.
-        var seamResult = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var seamResult = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", seamResult);
         StringAssert.Contains("no seam component", seamResult);
         StringAssert.Contains("CheckBare", seamResult); // and it names the door that CAN score this

@@ -53,7 +53,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
             var c1 = FixpointOracle.CompileTo(TestRoot, yamlA, name, "c1");
             string yamlB = FixpointOracle.Decode(c1);
             Assert.AreEqual(yamlA, yamlB, "authored fixture reaches a textual fixpoint: " + fixture);
-            StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
+            StringAssert.Contains("=> PASS", CheckAnimator.Run(c1, "explicit", null, null, null));
             AssertAuthoredValuesSurvived(fixture, yamlA, c0);
         }
 
@@ -115,7 +115,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
 
             LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
             string yamlOut = TestRoot + "/refuse_" + tag + ".yaml";
-            string res = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
+            string res = DecompileController.Run(ctrlPath, yamlOut, whatIf: false);
 
             StringAssert.Contains("FAIL", res);
             StringAssert.Contains(expectedToken, res, "the refusal names the offending construct: " + expectedToken);

@@ -30,7 +30,7 @@ public class ReportConsoleTests
         string token = "RCTEST-" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
         Debug.LogWarning(token + " header\nPAYLOAD-A alpha\nPAYLOAD-B beta\nPAYLOAD-C gamma");
 
-        string result = ReportConsole.Report(types: "warning", filterText: token, count: 5);
+        string result = ReportConsole.Run(types: "warning", filterText: token, count: 5);
 
         StringAssert.Contains(token + " header", result);
         StringAssert.Contains("PAYLOAD-A alpha", result);
@@ -51,7 +51,7 @@ public class ReportConsoleTests
             + "\n(Body SkinnedMeshRenderer blendShape.Smile) from ClipB"
             + "\n(Root/Tail Transform m_LocalScale.x) from ClipC");
 
-        string result = ReportConsole.Report(types: "warning", filterText: token, count: 5);
+        string result = ReportConsole.Run(types: "warning", filterText: token, count: 5);
 
         int stackAt = result.IndexOf("--- stack ---", System.StringComparison.Ordinal);
         Assert.Greater(stackAt, 0, "a Debug-logged entry should carry a callstack");
@@ -69,7 +69,7 @@ public class ReportConsoleTests
         string token = "RCBODY-" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
         Debug.LogWarning("unremarkable header line\nneedle-" + token + " in the body");
 
-        string result = ReportConsole.Report(types: "warning", filterText: "needle-" + token, count: 5);
+        string result = ReportConsole.Run(types: "warning", filterText: "needle-" + token, count: 5);
 
         StringAssert.Contains("needle-" + token, result);
         StringAssert.Contains("shown=1", result);
@@ -214,7 +214,7 @@ public class ReportConsoleTests
         string token = "RCSTK-" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
         Debug.LogWarning(token + " header only");
 
-        string result = ReportConsole.Report(types: "warning", filterText: token, count: 5, includeStackTrace: false);
+        string result = ReportConsole.Run(types: "warning", filterText: token, count: 5, includeStackTrace: false);
 
         StringAssert.Contains(token + " header only", result);
         StringAssert.Contains("stack lines]", result);
@@ -293,7 +293,7 @@ public class ReportConsoleTests
 
         // The strip counts are tallied over every matched entry before `count` trims the list, so a
         // small count still reports the full tally -- and keeps the digest inline (see above).
-        string result = ReportConsole.Report(types: "all", count: 5);
+        string result = ReportConsole.Run(types: "all", count: 5);
 
         StringAssert.Contains("benign-stripped=[", result);
         StringAssert.Contains("MACS third-party load noise", result);
@@ -306,7 +306,7 @@ public class ReportConsoleTests
         string token = "RCMACS-" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
         Debug.LogWarning("[MACS] Applying patches " + token);
 
-        string result = ReportConsole.Report(types: "all", filterText: token, count: 5);
+        string result = ReportConsole.Run(types: "all", filterText: token, count: 5);
 
         StringAssert.Contains(token, result);
         StringAssert.Contains("shown=1", result);
@@ -321,7 +321,7 @@ public class ReportConsoleTests
         // count is deliberately small: a large one lets ambient console volume push the digest past
         // the inline budget, where the return value is a summary + artifact path and the entry text
         // is on disk instead. The entry just logged is the newest, so a small count still contains it.
-        string kept = ReportConsole.Report(types: "all", count: 5, stripBenign: false);
+        string kept = ReportConsole.Run(types: "all", count: 5, stripBenign: false);
         StringAssert.Contains(token, kept);
     }
 
@@ -352,11 +352,11 @@ public class ReportConsoleTests
             // Unfiltered: nothing to declare.
             setFlags.Invoke(null, new object[] { origFlags | 128 | 256 | 512 });
             setText.Invoke(null, new object[] { "" });
-            StringAssert.DoesNotContain("UNREACHED=", ReportConsole.Report(count: 1));
+            StringAssert.DoesNotContain("UNREACHED=", ReportConsole.Run(count: 1));
 
             // Log severity hidden.
             setFlags.Invoke(null, new object[] { (origFlags | 128 | 256 | 512) & ~128 });
-            string hidden = ReportConsole.Report(count: 1);
+            string hidden = ReportConsole.Run(count: 1);
             // The gap is asserted as a COUNT against GetCountsByType (which is not filtered), so the
             // check survives a narrowing mechanism this code never enumerated. The flag name is only
             // the appended cause.
@@ -367,7 +367,7 @@ public class ReportConsoleTests
             // Search box set — the total-blackout case.
             setFlags.Invoke(null, new object[] { origFlags | 128 | 256 | 512 });
             setText.Invoke(null, new object[] { "zzz-no-such-text-zzz" });
-            string searched = ReportConsole.Report(count: 1);
+            string searched = ReportConsole.Run(count: 1);
             StringAssert.Contains("UNREACHED=", searched);
             StringAssert.Contains("search=\"zzz-no-such-text-zzz\"", searched);
             StringAssert.Contains("FILTERED VIEW", searched);
@@ -386,7 +386,7 @@ public class ReportConsoleTests
     [Test]
     public void Report_unknownType_failsLoudAndNamesIt()
     {
-        string result = ReportConsole.Report(types: "wraning");
+        string result = ReportConsole.Run(types: "wraning");
         StringAssert.Contains("[ReportConsole] FAIL", result);
         StringAssert.Contains("wraning", result);
     }
@@ -396,7 +396,7 @@ public class ReportConsoleTests
     [Test]
     public void Report_emptyTypeList_failsRatherThanMeaningAll()
     {
-        StringAssert.Contains("[ReportConsole] FAIL", ReportConsole.Report(types: ","));
+        StringAssert.Contains("[ReportConsole] FAIL", ReportConsole.Run(types: ","));
     }
 
     // The door must not write to the console it reads: a logging reader pollutes its own next read, and
@@ -410,8 +410,8 @@ public class ReportConsoleTests
         Debug.LogWarning(token + " marker");
 
         int before = CountEntries();
-        ReportConsole.Report(types: "all", filterText: token, count: 5);
-        ReportConsole.Report(types: "bogus-type-name");
+        ReportConsole.Run(types: "all", filterText: token, count: 5);
+        ReportConsole.Run(types: "bogus-type-name");
         int after = CountEntries();
 
         Assert.AreEqual(before, after, "ReportConsole must not add console entries (success or FAIL path)");
@@ -490,7 +490,7 @@ public class ReportConsoleTests
         string tag = "D3ProbeTag" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
         for (int i = 0; i < 4; i++) Debug.Log(tag + " holding");
 
-        var outText = ReportConsole.Report(types: "log", filterText: tag, count: 50);
+        var outText = ReportConsole.Run(types: "log", filterText: tag, count: 50);
 
         Assert.IsFalse(outText.Contains("collapsed="), "a filtered read must not collapse: " + outText);
         StringAssert.Contains("shown=4", outText);

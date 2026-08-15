@@ -52,7 +52,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// guard (write owned copies into read-only Assets/Vendor or Packages territory) AND the divergence
         /// guard (overwrite a hand-edited / unstamped existing <c>.anim</c> instead of refusing). Returns the
         /// one-line PASS/FAIL summary with the RunLog path folded on (<c>… => RESULT | log=&lt;path&gt;</c>).</summary>
-        public static string Compile(string sourcePath, string outDir, bool force = false, bool whatIf = false)
+        // Positional order matches CompileController.Run(sourcePath, outDir, whatIf): `whatIf` is third on
+        // both compile doors. Under one door name the two are textually interchangeable, and a third
+        // positional that meant `force` here and `whatIf` there would turn a preview into an overwrite that
+        // also defeats the read-only-outDir guard. Named arguments remain the documented call style.
+        public static string Run(string sourcePath, string outDir, bool whatIf = false, bool force = false)
         {
             var log = new RunLog("compile-clips") { whatIf = whatIf, source = sourcePath };
             string label = "clips";

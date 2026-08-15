@@ -103,7 +103,7 @@ public class ReportShapeOverlapTests
     // artifact too — and the FAIL cases, whose contract is that there is no trailer to record.
     private static string Report(string meshObject, string[] shapeNames = null, string outfitRoot = null)
     {
-        string summary = ReportShapeOverlap.Report(meshObject, shapeNames, outfitRoot);
+        string summary = ReportShapeOverlap.Run(meshObject, shapeNames, outfitRoot);
         int i = summary.IndexOf(LogMarker, StringComparison.Ordinal);
         if (i >= 0) Artifacts.Add(summary.Substring(i + LogMarker.Length).Trim());
         return summary;

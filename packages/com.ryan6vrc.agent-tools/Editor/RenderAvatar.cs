@@ -507,7 +507,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <param name="margin">fraction of the frame left as border; avatar fills ~(1-margin). Raise to zoom out.</param>
         /// <param name="showGizmos">draw component gizmos (physbone/contact/collider) into the capture.</param>
         /// <param name="resolution">per-tile square edge in px; the sheet is auto-downscaled to a ~2048 edge cap.</param>
-        public static string Capture(
+        public static string Run(
             string target,
             string[] angles = null,
             string[] hide = null,

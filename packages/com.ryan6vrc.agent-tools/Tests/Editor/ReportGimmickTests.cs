@@ -37,7 +37,7 @@ public class ReportGimmickTests
     // fixture goes through here, including the ones that only read the summary — they write a file too.
     private static string Summary(string rootPath)
     {
-        string summary = ReportGimmick.Report(rootPath);
+        string summary = ReportGimmick.Run(rootPath);
         int i = summary.IndexOf("log=");
         if (i >= 0) Artifacts.Add(summary.Substring(i + 4).Trim());
         return summary;

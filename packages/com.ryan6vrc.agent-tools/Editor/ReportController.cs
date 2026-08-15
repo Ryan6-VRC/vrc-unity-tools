@@ -39,7 +39,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Path/GUID overload: resolve <paramref name="controllerPathOrGuid"/> (an asset path or a
         /// GUID) to the <see cref="AnimatorController"/> and digest it. A handle that names no controller
         /// is a bare-FAIL echoing the handle, no trailer (nothing was written).</summary>
-        public static string Report(string controllerPathOrGuid)
+        public static string Run(string controllerPathOrGuid)
         {
             var controller = RunLogFormat.LoadByPathOrGuid<AnimatorController>(controllerPathOrGuid);
             if (controller == null)
@@ -48,7 +48,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 Debug.LogError(err);
                 return err;
             }
-            return Report(controller);
+            return Run(controller);
         }
 
         /// <summary>Why a handle that named no <c>AnimatorController</c> was refused. An
@@ -67,7 +67,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Digest <paramref name="controller"/> to markdown under Snapshots/. Returns a one-line
         /// summary ending with the artifact path in-band (<c>… =&gt; OK | log=&lt;path&gt;</c>); a null
         /// controller is a bare-FAIL with no trailer (nothing was written).</summary>
-        public static string Report(AnimatorController controller)
+        public static string Run(AnimatorController controller)
         {
             if (controller == null)
             {

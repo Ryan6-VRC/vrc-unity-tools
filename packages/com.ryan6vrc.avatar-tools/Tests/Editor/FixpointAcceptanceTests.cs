@@ -103,7 +103,7 @@ public class FixpointAcceptanceTests
         var c2 = FixpointOracle.CompileTo(TestRoot, yamlB, name, "c2");
         string yamlC = FixpointOracle.Decode(c2);
         Assert.AreEqual(yamlB, yamlC, "stabilized fixpoint: the owned form's decompile is textually identical after a recompile");
-        StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
+        StringAssert.Contains("=> PASS", CheckAnimator.Run(c1, "explicit", null, null, null));
 
         if (clean)
             // No broken refs ⇒ the RAW vendor already round-trips: the spec's literal tight fixpoint.
@@ -200,7 +200,7 @@ public class FixpointAcceptanceTests
 
         LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
         string yamlOut = TestRoot + "/refuse_trigger.yaml";
-        string res = DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false);
+        string res = DecompileController.Run(ctrlPath, yamlOut, whatIf: false);
 
         StringAssert.Contains("FAIL", res);
         StringAssert.Contains("Trigger", res, "the refusal names the offending construct");
@@ -235,7 +235,7 @@ public class FixpointAcceptanceTests
         var c1 = FixpointOracle.CompileTo(TestRoot, yaml1, "SlashName_Fx", "c1");
         string yaml2 = FixpointOracle.Decode(c1);
         Assert.AreEqual(yaml1, yaml2, "the slash-in-name controller reaches a textual fixpoint");
-        StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
+        StringAssert.Contains("=> PASS", CheckAnimator.Run(c1, "explicit", null, null, null));
     }
 
     // TANGENT COVERAGE IS TWO CASES, ONE PER ClassifyTangents BRANCH (Linear and Stepped/Constant), and each is
@@ -274,7 +274,7 @@ layers:
 
         var c2 = FixpointOracle.CompileTo(TestRoot, yamlB, "ConstLinear_Fx", "c2");
         Assert.AreEqual(yamlB, FixpointOracle.Decode(c2), "tight fixpoint on the constant linear curve");
-        StringAssert.Contains("=> PASS", CheckAnimator.Lint(c1, "explicit", null, null, null));
+        StringAssert.Contains("=> PASS", CheckAnimator.Run(c1, "explicit", null, null, null));
     }
 
     [Test]

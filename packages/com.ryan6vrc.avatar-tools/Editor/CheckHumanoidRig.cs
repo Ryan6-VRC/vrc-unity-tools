@@ -173,7 +173,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// wrong transform because some OTHER node carries the humanoid label (<b>name-shadow</b>). A bone
         /// can hit both classes; each is emitted once per class it hits.
         ///
-        /// Verdict mirrors <c>Ryan6Vrc.AgentTools.Editor.CheckAvatar.Inspect</c> exactly: PASS (no
+        /// Verdict mirrors <c>Ryan6Vrc.AgentTools.Editor.CheckAvatar.Run</c> exactly: PASS (no
         /// divergence found), CLASSIFY (a finding for the agent to route — never a tool failure), FAIL
         /// (bad input: unresolved handle, no descriptor, no Animator, no humanoid avatar — bare, no RunLog
         /// trailer, same family discipline as a CheckAvatar bad-input refusal).

@@ -164,7 +164,7 @@ public class ClipBindingTypeTests
         string body = "schema: 1\nbasis: avatar-root\ncontroller: C1Clips\n" +
             "clips:\n" +
             "  Latch: { set: { \"Cage/VRCPositionConstraint.Sources.source0.Weight\": 1, \"Recv/VRCContactReceiver.allowOthers\": 0 } }\n";
-        string s = CompileClips.Compile(WriteYaml(body), ClipsOut);
+        string s = CompileClips.Run(WriteYaml(body), ClipsOut);
         StringAssert.Contains("=> PASS", s);
 
         var clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(ClipsOut + "/Latch.anim");

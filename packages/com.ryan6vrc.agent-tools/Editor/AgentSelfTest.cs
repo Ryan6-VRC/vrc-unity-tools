@@ -176,7 +176,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static string SnapshotJson(string hierarchyPath)
         {
-            var summary = AgentInspector.Snapshot(hierarchyPath, includeChildren: true, followAssets: true);
+            var summary = AgentInspector.Run(hierarchyPath, includeChildren: true, followAssets: true);
             int idx = summary.IndexOf("log=", StringComparison.Ordinal);
             if (idx < 0) throw new Exception("Snapshot returned no log= trailer: " + summary);
             var file = summary.Substring(idx + 4).Trim();

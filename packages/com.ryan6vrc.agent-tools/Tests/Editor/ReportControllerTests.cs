@@ -41,7 +41,7 @@ public class ReportControllerTests
     // The digest body, with the Snapshot path it names recorded for teardown.
     private static string ReadReport(AnimatorController c)
     {
-        string summary = ReportController.Report(c);
+        string summary = ReportController.Run(c);
         return File.ReadAllText(Track(summary));
     }
 
@@ -314,7 +314,7 @@ public class ReportControllerTests
             "\n--- !u!1102 &9111111111\nAnimatorState:\n  m_Name: OrphanResidue\n" +
             "  m_Motion: {fileID: 7400000, guid: " + OrphanGuid + ", type: 2}\n");
 
-        string summaryLine = ReportController.Report(reloaded);
+        string summaryLine = ReportController.Run(reloaded);
         string report = File.ReadAllText(Track(summaryLine));
 
         int liveHdr   = report.IndexOf("live-reachable");

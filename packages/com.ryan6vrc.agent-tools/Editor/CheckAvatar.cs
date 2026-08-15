@@ -364,7 +364,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// mirrors RenderAvatar's target resolution). Returns a one-line summary; a real run ends with the
         /// RunLog path in-band (<c>… =&gt; PASS|CLASSIFY | log=&lt;path&gt;</c>). Bad input (root not found /
         /// no VRCAvatarDescriptor) is a bare <c>[CheckAvatar] FAIL: …</c> with no trailer.</summary>
-        public static string Inspect(string avatarRoot)
+        public static string Run(string avatarRoot)
         {
             var avatarGO = Resolve(avatarRoot);
             if (avatarGO == null)

@@ -15,7 +15,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// Read-only static report of a vendor avatar package (Phase-1 graph).
     /// Inspection-only — never mutates any asset or opens a scene.
     ///
-    /// Call <see cref="Report"/> from MCP execute_code or a menu item, passing the vendor
+    /// Call <see cref="Run"/> from MCP execute_code or a menu item, passing the vendor
     /// avatar folder (e.g. "Assets/Vendor/Avatars/Chocolat"). It writes a JSON RunLog to
     /// Assets/Agent/RunLogs/ and returns a one-line descriptive summary ending with that RunLog
     /// path (<c>… => OK | log=&lt;path&gt;</c>).
@@ -38,7 +38,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Returns a one-line descriptive summary ending with the RunLog path (<c>… => OK | log=&lt;path&gt;</c>);
         /// bad input or a mid-scan exception ends <c>=> ERROR</c>. Also Debug.Log/LogError it.
         /// </summary>
-        public static string Report(string vendorFolder)
+        public static string Run(string vendorFolder)
         {
             string label = TransplantCore.Leaf(vendorFolder);
 

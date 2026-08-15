@@ -116,7 +116,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// (<c>… => OK | log=&lt;path&gt;</c>); misuse (object/mesh/names bad) is a bare
         /// <c>[ReportShapeOverlap] FAIL: …</c> with no trailer. A shape name absent from the mesh is NOT a
         /// failure — it is reported as <c>MISSING</c> and the resolvable shapes are still analysed.</summary>
-        public static string Report(string meshObject, string[] shapeNames = null, string outfitRoot = null)
+        public static string Run(string meshObject, string[] shapeNames = null, string outfitRoot = null)
         {
             var go = Resolve(meshObject);
             if (go == null) return Fail("scene object '" + meshObject + "' not found in the active scene");
