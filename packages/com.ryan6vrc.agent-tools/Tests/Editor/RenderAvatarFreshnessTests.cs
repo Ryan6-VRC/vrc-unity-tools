@@ -284,26 +284,127 @@ public class RenderAvatarFreshnessTests
         StringAssert.Contains("cannot be ruled out", RenderAvatar.CanaryUnavailableNote);
     }
 
-    // The shading guard is a mechanism with no verdict token, so this note is the ONLY in-band trace it
-    // leaves. Same reasoning as the canary-unavailable constant above: no code path decides on it, only its
-    // wording is load-bearing. Three things are the payload: the placeholder colour, because that is what an
-    // operator matches against a suspect sheet by eye; that shading is NOT certified, rather than a bare
-    // "still compiling" that reads as routine editor chatter and gets skimmed past; and the non-attribution,
-    // which is the honesty constraint — ShaderUtil.anythingCompiling is editor-global and cannot tell this
-    // grab's compilation from an unrelated import's. An earlier draft claimed "the guard did not cover some
-    // path", asserting an attribution the probe cannot make; this pins the corrected claim so a future
-    // rewrite cannot quietly restore the over-claim.
+    // The scan is the outcome half of the shading guard: batchmode cannot render a pixel, so what IS
+    // assertable headlessly is the counter's discipline. Exact match only — the placeholder is a flat fill,
+    // and near-cyan is ordinary art on a lilToon avatar, so a tolerance would fail honest grabs. Alpha is
+    // deliberately unexamined (Downscale's Sample hardcodes it to 255), which is why no alpha case appears
+    // here: a test over alpha-0 data would assert against input the tool cannot produce.
     [Test]
-    public void ShaderCompilingNote_NamesTheColourAndClaimsNoAttribution()
+    public void CountPlaceholderPx_ExactMatchOnly_AndNullSafe()
     {
-        StringAssert.Contains("#00FFFF", RenderAvatar.ShaderCompilingNote);
-        StringAssert.Contains("cannot be attributed", RenderAvatar.ShaderCompilingNote);
-        StringAssert.Contains("NOT", RenderAvatar.ShaderCompilingNote);
-        StringAssert.Contains("re-grab", RenderAvatar.ShaderCompilingNote);
-        StringAssert.DoesNotContain("did not cover", RenderAvatar.ShaderCompilingNote);
-        // It must never read as a verdict: an unrelated background import also trips the probe, so a note
-        // that said FAIL would fail honest grabs.
-        StringAssert.DoesNotContain("FAIL", RenderAvatar.ShaderCompilingNote);
+        Assert.AreEqual(0, RenderAvatar.CountPlaceholderPx(null), "null must not throw");
+        Assert.AreEqual(0, RenderAvatar.CountPlaceholderPx(new Color32[0]));
+
+        var buf = new Color32[16];
+        for (int i = 0; i < buf.Length; i++) buf[i] = new Color32(233, 226, 224, 255); // the measured hair tone
+        Assert.AreEqual(0, RenderAvatar.CountPlaceholderPx(buf));
+
+        buf[3] = new Color32(0, 255, 255, 255);
+        buf[4] = new Color32(0, 255, 255, 0);     // alpha must not gate the count
+        buf[5] = new Color32(1, 255, 255, 255);   // one channel off is NOT the placeholder
+        buf[6] = new Color32(0, 254, 255, 255);
+        buf[7] = new Color32(0, 255, 254, 255);
+        Assert.AreEqual(2, RenderAvatar.CountPlaceholderPx(buf));
+    }
+
+    // The measured partial case: 64 px on a sheet that otherwise reads healthy (gate doc §Shading cell,
+    // 2026-08-13). It is the reason the floor is 0 and the reason no blob/interior filter is applied — a
+    // region this small has no interior pixels at all and is invisible to one.
+    [Test]
+    public void CountPlaceholderPx_CountsTheMeasuredPartialCase_NoInteriorFilter()
+    {
+        const int side = 512;
+        var tile = new Color32[side * side];
+        for (int i = 0; i < tile.Length; i++) tile[i] = new Color32(60, 60, 60, 255);
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+                tile[(100 + y) * side + (100 + x)] = new Color32(0, 255, 255, 255);
+        Assert.AreEqual(64, RenderAvatar.CountPlaceholderPx(tile));
+    }
+
+    // Same reasoning as the canary/reload constants above: no code path decides on this wording, but the
+    // wording is what an agent acts on. The payload is the placeholder colour (what an operator matches
+    // against a suspect sheet by eye), the offending angle, and — load-bearing — two materially different
+    // remedies. ShaderUtil.anythingCompiling is editor-global and cannot tell this grab's compilation from
+    // an unrelated import's, so the compiling arm must not claim attribution, and the quiet arm must not
+    // promise a re-grab will help. An earlier draft of the retired note claimed "the guard did not cover
+    // some path"; this pins the corrected claim so a rewrite cannot quietly restore the over-claim.
+    [Test]
+    public void PlaceholderFailReason_NamesTheColourAndSplitsTheRemedyByProbe()
+    {
+        string compiling = RenderAvatar.BuildPlaceholderFailReason("the served tiles", 64, "front", 64, true);
+        string quiet = RenderAvatar.BuildPlaceholderFailReason("the served tiles", 64, "front", 64, false);
+
+        foreach (var s in new[] { compiling, quiet })
+        {
+            StringAssert.Contains("#00FFFF", s);
+            StringAssert.Contains("front", s);
+            StringAssert.Contains("64", s);
+            StringAssert.DoesNotContain("did not cover", s);
+        }
+        StringAssert.Contains("cannot be attributed", compiling);
+        StringAssert.Contains("re-grab first", compiling);
+        StringAssert.Contains("not indicated", quiet);
+        StringAssert.Contains("Measure the mechanism", quiet);
+        Assert.AreNotEqual(compiling, quiet, "the two arms must not collapse to one remedy");
+
+        // The terminal case has to end somewhere the reader can act: floor 0 with no opt-out means an
+        // authored cyan surface would otherwise leave a target permanently un-grabbable. Both arms carry it,
+        // and the doc route is a resolvable PATH — a console reader has the string, not the class doc.
+        foreach (var s in new[] { compiling, quiet })
+        {
+            StringAssert.Contains("showGizmos:false", s);
+            StringAssert.Contains("hide", s);
+            StringAssert.Contains("RenderAvatarFreshnessGate.md", s);
+        }
+    }
+
+    // The counter is exercised through the real decode path, not just over hand-built buffers: the gate
+    // doc's live Measure row can only report "the grab returned OK", which is circular as proof, so what is
+    // assertable headlessly is that an encoded-then-decoded sheet still counts exactly. A scan reading a
+    // mis-strided or wrong-format buffer fails here rather than in a green live cell.
+    [Test]
+    public void CountPlaceholderPx_SurvivesThePngRoundTrip()
+    {
+        const int w = 64, h = 64;
+        var tex = new Texture2D(w, h, TextureFormat.RGBA32, false, false);
+        try
+        {
+            var px = new Color32[w * h];
+            for (int i = 0; i < px.Length; i++) px[i] = new Color32(60, 60, 60, 255);
+            for (int y = 0; y < 8; y++)
+                for (int x = 0; x < 8; x++)
+                    px[(10 + y) * w + (10 + x)] = new Color32(0, 255, 255, 255);
+            Assert.AreEqual(64, RenderAvatar.CountPlaceholderPx(px), "precondition: the source buffer");
+
+            tex.SetPixels32(px);
+            tex.Apply(false, false);
+            var png = ImageConversion.EncodeToPNG(tex);
+
+            var round = new Texture2D(2, 2, TextureFormat.RGBA32, false, false);
+            try
+            {
+                Assert.IsTrue(ImageConversion.LoadImage(round, png), "PNG must decode");
+                Assert.AreEqual(64, RenderAvatar.CountPlaceholderPx(round.GetPixels32()),
+                    "PNG is lossless, so the count must survive encode+decode exactly");
+            }
+            finally { UnityEngine.Object.DestroyImmediate(round); }
+        }
+        finally { UnityEngine.Object.DestroyImmediate(tex); }
+    }
+
+    // Frame A is a prior grab off disk: the live compile probe says nothing about it, so its reason must
+    // name the diff-specific damage (fabricated or masked `changed` px) and send the reader to re-grab A
+    // rather than this call.
+    [Test]
+    public void FrameAPlaceholderFailReason_SendsTheReaderToReGrabA()
+    {
+        string s = RenderAvatar.BuildFrameAPlaceholderFailReason("grab_a.png", 64, "back", 64);
+        StringAssert.Contains("#00FFFF", s);
+        StringAssert.Contains("grab_a.png", s);
+        StringAssert.Contains("back", s);
+        StringAssert.Contains("re-grab frame A", s);
+        StringAssert.DoesNotContain("still in flight", s);
     }
 
     [Test]

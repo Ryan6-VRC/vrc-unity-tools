@@ -40,15 +40,35 @@ Parameters: `<AVATAR>` MA-composed scene root; `<BODY>` an SMR under it with liv
 6. **BakeMesh ground truth rides every cell**: pixel evidence without a `BakeMesh` vertex delta lets a failed edit masquerade as a freeze (and vice versa).
 7. **Self-noise**: three consecutive `Capture` calls on a reactive target, separate calls, healthy editor — none may settle-FAIL (the canary's nudge+restore is a pair of scene writes NDMF could observe; measured clean 2026-07-29, re-verify when the canary's write pattern changes).
 8. **No-probe surface**: `Capture` a blendshape-less SMR prop → summary must carry the `canary unavailable` note, never `canary=live` and never a FAIL — the tool declares what it cannot certify.
-9. **Shading cell** — the only proof the sync-compile guard holds, since batchmode cannot see a rendered pixel. **Two revisions, because the guard is unconditional**: a caller on this code cannot produce an unguarded grab, so the control has to come from the parent commit, not from a flag.
+9. **Shading cell** — the only proof the sync-compile guard holds, since batchmode cannot see a rendered pixel. **This doc is canon for every measured count below**: the code comments, the class doc, and the FAIL strings route here and must not restate the figures. **Two revisions, because the guard is unconditional**: a caller on this code cannot produce an unguarded grab, so the control has to come from the parent commit, not from a flag.
    - *Control*, on the commit before the guard: arm per §Arming on demand, `Capture` in that same call, count exact `#00FFFF` — must be **> 0**, else the arming didn't take and the cell proves nothing (measured 2026-08-13, Sandbox: 32,618 px at 1 angle/512, 453,750 at 4 angles/1024).
-   - *Measure*, on the guarded code, same avatar and same angles: **must be 0**.
+   - *Measure*, on the guarded code, same avatar and same angles: **the grab must return OK, and hand-count the returned sheet anyway — it must be 0**. The tool asserts the floor itself (`CountPlaceholderPx` scans every served frame — the tiles, and a diff's frame A — and every frame that gates a token — the canary's baseline and nudge — and any hit FAILs), which makes `OK` alone **circular** as proof: it says the counter returned 0, which is the thing under test. The hand count is the independent half, and a scan wired to the wrong buffer is exactly what it catches. Keep both.
 
    The floor is **0**, not a tuned threshold — a healthy 2048² sheet of an MA-composed avatar measured exactly zero. Treat a hit as a finding to resolve by re-grab rather than proof by itself: an unlit or emissive material could legitimately render exact cyan, which no fixture here does. Do not filter to flat blob interiors — the partial case (64 px on a sheet that reads healthy, same avatar, cleared by the guard) has **no** interior pixels and is invisible to that filter.
 
+   **Scan bound, from `Downscale`:** it is 4-tap bilinear *at a point*, not a box filter over the footprint, so at `scale > 1` a cyan region narrower than the sample spacing (`side/tileRes`) can fall between taps and be missed **entirely** rather than diluted. The bound grows as `resolution` drops but stops widening at `tileRes` 128 — `MinTileRes`, not `MinResolution`, is the floor that governs here, since `tileRes = Max(MinTileRes, …)` clamps a `resolution:64` request back up to 128. Not in play at the measured failure sizes; in play at `resolution:128` against a ~900 px viewport, the true worst case. A survivor generally needs a pure-cyan 2×2 at the sample point, though a single px suffices where the taps land exactly on a texel (odd integer `scale`, which zeroes both interpolants).
+
+   **Guard-holds measurements, 2026-08-14, Sandbox, `MANUKA_lilToon`, editor unfocused, all on guarded code.** Every row measured **0 exact `#00FFFF` and 0 near-cyan**:
+
+   | | Arming | `anythingCompiling` after grab |
+   |---|---|---|
+   | A | none, front/512 | False |
+   | B | §Arming's `lts.shader` `ForceUpdate\|ForceSynchronousImport`, same call (325 ms) | False |
+   | C | same, but **without** `ForceSynchronousImport` (241 ms) | False |
+   | D | bulk `ForceUpdate` of all 65 lilToon shaders, same call (1881 ms) | **True** |
+   | E | none, `showGizmos:true` / 512 | — |
+   | F | none, 4 angles / 1024 (2048² sheet) | — |
+   | G | none, `showGizmos:true` + 4 angles / 1024 | — |
+
+   **D decided that `anythingCompiling` may not stand in for a verdict**, and is the reason no standalone note fires off it: in-flight compilation across a grab whose tiles scanned at exactly zero means the signal cannot see the outcome, so as a note it cried wolf on every session running a background import. It rides the FAIL as a mechanism hint instead. Do not restore it as a note.
+
+   **E and G settle the gizmo false-positive question** — no component gizmo in this fixture's set draws exact cyan — which is why the FAIL ships with no bypass; `hide` already excludes an offending renderer.
+
+   **C is evidence about the recipe, not the pipeline.** `ImportAsset` returned with the asset imported before the grab line ran; an auto-refresh landing on an editor tick is not caller-serialized the same way. It does not narrow §Traps' open edge, which stands.
+
 ## Traps
 
-- **On any future flat-cyan sighting, read `ShaderUtil.anythingCompiling` in the same call, immediately after the grab.** `True` confirms the async-compile placeholder — the mechanism the guard addresses, so the finding is that the guard missed a path (a shader *asset* mid-import has no compiled variant to block on and is the known open edge). `False` on a cyan sheet is a **different, unidentified mechanism** and the guard is not the fix — measure before assuming. The read only works after the grab: the render is what queues the compile, so the same probe reads `False` beforehand. This standing check exists because the trigger coverage is inference, not measurement — the reproduction above is a shader reimport, while the sighting that motivated the work was mid-NDMF-settle (plausibly fresh proxy materials → fresh variants → the same producer).
+- **The `anythingCompiling` read on a flat-cyan sighting is now the tool's, not yours** — the placeholder FAIL takes it in the same call and splits its remedy on it, so act on the FAIL's text rather than re-probing. Two things it cannot tell you, and they decide what to do next: a shader *asset* mid-import has no compiled variant to block on and is the known open edge, still uncovered; and the trigger coverage is inference, not measurement — the reproduction is a shader reimport, while the sighting that motivated the guard was mid-NDMF-settle (plausibly fresh proxy materials → fresh variants → the same producer).
 
 - The parked state **survives domain reloads** (two recompile/reload cycles measured, 2026-07-29) — recompiling is not a cure, and a canary-FAIL after your own script edit is the same state, not a new one.
 

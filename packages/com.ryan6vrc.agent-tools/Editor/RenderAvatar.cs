@@ -99,16 +99,21 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// restored in the finally), covering the canary's frames too — with async compilation live across the
     /// canary's baseline/nudge pair, a variant finishing between them moves pixels wholesale and would certify
     /// <c>canary=live</c> off shader completion rather than off deform.
-    /// <b>This is a MECHANISM, and no summary token certifies the outcome.</b> That is the deliberate limit:
-    /// this file's history is mechanisms defeated by editor states nobody predicted, so if the pref misses a
-    /// path the tool is back to serving a placeholder sheet. The only in-band tell is a note when
-    /// <c>ShaderUtil.anythingCompiling</c> still reads true after the last frame — evidence something escaped,
-    /// never proof that a note-free sheet is clean. Proving THAT needs a pixel scan of the tiles, which this
-    /// tool does not do; a healthy sheet measures exactly zero <c>#00FFFF</c> px for the measured fixtures,
-    /// so the scan's floor is 0 rather than a tuned threshold — though an unlit or emissive material could
-    /// legitimately render exact cyan, making any hit a finding to resolve by re-grab rather than proof on
-    /// its own. The live cell in Tests/Editor/RenderAvatarFreshnessGate.md is the only thing that proves the
-    /// guard holds — batchmode cannot see a rendered pixel.
+    /// <b>The pref is a MECHANISM, so the OUTCOME is scanned.</b> This file's history is mechanisms defeated
+    /// by editor states nobody predicted, so if the pref misses a path the sheet must not ship: every frame
+    /// served (the tiles, and a diff's frame A) and every frame that gates a token (the canary's baseline and
+    /// nudge) is counted for exact <c>#00FFFF</c> px, and any hit FAILs. The floor is 0 — measured, not tuned.
+    /// The FAIL reads <c>ShaderUtil.anythingCompiling</c> in the same call and splits on it: still compiling is
+    /// the known async-compile producer and re-grabbing clears it, quiet is an unidentified mechanism that a
+    /// re-grab may not touch. That probe used to ride as a standalone note, which was retired: it is
+    /// editor-global and unattributable, and it told readers a measurably clean sheet might carry placeholder
+    /// regions (gate doc §Shading cell, probe D). <b>Two bounds on the scan.</b> Downscale is 4-tap bilinear at
+    /// a point, so at scale &gt; 1 a region narrower than the sample spacing can be missed entirely rather than
+    /// diluted — the bound widens as <c>resolution</c> drops, until <c>tileRes</c> hits its floor. And an
+    /// unlit or emissive material could
+    /// legitimately render exact cyan, making a hit a finding to resolve by re-grab rather than proof on its
+    /// own. The live cell in Tests/Editor/RenderAvatarFreshnessGate.md is the only thing that proves the
+    /// guard holds — batchmode cannot see a rendered pixel, and that doc is canon for every measured count.
     /// <b>The guard's cost IS the guard:</b> a first grab of a freshly imported avatar compiles cold variants
     /// with the editor frozen for the whole call, and there is no progress bar possible (progress UI needs
     /// the main thread, which this synchronous call holds). Measured warm at 836 ms against a ~550 ms
@@ -348,26 +353,73 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const string CanaryDirtyNote =
             " | note=canary nudge left the scene dirty (ClearSceneDirtiness drifted) — save or revert manually";
 
-        // ----- Shading: the residual tell ----------------------------------------------------------
-        // The capture forces synchronous shader compilation (see the config block in CaptureCore), so a
-        // placeholder frame should be unreachable. Nothing in the summary certifies that, though — this is a
-        // MECHANISM, and this file's whole history is mechanisms being defeated by editor states nobody
-        // predicted. So the grab reads ShaderUtil.anythingCompiling once, right after the last frame: on an
-        // UNGUARDED grab that flips true exactly there (measured 2026-08-13 on main — false before, true
-        // after, because the render is what queues the compile). Note the limit of that measurement: it
-        // establishes the probe's timing on the defect, not its behaviour in the guard-escape case it now
-        // exists to catch, which is inferred.
-        // The signal is editor-global and UNATTRIBUTED — it cannot say the compilation was this grab's, and
-        // an unrelated background import trips it identically. So it is a NOTE, never a verdict: made to FAIL
-        // it would fail honest grabs. Its absence proves nothing either, since a variant can draw a
-        // placeholder and finish compiling before the probe reads. Proving a sheet clean needs the pixel scan
-        // this deliberately does not do (the tool's owed follow-on). The text below must claim exactly that
-        // much and no more — an earlier draft asserted "the guard did not cover some path", an attribution
-        // this probe cannot support.
-        internal const string ShaderCompilingNote =
-            " | note=shader compilation still in flight after the grab — this signal is editor-global and "
-            + "cannot be attributed to this grab (an unrelated import trips it too), so shading is NOT "
-            + "certified here and the sheet may carry flat #00FFFF placeholder regions; re-grab and compare";
+        // ----- Shading: the outcome scan -----------------------------------------------------------
+        // The capture forces synchronous shader compilation (see the config block in CaptureCore), so Unity's
+        // flat #00FFFF still-compiling placeholder should be undrawable. That is a MECHANISM, and this file's
+        // whole history is mechanisms defeated by editor states nobody predicted — so every frame this tool
+        // SERVES, and every frame that GATES a token, is scanned for the placeholder before it ships. The
+        // floor is 0: measured, not tuned.
+        // What this replaced: a note fired off ShaderUtil.anythingCompiling — editor-global, unattributable —
+        // which told the reader that a clean sheet "may carry flat #00FFFF placeholder regions". Measured
+        // 2026-08-14 (gate doc §Shading cell, probe D): compilation genuinely in flight across a grab whose
+        // tiles scanned at exactly zero. The signal could not see the outcome; this scan does, so the probe
+        // now rides the FAIL as a mechanism hint instead of standing in for a verdict.
+        // Detection bound: Downscale is 4-tap bilinear AT A POINT, not a box filter over the footprint — so
+        // an exact survivor generally needs a pure-cyan 2x2 at the sample point (a single px suffices at odd
+        // integer scale, where the taps land on a texel), and at scale>1 a region narrower than the sample
+        // spacing (side/tileRes) can fall between taps and be missed ENTIRELY rather than diluted. The bound
+        // widens as `resolution` drops until tileRes hits its MinTileRes floor. Sizes: the gate doc, canon.
+        // Alpha is not read: Sample hardcodes it to 255, so a tile carries no grab alpha to test.
+        internal static int CountPlaceholderPx(Color32[] tile)
+        {
+            if (tile == null) return 0;
+            int n = 0;
+            for (int i = 0; i < tile.Length; i++)
+            {
+                var c = tile[i];
+                if (c.r == 0 && c.g == 255 && c.b == 255) n++;
+            }
+            return n;
+        }
+
+        // `where` names WHICH frames carried it — the served tiles or the canary's own pair — because the
+        // two mean different things about the sheet.
+        // The compile state is a HINT, never the verdict, and never the verdict CLASS: probe D measured the
+        // flag true across a grab that scanned at exactly zero, so it cannot attribute a hit to this grab in
+        // either direction. Every placeholder hit is therefore a hard FAIL; the two arms differ only in which
+        // remedy to try first. Ordering the remedies is what the flag can honestly do.
+        // Both arms end at a cure the reader can act on, including the terminal authored-cyan case — a floor
+        // of 0 with no opt-out means a genuinely cyan surface would otherwise make a target un-grabbable with
+        // nothing in the text to try.
+        internal static string BuildPlaceholderFailReason(
+            string where, int total, string worstAngle, int worstN, bool compiling)
+            => "flat #00FFFF placeholder px in " + where + " — " + total + " px, worst '" + worstAngle
+               + "' at " + worstN + " (floor 0: a healthy sheet measures exactly zero). Unity draws that "
+               + "placeholder for a shader variant still compiling, which this grab forces synchronous "
+               + "compilation to prevent, so a path escaped the guard. "
+               + (compiling
+                   ? "Shader compilation is still in flight — editor-global, so it cannot be attributed to "
+                     + "this grab either way, but it is consistent with the known async-compile producer: "
+                     + "re-grab first, which cleared it when last measured."
+                   : "No shader compilation is in flight, so the known async-compile producer is not "
+                     + "indicated; a re-grab may not clear this. Measure the mechanism before assuming the "
+                     + "sync-compile guard is the fix.")
+               + " If it survives a re-grab: an authored unlit or emissive pure-cyan material counts here too "
+               + "(Tests/Editor/RenderAvatarFreshnessGate.md §Shading cell). Re-grab with showGizmos:false to "
+               + "rule the gizmo pass in or out, then `hide` the offending renderer; a count that repeats "
+               + "identically on an unchanged scene is an authored surface, not a placeholder.";
+
+        // Frame A is a PRIOR grab read off disk, so the live compile state says nothing about it and the
+        // cure is a re-grab of A, not of this call. Its damage is specific: a flat region manufactures
+        // `changed` px against an honestly-shaded B, or hides a real change under a fill, so the counts —
+        // the whole product of a diff — are what is in doubt.
+        internal static string BuildFrameAPlaceholderFailReason(string aName, int total, string worstAngle, int worstN)
+            => "flat #00FFFF placeholder px in frame A (" + aName + ") — " + total + " px, worst '" + worstAngle
+               + "' at " + worstN + " (floor 0: a healthy sheet measures exactly zero). A placeholder region "
+               + "manufactures `changed` px against an honestly-shaded B, or hides a real change under a flat "
+               + "fill, so this diff's counts cannot be trusted — re-grab frame A with Capture, then diff. If "
+               + "the fresh A carries it too, that grab's own FAIL names the remedies "
+               + "(Tests/Editor/RenderAvatarFreshnessGate.md §Shading cell).";
 
         // Top-CanaryMaxTries blendshapes of a mesh by max vertex delta, cached per mesh — the delta scan
         // is O(shapes × verts) and capture-hot. Normals/tangents are not read, so null is passed for
@@ -477,7 +529,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 r.label, string.Join(",", r.manifest.angles), r.manifest.views.Length, r.manifest.tileRes,
                 r.manifest.margin.ToString("0.##", CultureInfo.InvariantCulture), showGizmos ? "on" : "off",
                 r.hiddenCount, r.excludedCount, proxyInfo, r.gate, r.canaryToken,
-                r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + r.shaderNote + r.hideNote, png);
+                r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + r.hideNote, png);
             Debug.Log(summary);
             return summary;
         }
@@ -565,7 +617,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public Color32[] sheet; public int sheetW, sheetH;
             public CamManifest manifest; public string label;
             public int hiddenCount, excludedCount, proxiesKept, proxiesHidden;
-            public string proxyNote = "", horizonNote = "", settleNote = "", gate = "", canaryToken = "", canaryNote = "", hideNote = "", shaderNote = "";
+            public string proxyNote = "", horizonNote = "", settleNote = "", gate = "", canaryToken = "", canaryNote = "", hideNote = "";
         }
         private static CoreResult Failed(string msg) => new CoreResult { ok = false, fail = msg };
         private static CoreResult CoreFail(string label, string reason) => Failed(Fail(label, reason));
@@ -955,6 +1007,25 @@ namespace Ryan6Vrc.AgentTools.Editor
                     views[ai] = new CamView { angle = angle, pivot = pivotF, rot = rot, orthoSize = sizeF, cropX = cropX, cropY = cropY, side = side };
                 }
 
+                // ----- Shading: scan the served tiles (see the scan block above) ---------------
+                // Before the canary, which costs 2-4 further grabs a poisoned sheet would only waste.
+                // Angles come from views[], not resolvedAngles[]: the pinned path renders
+                // opts.pinned.views[ai].angle, and views[] is the authority for what was actually drawn.
+                {
+                    int placeholderPx = 0, worstN = 0; string worstAngle = null;
+                    for (int i = 0; i < tiles.Count; i++)
+                    {
+                        int ph = CountPlaceholderPx(tiles[i]);   // not `n`: that is the angle count here
+                        placeholderPx += ph;
+                        if (ph > worstN) { worstN = ph; worstAngle = views[i].angle; }
+                    }
+                    if (placeholderPx > 0)
+                        // Hard FAIL regardless of the compile probe — see BuildPlaceholderFailReason for why
+                        // the flag may order the remedies but not pick the verdict class.
+                        return CoreFail(label, BuildPlaceholderFailReason(
+                            "the served tiles", placeholderPx, worstAngle, worstN, ShaderUtil.anythingCompiling));
+                }
+
                 // ----- End-to-end freshness canary (model + measured states: the canary block above) --
                 // Post-tiles so the served frames are never polluted; a FAIL discards everything. The
                 // compare pair is a dedicated unnudged baseline + the nudged grab, both taken with the
@@ -993,11 +1064,20 @@ namespace Ryan6Vrc.AgentTools.Editor
                         // reason), so read the camera the baseline actually rendered through.
                         float wpp = baseF.camH > 0 ? 2f * baseF.cam.orthographicSize / baseF.camH : 0f;
                         var baseTile = Downscale(baseF.px, baseF.w, v0.cropX, v0.cropY, v0.side, tileRes);
+                        // The canary's own pair gates canary=live, so it is scanned too: a placeholder
+                        // here moves pixels under the nudge exactly like a real surface and would
+                        // fabricate the token. Baseline first, before any scene write, so this arm can
+                        // return without owing a restore.
+                        int basePh = CountPlaceholderPx(baseTile);
+                        if (basePh > 0)
+                            return CoreFail(label, BuildPlaceholderFailReason(
+                                "the freshness canary's baseline frame", basePh, v0.angle, basePh,
+                                ShaderUtil.anythingCompiling));
 
                         var nudgeScene = root.scene;
                         bool wasDirty = nudgeScene.isDirty;
                         var tried = new List<string>();
-                        bool live = false; int lastChanged = 0;
+                        bool live = false; int lastChanged = 0; int nudgePh = 0;
                         foreach (var cand in cands)
                         {
                             if (tried.Count >= CanaryMaxTries) break;
@@ -1015,6 +1095,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                             tried.Add("blendshape '" + cand.smr.sharedMesh.GetBlendShapeName(cand.idx)
                                 + "' on '" + cand.smr.name + "'");
                             var nudgeTile = Downscale(nf.px, nf.w, v0.cropX, v0.cropY, v0.side, tileRes);
+                            // Accumulated, not returned on: this arm HAS written scene data, so the
+                            // dirtiness restore below must run before any FAIL leaves.
+                            nudgePh = Mathf.Max(nudgePh, CountPlaceholderPx(nudgeTile));
                             RenderDiff.Compare(baseTile, nudgeTile, tileRes, tileRes, out lastChanged, out _);
                             if (CanaryAlive(lastChanged)) { live = true; break; }
                         }
@@ -1026,6 +1109,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                                 catch { }
                             if (!cleared) canaryNote += CanaryDirtyNote;
                         }
+                        // After the dirtiness restore, before any verdict: a poisoned nudge frame makes
+                        // both the live and the dead reading meaningless, so it outranks either.
+                        if (nudgePh > 0)
+                            // canaryNote rides along: this is the one placeholder return that fires AFTER a
+                            // write to the operator's scene, so a failed dirtiness restore must not die here.
+                            return CoreFail(label, BuildPlaceholderFailReason(
+                                "the freshness canary's nudge frame", nudgePh, v0.angle, nudgePh,
+                                ShaderUtil.anythingCompiling) + canaryNote);
                         if (tried.Count == 0)
                             canaryNote = CanaryUnavailableNote + canaryNote; // shapes exist but none visible at this framing
                         else if (live)
@@ -1037,11 +1128,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                         }
                     }
                 }
-
-                // ----- Shading: read the residual tell (see ShaderCompilingNote) ---------------
-                // Last thing after the final frame — including the canary's — because the compile is queued
-                // BY a render, so an earlier read reports the state of the previous grab, not this one.
-                string shaderNote = ShaderUtil.anythingCompiling ? ShaderCompilingNote : "";
 
                 // ----- Contact sheet + manifest ----------------------------------------------
                 var sheet = Compose(tiles, tileRes, cols, rows, out int sheetW, out int sheetH);
@@ -1059,7 +1145,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                     proxiesKept = proxiesKept, proxiesHidden = proxiesHidden,
                     proxyNote = proxyNote, horizonNote = horizonNote, settleNote = SettleNote(reactive),
                     gate = GateToken(reactive, settle), canaryToken = canaryToken, canaryNote = canaryNote,
-                    shaderNote = shaderNote,
                 };
             }
             catch (Exception e)
@@ -1203,23 +1288,47 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (!File.Exists(against))
                 return Fail(label, "frame A png missing: " + against + " — re-grab frame A");
 
-            var r = CaptureCore(target, A.angles, A.hide, A.margin, A.showGizmos, A.resolution, new CoreOpts { pinned = A });
-            if (!r.ok) return r.fail;
-
-            // Decode frame A BEFORE writing B: WriteSheetAndManifest's 30-day prune can delete a stale `against`,
-            // and this read has no catch — reading first turns a pruned A into the loud FAIL above, not a raw throw.
+            // Decode frame A BEFORE grabbing B, not merely before writing it. A is a static file whose
+            // manifest is already validated, so everything needed to reject it is in hand — while the grab
+            // below costs a synchronous shader-compile freeze, the canary's extra grabs AND its blendshape
+            // write to the operator's scene. Paying all of that to then discard it over a defect visible
+            // up front is the same waste the tile scan is ordered before the canary to avoid.
             var aTex = new Texture2D(2, 2, TextureFormat.RGBA32, false, false);
-            Color32[] aSheet;
+            Color32[] aSheet; int aW, aH;
             try
             {
                 if (!ImageConversion.LoadImage(aTex, File.ReadAllBytes(against)))
                     return Fail(label, "frame A png failed to decode: " + against);
-                if (aTex.width != r.sheetW || aTex.height != r.sheetH)
-                    return Fail(label, "frame A sheet size " + aTex.width + "x" + aTex.height + " != B "
-                        + r.sheetW + "x" + r.sheetH + " — re-grab the pair at the same window/resolution");
+                aW = aTex.width; aH = aTex.height;
                 aSheet = aTex.GetPixels32();
             }
             finally { UnityEngine.Object.DestroyImmediate(aTex); }
+
+            // Frame A carries the shading scan too — B is scanned inside CaptureCore, and a diff whose A half
+            // is unmeasured certifies only half its input. The manifest schema bump retired PRE-guard A's; it
+            // cannot retire a guard-escape A, which is the population this scan exists for. Tile geometry
+            // comes from A's own validated manifest, which is why this runs before B exists.
+            {
+                int aPh = 0, aWorstN = 0; string aWorstAngle = null;
+                for (int i = 0; i < A.views.Length; i++)
+                {
+                    int c = i % A.cols, rr = i / A.cols;
+                    int x0 = c * A.tileRes, y0 = (A.rows - 1 - rr) * A.tileRes;
+                    int ph = CountPlaceholderPx(ExtractTile(aSheet, aW, x0, y0, A.tileRes));
+                    aPh += ph;
+                    if (ph > aWorstN) { aWorstN = ph; aWorstAngle = A.views[i].angle; }
+                }
+                if (aPh > 0)
+                    return Fail(label, BuildFrameAPlaceholderFailReason(
+                        Path.GetFileName(against), aPh, aWorstAngle, aWorstN));
+            }
+
+            var r = CaptureCore(target, A.angles, A.hide, A.margin, A.showGizmos, A.resolution, new CoreOpts { pinned = A });
+            if (!r.ok) return r.fail;
+
+            if (aW != r.sheetW || aH != r.sheetH)
+                return Fail(label, "frame A sheet size " + aW + "x" + aH + " != B "
+                    + r.sheetW + "x" + r.sheetH + " — re-grab the pair at the same window/resolution");
 
             string pngB = WriteSheetAndManifest(r);
             if (pngB == null) return Fail(label, "failed to write the diff grab PNG/manifest to temp (disk full or locked path?)");
@@ -1240,10 +1349,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             // Carry B's freshness/settle notes — an unsettled or horizon-incomplete B undercuts the whole
             // "empty diff ⇒ immaterial GIVEN freshness" premise, so the caveat must ride the diff summary too.
-            // B's shader note rides for a sharper reason: a placeholder region under a diff is not merely
-            // uncertain, it manufactures `changed` px against an honestly-shaded A (or hides a real change
-            // under a flat fill), so the count itself is the thing in doubt. A is pinned but not re-probed —
-            // its own grab carried this note if it applied.
+            // Shading no longer rides as a note on either half: B is scanned in CaptureCore and A in the
+            // loop above, and both FAIL rather than annotate, because a placeholder under a diff does not
+            // merely add uncertainty — it manufactures `changed` px against an honestly-shaded counterpart
+            // (or hides a real change under a flat fill), so the counts are the product in doubt.
             // The sheet is bottom-origin and RenderDiff reports raw buffer coords, so bbox y grows UPWARD from
             // the bottom edge. Reading it as top-down inverts every localization — a reader chasing a
             // top-of-frame change concludes "nothing there". Stated once, as its own token rather than inside
@@ -1251,7 +1360,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             string originNote = identical == r.manifest.views.Length ? "" : " bboxOrigin=bottom";
             string summary = "[RenderAvatar] CaptureDiff " + label + " against=" + Path.GetFileName(against)
                 + " angles=" + string.Join(",", r.manifest.angles) + " => OK gate=" + r.gate + r.canaryToken + " diff=[" + string.Join("; ", parts) + "] identical="
-                + identical + "/" + r.manifest.views.Length + originNote + r.hideNote + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + r.shaderNote + " | png=" + pngB;
+                + identical + "/" + r.manifest.views.Length + originNote + r.hideNote + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + " | png=" + pngB;
             Debug.Log(summary);
             return summary;
         }
