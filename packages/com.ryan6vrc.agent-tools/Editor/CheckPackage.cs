@@ -239,9 +239,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Scope bound, stated because the message cannot: this asserts "the model carries an external-material
         // map AND has empty slots", not "this particular slot is the one the map should have filled" — the
         // importer's source-material list does not index-align with renderer slots (measured: 2 entries against
-        // 10 empty slots), so a per-slot attribution would be an assumption, not a reading. Naming the
-        // unresolved keys is what lets the reader close that gap. Censused at 15/69 map-carrying models, every
-        // one a genuine miss.
+        // 10 empty slots), so a per-slot attribution would be an assumption, not a reading. Censused at 15/69
+        // map-carrying models, every one a genuine miss.
+        //
+        // What IS readable is the entry: a mapped material either appears on some renderer of this model or it
+        // does not, and the walk below already has both halves in hand. So the message names the entries that
+        // landed nowhere rather than every entry in the map — with a dozen entries and two genuine misses, the
+        // undifferentiated list left the reader to re-derive the partition the scan had already computed.
         //
         // `materialImportMode == None` is excluded: materials are deliberately not imported there, so every
         // slot is empty by design and an empty count carries no signal at all.
@@ -252,26 +256,45 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             var mapped = new List<string>();
             var unresolved = new List<string>();
+            // The material each entry points at, kept so the walk below can ask whether it actually landed.
+            // Indexer, not Add: a duplicate identifier name would throw, and a throw here would take down a
+            // whole-folder scan over one malformed importer entry.
+            var target = new Dictionary<string, Material>();
             foreach (var kv in importer.GetExternalObjectMap())
             {
                 if (kv.Key.type != typeof(Material)) continue;
                 mapped.Add(kv.Key.name);
                 if (kv.Value == null) unresolved.Add(kv.Key.name);
+                else target[kv.Key.name] = kv.Value as Material;
             }
             if (mapped.Count == 0) return;
 
             var model = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
             if (model == null) return;
             int empty = 0;
+            // Non-null slots are collected, not just counted: a mapped material PRESENT on some renderer
+            // bound fine, so naming it beside the genuine misses buries them. This is the one attribution
+            // the API supports — the entry, never the slot.
+            var boundHere = new HashSet<Material>();
             foreach (var rend in model.GetComponentsInChildren<Renderer>(true))
             {
                 if (rend is ParticleSystemRenderer) continue;
-                foreach (var m in rend.sharedMaterials) if (m == null) empty++;
+                foreach (var m in rend.sharedMaterials)
+                {
+                    if (m == null) empty++; else boundHere.Add(m);
+                }
             }
             if (empty == 0) return;
 
             var verdict = ClassifyRemap(mapped.Count, unresolved.Count, empty);
             if (verdict == RemapVerdict.None) return;
+
+            var notBound = new List<string>();
+            foreach (var name in mapped)
+            {
+                Material t;
+                if (target.TryGetValue(name, out t) && t != null && !boundHere.Contains(t)) notBound.Add(name);
+            }
 
             if (verdict == RemapVerdict.Unresolved) r.RemapUnresolved += empty; else r.RemapStale += empty;
             r.Offenders.Add(new Offender
@@ -279,7 +302,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 Location = assetPath,
                 ObjectPath = "",
                 Kind = verdict == RemapVerdict.Unresolved ? "fbx-remap-unresolved" : "fbx-remap-stale",
-                Detail = DescribeRemap(verdict, mapped.Count, unresolved, empty, mapped)
+                Detail = DescribeRemap(verdict, mapped.Count, unresolved, empty, mapped, notBound)
             });
         }
 
@@ -296,18 +319,34 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>Pure wording for the two remap classes, kept beside the decision so a reader comparing
-        /// the remedies sees they run in opposite order.</summary>
+        /// the remedies sees they run in opposite order.
+        ///
+        /// <paramref name="notBound"/> is the stale class's whole readability: a model can carry a dozen
+        /// remap entries where two never landed, and naming all twelve leaves the reader to find the two.
+        /// An entry is "not bound" when its material appears on NO renderer of this model — an observation,
+        /// unlike a per-slot attribution, which the importer's list cannot support (see ScanModelRemap).
+        /// Empty means every mapped material did land, so the empty slots are other submeshes; that is
+        /// still reported rather than swallowed, because demoting the verdict on it would trade a false
+        /// alarm for a silent miss on evidence nobody has measured.</summary>
         internal static string DescribeRemap(RemapVerdict verdict, int mappedCount, List<string> unresolved, int emptySlots,
-                                            List<string> mapped = null)
+                                            List<string> mapped = null, List<string> notBound = null)
         {
             if (verdict == RemapVerdict.Unresolved)
                 return emptySlots + " empty renderer slot(s); " + unresolved.Count + " of " + mappedCount
                      + " external-material remap entries resolve to nothing (" + NameList(unresolved)
                      + ") — restore or import those material assets, THEN force-reimport the FBX. A reimport alone "
                      + "cannot fix this: the targets do not exist yet";
-            return emptySlots + " empty renderer slot(s) despite " + mappedCount
-                 + " resolvable external-material remap entries (" + NameList(mapped ?? new List<string>()) + ") — force-reimport the FBX. "
-                 + "If a reimport does not clear it, the empty slots are not the mapped ones and this model is fine";
+
+            if (notBound != null && notBound.Count > 0)
+                return emptySlots + " empty renderer slot(s); " + notBound.Count + " of " + mappedCount
+                     + " resolvable external-material remap entries are on no renderer of this model ("
+                     + NameList(notBound) + ") — force-reimport the FBX. The other "
+                     + (mappedCount - notBound.Count) + " bound fine and are not the problem";
+
+            return emptySlots + " empty renderer slot(s), but all " + mappedCount
+                 + " resolvable external-material remap entries are already bound on this model ("
+                 + NameList(mapped ?? new List<string>()) + ") — the empty slots are other submeshes, "
+                 + "not the mapped ones, and a force-reimport will not clear them";
         }
 
         /// <summary>Comma-joined names, capped so a many-material FBX names a readable few and counts the rest
