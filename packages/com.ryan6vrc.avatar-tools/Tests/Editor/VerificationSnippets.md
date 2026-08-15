@@ -8,7 +8,7 @@ The rendered PNG proves the *image* is right; it proves nothing about the projec
 
 ```csharp
 var t = System.Type.GetType("Ryan6Vrc.AvatarTools.Editor.RenderThumbnail, Ryan6VRC.AvatarTools.Editor");
-var m = t.GetMethod("Render", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+var m = t.GetMethod("Run", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
 var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
 bool dirtyBefore = scene.isDirty;
 int rootsBefore = scene.GetRootGameObjects().Length;

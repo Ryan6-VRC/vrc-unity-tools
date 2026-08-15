@@ -194,7 +194,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     refusal = "base has two humanoid bones both named '" + b.name + "' (" +
                         PathOf(other.gameObject) + " vs " + PathOf(b.gameObject) + ") — name-matching cannot " +
-                        "tell them apart. Rename one on the base, or seam the mergeable and use Check";
+                        "tell them apart. Rename one on the base, or seam the mergeable and use Run";
                     return pairs;
                 }
                 baseByName[b.name] = b;
@@ -224,7 +224,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         "includes INACTIVE objects, so a disabled backup armature counts. Rename or remove carriers " +
                         "until exactly one remains (a physbone collider named after the bone it guards is the " +
                         "usual duplicate, and renaming it on the probe costs nothing), or seam the mergeable and " +
-                        "use Check. Narrowing " +
+                        "use Run. Narrowing " +
                         "the mergeable root works ONLY if the duplicate sits outside the mesh subtree — narrowing " +
                         "past a sibling of the skinned meshes drops every weight and refuses again for a different, " +
                         "worse-reading reason";

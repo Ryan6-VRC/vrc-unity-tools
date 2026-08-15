@@ -417,7 +417,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             => "flat #00FFFF placeholder px in frame A (" + aName + ") — " + total + " px, worst '" + worstAngle
                + "' at " + worstN + " (floor 0: a healthy sheet measures exactly zero). A placeholder region "
                + "manufactures `changed` px against an honestly-shaded B, or hides a real change under a flat "
-               + "fill, so this diff's counts cannot be trusted — re-grab frame A with Capture, then diff. If "
+               + "fill, so this diff's counts cannot be trusted — re-grab frame A with Run, then diff. If "
                + "the fresh A carries it too, that grab's own FAIL names the remedies "
                + "(Tests/Editor/RenderAvatarFreshnessGate.md §Shading cell).";
 
@@ -1271,7 +1271,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             string camPath = against + ".cam.json";
             if (!File.Exists(camPath))
                 return Fail(label, "no camera manifest for " + against + " (expected " + Path.GetFileName(camPath)
-                    + " — absent or pruned). Re-grab frame A with Capture, then diff.");
+                    + " — absent or pruned). Re-grab frame A with Run, then diff.");
             CamManifest A;
             try { A = JsonUtility.FromJson<CamManifest>(File.ReadAllText(camPath)); }
             catch (Exception e) { return Fail(label, "camera manifest unreadable (" + e.Message + ") — re-grab frame A"); }

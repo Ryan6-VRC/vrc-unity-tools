@@ -372,7 +372,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             var descriptor = avatarGO.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             if (descriptor == null)
-                return Refuse("'" + avatarRoot + "' has no VRCAvatarDescriptor — Inspect expects the avatar (descriptor) root");
+                return Refuse("'" + avatarRoot + "' has no VRCAvatarDescriptor — Run expects the avatar (descriptor) root");
 
             var rep = new Report { Root = avatarGO };
             var pairs = MergeSurfaces.Enumerate(avatarGO, descriptor, vrcfOnly: false,

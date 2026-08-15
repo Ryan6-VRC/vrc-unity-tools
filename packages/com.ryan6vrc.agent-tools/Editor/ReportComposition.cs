@@ -66,7 +66,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (root == null) return Refuse("avatarRoot '" + (avatarRoot ?? "(null)") + "' did not resolve to a GameObject");
             var descriptor = root.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             if (descriptor == null)
-                return Refuse("'" + avatarRoot + "' has no VRCAvatarDescriptor — Report expects the avatar (descriptor) root");
+                return Refuse("'" + avatarRoot + "' has no VRCAvatarDescriptor — Run expects the avatar (descriptor) root");
 
             var census = Census(root, descriptor, paramFilter);
             if (!bake) return EmitPlain(root, census, paramFilter);

@@ -256,7 +256,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     reason = "RunLog reports the import was cancelled";
                     return Verdict.Fail;
                 default:
-                    reason = "no RunLog on disk for this package — Import was never started (or wrote elsewhere)";
+                    reason = "no RunLog on disk for this package — Run was never started (or wrote elsewhere)";
                     return Verdict.Fail;
             }
         }
