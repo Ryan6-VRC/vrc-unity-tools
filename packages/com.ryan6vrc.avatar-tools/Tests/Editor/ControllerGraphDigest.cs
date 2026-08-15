@@ -31,7 +31,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
         // the default-state line this exists for — is graph content.
         internal static string Of(AnimatorController c)
         {
-            string summary = Ryan6Vrc.AgentTools.Editor.ReportController.Report(c);
+            string summary = Ryan6Vrc.AgentTools.Editor.ReportController.Run(c);
             var m = Regex.Match(summary, @"log=(\S+)");
             Assert.IsTrue(m.Success, "ReportController did not report a log path — got: " + summary);
             string path = m.Groups[1].Value;

@@ -42,7 +42,7 @@ layers: []
     private string Compile(string menuBlock)
     {
         File.WriteAllText(_srcPath, Head + menuBlock);
-        return CompileController.Compile(_srcPath, OutDir);
+        return CompileController.Run(_srcPath, OutDir);
     }
 
     private VRCExpressionsMenu Load() => AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(MenuPath);
@@ -219,7 +219,7 @@ menu:
   - toggle: Local
     param: IsLocal
 ");
-        var msg = CompileController.Compile(_srcPath, OutDir);
+        var msg = CompileController.Run(_srcPath, OutDir);
         StringAssert.Contains("FAIL", msg);
         Assert.IsNull(Load());
     }
@@ -258,7 +258,7 @@ menu:
   - toggle: A
     param: Enable
 ");
-        StringAssert.Contains("FAIL", CompileController.Compile(_srcPath, OutDir));
+        StringAssert.Contains("FAIL", CompileController.Run(_srcPath, OutDir));
         Assert.IsTrue(File.Exists(MenuPath), "a failed compile must not delete the pre-existing menu asset");
         Assert.AreEqual(before, File.ReadAllText(MenuPath), "nor overwrite it");
     }
@@ -371,7 +371,7 @@ menu:
         AnimatorTestHelpers.EnsureFolder(TestRoot + "/sub");
         var nested = TestRoot + "/sub/M_Fx.yaml";
         File.WriteAllText(nested, Head + "menu:\n  - toggle: T\n    param: Enable\n    icon: ../assets/Knob.png\n");
-        StringAssert.Contains("=> OK", CompileController.Compile(nested, OutDir));
+        StringAssert.Contains("=> OK", CompileController.Run(nested, OutDir));
         Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
     }
 
@@ -393,7 +393,7 @@ menu:
             var yaml = Path.Combine(outside, "M_Fx.yaml");
             File.WriteAllText(yaml, Head + "menu:\n  - toggle: T\n    param: Enable\n    icon: assets/Knob.png\n");
 
-            var msg = CompileController.Compile(yaml, OutDir);
+            var msg = CompileController.Run(yaml, OutDir);
             StringAssert.Contains("=> OK", msg);
             Assert.IsNull(Load().controls.Single().icon, "an unreachable icon emits as null, not as a failure");
             StringAssert.Contains("not in the project's AssetDatabase", RunLogBody(msg));
@@ -416,7 +416,7 @@ menu:
             {
                 var yaml = Path.Combine(outside, "M_Fx.yaml");
                 File.WriteAllText(yaml, Head + "menu:\n  - toggle: T\n    param: Enable\n    icon: " + spelling + "\n");
-                var msg = CompileController.Compile(yaml, OutDir);
+                var msg = CompileController.Run(yaml, OutDir);
                 StringAssert.Contains("=> OK", msg, "spelling must not decide the regime: " + spelling);
                 Assert.IsNull(Load().controls.Single().icon, spelling);
             }
@@ -432,7 +432,7 @@ menu:
         // field there: the document read as out-of-project, and every icon silently emitted null.
         var icon = MakeIcon(TestRoot + "/assets/Knob.png");
         File.WriteAllText(_srcPath, Head + "menu:\n  - toggle: T\n    param: Enable\n    icon: assets/Knob.png\n");
-        var msg = CompileController.Compile(Path.GetFullPath(_srcPath), OutDir);
+        var msg = CompileController.Run(Path.GetFullPath(_srcPath), OutDir);
         StringAssert.Contains("=> OK", msg);
         Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
         StringAssert.Contains("_(none)_", RunLogBody(msg).Split(new[] { "## Compile advisory: unadjudicated menu icons" }, System.StringSplitOptions.None)[1]

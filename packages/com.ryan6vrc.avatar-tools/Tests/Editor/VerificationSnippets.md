@@ -1,6 +1,6 @@
 # RenderThumbnail — live verification snippets
 
-`RenderThumbnail.Render` bakes an avatar (the VRC SDK preprocess chain, `OnPreprocessAvatar`), samples a humanoid clip, applies an expression, and renders through an off-screen camera — all of which **mutate live `UnityEngine.Object`s**, which SIGSEGV-crash this project's headless NUnit suite (`vrc-unity-tools-editmode-batchmode`). So the render/bake/teardown path is verified **live** via MCP `execute_code`, not in NUnit; the EditMode tests (`RenderThumbnailTests.cs`) cover only the pure helpers. These are the scripts the coordinator ran against a live personal-project editor on the real MA/VRCFury-composed `Shinano_kisekae` (18 meshes, `MergeArmature`). Re-run them after any change to the render pipeline. Pin the MCP session to the target Editor first (`set_active_instance`), and run with `safety_checks:false` (the pipeline calls `AssetDatabase.DeleteAsset` during cleanup).
+`RenderThumbnail.Run` bakes an avatar (the VRC SDK preprocess chain, `OnPreprocessAvatar`), samples a humanoid clip, applies an expression, and renders through an off-screen camera — all of which **mutate live `UnityEngine.Object`s**, which SIGSEGV-crash this project's headless NUnit suite (`vrc-unity-tools-editmode-batchmode`). So the render/bake/teardown path is verified **live** via MCP `execute_code`, not in NUnit; the EditMode tests (`RenderThumbnailTests.cs`) cover only the pure helpers. These are the scripts the coordinator ran against a live personal-project editor on the real MA/VRCFury-composed `Shinano_kisekae` (18 meshes, `MergeArmature`). Re-run them after any change to the render pipeline. Pin the MCP session to the target Editor first (`set_active_instance`), and run with `safety_checks:false` (the pipeline calls `AssetDatabase.DeleteAsset` during cleanup).
 
 ## 1. Pristine-after-run invariant (the non-destructiveness gate)
 
@@ -8,7 +8,7 @@ The rendered PNG proves the *image* is right; it proves nothing about the projec
 
 ```csharp
 var t = System.Type.GetType("Ryan6Vrc.AvatarTools.Editor.RenderThumbnail, Ryan6VRC.AvatarTools.Editor");
-var m = t.GetMethod("Render", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+var m = t.GetMethod("Run", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
 var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
 bool dirtyBefore = scene.isDirty;
 int rootsBefore = scene.GetRootGameObjects().Length;

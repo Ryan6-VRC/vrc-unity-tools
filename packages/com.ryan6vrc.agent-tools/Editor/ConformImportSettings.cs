@@ -49,7 +49,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <paramref name="whatIf"/> previews: identical traversal, nothing written. Returns a one-line
         /// summary ending with the RunLog path (<c>… =&gt; RESULT | log=&lt;path&gt;</c>); a bad-input early return
         /// is a bare <c>[ConformImportSettings] FAIL: …</c> with no trailer.</summary>
-        public static string RunFolder(string assetFolderPath, bool whatIf = false)
+        public static string Run(string assetFolderPath, bool whatIf = false)
         {
             if (string.IsNullOrEmpty(assetFolderPath) || !AssetDatabase.IsValidFolder(assetFolderPath))
                 return "[ConformImportSettings] FAIL: not a valid asset folder: " + assetFolderPath;

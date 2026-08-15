@@ -97,7 +97,7 @@ public class ReportCompositionTests
     public void UnresolvableHandle_isABareFail_withNoArtifactTrailer()
     {
         LogAssert.Expect(LogType.Error, new Regex(@"\[ReportComposition\] FAIL:"));
-        var r = ReportComposition.Report("NoSuchRoot_xyz");
+        var r = ReportComposition.Run("NoSuchRoot_xyz");
         StringAssert.StartsWith("[ReportComposition] FAIL:", r);
         Assert.IsFalse(r.Contains("| log="), "a refusal must not point at an artifact: " + r);
     }
@@ -107,7 +107,7 @@ public class ReportCompositionTests
     {
         new GameObject("Bare");
         LogAssert.Expect(LogType.Error, new Regex(@"\[ReportComposition\] FAIL:"));
-        var r = ReportComposition.Report("Bare");
+        var r = ReportComposition.Run("Bare");
         StringAssert.Contains("has no VRCAvatarDescriptor", r);
     }
 
@@ -117,7 +117,7 @@ public class ReportCompositionTests
     public void AParameterNoScannedSurfaceWrites_carriesTheScopeNoteInTheCell()
     {
         BuildAvatar("ScopeAvatar", "Unwritten");
-        var r = ReportComposition.Report("ScopeAvatar");
+        var r = ReportComposition.Run("ScopeAvatar");
         StringAssert.Contains("=> OK", r);
         var body = ReadArtifact(r);
         StringAssert.Contains("`Unwritten`", body, "the declared parameter must appear: " + body);
@@ -138,7 +138,7 @@ public class ReportCompositionTests
     public void ParamFilter_narrowsTheTable_andSaysThatItDid()
     {
         BuildAvatar("FilterAvatar", "Keep/Me", "Drop/Me");
-        var r = ReportComposition.Report("FilterAvatar", false, "Keep");
+        var r = ReportComposition.Run("FilterAvatar", false, "Keep");
         var body = ReadArtifact(r);
         StringAssert.Contains("`Keep/Me`", body, body);
         Assert.IsFalse(body.Contains("| `Drop/Me` |"), "the filter must actually narrow the table: " + body);
@@ -150,7 +150,7 @@ public class ReportCompositionTests
     {
         var root = BuildAvatar("CensusAvatar", "P");
         root.AddComponent<BoxCollider>(); // a component no table above interprets
-        var r = ReportComposition.Report("CensusAvatar");
+        var r = ReportComposition.Run("CensusAvatar");
         StringAssert.Contains("UnityEngine.BoxCollider", ReadArtifact(r),
             "an uninterpreted component must be censused, or other=0 means nobody looked");
     }

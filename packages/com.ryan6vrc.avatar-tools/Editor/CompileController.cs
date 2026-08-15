@@ -50,7 +50,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// a controller under <paramref name="outDir"/> (an <c>Assets/…</c>-relative folder). With
         /// <paramref name="whatIf"/> the whole pipeline runs against a scratch temp that is deleted before
         /// return — the outDir is never touched. Returns the one-line summary (see class docs).</summary>
-        public static string Compile(string sourcePath, string outDir, bool whatIf = false)
+        public static string Run(string sourcePath, string outDir, bool whatIf = false)
         {
             // One refusal label per run: the source file's leaf (pre-parse stages don't know the
             // controller name; on failure the source is the thing to name).
@@ -634,7 +634,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string outDir = AssetPathUtil.ToProjectRelative(abs);
             if (outDir == null) { Debug.LogError("[CompileController] output folder must be under this project's Assets/."); return; }
 
-            CompileController.Compile(src, outDir, false);
+            CompileController.Run(src, outDir, false);
         }
     }
 }

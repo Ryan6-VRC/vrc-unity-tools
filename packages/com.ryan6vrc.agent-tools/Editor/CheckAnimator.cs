@@ -46,13 +46,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// GUID) to the <see cref="AnimatorController"/> and lint it, forwarding the basis args. A handle
         /// that names no controller is the same bare <c>[CheckAnimator] FAIL: …</c> (echoing the handle) as
         /// a null controller.</summary>
-        public static string Lint(string controllerPathOrGuid, string basis = "auto",
+        public static string Run(string controllerPathOrGuid, string basis = "auto",
                                   string mergeSite = null, string avatarRoot = null, string mountRoot = null)
         {
             var controller = RunLogFormat.LoadByPathOrGuid<AnimatorController>(controllerPathOrGuid);
             if (controller == null)
                 return Refuse(ReportController.RefuseWhy(controllerPathOrGuid)); // one wording for both asset doors
-            return Lint(controller, basis, mergeSite, avatarRoot, mountRoot);
+            return Run(controller, basis, mergeSite, avatarRoot, mountRoot);
         }
 
         /// <summary>Lint <paramref name="controller"/> against the v1 rule set. <paramref name="basis"/>
@@ -61,7 +61,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// active-scene hierarchy paths). Returns a one-line summary; a real run ends with the RunLog path
         /// in-band (<c>… =&gt; RESULT | log=&lt;path&gt;</c>). A bad-input/refusal early return is a bare
         /// <c>[CheckAnimator] FAIL: …</c> with no trailer.</summary>
-        public static string Lint(AnimatorController controller, string basis = "auto",
+        public static string Run(AnimatorController controller, string basis = "auto",
                                   string mergeSite = null, string avatarRoot = null, string mountRoot = null)
         {
             if (controller == null) return Refuse("controller not found");

@@ -7,7 +7,7 @@ using Ryan6Vrc.AgentTools.Editor;
 // tools read and the members docs/emulator.md teaches agents to drive by hand.
 //
 // The second half is the point. The pinned members already have two fail-loud runtime refusals behind them
-// (PlayGateCore's emulator-config offender, RenderThumbnailPlay.Begin's drift refusal), so a rename there
+// (PlayGateCore's emulator-config offender, RenderThumbnailPlay.Run's drift refusal), so a rename there
 // announces itself. Nothing guards the hand-driven surface: if `CreateNonLocalClone` were renamed, no tool
 // would notice, and the first symptom would be an agent mid-task reading null while following a doc that has
 // silently gone wrong. This fixture converts that into a red suite, at a door no PR bypasses.

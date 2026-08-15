@@ -58,7 +58,7 @@ internal static class CheckAvatarFixture
 // CheckAvatar proof obligations (spec 2026-07-07-avatarlint-design.md, Acceptance criteria) — the surface that
 // needs real assets: saved clips, saved controllers, and the MA/VRCFury frames that carry them.
 //
-// CheckAvatar.Inspect resolves scene paths against the ACTIVE scene (its local FindByHierarchyPath), so —
+// CheckAvatar.Run resolves scene paths against the ACTIVE scene (its local FindByHierarchyPath), so —
 // like CheckAnimatorRefactorTests — fixtures live in the active scene and are torn down in place. Nothing is
 // saved into TmpDir that must outlive a test: the temp controllers/clips + the emitted RunLog go in TearDown's
 // one batched delete, and the real scene file is never written. MA/VRCFury are the REAL installed types
@@ -132,7 +132,7 @@ public class CheckAvatarTests
         SetSeam("ResolveVrcfRewritePath", _origVrcfRewrite);
     }
 
-    private static string Inspect(string root) => CheckAvatar.Inspect(root);
+    private static string Inspect(string root) => CheckAvatar.Run(root);
 
     private string ReadLog(string result)
     {
@@ -750,7 +750,7 @@ public class CheckAvatarTests
 
         SetSeam("ResolveVrcfRewritePath", (Func<MethodInfo>)(() => null)); // force the pin unreachable
 
-        var r = CheckAnimator.Lint(ctrl, "auto", mergeSite: "LintVrcfRwNote/Prop");
+        var r = CheckAnimator.Run(ctrl, "auto", mergeSite: "LintVrcfRwNote/Prop");
         var log = ReadLog(r);
         StringAssert.Contains("could not be applied", log,
             "the un-applied rewrite rules must be named beside the count they may inflate: " + log);
@@ -877,7 +877,7 @@ public class CheckAvatarTests
     public void BadInput_barFail_noTrailer()
     {
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckAvatar\] FAIL:"));
-        var r = CheckAvatar.Inspect("NoSuchRoot_xyz");
+        var r = CheckAvatar.Run("NoSuchRoot_xyz");
         StringAssert.StartsWith("[CheckAvatar] FAIL:", r);
         Assert.IsFalse(r.Contains("| log="), "bad input carries no artifact trailer: " + r);
     }
@@ -1251,7 +1251,7 @@ public class CheckAvatarMergeConflictTests
     // The RunLog body for a fresh Inspect of the fixture root, with the artifact recorded for teardown.
     private string InspectLog()
     {
-        var path = CheckAvatarFixture.LogPath(CheckAvatar.Inspect(_root.name));
+        var path = CheckAvatarFixture.LogPath(CheckAvatar.Run(_root.name));
         if (path == null) return "";
         _logs.Add(path);
         return File.Exists(path) ? File.ReadAllText(path) : "";

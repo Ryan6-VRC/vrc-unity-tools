@@ -15,7 +15,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// base's before any render — <c>PASS</c> / <c>NOT-PASS</c> / bare <c>REFUSE</c>. It scores position, not
     /// intent: it counts weighted humanoid bones and gates on edit-time world-position coincidence.
     ///
-    /// Two doors, one gate. <see cref="Check"/> reflects the seam's own mapping (Modular Avatar
+    /// Two doors, one gate. <see cref="Run"/> reflects the seam's own mapping (Modular Avatar
     /// <c>GetBonesMapping</c> / VRCFury <c>ArmatureLinkService.GetLinks</c>) and derives ε from the base's
     /// scale — the composed case. <see cref="CheckBare"/> pairs by BONE NAME and takes the tolerance from the
     /// caller — the pre-seam case, where a mergeable sits beside a base with no mapping to reflect (a fresh
@@ -24,7 +24,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// that is not: name-matching collects humanoid bones only, so it is empty by construction at the bare door.
     ///
     /// Pure-core + injectable seams (mirrors <see cref="CheckAvatar"/>): each door resolves two scene roots and
-    /// calls <see cref="ResolveHumanoid"/>, then collects pairs — <see cref="Check"/> through
+    /// calls <see cref="ResolveHumanoid"/>, then collects pairs — <see cref="Run"/> through
     /// <see cref="ResolveSeam"/>, <see cref="CheckBare"/> by name, consulting no seam at all — then a shared
     /// pure scoring core. The seam defaults do the real reflection; tests swap fakes.
     /// </summary>
@@ -69,7 +69,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Doors ─────────────────────────────────────────────────────────────────────────────────────
 
-        public static string Check(string baseRoot, string mergeableRoot)
+        public static string Run(string baseRoot, string mergeableRoot)
         {
             var baseGO = Resolve(baseRoot);
             if (baseGO == null) return RefuseMisuse("base root '" + baseRoot + "' not found in the active scene");
@@ -117,12 +117,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>
-        /// Resolver-free coincidence gate: same verdict grammar as <see cref="Check"/>, but the base↔merge
+        /// Resolver-free coincidence gate: same verdict grammar as <see cref="Run"/>, but the base↔merge
         /// pairs are matched by BONE NAME and no seam component is consulted. For the pre-seam case a seam
         /// resolver cannot score — a raw refit output beside a target body, an unplaced mergeable — where
-        /// <see cref="Check"/> correctly REFUSEs because there is no mapping to reflect. Pre-seam is not
+        /// <see cref="Run"/> correctly REFUSEs because there is no mapping to reflect. Pre-seam is not
         /// seamless: a raw refit output does carry a MergeArmature, it simply has no base to resolve against
-        /// yet, so <see cref="Check"/> lands on the mergeTarget abstain rather than the bare-prop REFUSE.
+        /// yet, so <see cref="Run"/> lands on the mergeTarget abstain rather than the bare-prop REFUSE.
         ///
         /// <paramref name="maxOffsetMm"/> has no default on purpose. The known regimes differ by orders of
         /// magnitude — a warp solver's residue is ~0.001mm (millimetre-scale there is a wrong result, not
@@ -194,7 +194,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     refusal = "base has two humanoid bones both named '" + b.name + "' (" +
                         PathOf(other.gameObject) + " vs " + PathOf(b.gameObject) + ") — name-matching cannot " +
-                        "tell them apart. Rename one on the base, or seam the mergeable and use Check";
+                        "tell them apart. Rename one on the base, or seam the mergeable and use Run";
                     return pairs;
                 }
                 baseByName[b.name] = b;
@@ -224,7 +224,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         "includes INACTIVE objects, so a disabled backup armature counts. Rename or remove carriers " +
                         "until exactly one remains (a physbone collider named after the bone it guards is the " +
                         "usual duplicate, and renaming it on the probe costs nothing), or seam the mergeable and " +
-                        "use Check. Narrowing " +
+                        "use Run. Narrowing " +
                         "the mergeable root works ONLY if the duplicate sits outside the mesh subtree — narrowing " +
                         "past a sibling of the skinned meshes drops every weight and refuses again for a different, " +
                         "worse-reading reason";
@@ -543,7 +543,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // First carrier wins across BOTH fields. The pre-refactor single outer try aborted on the first
             // throw and set exactly one reason; because the per-collector/per-component guards now continue,
             // a later throw must not upgrade an earlier abstain (UnresolvableReason/warning) to misuse
-            // (ReflectError/error). Preserves Check()'s REFUSE severity and removes iteration-order dependence.
+            // (ReflectError/error). Preserves Run()'s REFUSE severity and removes iteration-order dependence.
             if (res.ReflectError != null || res.UnresolvableReason != null) return;
             // A RAW ArgumentException/TargetParameterCountException — not unwrapped from a
             // TargetInvocationException shell — was thrown by the reflection layer itself (argument binding

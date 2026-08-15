@@ -74,7 +74,7 @@ public class DecompileControllerTests
         string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
 
         string yamlOut = TestRoot + "/roundtrip.yaml";
-        string dec = Track(DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false));
+        string dec = Track(DecompileController.Run(ctrlPath, yamlOut, whatIf: false));
         StringAssert.Contains("=> OK", dec);
         Assert.IsTrue(File.Exists(yamlOut), "the .yaml is written");
 
@@ -86,12 +86,12 @@ public class DecompileControllerTests
         string logPath = dec.Substring(i + marker.Length).Trim();
         Assert.IsTrue(File.Exists(logPath), "the Snapshot RunLog exists at " + logPath);
 
-        string rec = Track(CompileController.Compile(Path.GetFullPath(yamlOut), TestRoot + "/out_rt", whatIf: false));
+        string rec = Track(CompileController.Run(Path.GetFullPath(yamlOut), TestRoot + "/out_rt", whatIf: false));
         StringAssert.Contains("=> OK", rec);
 
         var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(TestRoot + "/out_rt/Debounce_Fx.controller");
         Assert.IsNotNull(ctrl, "recompiled controller loads");
-        StringAssert.Contains("=> PASS", Track(CheckAnimator.Lint(ctrl, "explicit", null, null, null)));
+        StringAssert.Contains("=> PASS", Track(CheckAnimator.Run(ctrl, "explicit", null, null, null)));
     }
 
     // whatIf computes everything, writes NO .yaml, and appends " (whatIf)".
@@ -103,7 +103,7 @@ public class DecompileControllerTests
         string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
 
         string yamlOut = TestRoot + "/whatif.yaml";
-        string dec = Track(DecompileController.Decompile(ctrlPath, yamlOut, whatIf: true));
+        string dec = Track(DecompileController.Run(ctrlPath, yamlOut, whatIf: true));
         StringAssert.Contains("=> OK (whatIf)", dec);
         Assert.IsFalse(File.Exists(yamlOut), "whatIf leaves no .yaml on disk");
     }
@@ -117,7 +117,7 @@ public class DecompileControllerTests
         string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
 
         string yamlOut = TestRoot + "/notes.yaml";
-        Track(DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false));
+        Track(DecompileController.Run(ctrlPath, yamlOut, whatIf: false));
         Assert.IsTrue(File.Exists(yamlOut));
 
         string yaml = File.ReadAllText(yamlOut);
@@ -127,7 +127,7 @@ public class DecompileControllerTests
         StringAssert.Contains("tolerances", yaml, "notes carry the tolerances list");
 
         // The notes block re-parses inertly (parser skips _-prefixed top-level keys) — the yaml still compiles.
-        string rec = Track(CompileController.Compile(Path.GetFullPath(yamlOut), TestRoot + "/out_notes", whatIf: false));
+        string rec = Track(CompileController.Run(Path.GetFullPath(yamlOut), TestRoot + "/out_notes", whatIf: false));
         StringAssert.Contains("=> OK", rec);
     }
 
@@ -143,7 +143,7 @@ public class DecompileControllerTests
 
         LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
         string yamlOut = TestRoot + "/refuse.yaml";
-        string res = Track(DecompileController.Decompile(refusingCtrlPath, yamlOut, whatIf: false));
+        string res = Track(DecompileController.Run(refusingCtrlPath, yamlOut, whatIf: false));
 
         StringAssert.Contains("FAIL", res);
         StringAssert.Contains("Trigger", res, "the refusal names the offending construct");
@@ -173,13 +173,13 @@ public class DecompileControllerTests
 
         // Contrast first: the DEFAULT decompile of this same arranged controller carries the drag.
         string defaultOut = TestRoot + "/arranged.yaml";
-        StringAssert.Contains("=> OK", Track(DecompileController.Decompile(ctrlPath, defaultOut, whatIf: false)));
+        StringAssert.Contains("=> OK", Track(DecompileController.Run(ctrlPath, defaultOut, whatIf: false)));
         string arrangedYaml = File.ReadAllText(defaultOut);
         StringAssert.Contains("layout:", arrangedYaml, "an arranged controller decompiles WITH a layout block");
         StringAssert.Contains("[777, 888]", arrangedYaml, "and the block carries the dragged coordinate");
 
         string yamlOut = TestRoot + "/stripped.yaml";
-        string dec = Track(DecompileController.Decompile(ctrlPath, yamlOut, whatIf: false, stripLayout: true));
+        string dec = Track(DecompileController.Run(ctrlPath, yamlOut, whatIf: false, stripLayout: true));
         StringAssert.Contains("=> OK", dec);
         Assert.IsTrue(File.Exists(yamlOut), "the .yaml is written");
         Assert.IsFalse(File.ReadAllText(yamlOut).Contains("layout:"), "stripLayout writes no layout block");
@@ -206,7 +206,7 @@ public class DecompileControllerTests
         else ctrlPath = ctrlSpec.Length == 0 ? "" : TestRoot + ctrlSpec;
 
         LogAssert.Expect(LogType.Error, new Regex(@"\[DecompileController\] .*=> FAIL"));
-        string res = Track(DecompileController.Decompile(ctrlPath, outSpec.Length == 0 ? "" : TestRoot + outSpec, whatIf: false));
+        string res = Track(DecompileController.Run(ctrlPath, outSpec.Length == 0 ? "" : TestRoot + outSpec, whatIf: false));
 
         StringAssert.Contains("FAIL", res);
         StringAssert.Contains(reason, res, "the refusal names its own reason, not just FAIL");

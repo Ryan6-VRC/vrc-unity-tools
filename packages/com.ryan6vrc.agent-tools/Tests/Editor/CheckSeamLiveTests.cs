@@ -117,7 +117,7 @@ public partial class CheckSeamLiveTests
     public void MaMergeArmature_coincident_pass()
     {
         BuildMaFixture(out var baseGO, out var mergeGO, out _, out _);
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> PASS", r);
         StringAssert.Contains("weightedHumanoid=2", r);
         ReadLog(r);
@@ -128,7 +128,7 @@ public partial class CheckSeamLiveTests
     {
         BuildMaFixture(out var baseGO, out var mergeGO, out var mHips, out _);
         mHips.localPosition += new Vector3(0.01f, 0f, 0f); // 10mm >> eps=0.7mm ⇒ one offender
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r);
         StringAssert.Contains("offenders=1", r);
         var body = ReadLog(r);
@@ -146,7 +146,7 @@ public partial class CheckSeamLiveTests
         var ma = mergeGO.GetComponentInChildren<ModularAvatarMergeArmature>(true);
         ma.mergeTarget.Set(null); // the shape a rename, an unset field, or an off-avatar target leaves
 
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("resolves no merge target", r);
         StringAssert.Contains("mergeTarget", r);              // names the repair
@@ -262,7 +262,7 @@ public partial class CheckSeamLiveTests
     public void VrcfArmatureLink_coincident_pass()
     {
         BuildVrcfOrGate(out var baseGO, out var mergeGO, out _, forceScale: false);
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> PASS", r);
         StringAssert.Contains("weightedHumanoid=2", r);
         ReadLog(r);
@@ -273,7 +273,7 @@ public partial class CheckSeamLiveTests
     {
         BuildVrcfOrGate(out var baseGO, out var mergeGO, out var mHips, forceScale: false);
         mHips.localPosition += new Vector3(0.01f, 0f, 0f); // 10mm ⇒ offender
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r);
         StringAssert.Contains("offenders=1", r);   // N2: parity with the MA twin
         var body = ReadLog(r);
@@ -284,7 +284,7 @@ public partial class CheckSeamLiveTests
     public void VrcfArmatureLink_forceOneWorldScale_refuses()
     {
         BuildVrcfOrGate(out var baseGO, out var mergeGO, out _, forceScale: true);
-        var r = CheckSeam.Check(Path(baseGO), Path(mergeGO));
+        var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
         StringAssert.Contains("scaled at bake", r);
     }

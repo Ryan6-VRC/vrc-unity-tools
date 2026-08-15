@@ -60,7 +60,7 @@ public class PathHandleOverloadTests
     [Test]
     public void ReportController_ByPath_SucceedsAndWritesLog()
     {
-        string r = Track(ReportController.Report(_ctrlPath));
+        string r = Track(ReportController.Run(_ctrlPath));
         StringAssert.Contains("=> OK", r);
         StringAssert.Contains("log=", r);
     }
@@ -68,14 +68,14 @@ public class PathHandleOverloadTests
     [Test]
     public void ReportController_ByGuid_Resolves()
     {
-        StringAssert.Contains("=> OK", Track(ReportController.Report(_ctrlGuid)));
+        StringAssert.Contains("=> OK", Track(ReportController.Run(_ctrlGuid)));
     }
 
     [Test]
     public void ReportController_BadHandle_FailsLoud_NoTrailer()
     {
         LogAssert.Expect(LogType.Error, new Regex("no AnimatorController at"));
-        string r = Track(ReportController.Report("Assets/Nope/missing.controller"));
+        string r = Track(ReportController.Run("Assets/Nope/missing.controller"));
         StringAssert.Contains("FAIL", r);
         StringAssert.Contains("missing.controller", r);   // echoes the failed handle
         StringAssert.DoesNotContain("log=", r);
@@ -89,20 +89,20 @@ public class PathHandleOverloadTests
     public void CheckAnimator_ByPath_ForwardsBasisAndRuns()
     {
         // basis=explicit with null roots is the descriptor-borne case — runs the rule set, no scene needed.
-        string r = Track(CheckAnimator.Lint(_ctrlPath, "explicit"));
+        string r = Track(CheckAnimator.Run(_ctrlPath, "explicit"));
         StringAssert.Contains("log=", r);                 // a real run wrote a RunLog
         string body = File.ReadAllText(r.Substring(r.IndexOf("log=") + "log=".Length));
         StringAssert.Contains("basis=explicit", body);
 
         LogAssert.Expect(LogType.Error, new Regex("unknown basis 'no-such-basis'"));
-        StringAssert.Contains("no-such-basis", Track(CheckAnimator.Lint(_ctrlPath, "no-such-basis")));
+        StringAssert.Contains("no-such-basis", Track(CheckAnimator.Run(_ctrlPath, "no-such-basis")));
     }
 
     [Test]
     public void CheckAnimator_BadHandle_FailsLoud_NoTrailer()
     {
         LogAssert.Expect(LogType.Error, new Regex("no AnimatorController at"));
-        string r = Track(CheckAnimator.Lint("Assets/Nope/missing.controller"));
+        string r = Track(CheckAnimator.Run("Assets/Nope/missing.controller"));
         StringAssert.Contains("FAIL", r);
         StringAssert.DoesNotContain("log=", r);
     }
@@ -110,7 +110,7 @@ public class PathHandleOverloadTests
     [Test]
     public void ReportClip_ByPath_SucceedsAndWritesLog()
     {
-        string r = Track(ReportClip.Report(_clipPath));
+        string r = Track(ReportClip.Run(_clipPath));
         StringAssert.Contains("=> OK", r);
         StringAssert.Contains("log=", r);
     }
@@ -119,7 +119,7 @@ public class PathHandleOverloadTests
     public void ReportClip_BadHandle_FailsLoud_NoTrailer()
     {
         LogAssert.Expect(LogType.Error, new Regex("no AnimationClip at"));
-        string r = Track(ReportClip.Report("Assets/Nope/missing.anim"));
+        string r = Track(ReportClip.Run("Assets/Nope/missing.anim"));
         StringAssert.Contains("FAIL", r);
         StringAssert.DoesNotContain("log=", r);
     }

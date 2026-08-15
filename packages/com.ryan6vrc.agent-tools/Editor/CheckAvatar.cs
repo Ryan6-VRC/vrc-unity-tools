@@ -364,7 +364,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// mirrors RenderAvatar's target resolution). Returns a one-line summary; a real run ends with the
         /// RunLog path in-band (<c>… =&gt; PASS|CLASSIFY | log=&lt;path&gt;</c>). Bad input (root not found /
         /// no VRCAvatarDescriptor) is a bare <c>[CheckAvatar] FAIL: …</c> with no trailer.</summary>
-        public static string Inspect(string avatarRoot)
+        public static string Run(string avatarRoot)
         {
             var avatarGO = Resolve(avatarRoot);
             if (avatarGO == null)
@@ -372,7 +372,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             var descriptor = avatarGO.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             if (descriptor == null)
-                return Refuse("'" + avatarRoot + "' has no VRCAvatarDescriptor — Inspect expects the avatar (descriptor) root");
+                return Refuse("'" + avatarRoot + "' has no VRCAvatarDescriptor — Run expects the avatar (descriptor) root");
 
             var rep = new Report { Root = avatarGO };
             var pairs = MergeSurfaces.Enumerate(avatarGO, descriptor, vrcfOnly: false,

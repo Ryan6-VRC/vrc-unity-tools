@@ -41,7 +41,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <paramref name="stripLayout"/> (opt-in, default off) the walk captures NO graph-layout blocks —
         /// the own-a-vendor-controller path, where the vendor's node arrangement is noise. Returns the
         /// one-line summary (see class docs).</summary>
-        public static string Decompile(string controllerPath, string outPath, bool whatIf = false, bool stripLayout = false)
+        public static string Run(string controllerPath, string outPath, bool whatIf = false, bool stripLayout = false)
         {
             // One refusal label per run: the controller asset's leaf (the thing being decompiled).
             // Path.GetFileName throws on invalid-char paths (Mono/2022.3) — the door must refuse,
@@ -241,7 +241,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string outPath = EditorUtility.SaveFilePanelInProject("Save decompiled YAML", name, "yaml", "");
             if (string.IsNullOrEmpty(outPath)) return;
 
-            DecompileController.Decompile(ctrlPath, outPath, false);
+            DecompileController.Run(ctrlPath, outPath, false);
         }
     }
 }

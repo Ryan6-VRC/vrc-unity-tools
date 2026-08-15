@@ -27,7 +27,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// single synchronous call can settle-then-capture.</para>
     ///
     /// <para><b>Lifecycle — the caller drives the play toggle around three tool calls:</b>
-    /// <c>Begin(target)</c> (edit mode: snapshot the scene setup, open/ready the venue, enable the emulator,
+    /// <c>Run(target)</c> (edit mode: snapshot the scene setup, open/ready the venue, enable the emulator,
     /// isolate to one active avatar) → caller enters play (the SDK build-on-play runs, spawning the runtimes)
     /// → <c>Shoot(…)</c> (play mode: attaches to the built local avatar on first call, then
     /// poses/settles/composes/captures ASYNCHRONOUSLY, returning a tag the caller polls; one Begin serves many
@@ -44,7 +44,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <para><b>Reproducibility is explicitly NOT a goal</b> (every thumbnail is a fresh avatar version).
     /// Settle is never asserted — the verdict NAMES any chain still moving at capture (refusal over silent
     /// cleverness). All emulator access is reflection into <c>LyumaAv3Runtime</c> privates (the emulator is an
-    /// optional dependency this package must not reference); <see cref="Begin"/> asserts every member the tool
+    /// optional dependency this package must not reference); <see cref="Run"/> asserts every member the tool
     /// actually reads is present and FAILS LOUD, named, on drift.</para>
     ///
     /// <para><b>Venue.</b> The avatar is rendered in a loaded scene (the active scene, or one opened via
@@ -52,8 +52,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// backdrop from the camera clear. On <see cref="End"/> the whole scene setup is restored from disk,
     /// discarding the emulator control, deactivations, pose, and play-mode edits. This restore, and the
     /// cross-call session state surviving play entry, both require Enter-Play-Mode Options with domain AND
-    /// scene reload disabled — <see cref="Begin"/> SETS them (saving the operator's originals) and
-    /// <see cref="End"/> restores them, rather than demand a manual project change. <see cref="Begin"/>
+    /// scene reload disabled — <see cref="Run"/> SETS them (saving the operator's originals) and
+    /// <see cref="End"/> restores them, rather than demand a manual project change. <see cref="Run"/>
     /// refuses if any loaded scene has unsaved edits, since the restore would lose them.</para>
     /// </summary>
     [AgentTool]
@@ -128,10 +128,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// </summary>
         /// <param name="target">avatar root: hierarchy path, instance id, or name — resolved in the venue scene.</param>
         /// <param name="scenePath">optional venue scene to open (Single) first; null =&gt; use the active scene.</param>
-        public static string Begin(string target, string scenePath = null)
+        public static string Run(string target, string scenePath = null)
         {
             if (_prepared) return Fail("a play session is already prepared — call End() first (renders are serialized)");
-            if (Application.isPlaying) return Fail("already in play mode — exit play (manage_editor stop) before Begin()");
+            if (Application.isPlaying) return Fail("already in play mode — exit play (manage_editor stop) before Run()");
 
             if (!ResolveEmulatorReflection(out string driftErr)) return Fail(driftErr);
 
@@ -253,7 +253,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // import — wipes the whole session at once. Options are NOT statics: they are project settings, so
         // the forced DisableDomainReload | DisableSceneReload survives the reload that erased the record of
         // what preceded it. That asymmetry is the bug. Two things then go wrong, and the second is worse:
-        // End() reports "no prepared session" and returns without restoring, and the NEXT Begin() saves the
+        // End() reports "no prepared session" and returns without restoring, and the NEXT Run() saves the
         // forced values as if they were the operator's own, cementing them permanently. Measured in a live
         // editor: options forced on, _optionsOverridden false, _savedOptions None — the originals gone.
         //
@@ -385,8 +385,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public static string Shoot(string pose = null, string expression = null, string framing = "bust",
             string bg = null, float fov = 30f, float? yaw = null, int settleFrames = DefaultSettleFrames)
         {
-            if (!_prepared) return Fail("no prepared session — call Begin(target) first");
-            if (!Application.isPlaying) return Fail("not in play mode — enter play (manage_editor play) after Begin(), then Shoot()");
+            if (!_prepared) return Fail("no prepared session — call Run(target) first");
+            if (!Application.isPlaying) return Fail("not in play mode — enter play (manage_editor play) after Run(), then Shoot()");
             if (_shootUpdate != null) return Fail("a Shoot is already in flight — poll its tag / Status() until it completes (renders are serialized)");
             // Re-attach when the built avatar is gone (a prior play exit destroyed it while the session persisted).
             if (!_attached || _root == null) { if (!Attach(out string attachErr)) return Fail(attachErr); }
@@ -610,14 +610,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // No session in these statics, but a saved-options record outlived one: a domain reload happened
             // mid-session. The scene setup went with it and cannot be recovered, so this is still a failure —
             // but the operator's Enter-Play-Mode Options CAN be put back, and putting them back here is what
-            // stops the next Begin() from adopting the forced values as their originals. Say which half was
+            // stops the next Run() from adopting the forced values as their originals. Say which half was
             // salvaged, so "End failed" is not read as "nothing was restored".
             if (!_prepared && !Application.isPlaying && LoadSavedOptions())
             {
                 RestoreEnterPlayModeOptions();
                 return Fail("no prepared session — a domain reload (recompile/package import) ended it mid-session. "
                     + "Enter-Play-Mode Options restored from the out-of-domain record; the scene setup snapshot did "
-                    + "NOT survive, so reopen your scene(s) by hand before the next Begin()");
+                    + "NOT survive, so reopen your scene(s) by hand before the next Run()");
             }
             if (!_prepared) return Fail("no prepared session");
             if (Application.isPlaying) return Fail("still in play mode — exit play (manage_editor stop) before End()");
@@ -914,7 +914,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var t in types)
                 {
                     // Names live in agent-tools' EmulatorBinding; its canary test asserts each one against
-                    // the installed package, so a rename reds the suite before it reaches a Begin() here.
+                    // the installed package, so a rename reds the suite before it reaches a Run() here.
                     if (t.FullName == EmulatorBinding.RuntimeFullName) _runtimeType = t;
                     else if (t.FullName == EmulatorBinding.EmulatorFullName) _emulatorType = t;
                 }

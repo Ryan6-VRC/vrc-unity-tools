@@ -14,7 +14,7 @@ using Ryan6Vrc.AgentTools.Editor;
 // CollectUnresolvedBindings path, so a behavior drift in the shared helper is caught. Explicit basis keeps
 // broken-binding at error-tier, so one unresolved binding must FAIL.
 //
-// CheckAnimator.Lint resolves scene paths against the ACTIVE scene (its internal FindByHierarchyPath), which
+// CheckAnimator.Run resolves scene paths against the ACTIVE scene (its internal FindByHierarchyPath), which
 // no preview scene can stand in for — so the fixtures live in the active scene and are torn down in place.
 // Nothing is saved: Ryan's real scene file is never written, and the temp controller/clip + emitted RunLog
 // are deleted in TearDown.
@@ -69,7 +69,7 @@ public class CheckAnimatorRefactorTests
         // Emit logs the FAIL verdict via Debug.LogError; that is expected output, not a test failure.
         LogAssert.ignoreFailingMessages = true;
 
-        var result = CheckAnimator.Lint(controller, "explicit", null, AvatarName, AvatarName);
+        var result = CheckAnimator.Run(controller, "explicit", null, AvatarName, AvatarName);
         _logPath = ExtractLogPath(result);
 
         StringAssert.Contains("brokenBinding=1", result,
@@ -101,7 +101,7 @@ public class CheckAnimatorRefactorTests
 
         LogAssert.ignoreFailingMessages = true;   // Emit logs the FAIL verdict via Debug.LogError.
         // Null roots ⇒ the broken-binding rule is skipped (no basis root), isolating this rule.
-        var result = CheckAnimator.Lint(controller, "explicit", null, null, null);
+        var result = CheckAnimator.Run(controller, "explicit", null, null, null);
         _logPath = ExtractLogPath(result);
 
         StringAssert.Contains("nonFloatBlendParam=1", result,
@@ -132,7 +132,7 @@ public class CheckAnimatorRefactorTests
         AssetDatabase.SaveAssets();
 
         LogAssert.ignoreFailingMessages = true;   // Emit logs the FAIL verdict via Debug.LogError.
-        var result = CheckAnimator.Lint(controller, "explicit", null, null, null);
+        var result = CheckAnimator.Run(controller, "explicit", null, null, null);
         _logPath = ExtractLogPath(result);
 
         StringAssert.Contains("nonFloatParamCurve=1", result,
@@ -171,7 +171,7 @@ public class CheckAnimatorRefactorTests
         AssetDatabase.SaveAssets();
 
         LogAssert.ignoreFailingMessages = true;   // Emit logs the FAIL verdict via Debug.LogError.
-        var result = CheckAnimator.Lint(controller, "explicit", null, null, null);
+        var result = CheckAnimator.Run(controller, "explicit", null, null, null);
         _logPath = ExtractLogPath(result);
 
         StringAssert.Contains("driverOnAnimatedParam=1", result,
@@ -210,7 +210,7 @@ public class CheckAnimatorRefactorTests
         AddVrcfFullControllerWithRewrite(prop, controller, ("Armature", "Nested/Armature", false));
 
         LogAssert.ignoreFailingMessages = true;
-        var result = CheckAnimator.Lint(controller, "auto", AvatarName + "/Prop");
+        var result = CheckAnimator.Run(controller, "auto", AvatarName + "/Prop");
         _logPath = ExtractLogPath(result);
 
         StringAssert.Contains("brokenBinding=1", result,
@@ -244,7 +244,7 @@ public class CheckAnimatorRefactorTests
         AssetDatabase.ImportAsset(AssetPath);
 
         // Orphan is advisory-tier → verdict PASS → Debug.Log (no error), so no LogAssert is needed.
-        var result = CheckAnimator.Lint(controller, "explicit", null, null, null);
+        var result = CheckAnimator.Run(controller, "explicit", null, null, null);
         _logPath = ExtractLogPath(result);
 
         Assert.Contains("SweepTestDummySmb 'ORPHAN_SMB'", OrphanTokens(result),

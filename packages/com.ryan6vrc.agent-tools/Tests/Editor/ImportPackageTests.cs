@@ -204,7 +204,7 @@ public class ImportPackageTests
         var r = ImportPackage.Verify(pkg, TmpDir);
         StringAssert.Contains("=> PASS", r);
         StringAssert.Contains("| log=" + _logPath, r);
-        StringAssert.Contains("CheckPackage.VerifyFolder", r); // hands off deep health, not duplicated
+        StringAssert.Contains("CheckPackage.Run", r); // hands off deep health, not duplicated
     }
 
     [Test]
@@ -305,7 +305,7 @@ public class ImportPackageTests
     public void Import_missingFile_bareFail()
     {
         ExpectFail();
-        var r = ImportPackage.Import("C:/vendor/does-not-exist.unitypackage");
+        var r = ImportPackage.Run("C:/vendor/does-not-exist.unitypackage");
         StringAssert.StartsWith("[ImportPackage] FAIL:", r);
         StringAssert.Contains("does not exist", r);
         Assert.IsFalse(r.Contains("| log="), r);
@@ -319,7 +319,7 @@ public class ImportPackageTests
     public void Import_empty_bareFail()
     {
         ExpectFail();
-        var r = ImportPackage.Import("");
+        var r = ImportPackage.Run("");
         StringAssert.StartsWith("[ImportPackage] FAIL:", r);
         StringAssert.Contains("required", r);
     }
@@ -339,7 +339,7 @@ public class ImportPackageTests
         if (File.Exists(logPath)) File.Delete(logPath);
         try
         {
-            var r = ImportPackage.Import(pkgFile, whatIf: true);
+            var r = ImportPackage.Run(pkgFile, whatIf: true);
             StringAssert.Contains("=> WHATIF", r);
             StringAssert.Contains("wouldLog=" + logPath, r);
             Assert.IsFalse(r.Contains("| log="), "whatIf uses wouldLog=, never a log= trailer: " + r);

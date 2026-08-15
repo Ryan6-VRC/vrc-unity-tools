@@ -81,7 +81,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// toward world +X (screen-left).</param>
         /// <param name="whatIf">preflight only: resolve target/descriptor/pose, report, bake nothing.
         /// <paramref name="expression"/> is echoed unresolved — it needs the baked controller.</param>
-        public static string Render(
+        public static string Run(
             string target,
             string pose = null,
             string expression = null,

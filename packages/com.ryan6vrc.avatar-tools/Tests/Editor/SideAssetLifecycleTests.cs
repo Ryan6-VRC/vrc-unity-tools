@@ -75,7 +75,7 @@ layers: []
         param: Enable
 ";
 
-    private string Compile(string body) { File.WriteAllText(_srcPath, body); return CompileController.Compile(_srcPath, OutDir); }
+    private string Compile(string body) { File.WriteAllText(_srcPath, body); return CompileController.Run(_srcPath, OutDir); }
 
     // Both side-asset types in one sequence: the destroy sites treat them as one unit, so the oracle should
     // too, and a per-type helper invites exactly the half-coverage this file's header describes.

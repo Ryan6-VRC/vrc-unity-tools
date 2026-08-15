@@ -23,13 +23,13 @@ namespace Ryan6Vrc.AgentTools.Editor
     public static class ReportClip
     {
         // ----- Public API ---------------------------------------------------------------------
-        // Report(clip) takes the AnimationClip asset object; Report(string) below takes its asset
+        // Run(clip) takes the AnimationClip asset object; Run(string) below takes its asset
         // path/GUID (single clip — for every .anim under a folder use ReportFolder).
 
         /// <summary>Path/GUID overload: resolve <paramref name="clipPathOrGuid"/> (an asset path or a GUID)
         /// to the <see cref="AnimationClip"/> and digest it. A handle that names no clip is a bare
         /// <c>[ReportClip] FAIL: …</c> echoing the handle, no trailer.</summary>
-        public static string Report(string clipPathOrGuid)
+        public static string Run(string clipPathOrGuid)
         {
             var clip = RunLogFormat.LoadByPathOrGuid<AnimationClip>(clipPathOrGuid);
             if (clip == null)
@@ -38,12 +38,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                 Debug.LogError(err);
                 return err;
             }
-            return Report(clip);
+            return Run(clip);
         }
 
         /// <summary>Digest one clip. Returns a one-line summary ending with the artifact path in-band
         /// (<c>… => OK | log=&lt;path&gt;</c>); a null clip is a bare <c>[ReportClip] FAIL: …</c> with no trailer.</summary>
-        public static string Report(AnimationClip clip)
+        public static string Run(AnimationClip clip)
         {
             if (clip == null)
             {

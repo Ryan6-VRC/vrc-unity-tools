@@ -9,7 +9,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// <para>Names only, deliberately. Each caller keeps its own resolution policy, because the two shipped
     /// readers need opposite ones: <c>PlayGateCore</c> resolves lazily and public-only (an emulator-free
     /// scene is a legitimate bake-only check, so absence must stay a silent skip), while
-    /// <c>RenderThumbnailPlay.Begin</c> resolves up-front including non-public members and refuses the whole
+    /// <c>RenderThumbnailPlay.Run</c> resolves up-front including non-public members and refuses the whole
     /// session on a miss (it must fail before it mutates the scene). Funnelling both through one resolver
     /// would impose one policy on two correct answers.</para>
     /// <para>Why the emulator is reflected rather than referenced: an asmdef reference would make

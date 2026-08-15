@@ -22,7 +22,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// completion arrives on <c>AssetDatabase.importPackageCompleted/.importPackageFailed/
     /// .importPackageCancelled</c> on the main thread, so the invoking <c>execute_code</c> call —
     /// which holds the main thread — CANNOT block-wait for it.
-    ///   • <see cref="Import"/> validates, pre-writes the RunLog as <c>status=pending</c>, registers
+    ///   • <see cref="Run"/> validates, pre-writes the RunLog as <c>status=pending</c>, registers
     ///     the callbacks, kicks off the import, and returns immediately (=&gt; PENDING).
     ///   • <see cref="Verify"/> re-reads that RunLog + walks the expected on-disk root and emits a
     ///     PASS / PENDING / FAIL verdict. Verify is the TRUTH, not the callback — an import that
@@ -49,7 +49,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// the plan (including the RunLog path it WOULD write) without importing or writing anything.
         /// Summary: <c>[ImportPackage] STARTED &lt;name&gt; =&gt; PENDING | log=&lt;path&gt;</c>. Bad input is a
         /// bare <c>[ImportPackage] FAIL: …</c> naming the fix, with no trailer.</summary>
-        public static string Import(string packagePath, bool whatIf = false)
+        public static string Run(string packagePath, bool whatIf = false)
         {
             string bad = ValidatePackagePath(packagePath, requireExists: true);
             if (bad != null) return Fail(bad);
@@ -127,7 +127,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <paramref name="expectedRoot"/>, report what the RunLog recorded (on-disk state unverified).
         /// The on-disk walk is authoritative over the callback-written status. Summary:
         /// <c>[ImportPackage] VERIFY &lt;name&gt; (…) =&gt; RESULT | log=&lt;path&gt;</c>; run
-        /// <c>CheckPackage.VerifyFolder</c> for deep import health (missing refs / stale remap).</summary>
+        /// <c>CheckPackage.Run</c> for deep import health (missing refs / stale remap).</summary>
         public static string Verify(string packagePath, string expectedRoot = null)
         {
             string bad = ValidatePackagePath(packagePath, requireExists: false);
@@ -159,7 +159,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 summary += " | " + DescribeNearestExistingRoot(expectedRoot, packagePath);
 
             if (logExists) summary += " | log=" + logPath;
-            summary += " | next=run CheckPackage.VerifyFolder for import health";
+            summary += " | next=run CheckPackage.Run for import health";
 
             if (v == Verdict.Fail) Debug.LogError(summary); else Debug.Log(summary);
             return summary;
@@ -241,7 +241,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             switch (status)
             {
                 case "completed":
-                    reason = "RunLog reports completed (on-disk not verified — pass an expectedRoot or run CheckPackage.VerifyFolder)";
+                    reason = "RunLog reports completed (on-disk not verified — pass an expectedRoot or run CheckPackage.Run)";
                     return Verdict.Pass;
                 case "pending" when editorBusy:
                     reason = "RunLog pending and the editor is busy — import still running";
@@ -256,7 +256,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     reason = "RunLog reports the import was cancelled";
                     return Verdict.Fail;
                 default:
-                    reason = "no RunLog on disk for this package — Import was never started (or wrote elsewhere)";
+                    reason = "no RunLog on disk for this package — Run was never started (or wrote elsewhere)";
                     return Verdict.Fail;
             }
         }
