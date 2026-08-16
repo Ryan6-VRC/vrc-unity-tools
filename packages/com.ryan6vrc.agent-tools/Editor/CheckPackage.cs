@@ -22,9 +22,11 @@ namespace Ryan6Vrc.AgentTools.Editor
     ///
     /// The load-bearing distinction is MISSING vs EMPTY. A slot whose serialized reference has a
     /// non-zero instance id that fails to resolve is broken; a clean-zero slot is an intentional
-    /// empty (e.g. an unused submesh). Counting raw nulls is a false-alarm trap — a healthy
-    /// costume routinely has hundreds of intentionally-empty submesh slots. This counts only the
-    /// broken ones, so PASS/FAIL is meaningful.
+    /// empty (e.g. an unused submesh). Counting raw nulls is a false-alarm trap: the empty slots that
+    /// exist are almost entirely authored that way, so a null-counting verdict would fail healthy
+    /// packages and catch nothing. This counts only the broken ones, so PASS/FAIL is meaningful.
+    /// (The trap is real; the magnitude this comment used to claim for it — "hundreds per costume" —
+    /// is not, and the census below is what an argument about empty slots should cite instead.)
     ///
     /// A MISSING count alone says how many references broke, not how many things broke: one vendor-side
     /// mistake can dangle a thousand slots at two targets. So each MISSING offender names the target its
@@ -38,6 +40,30 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// that no later import re-applies — the model reads as "intentionally empty" yet renders untextured.
     /// These are the one place an empty slot is evidence, and only because the remap says something was
     /// supposed to fill it; everywhere else the empty count stays deliberately silent.
+    ///
+    /// That silence is a decision, measured 2026-08-15 rather than inherited. `empty=` rides every summary
+    /// and Finish's predicate never reads it, which looked like a gap once R25 retired the all-bound remap
+    /// verdict — so the population was censused across two projects: 163 models (1023 renderer slots) and
+    /// 723 prefabs (14712 slots).
+    ///
+    ///   empty slots, model side     19   3 models (17 in a vendor FBX, 1 in a package FBX in both
+    ///                                    projects) — every one already caught as the UNRESOLVED class
+    ///   empty slots, prefab side    56   45 ParticleSystemRenderer, 10 optimizer merge targets, 1 other
+    ///   map-free models with any     0   of 111
+    ///
+    /// So the whole population is two authoring idioms plus one residue. A particle renderer's unused trail
+    /// slot is routine (ScanModelRemap already excludes ParticleSystemRenderer from its own empty count for
+    /// exactly this reason; ScanMaterials does not, and should not — it reports rather than judges). A
+    /// mesh-merging optimizer's destination renderer is authored empty AND meshless, to be filled at build.
+    /// The one residue is a marker mesh left materialless so it draws nothing while switched on — which is
+    /// indistinguishable, in serialized state, from a submesh someone forgot to bind. That is the finding:
+    /// not that empty slots are too noisy to gate, but that the question a gate would answer — SHOULD this
+    /// slot draw — is not recorded anywhere a static read can reach. Hence the render-sheet routing in
+    /// docs/unity-tools.md, and hence no verdict here.
+    ///
+    /// Do not add one without a measured instance of a slot that should have drawn. It would also have to be
+    /// genuinely per-slot: `notBound` above is a model-wide material-identity test and would miss the same
+    /// class the retired verdict did.
     ///
     /// Prefab assets are inspected via LoadPrefabContents, which composes variant overrides in an
     /// isolated preview scene without touching the open scene. INSPECTION ONLY — never mutates.
