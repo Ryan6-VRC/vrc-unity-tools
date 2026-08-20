@@ -97,6 +97,51 @@ public class CompileControllerRobustnessTests
         StringAssert.Contains("=> OK", result); // warn-only: the compile still succeeds
     }
 
+    // ── Asserts on the .meta TEXT because AssetImporter.GetAtPath cannot testify to persistence at all
+    // (StampProvenance owns why). A green run here is the only evidence the stamp survives without a reimport.
+    [Test]
+    public void Provenance_Stamp_Reaches_The_Meta_On_Disk_And_Survives_An_Idempotent_Recompile()
+    {
+        string outDir = TestRoot + "/out_stamp";
+        string src = TestRoot + "/Debounce_Fx.yaml";
+        File.WriteAllText(src, AnimatorSchemaYamlTests.DebounceDoc);
+
+        StringAssert.Contains("=> OK", CompileController.Run(src, outDir, whatIf: false));
+        string metaPath = outDir + "/Debounce_Fx.controller.meta";
+        Assert.IsTrue(File.Exists(metaPath), "the compiled controller has a .meta");
+        StringAssert.Contains("compiled-from:;srchash:", File.ReadAllText(metaPath),
+            "the stamp reached the .meta ON DISK without a reimport — and carries the bare key, no path");
+
+        // The idempotent recompile: an unchanged stamp never dirties the importer, so
+        // WriteImportSettingsIfDirty returns false while the .meta is already correct. A guard that trusted
+        // that return would fire a spurious failure right here.
+        StringAssert.Contains("=> OK", CompileController.Run(src, outDir, whatIf: false));
+        StringAssert.Contains("compiled-from:;srchash:", File.ReadAllText(metaPath),
+            "the unchanged stamp is still on disk after a no-op recompile, and nothing reported a failure");
+    }
+
+    // ── A stamp may carry a path — older compiles wrote `compiled-from:<path>;srchash:<hash>`, and those
+    // controllers are committed. Both signals must keep reading that form, which is the one case where
+    // ExtractField has to stop the hash at a ';' the emitted form does not contain.
+    [Test]
+    public void Legacy_Stamp_With_A_Path_Still_Parses_As_Provenance()
+    {
+        string outDir = TestRoot + "/out_legacy";
+        string src = TestRoot + "/Debounce_Fx.yaml";
+        File.WriteAllText(src, AnimatorSchemaYamlTests.DebounceDoc);
+        StringAssert.Contains("=> OK", CompileController.Run(src, outDir, whatIf: false));
+
+        // Restamp in the old shape, with a hash that cannot match the source — so a correct parse reaches
+        // signal (b), "srchash differs", rather than signal (a), "no provenance at all".
+        var imp = AssetImporter.GetAtPath(outDir + "/Debounce_Fx.controller");
+        imp.userData = "compiled-from:Packages/com.ryan6vrc.patterns/x/controller.yaml;srchash:deadbeefdeadbeef";
+        imp.SaveAndReimport();
+
+        LogAssert.Expect(LogType.Warning, new Regex(
+            @"\[CompileController\] overwriting .*Debounce_Fx\.controller.*srchash=deadbeefdeadbeef differs"));
+        StringAssert.Contains("=> OK", CompileController.Run(src, outDir, whatIf: false));
+    }
+
     // ── Gap 1 (scope decision, recorded as an executable contract) — inline clip bindings resolve
     // UnityEngine-namespace component types ONLY. A binding to a UI / VRC-SDK component (here
     // UnityEngine.UI.Image, whose simple name is not under the UnityEngine namespace) is refused

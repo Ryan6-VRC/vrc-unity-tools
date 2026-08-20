@@ -136,8 +136,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // ControllerEmit's to answer — this validator is System.*-only and cannot reach the
                 // AssetDatabase. What it can rule out is the two spellings that resolve nowhere by
                 // construction: an empty string, and a rooted path (a drive letter or a leading separator),
-                // which is neither a project path nor document-relative and would bake one machine's layout
-                // into a committed document the way an absolute `compiled-from:` once did.
+                // which is neither a project path nor document-relative and would bake one machine's layout —
+                // a drive, a home directory, a checkout name — into a document that gets COMMITTED.
                 if (c.Icon != null)
                 {
                     if (c.Icon.Trim().Length == 0)

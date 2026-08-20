@@ -93,6 +93,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // where nothing here can tell a correct icon path from a wrong one; an in-project compile
             // adjudicates and throws instead. Each entry names the control and the path tried.
             public List<(string control, string path)> IconsOutsideProject = new List<(string control, string path)>();
+            // Non-null when the provenance stamp did not reach the .controller's .meta on disk. Deliberately
+            // NOT a compile failure — the controller is correctly written, and refusing would strand a
+            // half-replaced one (StampProvenance owns why) — but not a mere advisory either: the next compile
+            // of this path reads it as hand-authored and warns. CompileController surfaces it.
+            public string StampFailure;
 
             /// <summary>Destroy the side assets this result still owns in memory — <see cref="Params"/>,
             /// <see cref="Menu"/> and every <see cref="MenuChildren"/> page. The OWNER's door: the emit hands
@@ -1505,18 +1510,48 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // Build). Only the 2-arg scratch door leaves _sourceText null, and it has no provenance worth
                 // recording: the sole reader (CompileController.WarnIfOutOfBand) only ever inspects a controller
                 // a REAL compile wrote, and BOTH real doors thread the text — the compile itself and
-                // CompileController.ProofCompile's throwaway proof, which therefore does stamp and reimport.
-                // Skipping is also the biggest AssetDatabase saving in the emit path (the SaveAndReimport below
-                // is a full import), and the emit tests are what takes the skip.
+                // CompileController.ProofCompile's throwaway proof, which therefore stamps too.
                 if (_sourceText == null) return;
 
                 var importer = AssetImporter.GetAtPath(path);
                 if (importer == null) return;
-                // CompileController reads this userData to WARN before clobbering an out-of-band edit.
-                string src = ProvenanceSourcePath(_doc.SourcePath);
+                // CompileController reads this userData to WARN before clobbering an out-of-band edit. The
+                // `compiled-from:` key carries NO value by design — its bare presence is the whole signal that a
+                // compile wrote this controller, and WarnIfOutOfBand reads nothing else out of it but
+                // `srchash:`. Never rename the key: every stamped controller on disk spells it this way, so a
+                // rename makes all of them read as no-provenance and fire the hand-authored warning.
                 string hash = SourceHash(_sourceText);
-                importer.userData = "compiled-from:" + src + ";srchash:" + hash;
-                importer.SaveAndReimport();
+                string stamp = "compiled-from:;srchash:" + hash;
+                importer.userData = stamp;
+
+                // WRITE THE .meta, DO NOT REIMPORT. The stamp is sidecar metadata — nothing about the imported
+                // artifact changes — so SaveAndReimport buys a full synchronous import per compile for nothing.
+                // WriteImportSettingsIfDirty persists the same bytes and leaves the asset artifact-stale, which
+                // DEFERS that import to the next Refresh rather than eliminating it; the win is that deferred
+                // imports coalesce where serial reimports cannot. So this is a batch win (the vrc-patterns gate,
+                // a library regeneration — measured ~6x over ten controllers) and a wash on a single compile.
+                // ReloadFromDisk below does not depend on the reimport having happened; its own note owns that.
+                bool wrote = AssetDatabase.WriteImportSettingsIfDirty(path);
+
+                // VERIFY AGAINST THE .meta ON DISK, on both branches. `wrote` cannot answer this: false is the
+                // ordinary idempotent-recompile result (an unchanged stamp never dirties the importer, and the
+                // .meta is already correct), and true says only that a write was attempted. Neither can a
+                // read-back through AssetImporter.GetAtPath — it hands back the cached in-memory importer, the
+                // object assigned two lines up, which reports the intended string whether or not a byte landed.
+                string metaPath = path + ".meta";
+                if (File.Exists(metaPath) && File.ReadAllText(metaPath).Contains(stamp)) return;
+
+                // REPORT, NEVER THROW. This runs after the controller has been stripped and rebuilt, and
+                // CleanupAfterEmit restores nothing in that case — it relies on ProofCompile having made a
+                // post-strip throw unreachable, and the proof stamps a DIFFERENT path, so it cannot cover a
+                // failure at this one (a read-only .meta, a VCS lock). Throwing would return FAIL with the
+                // replaced controller already on disk, falsifying Run's "a failing overwrite therefore leaves
+                // the prior good controller untouched".
+                _result.StampFailure = "provenance stamp not persisted to " + metaPath
+                    + " (import-settings write reported " + wrote + ", and the stamp is absent from the .meta on"
+                    + " disk) — the controller compiled correctly, but the NEXT compile of this path reads it as"
+                    + " carrying no provenance and warns that it was hand-authored.";
+                Debug.LogError("[CompileController] " + _result.StampFailure);
             }
 
             private void ReloadFromDisk(string path)
@@ -1753,64 +1788,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 for (int i = 0; i < 8; i++) sb.Append(bytes[i].ToString("x2", CultureInfo.InvariantCulture));
                 return sb.ToString();
             }
-        }
-
-        /// <summary>The machine-independent form of a compile source, for the <c>compiled-from:</c> stamp.
-        /// A stamp lands in a <c>.controller.meta</c> that gets COMMITTED, so an absolute filesystem path
-        /// bakes one machine's layout — and a checkout name — into a public repo. Absolute paths are
-        /// normalized here rather than refused at the door: compiling from an arbitrary filesystem root is
-        /// how <c>vrc-patterns/tools/gate.ps1</c> is designed to work.
-        /// Longest-lived anchor wins: the Unity project root, else the enclosing git repo, else the bare
-        /// leaf. A path that is already relative is returned untouched — it came from an asset path.</summary>
-        internal static string ProvenanceSourcePath(string sourcePath)
-        {
-            if (string.IsNullOrEmpty(sourcePath)) return "";
-            string p = sourcePath.Replace('\\', '/');
-            if (!Path.IsPathRooted(p)) return p;
-            // Collapse `..` before any prefix compare: `<project>/../vrc-patterns/e/controller.yaml` starts
-            // with the project root as a STRING while living outside it, and would stamp a relative path that
-            // only reads correctly from this checkout's layout. GetFullPath throws on invalid-char paths, and
-            // an unstampable path is not worth failing a compile over — fall through to the leaf.
-            try { p = Norm(Path.GetFullPath(p)); }
-            catch (Exception) { return LeafOf(p); }
-
-            // Application.dataPath is "<project>/Assets"; its parent is the root that Assets/ and Packages/
-            // asset paths are relative to.
-            string projectRoot = Norm(Path.GetDirectoryName(Application.dataPath));
-            string under = RelativeTo(projectRoot, p);
-            if (under != null) return under;
-
-            for (var dir = Path.GetDirectoryName(p); !string.IsNullOrEmpty(dir); dir = Path.GetDirectoryName(dir))
-            {
-                // A worktree's .git is a FILE, not a directory — both are the repo root we want.
-                if (!Directory.Exists(dir + "/.git") && !File.Exists(dir + "/.git")) continue;
-                string rel = RelativeTo(Norm(dir), p);
-                if (rel != null) return rel;
-            }
-            return LeafOf(p);
-        }
-
-        private static string LeafOf(string p)
-        {
-            int slash = p.LastIndexOf('/');
-            return slash >= 0 ? p.Substring(slash + 1) : p;
-        }
-
-        private static string Norm(string dir)
-        {
-            if (string.IsNullOrEmpty(dir)) return "";
-            dir = dir.Replace('\\', '/');
-            return dir.EndsWith("/", StringComparison.Ordinal) ? dir.Substring(0, dir.Length - 1) : dir;
-        }
-
-        // Non-null only when `full` sits strictly UNDER `root` — the trailing-slash test keeps a sibling
-        // whose name merely starts with the root's (…/vrc-patterns-old) from reading as a child.
-        private static string RelativeTo(string root, string full)
-        {
-            if (string.IsNullOrEmpty(root)) return null;
-            if (!full.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase)) return null;
-            string rel = full.Substring(root.Length + 1);
-            return rel.Length == 0 ? null : rel;
         }
     }
 }

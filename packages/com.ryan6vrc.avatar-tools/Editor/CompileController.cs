@@ -229,7 +229,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 name, doc.Layers.Count, states, doc.Parameters.Count, menuPart, unresolvedPart, verdict,
                 whatIf ? " (whatIf)" : "");
 
-            string body = BuildBody(doc, finalPath, lint, frameLatency, unresolvedRefs, oscUnsafeNames, outsideIcons, whatIf);
+            string body = BuildBody(doc, finalPath, lint, frameLatency, unresolvedRefs, oscUnsafeNames, outsideIcons,
+                built.StampFailure, whatIf);
 
             // ── 7/8. Finalize: whatIf sweeps the temp; a real compile saves the asset ────────────────
             if (whatIf) { if (tempFolder != null) AssetDatabase.DeleteAsset(tempFolder); }
@@ -418,7 +419,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── RunLog body ──────────────────────────────────────────────────────────────────────────────
         private static string BuildBody(AnimDocument doc, string finalPath, LintResult lint,
             List<string> frameLatency, List<string> unresolvedRefs,
-            List<string> oscUnsafeNames, List<string> outsideIcons, bool whatIf)
+            List<string> oscUnsafeNames, List<string> outsideIcons, string stampFailure, bool whatIf)
         {
             var sb = new StringBuilder();
             sb.Append("# CompileController: ").Append(doc.ControllerName).Append('\n');
@@ -453,6 +454,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("\n## Compile advisory: unadjudicated menu icons\n\n");
             if (outsideIcons.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in outsideIcons) sb.Append("- ").Append(l).Append('\n');
+
+            // Its own section, deliberately NOT under "Compile advisory": an advisory costs nothing, and this
+            // costs the next compile of this path its clobber warning. Absent when the stamp landed.
+            if (stampFailure != null)
+                sb.Append("\n## Provenance stamp NOT written\n\n- ").Append(stampFailure).Append('\n');
 
             sb.Append("\n## Compile advisory: OSC-unsafe parameter names\n\n");
             if (oscUnsafeNames.Count == 0) sb.Append("_(none)_\n");
