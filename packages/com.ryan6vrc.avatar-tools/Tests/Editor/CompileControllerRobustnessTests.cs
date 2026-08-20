@@ -97,9 +97,8 @@ public class CompileControllerRobustnessTests
         StringAssert.Contains("=> OK", result); // warn-only: the compile still succeeds
     }
 
-    // ── The stamp is written with WriteImportSettingsIfDirty instead of SaveAndReimport, so the ONLY proof
-    // it persisted is the .meta text on disk. AssetImporter.GetAtPath cannot testify here — it hands back the
-    // cached in-memory importer, which reports the assigned value whether or not a byte was written.
+    // ── Asserts on the .meta TEXT because AssetImporter.GetAtPath cannot testify to persistence at all
+    // (StampProvenance owns why). A green run here is the only evidence the stamp survives without a reimport.
     [Test]
     public void Provenance_Stamp_Reaches_The_Meta_On_Disk_And_Survives_An_Idempotent_Recompile()
     {
@@ -113,17 +112,17 @@ public class CompileControllerRobustnessTests
         StringAssert.Contains("compiled-from:;srchash:", File.ReadAllText(metaPath),
             "the stamp reached the .meta ON DISK without a reimport — and carries the bare key, no path");
 
-        // The idempotent recompile: the stamp string is unchanged, so the importer is never dirty and
-        // WriteImportSettingsIfDirty returns FALSE while the .meta is already correct. Gating on that return
-        // alone would fire a spurious failure right here.
+        // The idempotent recompile: an unchanged stamp never dirties the importer, so
+        // WriteImportSettingsIfDirty returns false while the .meta is already correct. A guard that trusted
+        // that return would fire a spurious failure right here.
         StringAssert.Contains("=> OK", CompileController.Run(src, outDir, whatIf: false));
         StringAssert.Contains("compiled-from:;srchash:", File.ReadAllText(metaPath),
             "the unchanged stamp is still on disk after a no-op recompile, and nothing reported a failure");
     }
 
-    // ── Controllers stamped before the path was dropped carry `compiled-from:<path>;srchash:<hash>` (26 of
-    // them are committed in vrc-patterns). Both signals must still read that form: the key is found by
-    // IndexOf, and ExtractField must stop the hash at the ';' the new form does not have.
+    // ── A stamp may carry a path — older compiles wrote `compiled-from:<path>;srchash:<hash>`, and those
+    // controllers are committed. Both signals must keep reading that form, which is the one case where
+    // ExtractField has to stop the hash at a ';' the emitted form does not contain.
     [Test]
     public void Legacy_Stamp_With_A_Path_Still_Parses_As_Provenance()
     {

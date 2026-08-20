@@ -93,10 +93,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // where nothing here can tell a correct icon path from a wrong one; an in-project compile
             // adjudicates and throws instead. Each entry names the control and the path tried.
             public List<(string control, string path)> IconsOutsideProject = new List<(string control, string path)>();
-            // Non-null when the provenance stamp did not reach the .controller's .meta on disk. NOT a compile
-            // failure — the controller itself is correctly written, and refusing here would strand a
-            // half-replaced controller (StampProvenance owns that reasoning) — but not an advisory either: the
-            // next compile of this path will read it as hand-authored and warn. Surfaced by CompileController.
+            // Non-null when the provenance stamp did not reach the .controller's .meta on disk. Deliberately
+            // NOT a compile failure — the controller is correctly written, and refusing would strand a
+            // half-replaced one (StampProvenance owns why) — but not a mere advisory either: the next compile
+            // of this path reads it as hand-authored and warns. CompileController surfaces it.
             public string StampFailure;
 
             /// <summary>Destroy the side assets this result still owns in memory — <see cref="Params"/>,
@@ -1516,43 +1516,37 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var importer = AssetImporter.GetAtPath(path);
                 if (importer == null) return;
                 // CompileController reads this userData to WARN before clobbering an out-of-band edit. The
-                // `compiled-from:` KEY is what signal (a) tests for — its presence alone means "a compile wrote
-                // this". It deliberately carries NO value: nothing ever read the path (WarnIfOutOfBand does an
-                // IndexOf for the key and an ExtractField for srchash:), and producing a machine-independent
-                // one cost a path-normalizing git-root walk. The key survives rather than being renamed because
-                // every previously-stamped controller spells it this way — rename it and each of them reads as
-                // no-provenance and fires signal (a) spuriously.
+                // `compiled-from:` key carries NO value by design — its bare presence is the whole signal that a
+                // compile wrote this controller, and WarnIfOutOfBand reads nothing else out of it but
+                // `srchash:`. Never rename the key: every stamped controller on disk spells it this way, so a
+                // rename makes all of them read as no-provenance and fire the hand-authored warning.
                 string hash = SourceHash(_sourceText);
                 string stamp = "compiled-from:;srchash:" + hash;
                 importer.userData = stamp;
 
-                // WRITE THE .meta, DO NOT REIMPORT. SaveAndReimport is a full synchronous import (~90-115 ms on
-                // a .controller, flat in sub-asset count) for what is pure sidecar metadata — nothing about the
-                // imported artifact changes. WriteImportSettingsIfDirty persists the same bytes and leaves the
-                // asset artifact-stale, so the import is DEFERRED to the next Refresh rather than eliminated —
-                // and deferred imports COALESCE where serial SaveAndReimports cannot. Measured over 10
-                // controllers: 908 ms of serial imports + a 16 ms Refresh, against 4 ms of writes + one 151 ms
-                // Refresh. So this is a batch win (the vrc-patterns gate, a library regeneration) and a wash on
-                // a single compile — no caller pays more either way. ReloadFromDisk below does not depend on a
-                // reimport having happened; its own note owns that.
+                // WRITE THE .meta, DO NOT REIMPORT. The stamp is sidecar metadata — nothing about the imported
+                // artifact changes — so SaveAndReimport buys a full synchronous import per compile for nothing.
+                // WriteImportSettingsIfDirty persists the same bytes and leaves the asset artifact-stale, which
+                // DEFERS that import to the next Refresh rather than eliminating it; the win is that deferred
+                // imports coalesce where serial reimports cannot. So this is a batch win (the vrc-patterns gate,
+                // a library regeneration — measured ~6x over ten controllers) and a wash on a single compile.
+                // ReloadFromDisk below does not depend on the reimport having happened; its own note owns that.
                 bool wrote = AssetDatabase.WriteImportSettingsIfDirty(path);
 
-                // VERIFY OFF DISK, on BOTH branches. `wrote` is not the question: false is the ordinary
-                // idempotent-recompile answer (the stamp is unchanged, so the importer was never dirty and the
-                // .meta is already correct), and true means only that a write was ATTEMPTED. And the read-back
-                // must not go through AssetImporter.GetAtPath — that hands back the cached in-memory importer,
-                // i.e. the object assigned two lines up, which reports the intended string whether or not a
-                // byte reached disk. Only the .meta text answers it.
+                // VERIFY AGAINST THE .meta ON DISK, on both branches. `wrote` cannot answer this: false is the
+                // ordinary idempotent-recompile result (an unchanged stamp never dirties the importer, and the
+                // .meta is already correct), and true says only that a write was attempted. Neither can a
+                // read-back through AssetImporter.GetAtPath — it hands back the cached in-memory importer, the
+                // object assigned two lines up, which reports the intended string whether or not a byte landed.
                 string metaPath = path + ".meta";
                 if (File.Exists(metaPath) && File.ReadAllText(metaPath).Contains(stamp)) return;
 
                 // REPORT, NEVER THROW. This runs after the controller has been stripped and rebuilt, and
-                // CompileController.CleanupAfterEmit does nothing when the controller pre-existed — it relies
-                // on ProofCompile having made a post-strip throw unreachable, and the proof stamps a DIFFERENT
-                // path, so it cannot cover a failure at this one (a read-only .meta, a VCS lock). Throwing here
-                // would return FAIL with the replaced controller already on disk, falsifying Run's "a failing
-                // overwrite therefore leaves the prior good controller untouched". The controller is correct;
-                // only its stamp is missing, and what that costs is stated in the message.
+                // CleanupAfterEmit restores nothing in that case — it relies on ProofCompile having made a
+                // post-strip throw unreachable, and the proof stamps a DIFFERENT path, so it cannot cover a
+                // failure at this one (a read-only .meta, a VCS lock). Throwing would return FAIL with the
+                // replaced controller already on disk, falsifying Run's "a failing overwrite therefore leaves
+                // the prior good controller untouched".
                 _result.StampFailure = "provenance stamp not persisted to " + metaPath
                     + " (import-settings write reported " + wrote + ", and the stamp is absent from the .meta on"
                     + " disk) — the controller compiled correctly, but the NEXT compile of this path reads it as"

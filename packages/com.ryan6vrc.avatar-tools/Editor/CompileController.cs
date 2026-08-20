@@ -455,9 +455,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (outsideIcons.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in outsideIcons) sb.Append("- ").Append(l).Append('\n');
 
-            // Its own section, deliberately NOT under "Compile advisory": an advisory never costs anything,
-            // and this one costs the NEXT compile of this path its clobber warning. Absent when the stamp
-            // landed, so a healthy RunLog reads exactly as it did before this section existed.
+            // Its own section, deliberately NOT under "Compile advisory": an advisory costs nothing, and this
+            // costs the next compile of this path its clobber warning. Absent when the stamp landed.
             if (stampFailure != null)
                 sb.Append("\n## Provenance stamp NOT written\n\n- ").Append(stampFailure).Append('\n');
 
