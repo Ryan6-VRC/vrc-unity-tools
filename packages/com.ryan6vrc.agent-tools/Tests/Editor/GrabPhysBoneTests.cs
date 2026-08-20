@@ -18,8 +18,11 @@ using Ryan6Vrc.AgentTools.Editor;
 //
 // There is deliberately NO SDK binding canary here. VRC.Dynamics.dll is a precompiled auto-referenced plugin
 // and GrabPhysBone compiles against it directly with no reflection, so an SDK rename or overload change is a
-// compile error — the compile IS the canary. (EmulatorBindingCanaryTests exists because av3emu is reached
-// reflectively; that reasoning does not transfer.)
+// compile error — the compile IS the canary, for BINDING. (EmulatorBindingCanaryTests exists because av3emu
+// is reached reflectively; that reasoning does not transfer.) It guards none of the measured SEMANTICS the
+// tool rests on — grabberId inertness, LocalOffset as the seed convention, a stepped frame's dt following
+// fixedDeltaTime — each of which an SDK update can change while still compiling. Those are re-measured, not
+// asserted here, and no green run below should be read as covering them.
 public class GrabPhysBoneTests
 {
     // ── Handle codec ──────────────────────────────────────────────────────────────────────────────
@@ -75,6 +78,7 @@ public class GrabPhysBoneTests
             DtPinned = true,
             SavedFixedDt = 0.0166666667f,
             PumpArmed = true,
+            Owned = new[] { "5363680280397112067:0", "42:7" },
         };
 
         GrabPhysBone.RestoreRecord read;
@@ -85,6 +89,9 @@ public class GrabPhysBoneTests
         Assert.AreEqual(written.SavedFixedDt, read.SavedFixedDt, "the saved timestep must survive exactly — "
             + "a rounded restore silently rescales every later frame");
         Assert.AreEqual(written.PumpArmed, read.PumpArmed);
+        // Ownership has to survive too: Release refuses a grab this tool did not mint, so ownership lost
+        // to a reload turns that refusal into a lock on a grab nothing can drop.
+        CollectionAssert.AreEqual(written.Owned, read.Owned);
     }
 
     // Half a restore is worse than none: restoring pause while leaving the timestep pinned leaves the editor
@@ -95,12 +102,19 @@ public class GrabPhysBoneTests
         GrabPhysBone.RestoreRecord r;
         Assert.IsFalse(GrabPhysBone.TryParseRestoreRecord(null, out r));
         Assert.IsFalse(GrabPhysBone.TryParseRestoreRecord("", out r));
-        Assert.IsFalse(GrabPhysBone.TryParseRestoreRecord("v1|1|0|1|0.02", out r), "wrong arity");
-        Assert.IsFalse(GrabPhysBone.TryParseRestoreRecord("v2|1|0|1|0.02|1", out r), "unknown version");
-        Assert.IsFalse(GrabPhysBone.TryParseRestoreRecord("v1|1|0|1|notafloat|1", out r), "unparseable dt");
+        Assert.IsFalse(GrabPhysBone.TryParseRestoreRecord("v2|1|0|1|0.02", out r), "wrong arity");
+        Assert.IsFalse(GrabPhysBone.TryParseRestoreRecord("v1|1|0|1|0.02|1", out r),
+            "a superseded version is rejected, not partly read — v1 carried no ownership field");
+        Assert.IsFalse(GrabPhysBone.TryParseRestoreRecord("v2|1|0|1|notafloat|1|", out r), "unparseable dt");
         Assert.AreEqual(default(float), r.SavedFixedDt, "a rejected record leaves nothing half-applied");
         Assert.IsFalse(r.Frozen);
         Assert.IsFalse(r.DtPinned);
+        Assert.IsNull(r.Owned);
+
+        // An empty ownership field is a well-formed record, not a malformed one — every door but a grab
+        // writes it that way.
+        Assert.IsTrue(GrabPhysBone.TryParseRestoreRecord("v2|1|0|0|0.02|0|", out r));
+        CollectionAssert.IsEmpty(r.Owned);
     }
 
     // ── Pump policy ───────────────────────────────────────────────────────────────────────────────
@@ -170,6 +184,20 @@ public class GrabPhysBoneTests
             GrabPhysBone.Decide(Obs(105, 100, 5, 104), out why), "5 of 5");
         Assert.AreEqual(GrabPhysBone.PumpAction.Finish,
             GrabPhysBone.Decide(Obs(106, 100, 5, 104), out why), "overshoot still finishes, never loops");
+    }
+
+    // The single-frame case, which `Run`'s own not-registered-yet refusal prescribes ("Advance(1) then
+    // retry") — so it is the most-called shape and the one an off-by-one would break first.
+    [Test]
+    public void Decide_advanceOfOneFrameFinishesAfterExactlyOneFrame()
+    {
+        string why;
+        Assert.AreEqual(GrabPhysBone.PumpAction.Step,
+            GrabPhysBone.Decide(Obs(100, 100, 1, int.MinValue), out why));
+        Assert.AreEqual(GrabPhysBone.PumpAction.Wait,
+            GrabPhysBone.Decide(Obs(100, 100, 1, 100), out why), "step issued, not landed");
+        Assert.AreEqual(GrabPhysBone.PumpAction.Finish,
+            GrabPhysBone.Decide(Obs(101, 100, 1, 100), out why));
     }
 
     [Test]
