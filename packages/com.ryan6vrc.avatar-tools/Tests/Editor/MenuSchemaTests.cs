@@ -399,7 +399,7 @@ layers: []
     public void AbsoluteIconPath_IsRefused()
     {
         // Neither a project path nor document-relative: it would resolve only on the machine that wrote it,
-        // and a committed document carrying one is the same defect as an absolute `compiled-from:` stamp.
+        // and the document gets COMMITTED — so it bakes that machine's drive and checkout name into the repo.
         foreach (var p in new[] { "C:/Users/x/Icon.png", "/mnt/x/Icon.png", @"\\server\share\Icon.png" })
         {
             var errs = Errors("menu:\n  - toggle: A\n    param: Enable\n    icon: \"" + p.Replace(@"\", @"\\") + "\"\n");
