@@ -566,13 +566,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
             finally { UnityEngine.Object.DestroyImmediate(inst); }
         }
 
-        // Every file worth importing: the non-dot top-level dirs, whole. A dot dir is skipped and NOT
-        // descended — .git alone would swamp the copy — the same prune EnumerateEntries documents.
-        static System.Collections.Generic.IEnumerable<string> LibraryFiles(string root, string pattern) =>
-            Directory.GetDirectories(root)
+        // Every file worth importing: the non-dot top-level dirs, whole. A dot directory is skipped at
+        // EVERY depth, not just the top — .git alone would swamp the copy, and the deeper check is what
+        // keeps this copy's population identical to DuplicateCommittedGuid's, which skips a dot segment
+        // anywhere. That pass is the assertion making one shared scratch safe (class header), so a file
+        // it cannot see must not be a file this imports.
+        static System.Collections.Generic.IEnumerable<string> LibraryFiles(string root, string pattern)
+        {
+            var rootFull = Path.GetFullPath(root);
+            return Directory.GetDirectories(root)
                 .Where(d => !Path.GetFileName(d).StartsWith(".", StringComparison.Ordinal))
                 .OrderBy(d => d, StringComparer.Ordinal)
-                .SelectMany(d => Directory.GetFiles(d, pattern, SearchOption.AllDirectories));
+                .SelectMany(d => Directory.GetFiles(d, pattern, SearchOption.AllDirectories))
+                .Where(f => !Path.GetFullPath(f).Substring(rootFull.Length)
+                                .TrimStart('/', '\\')
+                                .Replace('\\', '/')
+                                .Split('/')
+                                .Any(seg => seg.StartsWith(".", StringComparison.Ordinal)));
+        }
 
         static (int failed, int total, string msg) CheckPrefabIntegrity(string root)
         {
@@ -591,6 +602,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 AssetDatabase.Refresh();
 
                 int offenderCount = 0;
+                // Failing PREFABS, not failing defects: the caller subtracts this from a prefab total,
+                // and offenderCount counts defects (missing-script counts, one per seam), so 40 missing
+                // scripts in one prefab of 34 printed "-6/34 clean" on exactly the failure path a reader
+                // most needs to trust. offenderCount still drives the exit code, where a defect count is
+                // the right unit.
+                var failedPrefabs = new System.Collections.Generic.HashSet<string>();
                 int total = 0;
                 var offenders = new System.Collections.Generic.List<string>();
                 foreach (var src in LibraryFiles(root, "*.prefab"))
@@ -622,14 +639,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         // One leaky prefab is one offender. Adding foreign.Count weighted it by line
                         // count against every other defect here, which counts one per defect.
                         offenderCount += 1;
+                        failedPrefabs.Add(label);
                     }
 
                     var go = AssetDatabase.LoadAssetAtPath<GameObject>(ToAssetsRelative(Path.Combine(full, rel)));
-                    if (go == null) { offenders.Add(label + " (failed to load)"); offenderCount++; continue; }
+                    if (go == null) { offenders.Add(label + " (failed to load)"); offenderCount++; failedPrefabs.Add(label); continue; }
                     int missing = 0;
                     foreach (var t in go.GetComponentsInChildren<Transform>(true))
                         missing += GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(t.gameObject);
-                    if (missing > 0) { offenders.Add($"{label} ({missing} missing script(s))"); offenderCount += missing; }
+                    if (missing > 0) { offenders.Add($"{label} ({missing} missing script(s))"); offenderCount += missing; failedPrefabs.Add(label); }
 
                     foreach (var seam in ScanAnchorSeams(go))
                     {
@@ -643,11 +661,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         }
                         offenders.Add($"{label} anchor-seam: {seam}");
                         offenderCount++;
+                        failedPrefabs.Add(label);
                     }
                 }
-                return (offenderCount, total, offenderCount == 0 ? "OK" : string.Join(", ", offenders));
+                return (failedPrefabs.Count, total, offenderCount == 0 ? "OK" : string.Join(", ", offenders));
             }
-            catch (Exception e) { return (1, 0, e.Message); }
+            // total -1 rather than 0: the pass never enumerated, so there is no denominator to report
+            // and the caller prints the failure without a ratio.
+            catch (Exception e) { return (1, -1, e.Message); }
             finally { CleanupScratch(scratch); }
         }
 
@@ -887,11 +908,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ships an FX + Gesture pair), each against built/<name>.controller. A built controller no document
         // claims is drift and fails the entry. Exits 0 iff all pass, 2 on a refusal — including a root that
         // yields NO entry at all, which would otherwise report 0/0 and exit 0, a gate passing on nothing.
-        // A second pass enumerates every non-dot TOP-LEVEL dir shipping a prefab at any depth
-        // (controller.yaml or not) — unlike the passes above, deliberately, per the class header — and
-        // asserts each imports with zero missing MonoBehaviour scripts, carries no anchor seam
-        // (CheckAvatar.ScanAnchorSeams), and names no consuming project's Assets/ path
-        // (ForeignProjectPathLines).
+        // A second pass copies every non-dot top-level dir into ONE scratch and asserts that every
+        // committed prefab in it — controller.yaml or not, at any depth — imports with zero missing
+        // MonoBehaviour scripts, carries no anchor seam (CheckAvatar.ScanAnchorSeams), and names no
+        // consuming project's Assets/ path (ForeignProjectPathLines). One copy rather than one per tree
+        // is what lets a Prefab Variant resolve a base in a sibling tree; the class header owns why that
+        // costs no coverage.
         public static void RunGate()
         {
             string root = null;
@@ -998,8 +1020,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (prefabFailed > 0) Debug.Log($"[gate] prefab-integrity FAIL: {prefabMsg}");
             // PREFABS, not entries and not trees: the copy is one unit now, so a per-tree verdict no longer
             // exists to report. The denominator differs from the entries line above and always did — that
-            // line counts entries at any depth, this one counts committed prefabs — so it says which.
-            Debug.Log($"[gate] prefab-integrity {prefabTotal - prefabFailed}/{prefabTotal} committed prefabs clean");
+            // line counts entries at any depth, this one counts committed prefabs — so it says which. A
+            // negative total means the pass threw before enumerating, so there is no ratio to report.
+            if (prefabTotal < 0)
+            {
+                Debug.Log("[gate] prefab-integrity did not enumerate: the pass threw before counting " +
+                          "prefabs, so the FAIL above is the whole verdict");
+            }
+            else
+            {
+                Debug.Log($"[gate] prefab-integrity {prefabTotal - prefabFailed}/{prefabTotal} committed prefabs clean");
+            }
 
             // Third pass: no two committed .meta ANYWHERE in the library may declare the same GUID. Over the
             // whole root, not tree by tree: the prefab pass now imports every tree into ONE scratch, so a
