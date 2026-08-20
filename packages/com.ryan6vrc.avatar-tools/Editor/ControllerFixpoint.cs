@@ -68,13 +68,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
     // Directory.Exists is: on Windows a mis-cased Assets/ is the same directory to that probe, so an ordinal
     // compare here would read it as reserved for tier derivation and still descend into it.
     //
-    // The prefab-integrity pass keeps a TOP-LEVEL enumeration and must NOT be widened to match. It filters
-    // top-level dirs by GetFiles(d, "*.prefab", SearchOption.AllDirectories), so a nested entry shipping a
-    // prefab necessarily makes its top-level ancestor selected, and CheckPrefabIntegrity copies that
-    // ancestor WHOLE — nested prefabs are already checked, as part of their parent. Widening its selection
-    // would add no coverage and would copy every nested entry twice. What that whole-entry copy requires is
-    // that no two committed .meta under one tree share a GUID, which DuplicateCommittedGuid asserts in a
-    // pass of its own — unconditionally, because the hazard outlives the gate (see its header).
+    // The prefab-integrity pass copies the WHOLE library into one scratch and checks every prefab in
+    // it. It used to copy one top-level tree at a time, each into a scratch of its own, so that no two
+    // trees' committed GUIDs ever co-imported. That isolation is what made a Prefab Variant whose base
+    // lives in a SIBLING tree load as null: the base was not in the copy. The library ships as ONE VPM
+    // package, so every tree co-imports in production regardless — the isolation modelled a
+    // configuration that never occurs. What the single copy requires is that no two committed .meta
+    // ANYWHERE in the library share a GUID, which DuplicateCommittedGuid asserts over the root in a pass
+    // of its own — strictly wider than the per-tree assertion it replaces, which is why deleting the
+    // isolation costs no coverage.
     //
     // A committed built .controller lives at an arbitrary --root filesystem path, not under the
     // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
@@ -533,16 +535,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        // Copy an entry's WHOLE directory into a scratch Assets/ dir as a UNIT — every file, subpath
-        // preserved — then import it and assert none of its prefabs has a missing MonoBehaviour script
-        // or fails to load. Copying the entry entire (not just *.prefab) is what lets a prefab's hard
-        // load dependencies travel with it: a Prefab Variant's base is a hard dep, and a base that
-        // lives in assets/ as a non-prefab (an .fbx the *.prefab glob would miss) makes the variant
-        // load as null otherwise — the head-proxy false-negative this dissolves. Entry files live at an
-        // arbitrary --root path outside the project (the patterns package is not loaded here), so they
-        // must be brought into Assets/ to load — the same constraint ImportCommittedAsset solves for a
-        // single artifact. Per-entry scratch isolation holds: each entry gets its own fresh scratch, so one
-        // entry's committed GUIDs never co-import with another's. Only prefabs are asserted on; built/
+        // Copy the WHOLE library into one scratch Assets/ dir as a UNIT — every file under every
+        // non-dot top-level dir, subpaths preserved — then import it and assert no prefab in it has a
+        // missing MonoBehaviour script or fails to load. Copying entire (not just *.prefab) is what lets a
+        // prefab's hard load dependencies travel with it: a Prefab Variant's base is a hard dep, and a base
+        // that lives in assets/ as a non-prefab (an .fbx the *.prefab glob would miss) makes the variant
+        // load as null otherwise — the head-proxy false-negative this dissolves. Copying every tree at
+        // once extends that to a variant whose base sits in a sibling tree, which no per-tree copy reaches.
+        // Library files live at an arbitrary --root path outside the project (the patterns package is not
+        // loaded here), so they must be brought into Assets/ to load — the same constraint
+        // ImportCommittedAsset solves for a single artifact. Only prefabs are asserted on; built/
         // controllers, yaml, and README ride along for GUID resolution but are never load-checked (a
         // dangling controller ref does not fail a prefab load, so widening the copy set masks nothing).
         // The anchor-seam class (CheckAvatar) over one entry prefab, instantiated so the scan walks a real
@@ -564,16 +566,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
             finally { UnityEngine.Object.DestroyImmediate(inst); }
         }
 
-        static (bool ok, string msg) CheckPrefabIntegrity(string entryDir)
+        // Every file worth importing: the non-dot top-level dirs, whole. A dot dir is skipped and NOT
+        // descended — .git alone would swamp the copy — the same prune EnumerateEntries documents.
+        static System.Collections.Generic.IEnumerable<string> LibraryFiles(string root, string pattern) =>
+            Directory.GetDirectories(root)
+                .Where(d => !Path.GetFileName(d).StartsWith(".", StringComparison.Ordinal))
+                .OrderBy(d => d, StringComparer.Ordinal)
+                .SelectMany(d => Directory.GetFiles(d, pattern, SearchOption.AllDirectories));
+
+        static (int failed, int total, string msg) CheckPrefabIntegrity(string root)
         {
             var scratch = "Assets/_prefab_" + Guid.NewGuid().ToString("N").Substring(0, 8);
             var full = Path.GetFullPath(scratch);
-            var entryFull = Path.GetFullPath(entryDir);
+            var rootFull = Path.GetFullPath(root);
             try
             {
-                foreach (var src in Directory.GetFiles(entryDir, "*", SearchOption.AllDirectories))
+                foreach (var src in LibraryFiles(root, "*"))
                 {
-                    var rel = Path.GetFullPath(src).Substring(entryFull.Length).TrimStart('/', '\\');
+                    var rel = Path.GetFullPath(src).Substring(rootFull.Length).TrimStart('/', '\\');
                     var dest = Path.Combine(full, rel);
                     Directory.CreateDirectory(Path.GetDirectoryName(dest));
                     File.Copy(src, dest, true);
@@ -581,10 +591,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 AssetDatabase.Refresh();
 
                 int offenderCount = 0;
+                int total = 0;
                 var offenders = new System.Collections.Generic.List<string>();
-                foreach (var src in Directory.GetFiles(entryDir, "*.prefab", SearchOption.AllDirectories))
+                foreach (var src in LibraryFiles(root, "*.prefab"))
                 {
-                    var rel = Path.GetFullPath(src).Substring(entryFull.Length).TrimStart('/', '\\');
+                    total++;
+                    var rel = Path.GetFullPath(src).Substring(rootFull.Length).TrimStart('/', '\\');
                     var label = rel.Replace('\\', '/');
 
                     // Provenance, checked on the COMMITTED text and before the load, so a prefab that fails
@@ -633,9 +645,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         offenderCount++;
                     }
                 }
-                return offenderCount == 0 ? (true, "OK") : (false, string.Join(", ", offenders));
+                return (offenderCount, total, offenderCount == 0 ? "OK" : string.Join(", ", offenders));
             }
-            catch (Exception e) { return (false, e.Message); }
+            catch (Exception e) { return (1, 0, e.Message); }
             finally { CleanupScratch(scratch); }
         }
 
@@ -796,8 +808,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // different entries. The class header calls the gate's failure message its product; an offender
         // nobody can address is that product failing in exactly the defect class this walk exists to catch.
         //
-        // FRAME, because two live in one log: an ENTRY label is root-relative, while the offender labels
-        // INSIDE a prefab-integrity failure are entry-relative (CheckPrefabIntegrity's own `rel`).
+        // FRAME: an ENTRY label is root-relative, and so are the offender labels inside a prefab-integrity
+        // failure (CheckPrefabIntegrity's own `rel`) — one frame for both, since the prefab pass copies
+        // the library whole rather than one entry at a time.
         internal static string EntryLabel(string root, string entryDir)
         {
             var r = Path.GetFullPath(root).Replace('\\', '/').TrimEnd('/');
@@ -815,23 +828,26 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        // Two committed .meta files under ONE TOP-LEVEL TREE declaring the same GUID — the collision
-        // ImportCommittedAsset's header names, arriving by a second route: the prefab pass copies a tree
-        // WHOLE, so a nested entry's .meta files import alongside its parent's, and Unity resolves a
+        // Two committed .meta files ANYWHERE IN THE LIBRARY declaring the same GUID — the collision
+        // ImportCommittedAsset's header names, arriving by a second route: the prefab pass copies every tree
+        // into ONE scratch, so every .meta in the library imports alongside every other, and Unity resolves a
         // duplicate by rewriting one .meta and leaving refs to it stale. In the gate that surfaces as a null
         // asset load — an anonymous failure in the pass with the least legible diagnostics — and the rewrite
-        // hits the scratch copy, not the checkout, so nothing on disk tells the author afterwards.
+        // hits the scratch copy, not the checkout, so nothing on disk tells the author afterwards. The scope
+        // widened from one tree to the root when that copy stopped being per-tree: a cross-tree collision was
+        // unreachable while each tree imported alone, and is a live import hazard now.
         //
         // A PASS OF ITS OWN, not a step inside CheckPrefabIntegrity, and the difference is coverage rather
-        // than tidiness: that pass runs only for a tree shipping a prefab somewhere, so two prefab-free
-        // Pattern entries could ship colliding GUIDs, never be imported here, and reach a consuming project
-        // — which DOES mount this library as a package — with the collision intact. The gate is the only
-        // thing standing between a copied entry and that, so it may not be conditional on a prefab.
+        // than tidiness: that pass imports what it can load, while this one reads every committed .meta in
+        // the library, prefab-free entries included. Two such entries could ship colliding GUIDs, be
+        // invisible to any import here, and still reach a consuming project — which DOES mount this
+        // library as a package — with the collision intact. The gate is the only thing standing between a
+        // copied entry and that, so it may not be conditional on a prefab.
         //
         // The live route is the obvious way to make a variant: copy an entry's directory, edit its
         // generator's CONFIG, regenerate — and leave the committed .meta GUIDs untouched. Sibling-to-sibling
-        // is as likely as parent-to-child (object-sync/y_double/ reads as a copy of object-sync/y/), so this
-        // asks the tree-wide question rather than a parent-vs-child one.
+        // is as likely as parent-to-child (object-sync/y_double/ reads as a copy of object-sync/y/), and
+        // cross-tree is as likely as either, so this asks the library-wide question.
         //
         // Dot-directories are skipped, matching EnumerateEntries and, more to the point, Unity: it never
         // imports a hidden folder, so a stashed .built-backup/ cannot produce the collision this models, and
@@ -839,13 +855,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         //
         // OrdinalIgnoreCase because Unity parses the field as 128-bit hex: differently-cased hex is one GUID
         // to the importer, and only a hand-edited .meta can produce it.
-        internal static string DuplicateCommittedGuid(string treeDir)
+        internal static string DuplicateCommittedGuid(string root)
         {
-            var treeFull = Path.GetFullPath(treeDir);
+            var rootFull = Path.GetFullPath(root);
             var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var meta in Directory.GetFiles(treeDir, "*.meta", SearchOption.AllDirectories))
+            foreach (var meta in Directory.GetFiles(root, "*.meta", SearchOption.AllDirectories))
             {
-                var rel = Path.GetFullPath(meta).Substring(treeFull.Length).TrimStart('/', '\\').Replace('\\', '/');
+                var rel = Path.GetFullPath(meta).Substring(rootFull.Length).TrimStart('/', '\\').Replace('\\', '/');
                 if (rel.Split('/').Any(s => s.StartsWith(".", StringComparison.Ordinal))) continue;
                 var guid = CommittedGuid(meta);
                 if (guid == null) continue;
@@ -973,42 +989,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             Debug.Log($"[gate] {entries.Count - failedEntries}/{entries.Count} entries passed ({checkedDocs} documents)");
 
-            // Second pass: every non-dot dir shipping a prefab must import with zero missing scripts.
+            // Second pass: every committed prefab in the library must import with zero missing scripts.
             // Structural Modules (a prefab, no controller.yaml) are invisible to the loop above; this
             // pass covers them and every other entry's prefab alike — a vanished VRCFury/MA script ref
             // is the regression it catches. It also asserts provenance on the committed text
             // (ForeignProjectPathLines). Integrity and provenance only; behaviour still rests on the README.
-            var prefabEntries = Directory.GetDirectories(root)
-                .Where(d => !Path.GetFileName(d).StartsWith("."))
-                .Where(d => Directory.GetFiles(d, "*.prefab", SearchOption.AllDirectories).Length > 0)
-                .OrderBy(d => d, StringComparer.Ordinal).ToList();
+            var (prefabFailed, prefabTotal, prefabMsg) = CheckPrefabIntegrity(root);
+            if (prefabFailed > 0) Debug.Log($"[gate] prefab-integrity FAIL: {prefabMsg}");
+            // PREFABS, not entries and not trees: the copy is one unit now, so a per-tree verdict no longer
+            // exists to report. The denominator differs from the entries line above and always did — that
+            // line counts entries at any depth, this one counts committed prefabs — so it says which.
+            Debug.Log($"[gate] prefab-integrity {prefabTotal - prefabFailed}/{prefabTotal} committed prefabs clean");
 
-            int prefabFailed = 0;
-            foreach (var dir in prefabEntries)
-            {
-                var (ok, msg) = CheckPrefabIntegrity(dir);
-                if (!ok) { Debug.Log($"[gate] prefab-integrity FAIL {EntryLabel(root, dir)}: {msg}"); prefabFailed++; }
-            }
-            // NOT "entries", and not the same denominator as the line above: this pass counts TOP-LEVEL
-            // TREES, each checked whole, while the passes above count entries at any depth. Sharing the noun
-            // made the two totals look comparable, so a reader saw "22/22 entries" beside "18/18 entries"
-            // and read a four-entry shortfall in prefab coverage that does not exist. Say which population
-            // this is and where the nested ones went, in the line itself — the class header explaining it is
-            // not visible to anyone reading a gate log.
-            Debug.Log($"[gate] prefab-integrity {prefabEntries.Count - prefabFailed}/{prefabEntries.Count} " +
-                      "top-level trees clean (each checked whole, so a nested entry rides its parent's)");
-
-            // Third pass: no two committed .meta under one top-level tree may declare the same GUID. Over
-            // EVERY non-dot top-level dir, not just the ones shipping a prefab — DuplicateCommittedGuid's
-            // header owns why the unconditional scope is the point rather than thoroughness. Counted into
-            // prefabFailed because both passes fail a TREE, so the exit expression needs no new term.
-            foreach (var dir in Directory.GetDirectories(root)
-                     .Where(d => !Path.GetFileName(d).StartsWith("."))
-                     .OrderBy(d => d, StringComparer.Ordinal))
-            {
-                var dup = DuplicateCommittedGuid(dir);
-                if (dup != null) { Debug.Log($"[gate] duplicate-guid FAIL {EntryLabel(root, dir)}: {dup}"); prefabFailed++; }
-            }
+            // Third pass: no two committed .meta ANYWHERE in the library may declare the same GUID. Over the
+            // whole root, not tree by tree: the prefab pass now imports every tree into ONE scratch, so a
+            // cross-tree collision is a real import hazard rather than a hypothetical, and this is the
+            // assertion that makes deleting the per-tree isolation safe. Counted into prefabFailed so the
+            // exit expression needs no new term.
+            var dup = DuplicateCommittedGuid(root);
+            if (dup != null) { Debug.Log($"[gate] duplicate-guid FAIL: {dup}"); prefabFailed++; }
 
             SweepScratch(); // authoritative cleanup: all Check refs are out of scope now, no Refresh follows
 
