@@ -6,7 +6,7 @@ The list names the MA components whose rendered result only resolves once an NDM
 
 ## There is no registry to reflect
 
-Reflecting NDMF's filter registry instead of maintaining a list is unreachable, in two independent ways. The version anchor is load-bearing here — a null result about a vendor API expires when the vendor changes — so: measured against MA 1.18.1 and the NDMF on disk beside it.
+Reflecting NDMF's filter registry instead of maintaining a list is unreachable, in two independent ways. The version anchor is load-bearing here — a null result about a vendor API expires when the vendor changes — so: measured against MA 1.18.4 and the NDMF on disk beside it.
 
 - `nadena.dev.ndmf.preview.IRenderFilter` is **public**, but filters are registered by hand — literal `new SomePreview()` arguments to `PreviewingWith(...)`, at one site in MA's own bootstrap (`Editor/PluginDefinition/PluginDefinition.cs`) — into **`internal`** collections (`SolverPass.RenderFilters`, `PluginResolver.RenderFilters`). No attribute scan, no assembly scan, nothing enumerable from outside the NDMF editor assembly.
 - Access would not answer the question anyway. `IRenderFilter.GetTargetGroups(ComputeContext)` returns `RenderGroup`s wrapping `Renderer`s plus opaque context data, and **neither the interface nor `RenderGroup` declares which component type drove a group.** A filter maps context to renderer work items; the component-type walk sits a layer below it, as hardcoded `GetComponentsInChildren<T>` calls in `ReactiveObjectAnalyzer.LocateReactions` plus two filters that walk their own types.
