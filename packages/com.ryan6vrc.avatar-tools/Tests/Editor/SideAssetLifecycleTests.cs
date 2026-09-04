@@ -114,7 +114,13 @@ layers: []
             + "reuse branch under test is never entered");
 
         var before = Snapshot();
-        StringAssert.Contains("=> OK", Compile(HeadWithMenu.Replace("  Sat: float\n", "  Sat: float\n  Extra: bool\n")));
+        // The match token carries NO newline, deliberately. HeadWithMenu is a verbatim string, so its line
+        // endings are the .cs file's own — and with no .gitattributes and core.autocrlf=true, a fresh
+        // checkout (every worktree) writes CRLF while the main checkout sits on LF. A "…float\n" token
+        // therefore matches in one checkout and silently no-ops in the other, recompiling the UNCHANGED
+        // document and failing the on-disk assertion below for a reason that names nothing. The inserted
+        // \n is safe either way: AnimatorSchemaYaml normalizes line endings before it parses.
+        StringAssert.Contains("=> OK", Compile(HeadWithMenu.Replace("  Sat: float", "  Sat: float\n  Extra: bool")));
         AssertNoneAdded(before, "the reuse-over-existing params path");
 
         Assert.AreEqual(guid, AssetDatabase.AssetPathToGUID(ParamsPath),
