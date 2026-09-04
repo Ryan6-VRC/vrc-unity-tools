@@ -530,12 +530,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         //
         // DIVERGES FROM AnimatorSchemaYaml, which binds all three lines below — so this can resolve a name
         // the compiler never writes and then hunt a built/<name>.controller that cannot exist. Other rows
-        // diverge too (a '#' without leading space, a duplicate key, a bool-like scalar); they resolve wrong
-        // but fail loudly on the compile that follows. These three do not:
+        // diverge too (a '#' without leading space, a duplicate key, a bool-like scalar); they matter only
+        // to a GUID-consumer entry, since the name's only use is addressing built/ and a Pattern has none.
         //   controller: "FX"   keeps the quotes, and '"' is illegal in a Windows path. RunGate feeds this to
         //                      Path.Combine OUTSIDE any try, so the run dies with no [gate] line at all.
-        //   controller : FX    return null, and RunGate's SKIP fires BEFORE the guid-consumer check — so the
-        //   "controller": FX   document is never gated either way, and the log shows only a SKIP.
+        //   controller : FX    return null, so the document is SKIPped before the missing-built requirement
+        //   "controller": FX   is ever applied — guidConsumer is computed earlier, but never consulted. The
+        //                      orphan pass is the only remaining net, and it sees this only while the built
+        //                      artifact still exists; if built/ is what went missing, nothing does.
         // No committed entry spells any of them, so this is armed for the next one; changing it changes what
         // the gate admits, which makes it a gate decision rather than a scanner tidy-up.
         internal static string ParseControllerName(string yamlPath)

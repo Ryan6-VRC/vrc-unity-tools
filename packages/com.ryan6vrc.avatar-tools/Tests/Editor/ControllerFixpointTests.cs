@@ -45,9 +45,12 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 // ADMISSION RULE, and it is what sets this file's size: a case earns its place iff breaking the line it
 // pins leaves the gate green or unattributable, AND no other case here fails on that same edit. Three
 // categories sit outside it and are deliberately absent, so their absence is not read as an oversight.
-// Fields the schema cannot author — `icon`, `style`, `labels` (animator-schema.md §menu) — are compared by
-// MenuDiff but can never differ at the gate, because the emitter writes neither side; the comparison is
-// kept for the reason MenuDiff's header gives, and pinning it guarded nothing. Known divergences and known
+// Three MenuDiff legs cannot differ AT THE GATE, and are compared but not pinned — for two distinct
+// reasons, so do not collapse them. The schema cannot author `style` or `labels` at all (animator-schema.md
+// §menu), so the emitter writes neither side. `icon` IS authorable: it is unpinnable for a different
+// reason — a library entry spells it document-relative and the gate host loads no entry's assets/, so both
+// sides resolve to "" ("the gate cannot see an icon", same doc). Reaching that leg cost this suite's only
+// imported-asset fixture, to pin a comparison the gate itself cannot exercise. Known divergences and known
 // gaps are design records rather than guards — they fail only when someone FIXES the thing — so they live
 // in ControllerFixpoint.cs beside the code they describe. And null-coalescing legs for a hand-edited
 // asset model a shape the class header rules out: built/ is generated and nobody hand-maintains it.
@@ -565,6 +568,30 @@ public class ControllerFixpointTests
     }
 
     // ── Orphan detection ───────────────────────────────────────────────────────────────────────────
+
+    // Each helper builds its OWN HashSet with StringComparer.Ordinal, so the choice is made three times and
+    // nothing else here distinguishes it from OrdinalIgnoreCase — every other fixture claims either the
+    // exact name or a wholly different one, and stays green either way. One case covers all three rather
+    // than three near-identical ones: what needs pinning is the comparer, and it is the same decision in
+    // each. Load-bearing on Windows specifically, where the filesystem WILL hand back a built artifact whose
+    // name differs from the claim only by case — an ignore-case comparer then reads it as claimed and the
+    // orphan pass, the only net for a stale artifact, goes quiet.
+    [Test]
+    public void OrphanClaimsAreOrdinal_AcrossAllThreeHelpers()
+    {
+        var built = Dir("built");
+        File_(built, "FX.controller");
+        File_(built, "FX_Menu.asset");
+        File_(built, "FX_Parameters.asset");
+
+        var miscased = new[] { "Fx" };
+        CollectionAssert.AreEquivalent(new[] { "FX" },
+            ControllerFixpoint.OrphanControllers(built, miscased).ToList(), "controllers");
+        CollectionAssert.AreEquivalent(new[] { "FX_Menu" },
+            ControllerFixpoint.OrphanMenus(built, miscased).ToList(), "menus");
+        CollectionAssert.AreEquivalent(new[] { "FX_Parameters" },
+            ControllerFixpoint.OrphanParams(built, miscased).ToList(), "params");
+    }
 
     [Test]
     public void OrphanControllers_UnclaimedController_IsReported()
