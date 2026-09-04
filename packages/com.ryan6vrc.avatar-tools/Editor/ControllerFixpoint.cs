@@ -367,9 +367,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // icon lives in that entry's assets/ — which the gate host does not load, so both sides resolve to
         // null and any real difference between them is invisible here. Closing it means importing the entry
         // dir before the compile pass, the way the prefab pass already does. Deliberately not done: it is a
-        // gate change, and no library entry authors an icon yet. ControllerFixpointTests does exercise the
-        // branch against real imported assets, which keeps the comparison itself honest — it does not close
-        // the gate hole above, and the two must not be confused.
+        // gate change, and no library entry authors an icon yet. `style` and `labels` are unreachable for a
+        // nearer reason — the schema cannot author either (animator-schema.md §menu) — so no test pins any
+        // of these three legs. `subParameters` is not among them: a radial's knob rides it, so it drifts.
+        //
+        // KNOWN DEFECT, inherited by ParamsDiff's defaultValue: `value` is compared with `!=`, so two NaNs
+        // report a difference between byte-identical menus that no "regenerate built/" can clear. A yaml can
+        // author `value: NaN` — nothing on AnimatorSchemaYaml's ToNumber path rejects a non-finite — and
+        // committing one makes that entry permanently unadmittable. The fix is !x.value.Equals(y.value)
+        // (RepathClips' FloatEq has the idiom), but it changes what the gate admits, so it is a gate call.
         internal static string MenuDiff(VRCExpressionsMenu a, VRCExpressionsMenu b, string where)
         {
             if (a.name != b.name)
@@ -521,6 +527,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // Reads the `controller:` name off a schema document without compiling it. Null when the file
         // carries no such key (e.g. a CompileClips document) — the caller decides what that means.
+        //
+        // DIVERGES FROM AnimatorSchemaYaml, which binds all three lines below — so this can resolve a name
+        // the compiler never writes and then hunt a built/<name>.controller that cannot exist. Other rows
+        // diverge too (a '#' without leading space, a duplicate key, a bool-like scalar); they matter only
+        // to a GUID-consumer entry, since the name's only use is addressing built/ and a Pattern has none.
+        //   controller: "FX"   keeps the quotes, and '"' is illegal in a Windows path. RunGate feeds this to
+        //                      Path.Combine OUTSIDE any try, so the run dies with no [gate] line at all.
+        //   controller : FX    return null, so the document is SKIPped before the missing-built requirement
+        //   "controller": FX   is ever applied — guidConsumer is computed earlier, but never consulted. The
+        //                      orphan pass is the only remaining net, and it sees this only while the built
+        //                      artifact still exists; if built/ is what went missing, nothing does.
+        // No committed entry spells any of them, so this is armed for the next one; changing it changes what
+        // the gate admits, which makes it a gate decision rather than a scanner tidy-up.
         internal static string ParseControllerName(string yamlPath)
         {
             foreach (var line in File.ReadLines(yamlPath))
@@ -717,6 +736,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         //
         // Throws DirectoryNotFoundException on an entryDir that does not exist — RunGate only ever passes a
         // directory it just enumerated, so the guard stays at that caller rather than being swallowed here.
+        //
+        // TWO KNOWN GAPS, neither live against the library today. assets/ is scanned TOP-LEVEL ONLY while
+        // CheckPrefabIntegrity walks the same tree with AllDirectories, so an entry shipping only
+        // assets/<subdir>/ reads as a Pattern and loses the built-controller requirement — and closing it
+        // must not widen the *.prefab glob beside it, which IsGuidConsumer_PrefabOneLevelDown_IsNotSeen pins
+        // because the recursion in EnumerateEntries rests on it. And a `built` that is a FILE switches the
+        // whole built/ regime off with no diagnostic.
         internal static bool IsGuidConsumer(string entryDir)
         {
             var builtDir = Path.Combine(entryDir, "built");
