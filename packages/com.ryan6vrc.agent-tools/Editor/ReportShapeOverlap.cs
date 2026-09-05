@@ -366,7 +366,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // cannot fire reads as covering a shape it does not cover — a worn-and-undeclared shape then hides
         // behind a dead row (the double-subtraction this tool exists to surface).
         //
-        // The mechanism, read off MA 1.18.4 rather than assumed (canon: `nondestructive.md`):
+        // The mechanism, read off MA 1.18.7 rather than assumed (canon: `nondestructive.md`):
         //   • ReactiveObjectAnalyzer.LocateReactions.BuildConditions walks the ShapeChanger's ancestors to the
         //     avatar root and adds ONE activeSelf ControlCondition per ancestor. It is a condition, not a drop.
         //     Its affected-object skip does NOT apply here: that skip is guarded on `affectedObject != null`
