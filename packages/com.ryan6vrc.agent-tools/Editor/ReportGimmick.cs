@@ -634,7 +634,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        // ----- Observations (§6) — six mechanically-certain idioms, each a fact + docs pointer --------
+        // ----- Observations (§6) — seven mechanically-certain idioms, each a fact + docs pointer ------
 
         private static int AppendObservations(StringBuilder sb, ConstraintRow[] rows, List<Transform> applyHosts,
                                               VRCPhysBone[] physbones, GameObject root)
@@ -700,10 +700,142 @@ namespace Ryan6Vrc.AgentTools.Editor
                           + " — docs/outfits.md §The FX controller is the authoritative map");
             }
 
+            // g. A constraint source sitting past its list length. Rendered here and NOT as a cell in the
+            //    §5.3 edge-list, because that table is built from Sources[i], which stops at totalLength and
+            //    therefore cannot see the slot at all (ScanConstraintLengths owns the mechanism). Reported,
+            //    never judged: the scan states what is serialized and leaves the intent to the reader.
+            foreach (var line in ScanConstraintLengths(root))
+                lines.Add(line.StartsWith(CheckAvatar.DegradedPrefix, StringComparison.Ordinal) ||
+                          line.StartsWith(CheckAvatar.ScopePrefix, StringComparison.Ordinal)
+                    ? line
+                    : "**constraint source past totalLength** — " + line);
+
             sb.Append("\n## Observations\n\n");
             if (lines.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in lines) sb.Append("- ").Append(l).Append('\n');
-            return lines.Count;
+            int observed = 0;
+            foreach (var l in lines)
+                if (!l.StartsWith(CheckAvatar.DegradedPrefix, StringComparison.Ordinal) &&
+                    !l.StartsWith(CheckAvatar.ScopePrefix, StringComparison.Ordinal)) observed++;
+            return observed;
+        }
+
+        // ----- Constraint source length (§5.3b) ---------------------------------------------------
+
+        /// <summary>The two-branch repair, quoted once. Which branch applies is the author's call: the
+        /// serialized text cannot tell a source that was meant to solve from one an edit left behind.</summary>
+        private const string SourceLengthFix =
+            "Fix: raise `Sources.totalLength` past it, or clear the slot — both `SerializedObject` " +
+            "writes (docs/runtime.md §Constraints)";
+
+        /// <summary>Fires iff some constraint declared a length reaching the keyable slots, so the scan could
+        /// not look past it. Bounds what a zero count covers.</summary>
+        internal const string SourceLengthScopeLine =
+            "only the 16 keyable slots (`source0`…`source15`) are read; a constraint whose `Sources.totalLength` " +
+            "reaches them keeps its remaining sources in `overflowList`, which this scan does not open";
+
+        /// <summary>The keyable half of a VRC constraint's source list — <c>source0</c>…<c>source15</c>, the
+        /// slots an animator can bind. Sources past these live in <c>overflowList</c> (docs/runtime.md
+        /// §Constraints).</summary>
+        private const int KeyableSlots = 16;
+
+        /// <summary>
+        /// The constraint source-length class alone, on any GameObject root — no descriptor required, so a
+        /// bare module prefab scans. A VRC constraint's <c>Sources</c> are 16 keyable slots fronted by a
+        /// <c>totalLength</c>, and the two runtimes disagree about a slot filled past it: the editor solves
+        /// every slot holding a transform, the client solves exactly the first <c>totalLength</c>
+        /// (docs/runtime.md §Constraints). Such a slot works in every play-mode pass and does nothing in-game.
+        ///
+        /// Returns one rendered line per offending SLOT, plus any fail-loud note prefixed with
+        /// <see cref="CheckAvatar.DegradedPrefix"/> and any scope bound prefixed with
+        /// <see cref="CheckAvatar.ScopePrefix"/> — the line grammar <see cref="CheckAvatar.ScanAnchorSeams"/>
+        /// declares, reused rather than restated. A list with no offender line means the scan ran and found
+        /// nothing; it never means the scan was skipped.
+        ///
+        /// Read through <see cref="SerializedObject"/>, never the SDK API: <c>Sources.Count</c> returns
+        /// <c>totalLength</c>, so a past-length slot is invisible to <c>Sources[i]</c> and to every consumer
+        /// that walks it — this file's own <see cref="FromVrc"/> included, which is why the edge-list table
+        /// cannot carry this and it lands as an observation. Addressed with <c>FindProperty</c> and never a
+        /// <c>NextVisible</c> walk, which does not surface <c>Sources.totalLength</c> at all (measured): a
+        /// walk-based reading takes the length as absent and passes every constraint silently.
+        ///
+        /// States what is serialized and never why. Whether a past-length slot is a source someone meant to
+        /// solve or one an edit left behind is a question about intent, and the two are byte-identical.
+        /// </summary>
+        public static List<string> ScanConstraintLengths(GameObject root)
+        {
+            var lines = new List<string>();
+            if (root == null)
+            {
+                lines.Add(CheckAvatar.DegradedPrefix + "null root — nothing was scanned");
+                return lines;
+            }
+
+            // includeInactive: a composed avatar's toggled-off layers are its normal resting state and the
+            // defect is serialized either way, so scoping to active objects would miss most of a real rig.
+            var overflowed = new List<string>();
+            foreach (var c in root.GetComponentsInChildren<VRCConstraintBase>(true))
+            {
+                if (c == null) continue;
+                string path = GetHierarchyPath(c.transform);
+                var so = new SerializedObject(c);
+                var lenProp = so.FindProperty("Sources.totalLength");
+                if (lenProp == null)
+                {
+                    lines.Add(CheckAvatar.DegradedPrefix + "`" + Cell(path) + "` (" + c.GetType().Name +
+                              ") exposes no `Sources.totalLength` — its source list was not read");
+                    continue;
+                }
+
+                int len = lenProp.intValue;
+                // At exactly KeyableSlots the length covers every keyable slot and the overflow is
+                // empty, so the scan was complete — skip the (empty) slot walk without claiming a bound.
+                if (len >= KeyableSlots)
+                {
+                    if (len > KeyableSlots) overflowed.Add("`" + Cell(path) + "`");
+                    continue;
+                }
+
+                // The in-length transforms, for the duplicate FACT below. Object identity, never name: two
+                // slots naming different objects that happen to share a name are not the same source.
+                var inLength = new HashSet<UnityEngine.Object>();
+                for (int i = 0; i < len; i++)
+                {
+                    var p = so.FindProperty("Sources.source" + i + ".SourceTransform");
+                    if (p != null && p.objectReferenceValue != null) inLength.Add(p.objectReferenceValue);
+                }
+
+                for (int i = len; i < KeyableSlots; i++)
+                {
+                    var p = so.FindProperty("Sources.source" + i + ".SourceTransform");
+                    if (p == null || p.objectReferenceValue == null) continue;
+
+                    var wProp = so.FindProperty("Sources.source" + i + ".Weight");
+                    string weight = wProp == null
+                        ? "?"
+                        : wProp.floatValue.ToString("0.####", CultureInfo.InvariantCulture);
+                    var srcT = p.objectReferenceValue as Transform;
+                    string srcName = srcT != null ? GetHierarchyPath(srcT) : p.objectReferenceValue.name;
+
+                    // Liveness is rendered, never gated on: an inert constraint's mis-lengthed slot is the
+                    // same authored defect, and a layer can raise IsActive at any time.
+                    string live = NotLiveReason(c, root.transform) ?? (c.IsActive ? null : "IsActive");
+
+                    lines.Add("`" + Cell(path) + "` (" + c.GetType().Name + "): `source" + i + "` → `" +
+                              Cell(srcName) + "` weight=" + weight + " sits past `totalLength`=" + len +
+                              ", so the editor solves it and the client ignores it" +
+                              (live == null ? "" : " [not-live: " + live + "]") +
+                              (inLength.Contains(p.objectReferenceValue)
+                                  ? "; the same transform is already a source inside the length"
+                                  : "") +
+                              ". " + SourceLengthFix);
+                }
+            }
+
+            if (overflowed.Count > 0)
+                lines.Add(CheckAvatar.ScopePrefix + SourceLengthScopeLine + " — " +
+                          string.Join(", ", overflowed.ToArray()));
+            return lines;
         }
 
         // ----- Other components (tier-2 generic census) -------------------------------------------

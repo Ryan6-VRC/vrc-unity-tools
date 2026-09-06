@@ -7,6 +7,7 @@ using UnityEngine;
 using UnityEngine.Animations;
 using Ryan6Vrc.AgentTools.Editor;
 using nadena.dev.modular_avatar.core;
+using VRC.Dynamics;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
 using VRC.SDK3.Dynamics.Constraint.Components;
@@ -869,5 +870,137 @@ public class ReportGimmickTests
         // other counts one row per single-visit component, so a tier-1 constraint (rendered in the
         // constraints TABLE, not the census) and the four Transforms cannot inflate it: probe + menuitem = 2.
         StringAssert.Contains("other=2", report);
+    }
+
+    // ----- Constraint source length -----------------------------------------------------------------
+    //
+    // A VRC constraint keeps 16 keyable source slots behind a `totalLength`, and the two runtimes disagree
+    // about a slot filled past it: the editor solves every slot holding a transform, the client solves
+    // exactly the first `totalLength`. Such a slot therefore passes every play-mode check and does nothing
+    // in-game. Nothing could report it before, because the SDK's own `Sources.Count` returns `totalLength` —
+    // the constraints TABLE is built from that indexer and is structurally blind to the slot, which is why
+    // this lands as an observation with its own SerializedObject read rather than as a table cell.
+
+    // Writes source slots and the declared length independently, which is the only way to express the
+    // defect: the public API cannot address a slot past the length (it is what `Sources.Count` hides).
+    private static void WriteSources(VRCConstraintBase c, int totalLength, params Transform[] slots)
+    {
+        var so = new SerializedObject(c);
+        for (int i = 0; i < slots.Length; i++)
+        {
+            so.FindProperty("Sources.source" + i + ".SourceTransform").objectReferenceValue = slots[i];
+            so.FindProperty("Sources.source" + i + ".Weight").floatValue = 1f;
+        }
+        so.FindProperty("Sources.totalLength").intValue = totalLength;
+        so.ApplyModifiedPropertiesWithoutUndo();
+    }
+
+    private static string OneOffender(System.Collections.Generic.List<string> lines)
+    {
+        var found = lines.FindAll(l => !l.StartsWith(CheckAvatar.DegradedPrefix)
+                                    && !l.StartsWith(CheckAvatar.ScopePrefix));
+        Assert.AreEqual(1, found.Count, "expected exactly one offender line, got:\n" + string.Join("\n", lines));
+        return found[0];
+    }
+
+    [Test]
+    public void ScanConstraintLengths_SlotPastLength_NamesTheSlotAndTheLength()
+    {
+        GameObject host, src;
+        var root = Rig(out host, out src);
+        var other = Child(root, "Other");
+        var con = host.AddComponent<VRCParentConstraint>();
+        WriteSources(con, 1, src.transform, other.transform);   // slot1 filled, length says 1
+
+        string line = OneOffender(ReportGimmick.ScanConstraintLengths(root));
+        StringAssert.Contains("source1", line);
+        StringAssert.Contains("Other", line);
+        StringAssert.Contains("totalLength`=1", line);
+        // The fix is part of the interface, not decoration: the reader has two branches and no way to pick
+        // between them from the text alone, so the line has to offer both.
+        StringAssert.Contains("raise `Sources.totalLength`", line);
+        StringAssert.Contains("clear the slot", line);
+    }
+
+    [Test]
+    public void ScanConstraintLengths_PastLengthSlotRepeatsAnInLengthSource_StatesTheRepetitionAsAFact()
+    {
+        GameObject host, src;
+        var root = Rig(out host, out src);
+        var con = host.AddComponent<VRCParentConstraint>();
+        WriteSources(con, 1, src.transform, src.transform);     // slot1 repeats slot0
+
+        string line = OneOffender(ReportGimmick.ScanConstraintLengths(root));
+        StringAssert.Contains("already a source inside the length", line);
+        // Stated, never interpreted: a repeated slot is EVIDENCE that an edit shrank the list, but whether
+        // this one is leftover or a source someone meant to solve is intent, and the bytes are identical.
+        StringAssert.DoesNotContain("residue", line);
+        StringAssert.DoesNotContain("harmless", line);
+    }
+
+    [Test]
+    public void ScanConstraintLengths_LengthCoversEveryFilledSlot_IsClean()
+    {
+        GameObject host, src;
+        var root = Rig(out host, out src);
+        var other = Child(root, "Other");
+        var con = host.AddComponent<VRCParentConstraint>();
+        WriteSources(con, 2, src.transform, other.transform);   // both slots inside the length
+
+        CollectionAssert.IsEmpty(ReportGimmick.ScanConstraintLengths(root));
+    }
+
+    [Test]
+    public void ScanConstraintLengths_InactiveHost_StillScannedAndMarkedNotLive()
+    {
+        GameObject host, src;
+        var root = Rig(out host, out src);
+        var other = Child(root, "Other");
+        var con = host.AddComponent<VRCParentConstraint>();
+        WriteSources(con, 1, src.transform, other.transform);
+        host.SetActive(false);
+
+        // A toggled-off layer is a composed avatar's normal resting state and the defect is serialized
+        // either way, so liveness is rendered beside the offender and never gates it out of the scan.
+        string line = OneOffender(ReportGimmick.ScanConstraintLengths(root));
+        StringAssert.Contains("not-live", line);
+    }
+
+    [Test]
+    public void ScanConstraintLengths_LengthCoversEveryKeyableSlot_ClaimsNoScopeBound()
+    {
+        GameObject host, src;
+        var root = Rig(out host, out src);
+        var slots = new Transform[16];
+        for (int i = 0; i < slots.Length; i++) slots[i] = Child(root, "S" + i).transform;
+        var con = host.AddComponent<VRCParentConstraint>();
+        WriteSources(con, 16, slots);
+
+        // At exactly 16 the length covers every keyable slot and the overflow is empty, so the scan
+        // saw everything. Emitting the bound here would tell a reader the scan was narrower than it was.
+        CollectionAssert.IsEmpty(ReportGimmick.ScanConstraintLengths(root));
+    }
+
+    [Test]
+    public void ScanConstraintLengths_NullRoot_DegradesRatherThanReadingClean()
+    {
+        var lines = ReportGimmick.ScanConstraintLengths(null);
+        // An empty list means scanned-and-clean everywhere else in this grammar, so the null case must not
+        // be able to borrow it.
+        Assert.AreEqual(1, lines.Count);
+        StringAssert.StartsWith(CheckAvatar.DegradedPrefix, lines[0]);
+    }
+
+    [Test]
+    public void Run_ConstraintSourcePastLength_ReachesTheObservationsIndex()
+    {
+        GameObject host, src;
+        var root = Rig(out host, out src);
+        var other = Child(root, "Other");
+        var con = host.AddComponent<VRCParentConstraint>();
+        WriteSources(con, 1, src.transform, other.transform);
+
+        string report = ReadReport("Rig");
+        StringAssert.Contains("**constraint source past totalLength**", report);
     }
 }
