@@ -37,13 +37,21 @@ public class ConstrainedDuplicateSourceTailTests
         {
             var host = new GameObject("Driven");
             host.transform.SetParent(root.transform);
-            var a = new GameObject("A"); a.transform.SetParent(root.transform);
-            var b = new GameObject("B"); b.transform.SetParent(root.transform);
-            var c = new GameObject("C"); c.transform.SetParent(root.transform);
             var driver = new GameObject("Driver"); driver.transform.SetParent(root.transform);
 
+            // Seed EVERY keyable slot, with a length of 3. Seeding only the three inside the length
+            // would leave slots 3-15 already null, so the 1..15 assertion below would hold for 13 of
+            // its 15 slots no matter what the door did — green against a tail clear that stopped at 2.
+            var slots = new Transform[16];
+            for (int i = 0; i < slots.Length; i++)
+            {
+                var s = new GameObject("S" + i);
+                s.transform.SetParent(root.transform);
+                slots[i] = s.transform;
+            }
+
             var con = host.AddComponent<VRCParentConstraint>();
-            WriteSources(con, 3, a.transform, b.transform, c.transform);
+            WriteSources(con, 3, slots);
 
             Assert.IsTrue(ConstrainedDuplicate.TryReplaceSources(con, driver.transform));
 
@@ -53,8 +61,8 @@ public class ConstrainedDuplicateSourceTailTests
             Assert.AreSame(driver.transform,
                 so.FindProperty("Sources.source0.SourceTransform").objectReferenceValue);
 
-            // And nothing survives behind it. Asserted over every keyable slot rather than just source1/2,
-            // so a future door that writes a longer list cannot leave a tail this test never looks at.
+            // And nothing survives behind it, over every keyable slot — each one seeded above, so every
+            // iteration is a slot the door had to clear rather than one that was never filled.
             for (int i = 1; i < 16; i++)
                 Assert.IsNull(so.FindProperty("Sources.source" + i + ".SourceTransform").objectReferenceValue,
                     "slot " + i + " still holds a transform past totalLength=1 — the editor solves it and " +

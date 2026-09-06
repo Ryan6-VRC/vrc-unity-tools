@@ -713,7 +713,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("\n## Observations\n\n");
             if (lines.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in lines) sb.Append("- ").Append(l).Append('\n');
-            return lines.Count;
+            int observed = 0;
+            foreach (var l in lines)
+                if (!l.StartsWith(CheckAvatar.DegradedPrefix, StringComparison.Ordinal) &&
+                    !l.StartsWith(CheckAvatar.ScopePrefix, StringComparison.Ordinal)) observed++;
+            return observed;
         }
 
         // ----- Constraint source length (§5.3b) ---------------------------------------------------
@@ -721,9 +725,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>The two-branch repair, quoted once. Which branch applies is the author's call: the
         /// serialized text cannot tell a source that was meant to solve from one an edit left behind.</summary>
         private const string SourceLengthFix =
-            "Fix: raise `Sources.totalLength` past the slot if that source is meant to solve, or clear its " +
-            "`SourceTransform` if it is left-over — both are `SerializedObject` writes, because the public " +
-            "API cannot address a slot past the length (docs/runtime.md §Constraints)";
+            "Fix: raise `Sources.totalLength` past it, or clear the slot — both `SerializedObject` " +
+            "writes (docs/runtime.md §Constraints)";
 
         /// <summary>Fires iff some constraint declared a length reaching the keyable slots, so the scan could
         /// not look past it. Bounds what a zero count covers.</summary>
@@ -785,7 +788,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
 
                 int len = lenProp.intValue;
-                if (len >= KeyableSlots) { overflowed.Add("`" + Cell(path) + "`"); continue; }
+                // At exactly KeyableSlots the length covers every keyable slot and the overflow is
+                // empty, so the scan was complete — skip the (empty) slot walk without claiming a bound.
+                if (len >= KeyableSlots)
+                {
+                    if (len > KeyableSlots) overflowed.Add("`" + Cell(path) + "`");
+                    continue;
+                }
 
                 // The in-length transforms, for the duplicate FACT below. Object identity, never name: two
                 // slots naming different objects that happen to share a name are not the same source.

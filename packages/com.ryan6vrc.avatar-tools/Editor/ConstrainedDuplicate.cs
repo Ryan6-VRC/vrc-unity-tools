@@ -183,6 +183,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // defect ReportGimmick.ScanConstraintLengths reports. The public API cannot address a slot
                 // past the length, so the tail is cleared through SerializedObject.
                 var so = new SerializedObject(constraint);
+                // Fail loud on a schema change rather than silently resuming the defect. The reader half
+                // (ReportGimmick.ScanConstraintLengths) raises a degraded note when it cannot address these
+                // properties; without this the writer would quietly no-op its tail clear and keep returning
+                // true while the reader shouted about the same drift.
+                if (so.FindProperty("Sources.source1.SourceTransform") == null)
+                {
+                    Debug.LogWarning($"{constraint.GetType().Name} on '{constraint.gameObject.name}': cannot " +
+                        "address `Sources.sourceN.SourceTransform`, so sources past the new length were left " +
+                        "in place — the editor solves them and the client does not (docs/runtime.md §Constraints).",
+                        constraint.gameObject);
+                    return false;
+                }
                 for (int i = sources.Count; i < 16; i++)
                 {
                     var src = so.FindProperty("Sources.source" + i + ".SourceTransform");

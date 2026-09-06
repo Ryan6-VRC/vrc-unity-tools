@@ -919,7 +919,7 @@ public class ReportGimmickTests
         // The fix is part of the interface, not decoration: the reader has two branches and no way to pick
         // between them from the text alone, so the line has to offer both.
         StringAssert.Contains("raise `Sources.totalLength`", line);
-        StringAssert.Contains("clear its `SourceTransform`", line);
+        StringAssert.Contains("clear the slot", line);
     }
 
     [Test]
@@ -964,6 +964,21 @@ public class ReportGimmickTests
         // either way, so liveness is rendered beside the offender and never gates it out of the scan.
         string line = OneOffender(ReportGimmick.ScanConstraintLengths(root));
         StringAssert.Contains("not-live", line);
+    }
+
+    [Test]
+    public void ScanConstraintLengths_LengthCoversEveryKeyableSlot_ClaimsNoScopeBound()
+    {
+        GameObject host, src;
+        var root = Rig(out host, out src);
+        var slots = new Transform[16];
+        for (int i = 0; i < slots.Length; i++) slots[i] = Child(root, "S" + i).transform;
+        var con = host.AddComponent<VRCParentConstraint>();
+        WriteSources(con, 16, slots);
+
+        // At exactly 16 the length covers every keyable slot and the overflow is empty, so the scan
+        // saw everything. Emitting the bound here would tell a reader the scan was narrower than it was.
+        CollectionAssert.IsEmpty(ReportGimmick.ScanConstraintLengths(root));
     }
 
     [Test]
