@@ -682,6 +682,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         offenderCount++;
                         failedPrefabs.Add(label);
                     }
+
+                    // Same shape, same tiers as the seam scan above: a source slot past the constraint
+                    // list length solves in the editor and is ignored by the client, so an entry can pass
+                    // every play-mode check and ship dead. FAIL here where ReportGimmick only observes —
+                    // an entry in THIS library is ours to rule on, while a composed avatar carries vendor
+                    // mergeables that are not (the asymmetry the seam scan states above). Scanned on the
+                    // loaded asset, not an instance: the predicate reads serialized fields only.
+                    foreach (var slot in Ryan6Vrc.AgentTools.Editor.ReportGimmick.ScanConstraintLengths(go))
+                    {
+                        if (slot.StartsWith(Ryan6Vrc.AgentTools.Editor.CheckAvatar.ScopePrefix, StringComparison.Ordinal))
+                        {
+                            Debug.LogWarning($"[gate] {label} {slot}");
+                            continue;
+                        }
+                        offenders.Add($"{label} constraint-source-length: {slot}");
+                        offenderCount++;
+                        failedPrefabs.Add(label);
+                    }
                 }
                 return (failedPrefabs.Count, total, offenderCount == 0 ? "OK" : string.Join(", ", offenders));
             }

@@ -163,7 +163,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        private static bool TryReplaceSources(VRCConstraintBase constraint, Transform driver)
+        // internal, not private: ConstrainedDuplicateSourceTailTests pins the source-tail contract directly.
+        // Reached through the existing InternalsVisibleTo, so the door grows no test-only seam.
+        internal static bool TryReplaceSources(VRCConstraintBase constraint, Transform driver)
         {
             if (constraint == null || driver == null) return false;
             try
@@ -172,6 +174,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 sources.Clear();
                 sources.Add(new VRCConstraintSource(driver, 1f));
                 constraint.Sources = sources;
+
+                // Clear() resets totalLength and leaves the SLOTS filled (measured): after a Clear+Add on
+                // a constraint that had three sources, totalLength reads 1 while source1 and source2 still
+                // hold their old transforms. The editor solves every filled slot and the client solves only
+                // the first totalLength (docs/runtime.md §Constraints), so that residue is a source which
+                // works in every play-mode pass and does nothing in-game — this door would author the exact
+                // defect ReportGimmick.ScanConstraintLengths reports. The public API cannot address a slot
+                // past the length, so the tail is cleared through SerializedObject.
+                var so = new SerializedObject(constraint);
+                for (int i = sources.Count; i < 16; i++)
+                {
+                    var src = so.FindProperty("Sources.source" + i + ".SourceTransform");
+                    if (src != null) src.objectReferenceValue = null;
+                    var w = so.FindProperty("Sources.source" + i + ".Weight");
+                    if (w != null) w.floatValue = 0f;
+                }
+                so.ApplyModifiedPropertiesWithoutUndo();
                 return true;
             }
             catch (Exception ex)
