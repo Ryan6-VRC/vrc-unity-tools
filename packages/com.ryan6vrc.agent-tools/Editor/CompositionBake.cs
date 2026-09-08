@@ -313,11 +313,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal static List<string> GeometrySection(List<GeoRow> authored, List<GeoRow> built,
                                                      string paramFilter, out string summaryKeys)
         {
-            Func<GeoRow, string> key = r => r.Path + " " + (r.Skinned ? "skinned" : "mesh");
-            var a = new Dictionary<string, GeoRow>(StringComparer.Ordinal);
-            var b = new Dictionary<string, GeoRow>(StringComparer.Ordinal);
-            foreach (var r in authored) a[key(r)] = r;
-            foreach (var r in built) b[key(r)] = r;
+            var a = KeyRows(authored);
+            var b = KeyRows(built);
 
             var lines = new List<string>
             {
@@ -359,6 +356,24 @@ namespace Ryan6Vrc.AgentTools.Editor
             summaryKeys = "tris=" + Subtotal(built, "all") + " trisSkinned=" + Subtotal(built, "skinned")
                         + " trisActive=" + Subtotal(built, "active");
             return lines;
+        }
+
+        /// <summary>Unity permits same-named siblings, so path plus kind is not unique: a second renderer on the
+        /// same key takes an ordinal suffix on its displayed path (` #2`, ` #3`, …) in hierarchy order, so every
+        /// renderer keeps its own row and the two sides pair by that order rather than one silently overwriting
+        /// the other.</summary>
+        private static Dictionary<string, GeoRow> KeyRows(List<GeoRow> rows)
+        {
+            var d = new Dictionary<string, GeoRow>(StringComparer.Ordinal);
+            foreach (var r0 in rows)
+            {
+                var r = r0;
+                string kind = r.Skinned ? "skinned" : "mesh";
+                string basePath = r.Path;
+                for (int n = 2; d.ContainsKey(r.Path + " " + kind); n++) r.Path = basePath + " #" + n;
+                d[r.Path + " " + kind] = r;
+            }
+            return d;
         }
 
         private static string TriCell(Dictionary<string, GeoRow> side, string k)

@@ -74,6 +74,9 @@ public class CompositionGeometryTests
         var root = new GameObject("Broken");
         Skinned(root, "Good", Tris(9));
         Skinned(root, "NoMesh", null);
+        var locked = Tris(3);
+        locked.UploadMeshData(true);   // markNoLongerReadable: the CPU copy is gone, isReadable reads false
+        Skinned(root, "Locked", locked);
 
         var rows = CompositionBake.ReadGeometry(root);
         string keys;
@@ -82,8 +85,12 @@ public class CompositionGeometryTests
         string row = Row(lines, "NoMesh");
         StringAssert.Contains("| unreadable | unreadable |", row);
         StringAssert.Contains("no mesh", row);
-        // Unknown is not zero: the unreadable row contributes nothing, and the total stays the readable sum.
+        row = Row(lines, "Locked");
+        StringAssert.Contains("| unreadable | unreadable |", row);
+        StringAssert.Contains("not readable", row);
+        // Unknown is not zero: neither unreadable row contributes, and the total stays the readable sum.
         Assert.AreEqual("| total (all) | | | 9 | 9 | |", Total(lines, "all"));
+        Assert.AreEqual("tris=9 trisSkinned=9 trisActive=9", keys);
     }
 
     [Test]
@@ -91,17 +98,36 @@ public class CompositionGeometryTests
     {
         var root = new GameObject("Filtered");
         Skinned(root, "Body", Tris(12));
+        Skinned(root, "Cloth", Tris(5));
         var rows = CompositionBake.ReadGeometry(root);
 
+        // A filter matching no renderer name: were geometry wrongly filtered by it, every row would vanish.
         string plainKeys, filteredKeys;
         var plain = CompositionBake.GeometrySection(rows, rows, null, out plainKeys);
-        var filtered = CompositionBake.GeometrySection(rows, rows, "Body", out filteredKeys);
+        var filtered = CompositionBake.GeometrySection(rows, rows, "NoSuchParameter", out filteredKeys);
 
         Assert.AreEqual(plainKeys, filteredKeys, "a parameter filter must not move a triangle count");
         CollectionAssert.AreEqual(plain.Skip(1), filtered.Skip(1),
             "every line but the header must be identical under a filter");
         StringAssert.Contains("narrows the parameter tables ONLY", filtered[0],
             "a reader who sees a filter on the artifact must be told this table is still whole");
+        Assert.AreEqual("tris=17 trisSkinned=17 trisActive=17", filteredKeys);
+    }
+
+    [Test]
+    public void SameNamedSiblings_eachKeepARow_pairedByHierarchyOrder()
+    {
+        var root = new GameObject("Twins");
+        Skinned(root, "Sleeve", Tris(3));
+        Skinned(root, "Sleeve", Tris(5));
+
+        var rows = CompositionBake.ReadGeometry(root);
+        string keys;
+        var lines = CompositionBake.GeometrySection(rows, rows, null, out keys);
+
+        StringAssert.Contains("| 3 | 3 |", Row(lines, "Sleeve"));
+        StringAssert.Contains("| 5 | 5 |", Row(lines, "Sleeve #2"));
+        Assert.AreEqual("| total (all) | | | 8 | 8 | |", Total(lines, "all"));
     }
 
     [Test]
