@@ -218,6 +218,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var target = ResolveTarget(getMethod, objField, row, comp);
                     var shapeName = nameField.GetValue(row) as string;
                     if (target == null || string.IsNullOrEmpty(shapeName)) continue;
+                    // MA's own three skips, in its order (FindShapes): no SkinnedMeshRenderer, no mesh, and no
+                    // such blendshape on that mesh. A row MA skipped becomes NO rule at all, on either key — so
+                    // it can neither be a declared removal nor cancel one. Censusing it would put a row in the
+                    // table that no bone can ever match and that nothing removed, and the fate table would then
+                    // read `build-time` for a row the build never saw.
+                    var smr = target.GetComponent<SkinnedMeshRenderer>();
+                    if (smr == null || smr.sharedMesh == null) continue;
+                    if (smr.sharedMesh.GetBlendShapeIndex(shapeName) < 0) continue;
                     int changeType = Convert.ToInt32(ctField.GetValue(row), CultureInfo.InvariantCulture);
                     order.Add((target, shapeName, changeType, (Component)comp));
                 }
@@ -227,8 +235,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 var (target, shape, changeType, owner) = order[i];
                 if (changeType != 0) continue;  // ShapeChangeType.Delete == 0; a Set declares no removal
-                var smr = target.GetComponent<SkinnedMeshRenderer>();
-                if (smr == null) continue;      // MA skips a row whose target carries no SkinnedMeshRenderer
+                var smr = target.GetComponent<SkinnedMeshRenderer>();  // resolved in the pass above
 
                 string laterSet = null;
                 for (int j = i + 1; j < order.Count; j++)

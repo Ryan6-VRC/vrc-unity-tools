@@ -320,6 +320,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Detail;
             public List<string> Parameters = new List<string>();
             public string Basis;
+            public int Bones;
         }
 
         private static List<RowResult> ResolveFates(ReportDeleteFate.Census census, GameObject clone,
@@ -329,27 +330,35 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var row in census.Rows)
             {
                 var r = new RowResult { Row = row };
-                var bone = MatchBone(row, bones);
-                if (bone != null)
+                var matched = MatchBones(row, bones);
+                if (matched.Count > 0)
                 {
-                    bone.Claimed = true;
+                    foreach (var b in matched) b.Claimed = true;
+                    var bone = matched[0];
+                    r.Bones = matched.Count;
                     r.Fate = ReportDeleteFate.FateNaNimation;
                     bool byLeaf;
-                    r.Parameters = ParametersDriving(bone, anim, out byLeaf);
-                    r.Basis = "a NaNimated bone on the built clone carries this row's key (`" + bone.Key + "`)"
-                            + (r.Parameters.Count == 0 ? "; no layer drives it"
-                               : byLeaf ? "; its driving layer was found by the bone's NAME, not its path — an "
-                                          + "optimizer moved the bone and repathed the curve with it"
-                                        : "; its driving layer binds the bone at `" + bone.RelativePath + "`");
+                    r.Parameters = ParametersDriving(matched, anim, out byLeaf);
+                    r.Basis = matched.Count + " NaNimated bone(s) on the built clone carry this row's key (`"
+                            + bone.Key + "`)"
+                            + (r.Parameters.Count == 0 ? "; no layer drives them"
+                               : byLeaf ? "; the driving layer was found by bone NAME rather than path — an "
+                                          + "optimizer moved the bones and repathed the curves with them"
+                                        : "; the driving layer binds one of them at `" + bone.RelativePath + "`");
                     r.Mechanism = ReportDeleteFate.ClassifyConditional(row, r.Parameters);
                     if (r.Mechanism == ReportDeleteFate.MechAncestorAnimated)
                     {
                         var ancestor = r.Parameters.Select(ReportDeleteFate.AncestorNamedBy).First(a => a != null);
                         var clipName = anim.ActiveBindings.FirstOrDefault(kv => Leaf(kv.Key) == ancestor).Value;
+                        // No surviving m_IsActive binding is the ordinary case, not a read failure: MA's own
+                        // constancy test ran against the PRE-optimizer index, and an optimizer that rewrites the
+                        // object toggle into its own NaNimation leaves no such binding in the final controllers.
+                        // Blaming a rename would name a cause that is not the usual one.
                         r.Detail = "ancestor `" + ancestor + "`"
                                  + (clipName != null ? ", bound by clip `" + clipName + "`"
-                                                     : ", whose binding clip this read could not name — the build "
-                                                       + "renamed the object out of every binding path it wrote");
+                                                     : ", whose `m_IsActive` no clip in the FINAL controllers still "
+                                                       + "binds — MA read the pre-optimizer index, and an optimizer "
+                                                       + "may since have rewritten that toggle away");
                     }
                     else if (r.Mechanism == ReportDeleteFate.MechMenuItem)
                         r.Detail = "menu item at `" + row.MenuItemAncestor + "`";
@@ -411,24 +420,27 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// tokens do not separate them, the first unclaimed bone is taken and the row's basis says the
         /// attribution is by renderer rather than by filter — the honest reading, since the FATE is the same
         /// for every cutter on that renderer even when which-bone-is-whose is not recoverable.</summary>
-        private static NanBone MatchBone(ReportDeleteFate.DeclaredRow row, List<NanBone> bones)
+        private static List<NanBone> MatchBones(ReportDeleteFate.DeclaredRow row, List<NanBone> bones)
         {
             if (row.Kind == "shape")
             {
                 string want = ReportDeleteFate.Mangle(row.TargetPropKey);
-                return bones.FirstOrDefault(b => !b.Claimed && b.Key == want);
+                return bones.Where(b => !b.Claimed && b.Key == want).ToList();
             }
             string prefix = ReportDeleteFate.Mangle(row.CutterKeyPrefix);
             var candidates = bones.Where(b => !b.Claimed && b.Key.StartsWith(prefix, StringComparison.Ordinal)).ToList();
-            if (candidates.Count == 0) return null;
+            if (candidates.Count == 0) return candidates;
             var tokens = row.FilterTokens?.Where(t => t != null).ToArray() ?? Array.Empty<string>();
             if (tokens.Length > 0)
             {
-                var scored = candidates.FirstOrDefault(b => tokens.All(t =>
-                    b.Key.IndexOf(t, prefix.Length, StringComparison.Ordinal) >= 0));
-                if (scored != null) return scored;
+                var scored = candidates.Where(b => tokens.All(t =>
+                    b.Key.IndexOf(t, prefix.Length, StringComparison.Ordinal) >= 0)).ToList();
+                if (scored.Count > 0) return scored;
             }
-            return candidates[0];
+            // No token separated them, so the bones under this renderer's mask key belong to SOME cutter here and
+            // this row cannot say which. They share a fate, so taking one whole key-group is right; the basis says
+            // the attribution was by renderer.
+            return candidates.Where(b => b.Key == candidates[0].Key).ToList();
         }
 
         /// <summary>Every parameter on a layer whose clips scale this bone. The join is by BINDING, not by layer
@@ -441,21 +453,22 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// an optimized avatar reports no controlling parameter and the door FAILs on its own blind spot. The
         /// bone name embeds the renderer and the shape, so it is not a loose match. <paramref name="byLeaf"/>
         /// says which arm answered, and the row carries it.</para></summary>
-        private static List<string> ParametersDriving(NanBone bone, BuiltAnimation anim, out bool byLeaf)
+        private static List<string> ParametersDriving(List<NanBone> group, BuiltAnimation anim, out bool byLeaf)
         {
             byLeaf = false;
+            var paths = new HashSet<string>(group.Select(b => b.RelativePath), StringComparer.Ordinal);
             var found = new List<string>();
             foreach (var (scaled, parameters) in anim.Layers)
             {
-                if (!scaled.Contains(bone.RelativePath)) continue;
+                if (!scaled.Overlaps(paths)) continue;
                 foreach (var p in parameters) if (!found.Contains(p)) found.Add(p);
             }
             if (found.Count > 0) return found;
 
-            string leaf = Leaf(bone.RelativePath);
+            var leaves = new HashSet<string>(group.Select(b => Leaf(b.RelativePath)), StringComparer.Ordinal);
             foreach (var (scaled, parameters) in anim.Layers)
             {
-                if (!scaled.Any(pth => Leaf(pth) == leaf)) continue;
+                if (!scaled.Any(pth => leaves.Contains(Leaf(pth)))) continue;
                 byLeaf = true;
                 foreach (var p in parameters) if (!found.Contains(p)) found.Add(p);
             }
@@ -524,12 +537,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                     + "the mesh and in the count, hidden by a NaN scale; `dropped` never reached the build at all; "
                     + "`cancelled-by-Set` was voided by a later Set on the same key. Only the first is geometry you "
                     + "stopped paying for._\n\n");
-            sb.Append("| declared | kind | host | fate | mechanism | controlling parameters | detail |\n");
-            sb.Append("| --- | --- | --- | --- | --- | --- | --- |\n");
+            sb.Append("`bones` is how many NaNimated bones the row cost. **MA emits one per original bone the "
+                    + "hidden vertices are skinned to**, not one per row, so a hand shape runs to dozens — that is "
+                    + "the row's real object-count cost, and it is why an unattributed bone below means something "
+                    + "rather than being the normal residue.\n\n");
+            sb.Append("| declared | kind | host | fate | bones | mechanism | controlling parameters | detail |\n");
+            sb.Append("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
             foreach (var r in results)
                 sb.Append("| `").Append(RunLogFormat.Cell(r.Row.Label)).Append("` | ").Append(r.Row.Kind)
                   .Append(" | `").Append(RunLogFormat.Cell(r.Row.HostPath)).Append("` | ")
                   .Append(r.Fate == ReportDeleteFate.FateBuildTime ? "**build-time**" : r.Fate).Append(" | ")
+                  .Append(r.Bones == 0 ? "—" : r.Bones.ToString(CultureInfo.InvariantCulture)).Append(" | ")
                   .Append(r.Mechanism ?? "—").Append(" | ")
                   .Append(r.Parameters.Count == 0 ? "—" : "`" + RunLogFormat.Cell(string.Join("`, `", r.Parameters)) + "`")
                   .Append(" | ").Append(RunLogFormat.Cell(r.Detail ?? "—")).Append(" |\n");
@@ -560,11 +578,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (bones.Count == 0) sb.Append("_(none — nothing on this build was hidden by NaNimation)_\n");
             else
             {
-                sb.Append("| key | path | attributed |\n| --- | --- | --- |\n");
-                foreach (var b in bones)
-                    sb.Append("| `").Append(RunLogFormat.Cell(b.Key)).Append("` | `")
-                      .Append(RunLogFormat.Cell(b.RelativePath)).Append("` | ").Append(b.Claimed ? "yes" : "**no**").Append(" |\n");
-                sb.Append("\nAn unattributed bone is a removal this census did not declare — a vendor module below the "
+                sb.Append("Grouped by key, since a row owns every bone sharing its key.\n\n");
+                sb.Append("| key | bones | attributed | one path |\n| --- | --- | --- | --- |\n");
+                foreach (var g in bones.GroupBy(b => b.Key, StringComparer.Ordinal))
+                    sb.Append("| `").Append(RunLogFormat.Cell(g.Key)).Append("` | ").Append(g.Count())
+                      .Append(" | ").Append(g.All(b => b.Claimed) ? "yes" : "**no**")
+                      .Append(" | `").Append(RunLogFormat.Cell(g.First().RelativePath)).Append("` |\n");
+                sb.Append("\nAn unattributed KEY is a removal this census did not declare — a vendor module below the "
                         + "root, or a row whose target this read resolved differently from the build. It is a place to "
                         + "look, not a verdict.\n");
             }

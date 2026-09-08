@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -30,7 +32,6 @@ public class ReportDeleteFateTests
     [SetUp]
     public void SetUp()
     {
-        LogAssert.ignoreFailingMessages = true; // the refusal branches log at Error, by contract
         EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         _avatar = new GameObject("DeleteFateAvatar");
         _avatar.AddComponent<VRCAvatarDescriptor>();
@@ -39,11 +40,10 @@ public class ReportDeleteFateTests
     [TearDown]
     public void TearDown()
     {
-        if (_avatar != null) Object.DestroyImmediate(_avatar);
+        if (_avatar != null) UnityEngine.Object.DestroyImmediate(_avatar);
         _avatar = null;
-        foreach (var m in _meshes) if (m != null) Object.DestroyImmediate(m);
+        foreach (var m in _meshes) if (m != null) UnityEngine.Object.DestroyImmediate(m);
         _meshes.Clear();
-        LogAssert.ignoreFailingMessages = false;
     }
 
     // ── Fixture builders ────────────────────────────────────────────────────────────────────────────
@@ -343,13 +343,24 @@ public class ReportDeleteFateTests
 
     // ── Door refusals: bad input is a bare FAIL with no trailer ─────────────────────────────────────
 
+    // Each refusal is EXPECTED at Error rather than ignored: logging the refusal is part of the contract —
+    // an agent that reads the console instead of the return value must still see it — so a refusal that
+    // stopped logging should redden a test rather than pass under a blanket ignore.
+    private static string Refusal(string expected, Func<string> call)
+    {
+        LogAssert.Expect(LogType.Error, new Regex(Regex.Escape(expected)));
+        return call();
+    }
+
     [Test]
     public void Run_refusesBadInput_withNoLogTrailer()
     {
         foreach (var (call, why) in new[]
                  {
-                     (ReportDeleteFate.Run("NoSuchRoot"), "root not found"),
-                     (ReportDeleteFate.Run("DeleteFateAvatar", -1), "negative budget"),
+                     (Refusal("avatar root 'NoSuchRoot' not found",
+                              () => ReportDeleteFate.Run("NoSuchRoot")), "root not found"),
+                     (Refusal("triangleBudget must be >= 0",
+                              () => ReportDeleteFate.Run("DeleteFateAvatar", -1)), "negative budget"),
                  })
         {
             StringAssert.StartsWith("[ReportDeleteFate] FAIL:", call, why);
@@ -363,11 +374,11 @@ public class ReportDeleteFateTests
         var bare = new GameObject("BareRoot");
         try
         {
-            var r = ReportDeleteFate.Run("BareRoot");
+            var r = Refusal("has no VRCAvatarDescriptor", () => ReportDeleteFate.Run("BareRoot"));
             StringAssert.StartsWith("[ReportDeleteFate] FAIL:", r);
             StringAssert.Contains("VRCAvatarDescriptor", r, "the refusal names the fix");
         }
-        finally { Object.DestroyImmediate(bare); }
+        finally { UnityEngine.Object.DestroyImmediate(bare); }
     }
 
     // The worktree hazard docs/dispatched-work.md names, in its Unity form: a venue's baked package pointer
