@@ -27,6 +27,13 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// only meaningful when it is present). Exactly-one-avatar and VRCFury-Fix-Write-Defaults are real
     /// hazards regardless, so they are unconditional.
     ///
+    /// <b>Two scopes, one door.</b> <see cref="EvaluateEntry"/> is the four rules; <see cref="Evaluate"/>
+    /// dispatches to it in edit mode and REFUSES in play, where 2a and 3b are structurally
+    /// untrustworthy (a live emulator's own clones inflate 2a; VRCFury and the emulator each clear 3b's
+    /// flag on a composed build). Agents read that false offender list as a dead-build verdict and one
+    /// brief encoded it as an abort trigger, which is what the refusal retires. The hook calls
+    /// <see cref="EvaluateEntry"/>, never the dispatch — <see cref="Evaluate"/> owns that reasoning.
+    ///
     /// Degradation is one sentence: <b>absent = safe silent skip; present-but-unreadable = block loud.</b>
     /// A genuinely-absent type (package not installed) skips its rule silently; a hazard that IS on a
     /// scene object but whose needed field/feature can't be reflected emits a loud named FAIL — a read
@@ -53,13 +60,79 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const string VrcFuryComponentFullName = "VF.Model.VRCFury";
         private const string GestureManagerFullName   = "BlackStartX.GestureManager.GestureManager";
 
-        public struct PlayGateResult { public bool Pass; public List<Offender> Offenders; }
+        /// <summary>The scope a <see cref="PlayGateResult"/> was produced in. <c>Play = 0</c> is deliberate:
+        /// it makes <c>Entry</c> unreachable by struct default, so a result that forgot to set the field reads
+        /// as the refusing scope instead of as an evaluated entry verdict.</summary>
+        public enum PlayGateScope { Play = 0, Entry = 1 }
+
+        public struct PlayGateResult
+        {
+            public bool Pass;
+            public List<Offender> Offenders;
+            /// <summary>Which rule set produced this. <c>Entry</c>: the entry-scope door produced it — the
+            /// four rules ran, or threw while running. <c>Play</c>: nothing was evaluated and the one offender
+            /// is the scope refusal. Branch on THIS,
+            /// never on <see cref="Pass"/> alone — a refusal is also <c>Pass=false</c>.</summary>
+            public PlayGateScope Scope;
+        }
         public struct Offender { public string Tag; public string Message; public string Fix; }
 
-        /// <summary>Evaluate the preconditions for entering play with <paramref name="scene"/> (the scene
-        /// entering play — the hook passes <c>SceneManager.GetActiveScene()</c>). Pass ⇔ zero offenders.
-        /// A non-avatar / codegen / bake scene (no active descriptor) passes silently.</summary>
+        // ----- The in-play scope refusal --------------------------------------------------------------
+        // Agent-directed diagnostic prose, so the strings live at one canon and the tests assert these
+        // constants rather than fragments (the CheckAvatar precedent). The two "why" clauses are stated as
+        // why the rules CANNOT BE TRUSTED in play, not as observed facts: with no emulator installed neither
+        // clause is true of the scene, and rule 2a's offender there would be a genuine multi-avatar finding.
+
+        internal const string ScopeRefusalTag = "Entry gate called in play - not a scene finding";
+
+        internal const string ScopeRefusalMessage =
+            "PlayGateCore evaluates the preconditions for ENTERING play, and inside play its rules cannot be " +
+            "trusted: rule 2a counts every active descriptor, and a live emulator adds its own MirrorReflection " +
+            "and ShadowClone roots to that count, while rule 3b reads RunPreprocessAvatarHook, which VRCFury and " +
+            "the emulator each clear themselves on a composed build. No scene was inspected and no rule was " +
+            "evaluated here, so Pass=false reports the refusal and says nothing about this scene";
+
+        internal const string ScopeRefusalFix =
+            "branch on PlayGateResult.Scope (Entry vs Play), not on Pass alone; to judge whether a build actually ran " +
+            "the stack, measure the built avatar rather than the gate (docs/emulator.md §Setup)";
+
+        /// <summary>Evaluate the preconditions for entering play with <paramref name="scene"/>. In EDIT mode
+        /// this is <see cref="EvaluateEntry"/>. IN PLAY it evaluates nothing and returns the scope refusal:
+        /// the entry rules are structurally untrustworthy there (see the class summary). Read
+        /// <see cref="PlayGateResult.Scope"/>
+        /// to tell the two apart — both carry <c>Pass=false</c> when they carry offenders.
+        ///
+        /// <see cref="PlayGate"/> deliberately calls <see cref="EvaluateEntry"/> and NOT this door.
+        /// <c>Application.isPlaying</c> may read true during <c>ExitingEditMode</c> — the reason
+        /// <c>EditorApplication.isPlayingOrWillChangePlaymode</c> exists as a separate API — and were it
+        /// true there, routing the hook through this dispatch would refuse every play entry forever. The hook
+        /// must not depend on that fact in either direction.</summary>
         public static PlayGateResult Evaluate(Scene scene)
+        {
+            if (!Application.isPlaying) return EvaluateEntry(scene);
+            return new PlayGateResult
+            {
+                Pass = false,
+                Scope = PlayGateScope.Play,
+                Offenders = new List<Offender>
+                {
+                    new Offender { Tag = ScopeRefusalTag, Message = ScopeRefusalMessage, Fix = ScopeRefusalFix },
+                },
+            };
+        }
+
+        /// <summary>The four entry rules against <paramref name="scene"/> (the scene entering play — the
+        /// hook passes <c>SceneManager.GetActiveScene()</c>). Pass ⇔ zero offenders. A non-avatar /
+        /// codegen / bake scene (no active descriptor) passes silently. Scope-free by construction: it makes
+        /// no <c>Application.isPlaying</c> read, which is what lets the hook call it safely.
+        ///
+        /// <b>Internal, and that is load-bearing.</b> Called in play this evaluates the clone-inflated 2a
+        /// count and the cleared 3b flag and stamps the result <c>Scope=Entry</c> — a caller obeying
+        /// "branch on Scope" would read those false offenders as an entry verdict, which is worse than the
+        /// unscoped result this change replaced. <see cref="Evaluate"/> is the door for anyone outside this
+        /// assembly. Reflection still reaches this method, so the narrowing removes a false steer rather
+        /// than sealing the path.</summary>
+        internal static PlayGateResult EvaluateEntry(Scene scene)
         {
             var offenders = new List<Offender>();
             var roots = scene.IsValid() ? scene.GetRootGameObjects() : Array.Empty<GameObject>();
@@ -75,7 +148,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var d in root.GetComponentsInChildren<VRCAvatarDescriptor>(true))
                     if (d.gameObject.activeInHierarchy) descriptors.Add(d);
             if (descriptors.Count == 0)
-                return new PlayGateResult { Pass = true, Offenders = offenders };
+                return new PlayGateResult { Pass = true, Offenders = offenders, Scope = PlayGateScope.Entry };
 
             // Rule 2a (unconditional): more than one active descriptor.
             if (descriptors.Count > 1)
@@ -100,7 +173,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 CheckEmulatorConfig(emulator, offenders);   // 3b — the emulator's own config
             }
 
-            return new PlayGateResult { Pass = offenders.Count == 0, Offenders = offenders };
+            return new PlayGateResult
+            {
+                Pass = offenders.Count == 0, Offenders = offenders, Scope = PlayGateScope.Entry,
+            };
         }
 
         /// <summary>Overlay line 2 (deterministic, unit-testable): the first two offender tags in parens,

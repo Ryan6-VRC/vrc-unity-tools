@@ -50,7 +50,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                     return;
                 }
 
-                var result = PlayGateCore.Evaluate(SceneManager.GetActiveScene());
+                // EvaluateEntry, not Evaluate: this handler runs during ExitingEditMode, where
+                // Application.isPlaying may already read true, and the dispatch would then refuse every
+                // entry forever (PlayGateCore.Evaluate's doc-comment owns the reasoning).
+                var result = PlayGateCore.EvaluateEntry(SceneManager.GetActiveScene());
                 if (result.Pass) return; // play proceeds silently
 
                 // Cancel entry (spike-confirmed clean: no flicker into play, single ExitingEditMode fire),
@@ -68,6 +71,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 EmitConsole(new PlayGateCore.PlayGateResult
                 {
                     Pass = false,
+                    Scope = PlayGateCore.PlayGateScope.Entry,
                     Offenders = new List<PlayGateCore.Offender>
                     {
                         new PlayGateCore.Offender
