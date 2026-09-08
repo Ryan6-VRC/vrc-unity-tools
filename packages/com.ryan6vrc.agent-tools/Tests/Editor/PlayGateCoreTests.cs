@@ -343,4 +343,70 @@ public class PlayGateCoreTests
         StringAssert.Contains("at Foo.Bar()", line);
         StringAssert.Contains("(fix: fix the exception above or override via the menu)", line);
     }
+
+    // ── Scope: which rule set produced a result ───────────────────────────────────
+
+    // This case is what makes the two Entry asserts below mean anything. Were the enum declared Entry-first,
+    // Entry would BE the struct default and an Entry assert would pass with every assignment deleted — the
+    // dead-but-green shape this file's header exists to forbid. Pinning the default also fixes the direction
+    // of the failure: a result that forgot to set Scope refuses rather than posing as an entry verdict.
+    [Test]
+    public void Play_is_the_struct_default_so_an_unset_scope_never_reads_as_Entry()
+    {
+        Assert.AreEqual(PlayGateCore.PlayGateScope.Play, default(PlayGateCore.PlayGateResult).Scope);
+        Assert.AreNotEqual(PlayGateCore.PlayGateScope.Entry, default(PlayGateCore.PlayGateResult).Scope);
+    }
+
+    // The two entry returns are separate construction sites (the silent zero-descriptor early return, and the
+    // offender-bearing tail), so each is asserted rather than one standing for both.
+    [Test]
+    public void EvaluateEntry_scopes_the_silent_zero_descriptor_pass_as_Entry()
+    {
+        var r = PlayGateCore.EvaluateEntry(_scene);
+        Assert.IsTrue(r.Pass);
+        Assert.AreEqual(PlayGateCore.PlayGateScope.Entry, r.Scope);
+    }
+
+    [Test]
+    public void EvaluateEntry_scopes_an_offender_bearing_fail_as_Entry()
+    {
+        NewAvatar("A");
+        NewAvatar("B");
+        var r = PlayGateCore.EvaluateEntry(_scene);
+        Assert.IsFalse(r.Pass);
+        CollectionAssert.IsNotEmpty(r.Offenders);
+        Assert.AreEqual(PlayGateCore.PlayGateScope.Entry, r.Scope);
+    }
+
+    // In edit mode the public door IS the entry rules, and the 23 cases above all reach them through it.
+    // Asserted as an equality between the two doors so the dispatch cannot start diverging silently on the
+    // path every other test in this file depends on.
+    [Test]
+    public void Evaluate_in_edit_mode_is_EvaluateEntry()
+    {
+        NewAvatar("A");
+        NewAvatar("B");
+        var viaDispatch = PlayGateCore.Evaluate(_scene);
+        var viaEntry    = PlayGateCore.EvaluateEntry(_scene);
+        Assert.AreEqual(viaEntry.Pass, viaDispatch.Pass);
+        Assert.AreEqual(viaEntry.Scope, viaDispatch.Scope);
+        Assert.AreEqual(PlayGateCore.ConsoleSummaryLine(viaEntry.Offenders),
+                        PlayGateCore.ConsoleSummaryLine(viaDispatch.Offenders));
+    }
+
+    // The play branch itself is unreachable from an EditMode test (nothing here can set
+    // Application.isPlaying), so what IS tested is the refusal's rendered form: it is the one offender an
+    // agent reads through the struct, and it must obey the same single-line grammar as every other one.
+    // The in-play return itself is verified via execute_code on a real venue, not here.
+    [Test]
+    public void Scope_refusal_renders_as_one_flat_line_naming_Scope_and_the_route()
+    {
+        var line = PlayGateCore.ConsoleSummaryLine(FullOffs(
+            (PlayGateCore.ScopeRefusalTag, PlayGateCore.ScopeRefusalMessage, PlayGateCore.ScopeRefusalFix)));
+        Assert.IsFalse(line.Contains("\n"), "the refusal must carry no newline");
+        Assert.IsFalse(line.Contains("\r"), "the refusal must carry no carriage return");
+        StringAssert.Contains("not a scene finding", line);
+        StringAssert.Contains("PlayGateResult.Scope", line);   // the field a caller must branch on
+        StringAssert.Contains("docs/emulator.md", line);       // the route to the real question
+    }
 }
