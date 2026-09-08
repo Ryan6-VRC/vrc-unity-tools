@@ -136,6 +136,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var readNotes = new List<string>();
                 var built = BuiltDeclarations(clone, readNotes, out incomplete);
                 var diff = Diff(census, built, paramFilter, incomplete == null);
+                string geometryKeys;
+                var geometry = GeometrySection(ReadGeometry(root), ReadGeometry(clone), paramFilter, out geometryKeys);
                 string summary = string.Format(CultureInfo.InvariantCulture,
                     // `unattributed=` is deliberately GONE rather than kept with a narrower meaning: it used to
                     // count ambiguity and built-only rows together, so preserving the key while the number moves
@@ -143,7 +145,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // signal that the denominator changed. Renaming both halves makes the change visible.
                     // unlintableSurfaces rides here too, not only EmitPlain: bake is the EXACTNESS mode, so a
                     // surface this run could not walk is where the omission costs most.
-                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} mode=bake => OK | log={12}",
+                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} mode=bake => OK | log={12}",
                     root.name, census.Surfaces.Count, census.Params.Count,
                     diff.Count(d => d.Category == "kept"), diff.Count(d => d.Category == "renamed"),
                     diff.Count(d => d.Category == "dropped"), diff.Count(d => d.Category == "merged"),
@@ -151,7 +153,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     diff.Count(d => d.Category == "vrc-reserved"),
                     diff.Count(d => d.Category == "not-in-scope"),
                     diff.Count(d => d.Category == "built-side-unread"), path,
-                    census.UnlintableSurfaces > 0 ? " unlintableSurfaces=" + census.UnlintableSurfaces : "");
+                    census.UnlintableSurfaces > 0 ? " unlintableSurfaces=" + census.UnlintableSurfaces : "",
+                    geometryKeys);
 
                 var section = new List<string>
                 {
@@ -213,10 +216,186 @@ namespace Ryan6Vrc.AgentTools.Editor
                           + "pre-optimizer view.");
 
                 string body = "summary: " + summary + "\n\n"
-                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section);
+                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry);
                 WriteArtifact(path, body);
                 Debug.Log(summary);
             }   // scope closes: the clone is destroyed and OnPostprocessAvatar fires, in that order
+        }
+
+        // ── Geometry: triangles, authored against built ───────────────────────────────────────────────
+
+        /// <summary>One renderer's triangles on one side of the diff. <c>Unreadable</c> is a THIRD state, not
+        /// a zero: a renderer whose mesh is null, destroyed or unreadable is a named row with an empty count,
+        /// because a 0 in a triangle column reads as "the build emptied this" — the one claim this section
+        /// exists to let a reader make, and the one it must not manufacture.</summary>
+        internal struct GeoRow
+        {
+            public string Path;      // hierarchy path relative to the side's own root
+            public bool Skinned;     // SkinnedMeshRenderer; false is a MeshRenderer read through its MeshFilter
+            public bool Active;      // active in hierarchy AND the renderer component enabled
+            public long Tris;
+            public bool Unreadable;
+            public string Caveat;
+        }
+
+        /// <summary>Every <c>SkinnedMeshRenderer</c> and <c>MeshRenderer</c> under <paramref name="root"/>,
+        /// active or not: the build merges toggled-off renderers into an always-active mesh under NaNimation,
+        /// so "active" is runtime state and filtering on it would report a merge as a deletion.
+        /// <para><b>The built side is readable only inside the bake scope</b>, which is why the call sits where
+        /// it does in <see cref="Run"/>: both optimizers' output meshes live only in memory — AAO's under
+        /// NDMF's generated-asset root that the post-callback's <c>CleanupTemporaryAssets</c> deletes, d4rk's a
+        /// bare <c>new Mesh()</c> never persisted — so after the scope closes there is nothing left to count.
+        /// The other half of the same question is what the chain SKIPS when no upload is happening: VRCFury's
+        /// <c>DisablePluginsWhenNotUploadingHook</c> inhibits six named callback types (Poiyomi's and liltoon's
+        /// material lockdown, UdonSharp's recompile, and the SDK's product/network id assignment), none of
+        /// which touches a mesh — read from VRCFury 1.1427.0's source; re-read that list if a triangle count
+        /// ever disagrees with an uploaded avatar's.</para></summary>
+        internal static List<GeoRow> ReadGeometry(GameObject root)
+        {
+            var rows = new List<GeoRow>();
+            if (root == null) return rows;
+            foreach (var r in root.GetComponentsInChildren<Renderer>(true))
+            {
+                if (r == null) continue;
+                Mesh mesh;
+                bool skinned = r is SkinnedMeshRenderer;
+                if (skinned) mesh = ((SkinnedMeshRenderer)r).sharedMesh;
+                else if (r is MeshRenderer)
+                {
+                    var mf = r.GetComponent<MeshFilter>();
+                    mesh = mf != null ? mf.sharedMesh : null;
+                }
+                else continue;   // particle, trail and line renderers carry no mesh this read counts
+
+                var row = new GeoRow
+                {
+                    Path = RelPath(root, r.transform), Skinned = skinned,
+                    Active = r.gameObject.activeInHierarchy && r.enabled,
+                };
+                if (mesh == null || !mesh.isReadable)
+                {
+                    row.Unreadable = true;
+                    row.Caveat = mesh == null
+                        ? "no mesh (null, destroyed, or a MeshRenderer with no MeshFilter)"
+                        : "mesh is not readable, so its index buffer cannot be counted here";
+                }
+                else
+                {
+                    var skippedTopologies = new List<string>();
+                    for (int s = 0; s < mesh.subMeshCount; s++)
+                    {
+                        var topology = mesh.GetTopology(s);
+                        if (topology == MeshTopology.Triangles) row.Tris += mesh.GetIndexCount(s) / 3;
+                        else skippedTopologies.Add("submesh " + s + " is " + topology);
+                    }
+                    if (skippedTopologies.Count > 0)
+                        row.Caveat = "not counted: " + string.Join(", ", skippedTopologies);
+                }
+                rows.Add(row);
+            }
+            return rows;
+        }
+
+        private static string RelPath(GameObject root, Transform t)
+        {
+            if (t == root.transform) return "(root)";
+            var sb = new StringBuilder(t.name);
+            for (var p = t.parent; p != null && p != root.transform; p = p.parent) sb.Insert(0, p.name + "/");
+            return sb.ToString();
+        }
+
+        /// <summary>The <c>## Geometry</c> table, and (out) the built side's three summary keys. Pure — rows in,
+        /// lines out — so the arithmetic every reading of this section rests on is unit-testable without a bake.
+        /// <para>Rows are keyed on path AND kind, because one transform may carry both a skinned and a mesh
+        /// renderer and a path-only key would silently fold them into one row. <paramref name="paramFilter"/>
+        /// narrows nothing here — it is a parameter-name filter, and a geometry table narrowed by it would
+        /// report a partial avatar under totals that read whole — so it is only disclosed.</para></summary>
+        internal static List<string> GeometrySection(List<GeoRow> authored, List<GeoRow> built,
+                                                     string paramFilter, out string summaryKeys)
+        {
+            var a = KeyRows(authored);
+            var b = KeyRows(built);
+
+            var lines = new List<string>
+            {
+                "built triangles, authored against the clone; paramFilter does not narrow this section"
+                    + (string.IsNullOrEmpty(paramFilter) ? ""
+                       : " (`" + RunLogFormat.Cell(paramFilter) + "` is active and narrows the parameter tables ONLY, so these rows and totals are of the WHOLE avatar)"),
+                "",
+                "| renderer (path) | kind | active | authored tris | built tris | caveat |",
+                "| --- | --- | --- | --- | --- | --- |",
+            };
+            foreach (var k in a.Keys.Union(b.Keys).OrderBy(s => s, StringComparer.Ordinal))
+            {
+                bool inA = a.ContainsKey(k), inB = b.ContainsKey(k);
+                var row = inB ? b[k] : a[k];
+                string presence = inA && inB ? "" : inB ? " (built-only)" : " (authored-only)";
+                var caveats = new List<string>();
+                if (inA && !string.IsNullOrEmpty(a[k].Caveat)) caveats.Add((inB ? "authored: " : "") + a[k].Caveat);
+                if (inB && !string.IsNullOrEmpty(b[k].Caveat)) caveats.Add((inA ? "built: " : "") + b[k].Caveat);
+                // The `active` cell reports the BUILT side where there is one; a side that disagrees is named
+                // rather than dropped, since a renderer the build activates is exactly the NaNimation merge the
+                // population rule above exists for.
+                if (inA && inB && a[k].Active != b[k].Active)
+                    caveats.Add("active differs: authored=" + (a[k].Active ? "yes" : "no"));
+                lines.Add("| `" + RunLogFormat.Cell(row.Path) + "` | " + (row.Skinned ? "skinned" : "mesh") + presence
+                        + " | " + (row.Active ? "yes" : "no")
+                        + " | " + TriCell(a, k) + " | " + TriCell(b, k)
+                        + " | " + RunLogFormat.Cell(string.Join("; ", caveats)) + " |");
+            }
+            foreach (var t in new[] { "all", "skinned", "active" })
+                lines.Add("| total (" + t + ") | | | " + Subtotal(authored, t) + " | " + Subtotal(built, t) + " | |");
+            lines.Add("");
+            lines.Add("**The three subtotals.** `all` is every renderer counted here; `skinned` only the "
+                    + "`SkinnedMeshRenderer`s; `active` only those of them active in the hierarchy with the "
+                    + "component enabled. A **built-only** row is where a merge landed — compare it yourself "
+                    + "against the sum of the authored rows that fed it, which no static read can identify. "
+                    + "An **authored-only** row carries geometry the build removed. This section attributes "
+                    + "nothing to a blendshape: a drop says the triangles went, never which shape's footprint "
+                    + "they were (`ReportShapeOverlap` prints an authored footprint per shape at edit time).");
+            summaryKeys = "tris=" + Subtotal(built, "all") + " trisSkinned=" + Subtotal(built, "skinned")
+                        + " trisActive=" + Subtotal(built, "active");
+            return lines;
+        }
+
+        /// <summary>Unity permits same-named siblings, so path plus kind is not unique: a second renderer on the
+        /// same key takes an ordinal suffix on its displayed path (` #2`, ` #3`, …) in hierarchy order, so every
+        /// renderer keeps its own row and the two sides pair by that order rather than one silently overwriting
+        /// the other.</summary>
+        private static Dictionary<string, GeoRow> KeyRows(List<GeoRow> rows)
+        {
+            var d = new Dictionary<string, GeoRow>(StringComparer.Ordinal);
+            foreach (var r0 in rows)
+            {
+                var r = r0;
+                string kind = r.Skinned ? "skinned" : "mesh";
+                string basePath = r.Path;
+                for (int n = 2; d.ContainsKey(r.Path + " " + kind); n++) r.Path = basePath + " #" + n;
+                d[r.Path + " " + kind] = r;
+            }
+            return d;
+        }
+
+        private static string TriCell(Dictionary<string, GeoRow> side, string k)
+        {
+            if (!side.ContainsKey(k)) return "—";
+            var r = side[k];
+            return r.Unreadable ? "unreadable" : r.Tris.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>An unreadable row contributes nothing to any subtotal — its count is unknown, not zero —
+        /// which is why its row says `unreadable` where a total could not.</summary>
+        private static string Subtotal(List<GeoRow> side, string which)
+        {
+            long sum = 0;
+            foreach (var r in side)
+            {
+                if (r.Unreadable) continue;
+                if (which == "skinned" && !r.Skinned) continue;
+                if (which == "active" && !(r.Skinned && r.Active)) continue;
+                sum += r.Tris;
+            }
+            return sum.ToString(CultureInfo.InvariantCulture);
         }
 
         /// <summary>One row of the diff. <c>Caveat</c> is kept OUT of <c>Surface</c> rather than concatenated into
