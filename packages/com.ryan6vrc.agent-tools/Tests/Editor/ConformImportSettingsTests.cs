@@ -30,9 +30,17 @@ public class ConformImportSettingsTests
         if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", TmpName);
     }
 
+    // Scene objects and in-memory materials the avatar-scope tests build; destroyed after each test.
+    private readonly System.Collections.Generic.List<Object> _sceneObjects = new System.Collections.Generic.List<Object>();
+    private System.Func<string, bool> _isConformable;
+
     [TearDown]
     public void TearDown()
     {
+        UnityEngine.TestTools.LogAssert.ignoreFailingMessages = false;
+        if (_isConformable != null) ConformImportSettings.IsConformable = _isConformable;
+        foreach (var o in _sceneObjects) if (o != null) Object.DestroyImmediate(o);
+        _sceneObjects.Clear();
         if (AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.DeleteAsset(TmpDir);
         AssetDatabase.Refresh();
         if (!Directory.Exists(RunLogFormat.RunLogDir)) return;
@@ -252,6 +260,154 @@ public class ConformImportSettingsTests
         var s = ConformImportSettings.Run(TmpDir);
         Assert.That(s, Does.Contain("conformed: none"),
             "the door is re-runnable by design — a second pass on a clean folder must be a no-op");
+    }
+
+    // ── Avatar scope: the SDK panel's own asset set, and the one class it names but never writes ────────
+
+    [Test]
+    public void AvatarScope_CollectsMeshesTheWayTheSdkDoes_ThenConformsOnlyThose()
+    {
+        // Four unreadable OBJs; the SDK panel's mesh walk reaches three of them.
+        var filterMesh = WriteObj("filter.obj");        // MeshFilter on an active child
+        var skinnedMesh = WriteObj("skinned.obj");      // SkinnedMeshRenderer on an INACTIVE child (walked)
+        var particleMesh = WriteObj("particle.obj");    // ParticleSystemRenderer mesh (walked, despite "skinned" wording)
+        var editorOnlyMesh = WriteObj("editoronly.obj"); // MeshFilter under an EditorOnly subtree (stripped at upload)
+
+        var root = NewGo("ConformScopeRoot");
+        NewGo("Filter", root).AddComponent<MeshFilter>().sharedMesh = AssetDatabase.LoadAssetAtPath<Mesh>(filterMesh);
+        var skinnedGo = NewGo("Skinned", root);
+        skinnedGo.AddComponent<SkinnedMeshRenderer>().sharedMesh = AssetDatabase.LoadAssetAtPath<Mesh>(skinnedMesh);
+        skinnedGo.SetActive(false);
+        var particleGo = NewGo("Particles", root);
+        particleGo.AddComponent<ParticleSystem>();
+        var psr = particleGo.GetComponent<ParticleSystemRenderer>();
+        psr.renderMode = ParticleSystemRenderMode.Mesh;
+        var particleMesh2 = WriteObj("particle2.obj");  // slot 1 — the SDK walks every slot, `.mesh` is slot 0 only
+        psr.SetMeshes(new[] { AssetDatabase.LoadAssetAtPath<Mesh>(particleMesh), AssetDatabase.LoadAssetAtPath<Mesh>(particleMesh2) });
+        var editorOnly = NewGo("Tooling", root);
+        editorOnly.tag = "EditorOnly";
+        NewGo("Gizmo", editorOnly).AddComponent<MeshFilter>().sharedMesh = AssetDatabase.LoadAssetAtPath<Mesh>(editorOnlyMesh);
+
+        var preview = ConformImportSettings.Run(root, whatIf: true);
+        Assert.That(preview, Does.Contain("(whatIf)"));
+        Assert.That(preview, Does.Contain("would conform: mesh-readable=4"),
+            "filter + inactive skinned + both particle slots are the panel's set; the EditorOnly subtree is not");
+        Assert.That(preview, Does.Contain("EditorOnly subtrees excluded"), "the scope note must say what was walked");
+        Assert.That(preview, Does.Contain("=> PASS"));
+        Assert.That(((ModelImporter)AssetImporter.GetAtPath(filterMesh)).isReadable, Is.False, "whatIf must not write");
+
+        var applied = ConformImportSettings.Run(root);
+        Assert.That(applied, Does.Contain("conformed: mesh-readable=4"));
+        Assert.That(((ModelImporter)AssetImporter.GetAtPath(particleMesh2)).isReadable, Is.True, "particle slot 1 is in the panel's set");
+        Assert.That(((ModelImporter)AssetImporter.GetAtPath(filterMesh)).isReadable, Is.True);
+        Assert.That(((ModelImporter)AssetImporter.GetAtPath(skinnedMesh)).isReadable, Is.True);
+        Assert.That(((ModelImporter)AssetImporter.GetAtPath(particleMesh)).isReadable, Is.True);
+        Assert.That(((ModelImporter)AssetImporter.GetAtPath(editorOnlyMesh)).isReadable, Is.False,
+            "an avatar scope writes only what the avatar ships — the EditorOnly mesh is untouched");
+    }
+
+    [Test]
+    public void AvatarScope_TexturesReachThroughMaterials_AndClipsThroughAudioSources()
+    {
+        var png = WritePng("albedo.png");
+        var wav = WriteWav("voice.wav");
+
+        var root = NewGo("ConformScopeRoot");
+        var mat = new Material(Shader.Find("Standard"));
+        _sceneObjects.Add(mat);
+        mat.mainTexture = AssetDatabase.LoadAssetAtPath<Texture2D>(png);
+        var meshGo = NewGo("Body", root);
+        meshGo.AddComponent<MeshFilter>();
+        meshGo.AddComponent<MeshRenderer>().sharedMaterial = mat;
+        NewGo("Voice", root).AddComponent<AudioSource>().clip = AssetDatabase.LoadAssetAtPath<AudioClip>(wav);
+
+        var s = ConformImportSettings.Run(root, whatIf: true);
+        Assert.That(s, Does.Contain("mip-streaming=1"), "a texture is in scope through the material that binds it");
+        Assert.That(s, Does.Contain("audio-background-load=1"), "a clip is in scope through the AudioSource that plays it");
+    }
+
+    [Test]
+    public void AvatarScope_OffenderItMayNotWrite_IsNamedAndFailsInBothModes_AndIsNeverWritten()
+    {
+        var mesh = WriteObj("vendorpkg.obj");
+        var root = NewGo("ConformScopeRoot");
+        NewGo("Prop", root).AddComponent<MeshFilter>().sharedMesh = AssetDatabase.LoadAssetAtPath<Mesh>(mesh);
+
+        // The real predicate refuses Packages/; a test cannot plant an offender there, so the seam marks
+        // this fixture asset unconformable and the plumbing behind the predicate is what gets asserted.
+        _isConformable = ConformImportSettings.IsConformable;
+        ConformImportSettings.IsConformable = path => path != mesh;
+        UnityEngine.TestTools.LogAssert.ignoreFailingMessages = true; // a NOT-PASS verdict is logged at error level by design
+
+        var preview = ConformImportSettings.Run(root, whatIf: true);
+        Assert.That(preview, Does.Contain("NOT CONFORMABLE HERE"));
+        Assert.That(preview, Does.Contain(mesh));
+        Assert.That(preview, Does.Contain("=> NOT-PASS"), "a whatIf PASS over an offender this door cannot fix would argue with its own body");
+
+        var applied = ConformImportSettings.Run(root);
+        Assert.That(applied, Does.Contain("=> NOT-PASS"));
+        Assert.That(applied, Does.Contain("conformed: none"), "the headline counts only what was written");
+        Assert.That(((ModelImporter)AssetImporter.GetAtPath(mesh)).isReadable, Is.False, "named, never written");
+    }
+
+    [Test]
+    public void DefaultConformablePredicate_RefusesOnlyPackages()
+    {
+        Assert.That(ConformImportSettings.IsConformable("Packages/com.llealloo.audiolink/Samples/Mesh.fbx"), Is.False);
+        Assert.That(ConformImportSettings.IsConformable("Packages"), Is.False);
+        Assert.That(ConformImportSettings.IsConformable("Assets/Vendor/Outfits/X/Mesh.fbx"), Is.True,
+            "Assets/Vendor is writable for this class of setting (LAYOUT.md §Vendor mutation)");
+        Assert.That(ConformImportSettings.IsConformable("Assets/PackagesLike/Mesh.fbx"), Is.True);
+    }
+
+    [Test]
+    public void StringScope_ResolvesAPlacedRoot_AndRefusesWhatIsNeither()
+    {
+        var mesh = WriteObj("byname.obj");
+        var root = NewGo("ConformScopeRoot");
+        NewGo("Prop", root).AddComponent<MeshFilter>().sharedMesh = AssetDatabase.LoadAssetAtPath<Mesh>(mesh);
+
+        var byPath = ConformImportSettings.Run("ConformScopeRoot", whatIf: true);
+        Assert.That(byPath, Does.Contain("would conform: mesh-readable=1"), "a hierarchy path is a scope");
+
+        var neither = ConformImportSettings.Run("NoSuchFolderOrObject", whatIf: true);
+        Assert.That(neither, Does.StartWith("[ConformImportSettings] FAIL:"));
+        Assert.That(neither, Does.Contain("asset folder").And.Contain("scene object"), "the refusal names both readings");
+        Assert.That(neither, Does.Not.Contain("| log="));
+    }
+
+    [Test]
+    public void AvatarScope_RootTaggedEditorOnly_IsBareFail_NotASilentPass()
+    {
+        var root = NewGo("ConformScopeRoot");
+        root.tag = "EditorOnly";
+        var s = ConformImportSettings.Run(root, whatIf: true);
+        Assert.That(s, Does.StartWith("[ConformImportSettings] FAIL:").And.Contain("EditorOnly"));
+    }
+
+    [Test]
+    public void StringScope_AmbiguousName_IsBareFailNamingEachMatch()
+    {
+        var a = NewGo("ConformScopeRoot");
+        var b = NewGo("ConformScopeRootTwin");
+        NewGo("Body", a);
+        NewGo("Body", b);
+        var s = ConformImportSettings.Run("Body", whatIf: true);
+        Assert.That(s, Does.StartWith("[ConformImportSettings] FAIL:").And.Contain("ConformScopeRoot/Body").And.Contain("ConformScopeRootTwin/Body"));
+    }
+
+    [Test]
+    public void AvatarScope_NullRoot_IsBareFail()
+    {
+        Assert.That(ConformImportSettings.Run((GameObject)null), Does.StartWith("[ConformImportSettings] FAIL:"));
+    }
+
+    private GameObject NewGo(string name, GameObject parent = null)
+    {
+        var go = new GameObject(name);
+        if (parent != null) go.transform.SetParent(parent.transform, false);
+        else _sceneObjects.Add(go); // roots own their subtree's destruction
+        return go;
     }
 
     // ── Fixture builders ──────────────────────────────────────────────────────────────────────────────
