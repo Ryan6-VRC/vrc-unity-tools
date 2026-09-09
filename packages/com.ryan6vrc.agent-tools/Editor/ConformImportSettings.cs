@@ -6,11 +6,14 @@ using System.Reflection;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Corrects the import settings that hard-fail a driven VRChat upload.
+    /// Corrects the import settings that hard-fail a driven VRChat upload — over an asset folder, or over
+    /// everything a placed avatar root references (the set the SDK panel's own validations walk, so
+    /// <c>whatIf</c> on a root is the pre-build preview of the panel's verdict).
     ///
     /// The VRCSDK's blocking validations read the <b>on-disk importer</b>, not the asset, so no build pass can
     /// correct them and no universally-present pass can be relied on to mask them (VRCFury's texture clone does
@@ -21,9 +24,11 @@ namespace Ryan6Vrc.AgentTools.Editor
     ///
     /// There is deliberately NO <c>force</c> parameter, and that is an instruction to whoever maintains this next.
     /// Elsewhere a vendor write takes <c>force=true</c> to override a real per-asset writable decision
-    /// (<c>TransplantCore.IsWritableAsset</c>, 11 sites). Here the folder argument <i>is</i> the scope decision and
+    /// (<c>TransplantCore.IsWritableAsset</c>, 11 sites). Here the scope argument <i>is</i> the scope decision and
     /// there is no second class of asset a flag could unlock — so a <c>force</c> flag would be unfalsifiable, and
-    /// the guard that actually matters is the refusal of over-broad roots below. Do not add one.
+    /// the guards that actually matter are the refusal of over-broad folder roots below and the one fixed
+    /// per-asset refusal an avatar scope introduces: an offender under <c>Packages/</c> is named, never written,
+    /// because a VPM resolve rewrites that tree and the correction would be discarded, not sanctioned. Do not add one.
     /// </summary>
     [AgentTool]
     public static class ConformImportSettings
@@ -42,17 +47,52 @@ namespace Ryan6Vrc.AgentTools.Editor
         };
 
         private const string ScopeNote = "scope=t:Texture,t:Model,t:AudioClip under this folder only, 5 rows (menu-icon + mip-filter validations excluded — still the operator's)";
+        private const string AvatarScopeNote = "scope=meshes on SkinnedMeshRenderer/MeshFilter/ParticleSystemRenderer, textures on every Renderer's materials, clips on every AudioSource under this root (inactive included, EditorOnly subtrees excluded — the SDK panel's own walk), 5 rows (menu-icon + mip-filter validations excluded — still the operator's)";
 
         // ----- Public API (callable from execute_code / the import skill) ---------------------
 
-        /// <summary>Conform every offending import setting under an asset folder, recursively.
-        /// <paramref name="whatIf"/> previews: identical traversal, nothing written. Returns a one-line
-        /// summary ending with the RunLog path (<c>… =&gt; RESULT | log=&lt;path&gt;</c>); a bad-input early return
-        /// is a bare <c>[ConformImportSettings] FAIL: …</c> with no trailer.</summary>
-        public static string Run(string assetFolderPath, bool whatIf = false)
+        /// <summary>Conform every offending import setting in a scope. <paramref name="scope"/> is an asset
+        /// folder (recursive) or a placed scene root — hierarchy path, instance id, or unique name — whose
+        /// referenced meshes, textures and clips are the set (see <see cref="Run(GameObject, bool)"/>). A folder
+        /// wins when the string is both. <paramref name="whatIf"/> previews: identical traversal, nothing written.
+        /// Returns a one-line summary ending with the RunLog path (<c>… =&gt; RESULT | log=&lt;path&gt;</c>); a
+        /// bad-input early return is a bare <c>[ConformImportSettings] FAIL: …</c> with no trailer.</summary>
+        public static string Run(string scope, bool whatIf = false)
         {
-            if (string.IsNullOrEmpty(assetFolderPath) || !AssetDatabase.IsValidFolder(assetFolderPath))
-                return "[ConformImportSettings] FAIL: not a valid asset folder: " + assetFolderPath;
+            if (string.IsNullOrEmpty(scope))
+                return "[ConformImportSettings] FAIL: empty scope: pass an asset folder (e.g. Assets/Vendor/Outfits/<Name>) or a placed avatar root.";
+            if (AssetDatabase.IsValidFolder(scope)) return RunFolder(scope, whatIf);
+            var go = Resolve(scope);
+            if (go != null) return Run(go, whatIf);
+            return "[ConformImportSettings] FAIL: neither a valid asset folder nor a scene object: " + scope
+                 + " (an asset folder such as Assets/Vendor/Outfits/<Name>, or a placed avatar root's hierarchy path).";
+        }
+
+        /// <summary>Conform every offending import setting behind a placed avatar root: the meshes on every
+        /// SkinnedMeshRenderer / MeshFilter / ParticleSystemRenderer, the textures on every Renderer's materials,
+        /// and the clips on every AudioSource — inactive objects included, <c>EditorOnly</c>-tagged subtrees
+        /// excluded — which is the set the VRCSDK panel's own validations collect
+        /// (<c>com.vrchat.avatars/Editor/VRCSDK/SDK3A/VRCSdkControlPanelAvatarBuilder.cs</c>: the two
+        /// <c>CheckAvatarMeshesFor…</c> checks, <c>VerifyAvatarMipMapStreaming</c>, <c>VerifyMaxTextureSize</c>,
+        /// the AudioSource loop in <c>ValidateFeatures</c>). Read from the placed hierarchy, not a build: a mesh
+        /// the build merges away is still conformed here, which costs nothing and is where the setting belongs.
+        /// An offender under <c>Packages/</c> is named and never written; its presence makes the verdict
+        /// <c>NOT-PASS</c> in either mode, because the scope will not end up conformed by this door.</summary>
+        public static string Run(GameObject avatarRoot, bool whatIf = false)
+        {
+            if (avatarRoot == null)
+                return "[ConformImportSettings] FAIL: avatar root is null: pass a placed scene root.";
+
+            var r = new Report { Target = HierarchyPath(avatarRoot), WhatIf = whatIf, AvatarScope = true };
+            var set = CollectAvatarAssets(avatarRoot);
+            Scan(set.Textures, set.Models, set.Clips, r);
+            foreach (var f in r.Findings) f.Conformable = IsConformable(f.Path);
+            if (!whatIf && r.Findings.Any(f => f.Conformable)) Apply(r);
+            return Finish(r, RunLogFormat.Leaf(r.Target));
+        }
+
+        private static string RunFolder(string assetFolderPath, bool whatIf)
+        {
 
             // The folder argument is the only bound on a write that is partly lossy, so the roots are refused by
             // name rather than trusted. `Assets` would clamp every oversize cap in the project; a `Packages` tree
@@ -63,19 +103,152 @@ namespace Ryan6Vrc.AgentTools.Editor
                      + "): pass the specific vendor or owned folder to conform, e.g. Assets/Vendor/Outfits/<Name>.";
 
             var r = new Report { Target = assetFolderPath, WhatIf = whatIf };
-            Scan(assetFolderPath, r);
+            var roots = new[] { assetFolderPath };
+            Scan(PathsOfType("t:Texture", roots), PathsOfType("t:Model", roots), PathsOfType("t:AudioClip", roots), r);
+            foreach (var f in r.Findings) f.Conformable = true; // the root refusal above already bounded the scope
             if (!whatIf && r.Findings.Count > 0) Apply(r);
             return Finish(r, RunLogFormat.Leaf(assetFolderPath));
         }
 
+        /// <summary>Whether this door may write an offender found through an avatar scope. The one class it
+        /// refuses is <c>Packages/</c>: a VPM resolve rewrites that tree, so the write is discarded rather than
+        /// sanctioned (the same reason the folder door refuses that root by name). Deliberately narrower than
+        /// <c>TransplantCore.IsWritableAsset</c> — <c>Assets/Vendor/</c> IS writable for this class of setting
+        /// (`docs/LAYOUT.md` §Vendor mutation). A test seam, restored by its test.</summary>
+        internal static Func<string, bool> IsConformable = DefaultIsConformable;
+
+        private static bool DefaultIsConformable(string assetPath)
+        {
+            var norm = (assetPath ?? "").Replace('\\', '/');
+            return !(norm == "Packages" || norm.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase));
+        }
+
+        // ----- Avatar scope: the SDK panel's own asset set ------------------------------------
+
+        private struct AssetSet
+        {
+            public List<string> Textures;
+            public List<string> Models;
+            public List<string> Clips;
+        }
+
+        private static AssetSet CollectAvatarAssets(GameObject root)
+        {
+            var textures = new HashSet<string>(StringComparer.Ordinal);
+            var models = new HashSet<string>(StringComparer.Ordinal);
+            var clips = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var go in WalkExcludingEditorOnly(root.transform))
+            {
+                // Meshes: exactly the three renderer kinds the SDK's GetAllMeshesInGameObjectHierarchy walks.
+                // The error string the panel prints says "skinned meshes"; the predicate does not.
+                foreach (var smr in go.GetComponents<SkinnedMeshRenderer>()) AddAssetPath(models, smr.sharedMesh);
+                foreach (var mf in go.GetComponents<MeshFilter>()) AddAssetPath(models, mf.sharedMesh);
+                foreach (var psr in go.GetComponents<ParticleSystemRenderer>()) AddAssetPath(models, psr.mesh);
+
+                // Textures: every texture slot on every material of every Renderer (both panel texture checks).
+                foreach (var rend in go.GetComponents<Renderer>())
+                    foreach (var m in rend.sharedMaterials)
+                    {
+                        if (m == null) continue;
+                        foreach (int id in m.GetTexturePropertyNameIDs()) AddAssetPath(textures, m.GetTexture(id));
+                    }
+
+                foreach (var src in go.GetComponents<AudioSource>()) AddAssetPath(clips, src.clip);
+            }
+
+            return new AssetSet
+            {
+                Textures = textures.OrderBy(p => p, StringComparer.Ordinal).ToList(),
+                Models = models.OrderBy(p => p, StringComparer.Ordinal).ToList(),
+                Clips = clips.OrderBy(p => p, StringComparer.Ordinal).ToList(),
+            };
+        }
+
+        private static void AddAssetPath(HashSet<string> into, UnityEngine.Object obj)
+        {
+            if (obj == null) return;
+            var path = AssetDatabase.GetAssetPath(obj);
+            if (!string.IsNullOrEmpty(path)) into.Add(path); // a scene-only or built-in object has no importer
+        }
+
+        /// <summary>Every GameObject under (and including) <paramref name="root"/>, inactive included, skipping
+        /// any subtree whose root carries the <c>EditorOnly</c> tag — the objects VRChat strips at upload and the
+        /// panel therefore never validates.</summary>
+        private static IEnumerable<GameObject> WalkExcludingEditorOnly(Transform root)
+        {
+            if (root.CompareTag("EditorOnly")) yield break;
+            yield return root.gameObject;
+            foreach (Transform child in root)
+                foreach (var go in WalkExcludingEditorOnly(child)) yield return go;
+        }
+
+        // ----- Scene resolver (path → instance id → name; mirrors CheckAvatar.Resolve, kept local) -------
+
+        private static GameObject Resolve(string target)
+        {
+            if (string.IsNullOrEmpty(target)) return null;
+            var byPath = FindByHierarchyPath(target);
+            if (byPath != null) return byPath;
+
+            if (int.TryParse(target.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
+            {
+                var obj = EditorUtility.InstanceIDToObject(id);
+                if (obj is GameObject go) return go;
+                if (obj is Component comp) return comp.gameObject;
+            }
+
+            foreach (var rootGo in SceneManager.GetActiveScene().GetRootGameObjects())
+            {
+                var hit = FindByNameRecursive(rootGo.transform, target);
+                if (hit != null) return hit.gameObject;
+            }
+            return null;
+        }
+
+        private static GameObject FindByHierarchyPath(string path)
+        {
+            var segs = path.Trim('/').Split('/');
+            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
+            {
+                if (root.name != segs[0]) continue;
+                Transform t = root.transform;
+                bool ok = true;
+                for (int i = 1; i < segs.Length && ok; i++)
+                {
+                    t = t.Find(segs[i]);
+                    if (t == null) ok = false;
+                }
+                if (ok) return t.gameObject;
+            }
+            return null;
+        }
+
+        private static Transform FindByNameRecursive(Transform t, string name)
+        {
+            if (t.name == name) return t;
+            foreach (Transform child in t)
+            {
+                var hit = FindByNameRecursive(child, name);
+                if (hit != null) return hit;
+            }
+            return null;
+        }
+
+        private static string HierarchyPath(GameObject go)
+        {
+            var parts = new List<string>();
+            for (var t = go.transform; t != null; t = t.parent) parts.Add(t.name);
+            parts.Reverse();
+            return string.Join("/", parts);
+        }
+
         // ----- Scanning -----------------------------------------------------------------------
 
-        private static void Scan(string folder, Report r)
+        private static void Scan(IEnumerable<string> texturePaths, IEnumerable<string> modelPaths, IEnumerable<string> clipPaths, Report r)
         {
-            var roots = new[] { folder };
-
             int cap = MaxSdkTextureSize(r);
-            foreach (var path in PathsOfType("t:Texture", roots))
+            foreach (var path in texturePaths)
             {
                 // Null for every asset whose importer is not a TextureImporter: native-format assets
                 // (.renderTexture, a CreateAsset texture), .dds via IHVImageFormatImporter, and textures
@@ -113,7 +286,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             var legacyProp = LegacyNormalsProperty(r);
-            foreach (var path in PathsOfType("t:Model", roots))
+            foreach (var path in modelPaths)
             {
                 var mi = AssetImporter.GetAtPath(path) as ModelImporter;
                 if (mi == null) { r.Skipped++; continue; }
@@ -135,7 +308,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     r.Add(path, RowLegacyNormals, "blendshape normals = Calculate without legacy", false);
             }
 
-            foreach (var path in PathsOfType("t:AudioClip", roots))
+            foreach (var path in clipPaths)
             {
                 var ai = AssetImporter.GetAtPath(path) as AudioImporter;
                 if (ai == null) { r.Skipped++; continue; }
@@ -169,7 +342,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // SaveAndReimport independently and pay twice); and reimporting a model destroys and recreates
             // its Mesh objects, so any asset object collected during the scan is dead afterwards. Nothing
             // below dereferences a scanned object — only paths.
-            var byPath = r.Findings.GroupBy(f => f.Path).ToList();
+            var byPath = r.Findings.Where(f => f.Conformable).GroupBy(f => f.Path).ToList();
             var legacyProp = LegacyNormalsProperty(r);
             int cap = MaxSdkTextureSize(r);
 
@@ -235,7 +408,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // Truth is on disk, not in the write call. A row whose importer accepted the setter but whose
             // flag did not survive the import would otherwise re-fire on the next run while this one
             // claimed success, so the reported count is re-derived by re-running each predicate.
-            foreach (var f in r.Findings) f.Persisted = !StillOffending(f, legacyProp, cap);
+            foreach (var f in r.Findings.Where(f => f.Conformable)) f.Persisted = !StillOffending(f, legacyProp, cap);
         }
 
         private static bool StillOffending(Finding f, PropertyInfo legacyProp, int cap)
@@ -382,12 +555,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Detail;
             public bool Downscales;
             public bool Persisted;
+            public bool Conformable;   // false ⇒ named, never written (avatar scope, under Packages/)
         }
 
         private sealed class Report
         {
             public string Target;
             public bool WhatIf;
+            public bool AvatarScope;
             public int Scanned;
             public int Skipped;
             public readonly List<Finding> Findings = new List<Finding>();
@@ -428,10 +603,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             var downscaled = r.Findings.Where(f => f.Downscales).Select(f => f.Path).Distinct().ToList();
             var notPersisted = r.WhatIf
                 ? new List<Finding>()
-                : r.Findings.Where(f => !f.Persisted).ToList();
+                : r.Findings.Where(f => f.Conformable && !f.Persisted).ToList();
+            // Named in both modes and failing in both: the scope will not be conformed by this door, so a
+            // whatIf PASS over it would argue with its own body.
+            var notConformable = r.Findings.Where(f => !f.Conformable).Select(f => f.Path).Distinct().ToList();
 
-            bool pass = notPersisted.Count == 0 && r.Unwritten.Count == 0 && r.WriteErrors.Count == 0;
-            string result = r.WhatIf ? "PASS" : (pass ? "PASS" : "NOT-PASS");
+            bool pass = notPersisted.Count == 0 && r.Unwritten.Count == 0 && r.WriteErrors.Count == 0
+                     && notConformable.Count == 0;
+            string result = pass ? "PASS" : "NOT-PASS";
 
             string verb = r.WhatIf ? "would conform" : "conformed";
             var sb = new StringBuilder();
@@ -444,6 +623,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append(" | CAPPED BELOW SOURCE on ").Append(downscaled.Count).Append(" path(s): ")
                   .Append(string.Join(", ", downscaled.Take(5)))
                   .Append(downscaled.Count > 5 ? ", …" : "");
+            if (notConformable.Count > 0)
+                sb.Append(" | NOT CONFORMABLE HERE (under Packages/, a VPM resolve reverts the write) on ")
+                  .Append(notConformable.Count).Append(" path(s): ")
+                  .Append(string.Join(", ", notConformable.Take(5)))
+                  .Append(notConformable.Count > 5 ? ", …" : "");
             if (notPersisted.Count > 0)
                 sb.Append(" | NOT PERSISTED: ")
                   .Append(string.Join(", ", notPersisted.Select(f => f.Row + "@" + f.Path).Take(5)))
@@ -457,7 +641,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append(" | ROWS SKIPPED: ").Append(string.Join("; ", r.SkippedRows));
             if (r.Notes.Count > 0)
                 sb.Append(" | NOTE: ").Append(string.Join("; ", r.Notes));
-            sb.Append(" | ").Append(ScopeNote);
+            sb.Append(" | ").Append(r.AvatarScope ? AvatarScopeNote : ScopeNote);
             sb.Append(" => ").Append(result);
 
             string summary = RunLogFormat.WriteRunLog(RunLogDir, "conformimportsettings_" + label, sb.ToString(), BuildLog(r, label, result), ".json");
@@ -483,7 +667,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("  \"clipLoadFailures\": ").Append(r.ClipLoadFailures).Append(",\n");
             sb.Append("  \"writeErrors\": [").Append(string.Join(", ", r.WriteErrors.Select(RunLogFormat.Q))).Append("],\n");
             sb.Append("  \"notes\": [").Append(string.Join(", ", r.Notes.Select(RunLogFormat.Q))).Append("],\n");
-            sb.Append("  \"scope\": ").Append(RunLogFormat.Q(ScopeNote)).Append(",\n");
+            sb.Append("  \"scope\": ").Append(RunLogFormat.Q(r.AvatarScope ? AvatarScopeNote : ScopeNote)).Append(",\n");
+            sb.Append("  \"scopeKind\": ").Append(RunLogFormat.Q(r.AvatarScope ? "avatar" : "folder")).Append(",\n");
             sb.Append("  \"rowsSkipped\": [");
             sb.Append(string.Join(", ", r.SkippedRows.Select(RunLogFormat.Q)));
             sb.Append("],\n");
@@ -495,8 +680,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                   .Append(", \"path\": ").Append(RunLogFormat.Q(f.Path))
                   .Append(", \"detail\": ").Append(RunLogFormat.Q(f.Detail))
                   .Append(", \"cappedBelowSource\": ").Append(f.Downscales ? "true" : "false")
-                  .Append(", \"written\": ").Append(r.WhatIf ? "false" : (r.Unwritten.Contains(f.Path) ? "false" : "true"))
-                  .Append(", \"persisted\": ").Append(r.WhatIf ? "null" : (f.Persisted ? "true" : "false"))
+                  .Append(", \"conformable\": ").Append(f.Conformable ? "true" : "false")
+                  .Append(", \"written\": ").Append(r.WhatIf || !f.Conformable ? "false" : (r.Unwritten.Contains(f.Path) ? "false" : "true"))
+                  .Append(", \"persisted\": ").Append(r.WhatIf || !f.Conformable ? "null" : (f.Persisted ? "true" : "false"))
                   .Append(" }").Append(i + 1 < r.Findings.Count ? "," : "").Append("\n");
             }
             sb.Append("  ],\n");
