@@ -62,10 +62,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (string.IsNullOrEmpty(scope))
                 return "[ConformImportSettings] FAIL: empty scope: pass an asset folder (e.g. Assets/Vendor/Outfits/<Name>) or a placed avatar root.";
             if (AssetDatabase.IsValidFolder(scope)) return RunFolder(scope, whatIf);
-            GameObject go;
-            try { go = Resolve(scope); }
-            catch (ArgumentException e) { return "[ConformImportSettings] FAIL: ambiguous scope: " + e.Message; }
-            if (go != null) return Run(go, whatIf);
+            var handle = SceneHandle.Resolve(scope);
+            if (handle.Ok) return Run(handle.Object, whatIf);
+            if (handle.Outcome != SceneHandleOutcome.NotFound)
+                return "[ConformImportSettings] FAIL: " + handle.Refusal;
             return "[ConformImportSettings] FAIL: neither a valid asset folder nor a scene object: " + scope
                  + " (an asset folder such as Assets/Vendor/Outfits/<Name>, or a placed avatar root's hierarchy path).";
         }
@@ -200,54 +200,6 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // ----- Scene resolver (path → instance id → name; mirrors CheckAvatar.Resolve, kept local) -------
-
-        private static GameObject Resolve(string target)
-        {
-            if (string.IsNullOrEmpty(target)) return null;
-            var byPath = FindByHierarchyPath(target);
-            if (byPath != null) return byPath;
-
-            if (int.TryParse(target.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
-            {
-                var obj = EditorUtility.InstanceIDToObject(id);
-                if (obj is GameObject go) return go;
-                if (obj is Component comp) return comp.gameObject;
-            }
-
-            // A bare name must be unique: this door writes, and first-wins would pick which .meta files change.
-            var hits = new List<Transform>();
-            foreach (var rootGo in SceneManager.GetActiveScene().GetRootGameObjects())
-                CollectByName(rootGo.transform, target, hits);
-            if (hits.Count == 1) return hits[0].gameObject;
-            if (hits.Count > 1)
-                throw new ArgumentException("name '" + target + "' matches " + hits.Count + " objects: "
-                    + string.Join(", ", hits.Select(h => HierarchyPath(h.gameObject))) + " — pass one hierarchy path.");
-            return null;
-        }
-
-        private static GameObject FindByHierarchyPath(string path)
-        {
-            var segs = path.Trim('/').Split('/');
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                if (root.name != segs[0]) continue;
-                Transform t = root.transform;
-                bool ok = true;
-                for (int i = 1; i < segs.Length && ok; i++)
-                {
-                    t = t.Find(segs[i]);
-                    if (t == null) ok = false;
-                }
-                if (ok) return t.gameObject;
-            }
-            return null;
-        }
-
-        private static void CollectByName(Transform t, string name, List<Transform> into)
-        {
-            if (t.name == name) into.Add(t);
-            foreach (Transform child in t) CollectByName(child, name, into);
-        }
 
         private static string HierarchyPath(GameObject go)
         {

@@ -91,9 +91,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             float? yaw = null,
             bool whatIf = false)
         {
-            var root = RenderThumbnailCore.Resolve(target);
-            if (root == null)
-                return Fail(target, "target not found — tried hierarchy path, instance id, then name in the active scene");
+            var handle = Ryan6Vrc.AgentTools.Editor.SceneHandle.Resolve(target);
+            if (!handle.Ok) return Fail(target, handle.Refusal);
+            var root = handle.Object;
             string label = root.name;
 
             var descriptor = root.GetComponent<VRC.SDKBase.VRC_AvatarDescriptor>();

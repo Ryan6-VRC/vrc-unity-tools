@@ -532,57 +532,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ===== Target resolution: hierarchy-path -> instance-id -> name (mirrors RenderAvatar's resolver) =====
 
-        internal static GameObject Resolve(string target)
-        {
-            if (string.IsNullOrEmpty(target)) return null;
-            var byPath = FindByHierarchyPath(target);
-            if (byPath != null) return byPath;
-
-            if (int.TryParse(target.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
-            {
-                var obj = EditorUtility.InstanceIDToObject(id);
-                if (obj is GameObject go) return go;
-                if (obj is Component comp) return comp.gameObject;
-            }
-
-            var scene = SceneManager.GetActiveScene();
-            foreach (var rootGo in scene.GetRootGameObjects())
-            {
-                var hit = FindByNameRecursive(rootGo.transform, target);
-                if (hit != null) return hit.gameObject;
-            }
-            return null;
-        }
-
-        private static GameObject FindByHierarchyPath(string path)
-        {
-            var segs = path.Trim('/').Split('/');
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                if (root.name != segs[0]) continue;
-                Transform t = root.transform;
-                bool ok = true;
-                for (int i = 1; i < segs.Length && ok; i++)
-                {
-                    t = t.Find(segs[i]);
-                    if (t == null) ok = false;
-                }
-                if (ok) return t.gameObject;
-            }
-            return null;
-        }
-
-        private static Transform FindByNameRecursive(Transform t, string name)
-        {
-            if (t.name == name) return t;
-            foreach (Transform child in t)
-            {
-                var hit = FindByNameRecursive(child, name);
-                if (hit != null) return hit;
-            }
-            return null;
-        }
-
         // ----- Session RunLogs ------------------------------------------------------------------
         // Both thumbnail doors used to write no RunLog at all — they borrowed RunLogFormat.Sanitize for a temp
         // PNG name and nothing else. So the fitting sweep's "which doors were driven" signal was blind to both

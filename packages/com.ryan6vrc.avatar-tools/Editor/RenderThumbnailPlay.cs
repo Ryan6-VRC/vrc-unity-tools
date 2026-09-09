@@ -217,8 +217,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var venue = SceneManager.GetActiveScene();
                 if (string.IsNullOrEmpty(venue.path)) { AbortBegin(); return Fail("the venue scene is unsaved (no disk path) — save it or pass a scenePath"); }
 
-                var target0 = RenderThumbnailCore.Resolve(target);
-                if (target0 == null) { AbortBegin(); return Fail("target '" + target + "' not found in the venue scene"); }
+                var handle = Ryan6Vrc.AgentTools.Editor.SceneHandle.Resolve(target, new[] { venue });
+                if (!handle.Ok) { AbortBegin(); return Fail(handle.Refusal + " (searched the venue scene only — this door's emulator and play gate are both venue-scoped)"); }
+                var target0 = handle.Object;
                 var descriptor = target0.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
                 if (descriptor == null) { AbortBegin(); return Fail("no VRCAvatarDescriptor on '" + target0.name + "'"); }
 

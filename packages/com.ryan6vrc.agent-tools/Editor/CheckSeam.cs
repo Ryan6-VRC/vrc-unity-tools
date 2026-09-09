@@ -71,10 +71,12 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         public static string Run(string baseRoot, string mergeableRoot)
         {
-            var baseGO = Resolve(baseRoot);
-            if (baseGO == null) return RefuseMisuse("base root '" + baseRoot + "' not found in the active scene");
-            var mergeGO = Resolve(mergeableRoot);
-            if (mergeGO == null) return RefuseMisuse("mergeable root '" + mergeableRoot + "' not found in the active scene");
+            var baseHandle = SceneHandle.Resolve(baseRoot);
+            if (!baseHandle.Ok) return RefuseMisuse(baseHandle.Refusal);
+            var baseGO = baseHandle.Object;
+            var mergeHandle = SceneHandle.Resolve(mergeableRoot);
+            if (!mergeHandle.Ok) return RefuseMisuse(mergeHandle.Refusal);
+            var mergeGO = mergeHandle.Object;
 
             var human = ResolveHumanoid(baseGO);
             if (human.Bones.Count == 0)
@@ -131,10 +133,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// </summary>
         public static string CheckBare(string baseRoot, string mergeableRoot, float maxOffsetMm)
         {
-            var baseGO = Resolve(baseRoot);
-            if (baseGO == null) return RefuseMisuse("base root '" + baseRoot + "' not found in the active scene", BareLabel);
-            var mergeGO = Resolve(mergeableRoot);
-            if (mergeGO == null) return RefuseMisuse("mergeable root '" + mergeableRoot + "' not found in the active scene", BareLabel);
+            var baseHandle = SceneHandle.Resolve(baseRoot);
+            if (!baseHandle.Ok) return RefuseMisuse(baseHandle.Refusal, BareLabel);
+            var baseGO = baseHandle.Object;
+            var mergeHandle = SceneHandle.Resolve(mergeableRoot);
+            if (!mergeHandle.Ok) return RefuseMisuse(mergeHandle.Refusal, BareLabel);
+            var mergeGO = mergeHandle.Object;
             // Name-matching a skeleton against itself pairs every bone with itself at distance 0 and PASSes at
             // any tolerance. The seam door cannot reach this (no seam maps a root onto itself); the bare door
             // has to refuse it, and the same object is only the visible half. The dangerous half is CONTAINMENT:
@@ -735,57 +739,6 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // ── Scene resolver (path → instance id → name; copied verbatim from CheckAvatar.Resolve) ────────
-
-        private static GameObject Resolve(string target)
-        {
-            if (string.IsNullOrEmpty(target)) return null;
-            var byPath = FindByHierarchyPath(target);
-            if (byPath != null) return byPath;
-
-            if (int.TryParse(target.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
-            {
-                var obj = EditorUtility.InstanceIDToObject(id);
-                if (obj is GameObject go) return go;
-                if (obj is Component comp) return comp.gameObject;
-            }
-
-            foreach (var rootGo in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                var hit = FindByNameRecursive(rootGo.transform, target);
-                if (hit != null) return hit.gameObject;
-            }
-            return null;
-        }
-
-        private static GameObject FindByHierarchyPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return null;
-            var segs = path.Trim('/').Split('/');
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                if (root.name != segs[0]) continue;
-                Transform t = root.transform;
-                bool ok = true;
-                for (int i = 1; i < segs.Length && ok; i++)
-                {
-                    t = t.Find(segs[i]);
-                    if (t == null) ok = false;
-                }
-                if (ok) return t.gameObject;
-            }
-            return null;
-        }
-
-        private static Transform FindByNameRecursive(Transform t, string name)
-        {
-            if (t.name == name) return t;
-            foreach (Transform child in t)
-            {
-                var hit = FindByNameRecursive(child, name);
-                if (hit != null) return hit;
-            }
-            return null;
-        }
 
         private static string PathOf(GameObject go)
         {
