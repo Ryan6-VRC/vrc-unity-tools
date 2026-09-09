@@ -47,7 +47,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         };
 
         private const string ScopeNote = "scope=t:Texture,t:Model,t:AudioClip under this folder only, 5 rows (menu-icon + mip-filter validations excluded — still the operator's)";
-        private const string AvatarScopeNote = "scope=meshes on SkinnedMeshRenderer/MeshFilter/ParticleSystemRenderer, textures on every Renderer's materials, clips on every AudioSource under this root (inactive included, EditorOnly subtrees excluded — the SDK panel's own walk), 5 rows (menu-icon + mip-filter validations excluded — still the operator's)";
+        private const string AvatarScopeNote = "scope=meshes on SkinnedMeshRenderer/MeshFilter/ParticleSystemRenderer, textures on every Renderer's materials, clips on every AudioSource under this root (inactive included, EditorOnly subtrees excluded — the SDK panel's own walk; clips an animator Play Audio behaviour names are NOT collected — still the panel's), 5 rows (menu-icon + mip-filter validations excluded — still the operator's)";
 
         // ----- Public API (callable from execute_code / the import skill) ---------------------
 
@@ -62,7 +62,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (string.IsNullOrEmpty(scope))
                 return "[ConformImportSettings] FAIL: empty scope: pass an asset folder (e.g. Assets/Vendor/Outfits/<Name>) or a placed avatar root.";
             if (AssetDatabase.IsValidFolder(scope)) return RunFolder(scope, whatIf);
-            var go = Resolve(scope);
+            GameObject go;
+            try { go = Resolve(scope); }
+            catch (ArgumentException e) { return "[ConformImportSettings] FAIL: ambiguous scope: " + e.Message; }
             if (go != null) return Run(go, whatIf);
             return "[ConformImportSettings] FAIL: neither a valid asset folder nor a scene object: " + scope
                  + " (an asset folder such as Assets/Vendor/Outfits/<Name>, or a placed avatar root's hierarchy path).";
@@ -83,6 +85,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (avatarRoot == null)
                 return "[ConformImportSettings] FAIL: avatar root is null: pass a placed scene root.";
 
+            if (avatarRoot.CompareTag("EditorOnly"))
+                return "[ConformImportSettings] FAIL: " + HierarchyPath(avatarRoot)
+                     + " is tagged EditorOnly, so the panel never validates it and this scope would scan nothing; pass the avatar root itself.";
+
             var r = new Report { Target = HierarchyPath(avatarRoot), WhatIf = whatIf, AvatarScope = true };
             var set = CollectAvatarAssets(avatarRoot);
             Scan(set.Textures, set.Models, set.Clips, r);
@@ -98,7 +104,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             // name rather than trusted. `Assets` would clamp every oversize cap in the project; a `Packages` tree
             // is rewritten by `vrc-get resolve` anyway, so a write there is discarded rather than sanctioned.
             var norm = assetFolderPath.Replace('\\', '/').TrimEnd('/');
-            if (norm == "Assets" || norm == "Packages" || norm.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(norm, "Assets", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(norm, "Packages", StringComparison.OrdinalIgnoreCase)
+                || norm.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
                 return "[ConformImportSettings] FAIL: refusing an over-broad or non-durable root (" + assetFolderPath
                      + "): pass the specific vendor or owned folder to conform, e.g. Assets/Vendor/Outfits/<Name>.";
 
@@ -120,7 +128,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static bool DefaultIsConformable(string assetPath)
         {
             var norm = (assetPath ?? "").Replace('\\', '/');
-            return !(norm == "Packages" || norm.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase));
+            return !(string.Equals(norm, "Packages", StringComparison.OrdinalIgnoreCase)
+                     || norm.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase));
         }
 
         // ----- Avatar scope: the SDK panel's own asset set ------------------------------------
@@ -144,7 +153,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // The error string the panel prints says "skinned meshes"; the predicate does not.
                 foreach (var smr in go.GetComponents<SkinnedMeshRenderer>()) AddAssetPath(models, smr.sharedMesh);
                 foreach (var mf in go.GetComponents<MeshFilter>()) AddAssetPath(models, mf.sharedMesh);
-                foreach (var psr in go.GetComponents<ParticleSystemRenderer>()) AddAssetPath(models, psr.mesh);
+                foreach (var psr in go.GetComponents<ParticleSystemRenderer>())
+                {
+                    // Every slot, not `.mesh` (slot 0 only): the SDK allocates `meshCount` and calls GetMeshes.
+                    var slots = new Mesh[psr.meshCount];
+                    psr.GetMeshes(slots);
+                    foreach (var m in slots) AddAssetPath(models, m);
+                }
 
                 // Textures: every texture slot on every material of every Renderer (both panel texture checks).
                 foreach (var rend in go.GetComponents<Renderer>())
@@ -157,6 +172,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var src in go.GetComponents<AudioSource>()) AddAssetPath(clips, src.clip);
             }
 
+            textures.ExceptWith(models); // an FBX-embedded texture resolves to the .fbx path: already a model row
             return new AssetSet
             {
                 Textures = textures.OrderBy(p => p, StringComparer.Ordinal).ToList(),
@@ -198,11 +214,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (obj is Component comp) return comp.gameObject;
             }
 
+            // A bare name must be unique: this door writes, and first-wins would pick which .meta files change.
+            var hits = new List<Transform>();
             foreach (var rootGo in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                var hit = FindByNameRecursive(rootGo.transform, target);
-                if (hit != null) return hit.gameObject;
-            }
+                CollectByName(rootGo.transform, target, hits);
+            if (hits.Count == 1) return hits[0].gameObject;
+            if (hits.Count > 1)
+                throw new ArgumentException("name '" + target + "' matches " + hits.Count + " objects: "
+                    + string.Join(", ", hits.Select(h => HierarchyPath(h.gameObject))) + " — pass one hierarchy path.");
             return null;
         }
 
@@ -224,15 +243,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             return null;
         }
 
-        private static Transform FindByNameRecursive(Transform t, string name)
+        private static void CollectByName(Transform t, string name, List<Transform> into)
         {
-            if (t.name == name) return t;
-            foreach (Transform child in t)
-            {
-                var hit = FindByNameRecursive(child, name);
-                if (hit != null) return hit;
-            }
-            return null;
+            if (t.name == name) into.Add(t);
+            foreach (Transform child in t) CollectByName(child, name, into);
         }
 
         private static string HierarchyPath(GameObject go)
@@ -593,14 +607,16 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static string Finish(Report r, string label)
         {
+            // Only findings this door acts on: a NOT CONFORMABLE path is named in its own clause, and counting it
+            // under "conformed:" would claim a write that never happened.
             var perRow = AllRows
-                .Select(row => new { row, n = r.Findings.Count(f => f.Row == row) })
+                .Select(row => new { row, n = r.Findings.Count(f => f.Row == row && f.Conformable) })
                 .Where(x => x.n > 0)
                 .Select(x => x.row + "=" + x.n)
                 .ToList();
             string rows = perRow.Count == 0 ? "none" : string.Join(" ", perRow);
 
-            var downscaled = r.Findings.Where(f => f.Downscales).Select(f => f.Path).Distinct().ToList();
+            var downscaled = r.Findings.Where(f => f.Downscales && f.Conformable).Select(f => f.Path).Distinct().ToList();
             var notPersisted = r.WhatIf
                 ? new List<Finding>()
                 : r.Findings.Where(f => f.Conformable && !f.Persisted).ToList();
@@ -624,7 +640,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                   .Append(string.Join(", ", downscaled.Take(5)))
                   .Append(downscaled.Count > 5 ? ", …" : "");
             if (notConformable.Count > 0)
-                sb.Append(" | NOT CONFORMABLE HERE (under Packages/, a VPM resolve reverts the write) on ")
+                sb.Append(" | NOT CONFORMABLE HERE (under Packages/, a VPM resolve reverts the write; copy the asset under Assets/ and repoint the reference, or accept the panel's own fix knowing a resolve reverts it) on ")
                   .Append(notConformable.Count).Append(" path(s): ")
                   .Append(string.Join(", ", notConformable.Take(5)))
                   .Append(notConformable.Count > 5 ? ", …" : "");
@@ -645,7 +661,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append(" => ").Append(result);
 
             string summary = RunLogFormat.WriteRunLog(RunLogDir, "conformimportsettings_" + label, sb.ToString(), BuildLog(r, label, result), ".json");
-            if (result == "PASS") Debug.Log(summary); else Debug.LogError(summary);
+            if (result == "PASS") Debug.Log(summary);
+            else if (r.WhatIf) Debug.LogWarning(summary); // a preview wrote nothing; the verdict is the finding
+            else Debug.LogError(summary);
             return summary;
         }
 

@@ -282,21 +282,23 @@ public class ConformImportSettingsTests
         particleGo.AddComponent<ParticleSystem>();
         var psr = particleGo.GetComponent<ParticleSystemRenderer>();
         psr.renderMode = ParticleSystemRenderMode.Mesh;
-        psr.mesh = AssetDatabase.LoadAssetAtPath<Mesh>(particleMesh);
+        var particleMesh2 = WriteObj("particle2.obj");  // slot 1 — the SDK walks every slot, `.mesh` is slot 0 only
+        psr.SetMeshes(new[] { AssetDatabase.LoadAssetAtPath<Mesh>(particleMesh), AssetDatabase.LoadAssetAtPath<Mesh>(particleMesh2) });
         var editorOnly = NewGo("Tooling", root);
         editorOnly.tag = "EditorOnly";
         NewGo("Gizmo", editorOnly).AddComponent<MeshFilter>().sharedMesh = AssetDatabase.LoadAssetAtPath<Mesh>(editorOnlyMesh);
 
         var preview = ConformImportSettings.Run(root, whatIf: true);
         Assert.That(preview, Does.Contain("(whatIf)"));
-        Assert.That(preview, Does.Contain("would conform: mesh-readable=3"),
-            "filter + inactive skinned + particle mesh are the panel's set; the EditorOnly subtree is not");
+        Assert.That(preview, Does.Contain("would conform: mesh-readable=4"),
+            "filter + inactive skinned + both particle slots are the panel's set; the EditorOnly subtree is not");
         Assert.That(preview, Does.Contain("EditorOnly subtrees excluded"), "the scope note must say what was walked");
         Assert.That(preview, Does.Contain("=> PASS"));
         Assert.That(((ModelImporter)AssetImporter.GetAtPath(filterMesh)).isReadable, Is.False, "whatIf must not write");
 
         var applied = ConformImportSettings.Run(root);
-        Assert.That(applied, Does.Contain("conformed: mesh-readable=3"));
+        Assert.That(applied, Does.Contain("conformed: mesh-readable=4"));
+        Assert.That(((ModelImporter)AssetImporter.GetAtPath(particleMesh2)).isReadable, Is.True, "particle slot 1 is in the panel's set");
         Assert.That(((ModelImporter)AssetImporter.GetAtPath(filterMesh)).isReadable, Is.True);
         Assert.That(((ModelImporter)AssetImporter.GetAtPath(skinnedMesh)).isReadable, Is.True);
         Assert.That(((ModelImporter)AssetImporter.GetAtPath(particleMesh)).isReadable, Is.True);
@@ -344,6 +346,7 @@ public class ConformImportSettingsTests
 
         var applied = ConformImportSettings.Run(root);
         Assert.That(applied, Does.Contain("=> NOT-PASS"));
+        Assert.That(applied, Does.Contain("conformed: none"), "the headline counts only what was written");
         Assert.That(((ModelImporter)AssetImporter.GetAtPath(mesh)).isReadable, Is.False, "named, never written");
     }
 
@@ -371,6 +374,26 @@ public class ConformImportSettingsTests
         Assert.That(neither, Does.StartWith("[ConformImportSettings] FAIL:"));
         Assert.That(neither, Does.Contain("asset folder").And.Contain("scene object"), "the refusal names both readings");
         Assert.That(neither, Does.Not.Contain("| log="));
+    }
+
+    [Test]
+    public void AvatarScope_RootTaggedEditorOnly_IsBareFail_NotASilentPass()
+    {
+        var root = NewGo("ConformScopeRoot");
+        root.tag = "EditorOnly";
+        var s = ConformImportSettings.Run(root, whatIf: true);
+        Assert.That(s, Does.StartWith("[ConformImportSettings] FAIL:").And.Contain("EditorOnly"));
+    }
+
+    [Test]
+    public void StringScope_AmbiguousName_IsBareFailNamingEachMatch()
+    {
+        var a = NewGo("ConformScopeRoot");
+        var b = NewGo("ConformScopeRootTwin");
+        NewGo("Body", a);
+        NewGo("Body", b);
+        var s = ConformImportSettings.Run("Body", whatIf: true);
+        Assert.That(s, Does.StartWith("[ConformImportSettings] FAIL:").And.Contain("ConformScopeRoot/Body").And.Contain("ConformScopeRootTwin/Body"));
     }
 
     [Test]
