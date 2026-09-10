@@ -250,4 +250,99 @@ public class AvatarRecordLogicTests
         StringAssert.Contains("ReportAvatarRecord", r);
         StringAssert.Contains("Do NOT re-run", r);
     }
+
+    // ── The image ────────────────────────────────────────────────────────────────────────────
+
+    static bool Missing(string p) => false;
+    static bool Present(string p) => true;
+
+    [Test] public void Image_NullIsNotAnError()
+        => Assert.IsNull(AvatarRecordLogic.ValidateImagePath(null, Present));
+
+    // An empty string is the "clear it" idiom for tags. There is no delete-image call, so the same input
+    // here is a caller error — and reading it as an omission would silently drop the attach.
+    [Test] public void Image_EmptyIsRefusedAndSaysItCannotBeCleared()
+        => StringAssert.Contains("never cleared", AvatarRecordLogic.ValidateImagePath("", Present));
+
+    // Existence is checked in the guard, not the async body: the image is attached AFTER the metadata
+    // write, so a late rejection would leave the name landed and the thumbnail refused.
+    [Test] public void Image_MissingFileIsRefusedBeforeAnythingIsWritten()
+        => StringAssert.Contains("does not exist",
+                                 AvatarRecordLogic.ValidateImagePath("C:/none/x.png", Missing));
+
+    [Test] public void Image_NonImageExtensionIsRefused()
+        => StringAssert.Contains("not a .png", AvatarRecordLogic.ValidateImagePath("C:/x/y.txt", Present));
+
+    [Test] public void Image_AcceptsThePathAThumbnailDoorReports()
+        => Assert.IsNull(AvatarRecordLogic.ValidateImagePath("C:/out/thumb_Row.png", Present));
+
+    // UploadException carries no status field, so the shape-based classifier cannot see it and the message
+    // is the only signal. Both SDK throw sites share this phrase.
+    [Test] public void Image_AlreadyUploadedIsRecognisedFromTheMessage()
+    {
+        Assert.IsTrue(AvatarRecordLogic.IsAlreadyUploaded("This file was already uploaded"));
+        Assert.IsTrue(AvatarRecordLogic.IsAlreadyUploaded(
+            "This file was already uploaded, you should make a new build"));
+    }
+
+    [Test] public void Image_AnUnrelatedFailureIsNotMistakenForAlreadyUploaded()
+        => Assert.IsFalse(AvatarRecordLogic.IsAlreadyUploaded("Failed to get signature MD5, exiting upload"));
+
+    [Test] public void Image_NullMessageDoesNotThrow()
+        => Assert.IsFalse(AvatarRecordLogic.IsAlreadyUploaded(null));
+
+    // The quiet failure: UpdateAvatarImage returns the record UNMODIFIED when the upload produced no URL.
+    // An unmoved image url is the only observable, so it must read as a failure and not as success.
+    [Test] public void Image_UnmovedUrlIsReportedAsNotChanged()
+    {
+        var r = AvatarRecordLogic.DescribeImageLanding(false);
+        StringAssert.Contains("DID NOT CHANGE", r);
+        StringAssert.Contains("still the old one", r);
+    }
+
+    [Test] public void Image_MovedUrlIsReportedAsLanded()
+        => StringAssert.Contains("image landed", AvatarRecordLogic.DescribeImageLanding(true));
+
+    // The already-uploaded row must NOT assert the requested thumbnail is published. The SDK matches the
+    // MD5 against the file's LATEST version while the record references a version by url, and those differ
+    // after an attach whose upload completed and whose final url PUT did not — which is exactly where the
+    // recommended re-run lands. Asserting success there would make the documented remedy a false PASS.
+    [Test] public void Image_AlreadyUploadedDoesNotClaimThePublishedThumbnailIsTheRequestedOne()
+    {
+        var r = AvatarRecordLogic.ImageAlreadyUploadedRow();
+        StringAssert.Contains("does NOT prove", r);
+        StringAssert.Contains("latest version", r);
+    }
+
+    // 422 on an image tells the caller to change text the request never carried.
+    [Test] public void Image_ModerationRejectionNamesTheImageNotTheText()
+    {
+        var r = AvatarRecordLogic.RefuseForStatus(422, null, forImage: true);
+        StringAssert.Contains("image", r);
+        StringAssert.DoesNotContain("change the text", r);
+    }
+
+    [Test] public void Image_ModerationRejectionStillNamesTextWhenNotAnImage()
+        => StringAssert.Contains("change the text",
+                                 AvatarRecordLogic.RefuseForStatus(422, null, forImage: false));
+
+    // A lost image attach and a lost metadata write need OPPOSITE advice: re-running the image is safe
+    // (a byte-identical re-upload is refused as a no-op), and no read can reconcile it.
+    [Test] public void Interrupted_ImageSentSaysReRunRatherThanReconcile()
+    {
+        var r = AvatarRecordLogic.InterruptedVerdict("UpdateAvatarRecord", "Row",
+                                                     AvatarRecordLogic.Phase.ImageSent, "editor reloaded");
+        StringAssert.Contains("RE-RUN", r);
+        StringAssert.Contains("cannot see it", r);
+        StringAssert.DoesNotContain("Do NOT re-run", r);
+    }
+
+    // An image alone is a real edit, so the "nothing to change" refusal must not fire on it — otherwise
+    // attaching a thumbnail without touching the metadata would be inexpressible.
+    [Test] public void Image_AloneIsSomethingToDo()
+        => Assert.IsNull(AvatarRecordLogic.CheckSomethingToDo(null, null, null, "C:/out/t.png"));
+
+    [Test] public void Image_AllFourNullStillRefusesAndNamesTheImageArgument()
+        => StringAssert.Contains("newImagePath",
+                                 AvatarRecordLogic.CheckSomethingToDo(null, null, null, null));
 }

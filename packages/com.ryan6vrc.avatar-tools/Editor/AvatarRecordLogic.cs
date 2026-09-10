@@ -129,8 +129,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// not exist and for one this account may not see, and the door cannot tell those apart — so the
         /// text names both branches rather than asserting the one it cannot prove.</summary>
         internal static string RefuseForStatus(int? statusCode, string serverMessage)
+            => RefuseForStatus(statusCode, serverMessage, forImage: false);
+
+        /// <summary>As above, but able to name the IMAGE as what was rejected.
+        ///
+        /// Only 422 differs. Its text tells the caller to change the offending text, which is the right
+        /// instruction for a name or description and a wrong one for an image-only call — there is no text
+        /// in that request to change.</summary>
+        internal static string RefuseForStatus(int? statusCode, string serverMessage, bool forImage)
         {
             string tail = string.IsNullOrEmpty(serverMessage) ? "" : " — server said: " + Escape(serverMessage);
+            if (forImage && statusCode == 422)
+                return "the VRChat moderation filter rejected this image — shoot a different one rather " +
+                       "than retrying the same file" + tail;
             switch (statusCode)
             {
                 case 401:
@@ -199,13 +210,91 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Every field is null-means-unchanged, so "change nothing" is expressible and is almost always a
         /// caller bug — a door that silently posted the record back unchanged would still bump the server's
         /// Version and report PASS, which reads as a successful edit that never happened.</summary>
-        internal static string CheckSomethingToDo(string newName, string newDescription, string[] newTags)
+        internal static string CheckSomethingToDo(string newName, string newDescription, string[] newTags,
+                                                  string newImagePath = null)
         {
-            if (newName == null && newDescription == null && newTags == null)
+            if (newName == null && newDescription == null && newTags == null && newImagePath == null)
                 return "nothing to change — every field is null (null means \"leave it alone\"). Pass at " +
-                       "least one of newName / newDescription / newTags.";
+                       "least one of newName / newDescription / newTags / newImagePath.";
             return null;
         }
+
+        // ── The image ───────────────────────────────────────────────────────────────────────────
+
+        /// <summary>Reject an image the call cannot use, BEFORE anything is written.
+        ///
+        /// This runs in the synchronous guard rather than the async body on purpose: the image is attached
+        /// after the metadata write, so a path rejected late would leave a half-applied call behind — the
+        /// name landed, the thumbnail refused. Existence is checked here for the same reason.
+        ///
+        /// There is no way to CLEAR a thumbnail: the API exposes no delete-image call, only a replace. So
+        /// an empty string is a caller error rather than the "clear it" idiom an empty tag array is, and
+        /// saying so beats letting it read as an omission.
+        ///
+        /// The extension list is a caller-fixable shape check, not a mirror of server policy — the API is
+        /// what decides what it accepts, and its refusal reaches the caller intact.</summary>
+        internal static string ValidateImagePath(string newImagePath, Func<string, bool> fileExists)
+        {
+            if (newImagePath == null) return null;
+            if (newImagePath.Trim().Length == 0)
+                return "newImagePath is empty — a thumbnail can be replaced but never cleared (the API has " +
+                       "no delete-image call), so pass a path or pass null to leave it alone";
+            if (newImagePath != newImagePath.Trim())
+                return "newImagePath has leading/trailing whitespace — pass it already trimmed";
+
+            var lower = newImagePath.ToLowerInvariant();
+            if (!lower.EndsWith(".png") && !lower.EndsWith(".jpg") && !lower.EndsWith(".jpeg"))
+                return "newImagePath is not a .png/.jpg/.jpeg: " + Quote(newImagePath);
+            if (fileExists != null && !fileExists(newImagePath))
+                return "newImagePath does not exist: " + Quote(newImagePath) +
+                       " — pass the png= path a thumbnail door reported";
+            return null;
+        }
+
+        /// <summary>Whether a failed image upload is the SDK refusing a file it already holds.
+        ///
+        /// <c>UploadFile</c> throws when the candidate's MD5 matches the version already stored. That is not
+        /// a failure for this door: the requested image IS what is published. It matters because thumbnails
+        /// here are deliberately disposable and re-shot on any change, and a deterministic renderer produces
+        /// a byte-identical file whenever nothing about the avatar moved — so the no-op re-attach is the
+        /// common case, not an edge one.
+        ///
+        /// Matched on the message because <c>UploadException</c> carries no status field of any kind, so the
+        /// shape-based classifier that handles every API error cannot see it. The prefix is what both of the
+        /// SDK's two throw sites share.</summary>
+        internal static bool IsAlreadyUploaded(string exceptionMessage)
+            => exceptionMessage != null &&
+               exceptionMessage.IndexOf("was already uploaded", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        /// <summary>Report what the image half did, given whether the record's image URL moved.
+        ///
+        /// Takes the decision as a BOOL rather than re-deriving it from the URLs, because the caller's
+        /// verdict and this sentence must not be able to disagree: a verdict recovered by string-matching
+        /// the prose would flip to PASS the moment the wording changed, which is the same defect that rules
+        /// out <c>hasThumbnail</c> below.
+        ///
+        /// The move has to be observed at the call site rather than read back later: <c>hasThumbnail</c> is
+        /// a bool off <c>ThumbnailImageUrl</c>, a different and server-derived field already true on any
+        /// avatar ever uploaded, so it cannot distinguish a landed attach from a no-op.</summary>
+        internal static string DescribeImageLanding(bool moved)
+            => moved
+                ? "image landed (the record's image url moved)"
+                : "image DID NOT CHANGE — the API returned the record unmodified, which is how a failed " +
+                  "upload surfaces without throwing; the published thumbnail is still the old one";
+
+        /// <summary>The row for an upload the SDK refused because it already holds the file.
+        ///
+        /// Deliberately does NOT claim the published thumbnail is the requested one, because the door
+        /// cannot know that. The SDK derives the file id from the record's image url but compares the MD5
+        /// against the file's LATEST version, and those differ after a run whose upload completed and whose
+        /// final url PUT did not: the record still points at the older version while the newer one matches.
+        /// The recovery this door recommends — re-running — lands exactly there, so asserting success would
+        /// turn the documented remedy into a false PASS.</summary>
+        internal static string ImageAlreadyUploadedRow()
+            => "image not re-uploaded — the server already holds a byte-identical file. Normally that " +
+               "means the requested thumbnail is published; it does NOT prove it, because the match is " +
+               "against the file's latest version and the record may reference an older one after an " +
+               "interrupted attach. Confirm in the client if it matters.";
 
         // ── Landing (server-side sanitization) ──────────────────────────────────────────────────
 
@@ -264,7 +353,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// must be told. The distinction is the whole point: a lost READ costs nothing, while a lost WRITE
         /// may have landed on the server, and reporting either as a plain failure invites a re-run that
         /// silently double-writes or a false belief that nothing changed.</summary>
-        internal enum Phase { Reading, UpdateSent }
+        /// <summary>How far an operation had got. <c>ImageSent</c> is distinct from <c>UpdateSent</c>
+        /// because the two need OPPOSITE advice: a lost metadata write must not be re-issued blindly, while
+        /// a lost image attach is safe to re-run — the SDK refuses a byte-identical re-upload outright.
+        /// Collapsing them would tell the caller to reconcile with a read that cannot see an image.</summary>
+        internal enum Phase { Reading, UpdateSent, ImageSent }
 
         /// <summary>The verdict for an operation this editor can no longer observe — a domain reload during
         /// the call, or a frame budget that expired with the request still in flight.
@@ -274,6 +367,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// it is the only way the caller can find out what is actually true.</summary>
         internal static string InterruptedVerdict(string door, string handle, Phase phase, string cause)
         {
+            if (phase == Phase.ImageSent)
+                return "[avatar-record] " + door + " handle=" + Quote(handle) + " => UNKNOWN " + cause +
+                       " while the thumbnail was uploading; any metadata in the same call had already " +
+                       "landed. No read can tell you whether the image arrived — ReportAvatarRecord " +
+                       "cannot see it. Simply RE-RUN the same call: an image the server already holds is " +
+                       "refused as a no-op, so a re-run either completes the attach or reports it absent.";
             if (phase == Phase.UpdateSent)
                 return "[avatar-record] " + door + " handle=" + Quote(handle) + " => UNKNOWN " + cause +
                        " AFTER the update was sent — it may well have landed on the server. Do NOT re-run " +
