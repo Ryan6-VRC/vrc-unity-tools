@@ -34,8 +34,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     }
 
     /// <summary>The one string→scene-GameObject resolver behind every string scene handle in `agent-tools` and
-    /// `avatar-tools`. Ladder: hierarchy path → instance id → bare name, each rung trying the ACTIVE scene alone
-    /// before widening to the other loaded scenes.
+    /// `avatar-tools`. Ladder: hierarchy path → instance id → bare name, over the ACTIVE scene.
     ///
     /// <para>Two measured facts pin the domain, neither obvious from the API:</para>
     /// <list type="bullet">
@@ -44,7 +43,9 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// separately in <c>EditorSceneManager.previewSceneCount</c>. So enumerating buys the exclusion structurally;
     /// an <c>isLoaded</c> filter is emphatically NOT what buys it, and adding one would read as if it were.</item>
     /// <item><see cref="EditorUtility.InstanceIDToObject"/> is not scene-scoped, so the id rung is the only one
-    /// that can reach out of the domain — which is why it alone returns <see cref="SceneHandleOutcome.OutOfDomain"/>.</item>
+    /// that can reach outside the active scene — which is why it alone returns
+    /// <see cref="SceneHandleOutcome.OutOfDomain"/>, covering a prefab asset, a prefab stage and another
+    /// loaded scene alike.</item>
     /// </list>
     ///
     /// <para>Not here: resolving a path RELATIVE to a known root (`RenderAvatar.ResolveDescendant`). That is a
@@ -53,53 +54,30 @@ namespace Ryan6Vrc.AgentTools.Editor
     {
         internal static SceneHandleResult Resolve(string handle)
         {
-            return Resolve(handle, Domain());
-        }
-
-        /// <summary>Domain-explicit overload. The test seam: a fixture cannot add a second scene to the venue's
-        /// domain (`NewScene(Additive)` throws on the batchmode venue's unsaved untitled scene, and a preview
-        /// scene does not enumerate), so multi-scene behaviour is only reachable by passing the domain in.</summary>
-        internal static SceneHandleResult Resolve(string handle, IReadOnlyList<Scene> domain)
-        {
             if (string.IsNullOrEmpty(handle))
                 return Refuse(SceneHandleOutcome.NotFound, "empty scene handle: pass a hierarchy path, an instance id, or an object name.");
 
-            var active = SceneManager.GetActiveScene();
+            var scene = SceneManager.GetActiveScene();
 
             // Ladder order is path → id → name, preserved from the twelve copies this replaces. The two
             // deviations both exist to keep a refusal from dead-ending: an Ambiguous path falls through to the
             // id rung (otherwise a handle that is BOTH a duplicated name and an instance id refuses while
             // advising the very handle it refused), and an out-of-domain id yields to an Ambiguous path, whose
             // message is the more actionable of the two.
-            var byPath = ByPath(handle, domain, active);
+            var byPath = ByPath(handle, scene);
             if (byPath.Ok) return byPath;
 
-            var byId = ById(handle, domain);
+            var byId = ById(handle, scene);
             if (byId.Ok) return byId;
             if (byPath.Outcome == SceneHandleOutcome.Ambiguous) return byPath;
             if (byId.Outcome == SceneHandleOutcome.OutOfDomain) return byId;
 
-            var byName = ByName(handle, domain, active);
+            var byName = ByName(handle, scene);
             if (byName.Ok || byName.Outcome == SceneHandleOutcome.Ambiguous) return byName;
 
             return Refuse(SceneHandleOutcome.NotFound,
-                "'" + handle + "' not found in " + DescribeDomain(domain)
+                "'" + handle + "' not found in scene '" + scene.name + "'"
                 + " — tried hierarchy path, instance id, then object name.");
-        }
-
-        // ── Domain ────────────────────────────────────────────────────────────────────────────────────────
-
-        /// <summary>Every loaded scene. <c>IsValid()</c> is not belt-and-braces: <c>Scene.GetRootGameObjects()</c>
-        /// throws <c>ArgumentException</c> on an invalid or unloaded scene.</summary>
-        internal static List<Scene> Domain()
-        {
-            var scenes = new List<Scene>();
-            for (int i = 0; i < SceneManager.sceneCount; i++)
-            {
-                var s = SceneManager.GetSceneAt(i);
-                if (s.IsValid() && s.isLoaded) scenes.Add(s);
-            }
-            return scenes;
         }
 
         /// <summary>Roots a handle may name. <c>HideInHierarchy</c> roots are excluded because the operator
@@ -114,17 +92,13 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Rung 1: hierarchy path ────────────────────────────────────────────────────────────────────────
 
-        private static SceneHandleResult ByPath(string handle, IReadOnlyList<Scene> domain, Scene active)
+        private static SceneHandleResult ByPath(string handle, Scene scene)
         {
             var segs = handle.Trim('/').Split('/');
-            return ActiveFirst(domain, active, scenes =>
-            {
-                var hits = new List<GameObject>();
-                foreach (var s in scenes)
-                    foreach (var root in Roots(s))
-                        if (root.name == segs[0]) Descend(root, segs, 1, hits);
-                return hits;
-            }, handle, "hierarchy path");
+            var hits = new List<GameObject>();
+            foreach (var root in Roots(scene))
+                if (root.name == segs[0]) Descend(root, segs, 1, hits);
+            return Decide(hits, handle, "hierarchy path");
         }
 
         /// <summary>Branching descent. Never <c>Transform.Find</c>: it returns the FIRST same-named child, so a
@@ -140,7 +114,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Rung 2: instance id ───────────────────────────────────────────────────────────────────────────
 
-        private static SceneHandleResult ById(string handle, IReadOnlyList<Scene> domain)
+        private static SceneHandleResult ById(string handle, Scene scene)
         {
             int id;
             if (!int.TryParse(handle.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out id))
@@ -151,27 +125,23 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (go == null) { var comp = obj as Component; if (comp != null) go = comp.gameObject; }
             if (go == null) return new SceneHandleResult { Outcome = SceneHandleOutcome.NotFound };
 
-            foreach (var s in domain) if (go.scene == s) return new SceneHandleResult { Outcome = SceneHandleOutcome.Found, Object = go };
+            if (go.scene == scene) return new SceneHandleResult { Outcome = SceneHandleOutcome.Found, Object = go };
 
             // Split by cause: a prefab ASSET is on disk and has no scene at all, while a prefab stage or a
             // preview scene is a live scene the enumeration deliberately omits. One message for both would send
             // the reader looking in a scene for something that is a file, or vice versa.
             return Refuse(SceneHandleOutcome.OutOfDomain, go.scene.IsValid()
-                ? "instance id " + id + " ('" + go.name + "') is in prefab isolation or another preview scene — grab from a loaded scene."
+                ? "instance id " + id + " ('" + go.name + "') is not in the active scene (prefab isolation, a preview scene, or another loaded scene) — open or activate the scene holding it."
                 : "instance id " + id + " ('" + go.name + "') is inside a prefab asset, not a loaded scene — place it, or pass an asset path to a door that takes one.");
         }
 
         // ── Rung 3: bare name ─────────────────────────────────────────────────────────────────────────────
 
-        private static SceneHandleResult ByName(string handle, IReadOnlyList<Scene> domain, Scene active)
+        private static SceneHandleResult ByName(string handle, Scene scene)
         {
-            return ActiveFirst(domain, active, scenes =>
-            {
-                var hits = new List<GameObject>();
-                foreach (var s in scenes)
-                    foreach (var root in Roots(s)) CollectByName(root, handle, hits);
-                return hits;
-            }, handle, "object name");
+            var hits = new List<GameObject>();
+            foreach (var root in Roots(scene)) CollectByName(root, handle, hits);
+            return Decide(hits, handle, "object name");
         }
 
         private static void CollectByName(Transform t, string name, List<GameObject> into)
@@ -180,25 +150,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (Transform child in t) CollectByName(child, name, into);
         }
 
-        // ── Active-scene-first ────────────────────────────────────────────────────────────────────────────
+        // ── Deciding ─────────────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Run a rung over the active scene alone, and only widen to the other loaded scenes when the
-        /// active scene names nothing. Two things this buys, both load-bearing: a handle that resolves today
-        /// keeps resolving to the same object (the active scene is searched first and wins outright), and the
-        /// agent gets a DURABLE way to say which scene it means — make that scene active — where an instance id
-        /// is minted per session and cannot be carried in a skill line, a RunLog, or a handoff. Ambiguity inside
-        /// the active scene refuses rather than widening: the handle is already wrong where the work is.</summary>
-        private static SceneHandleResult ActiveFirst(
-            IReadOnlyList<Scene> domain, Scene active, System.Func<IEnumerable<Scene>, List<GameObject>> run,
-            string handle, string rung)
+        /// <summary>One hit resolves; several refuse. Refusing beats picking even for a read door — a wrong
+        /// object reported confidently is worse than a refusal that hands back the handles which disambiguate.</summary>
+        private static SceneHandleResult Decide(List<GameObject> hits, string handle, string rung)
         {
-            var activeOnly = new List<Scene>();
-            var rest = new List<Scene>();
-            foreach (var s in domain) { if (s == active) activeOnly.Add(s); else rest.Add(s); }
-
-            var hits = activeOnly.Count > 0 ? run(activeOnly) : new List<GameObject>();
-            if (hits.Count == 0 && rest.Count > 0) hits = run(rest);
-
             if (hits.Count == 1) return new SceneHandleResult { Outcome = SceneHandleOutcome.Found, Object = hits[0] };
             if (hits.Count == 0) return new SceneHandleResult { Outcome = SceneHandleOutcome.NotFound };
 
@@ -215,20 +172,12 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Rendering ─────────────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Scene-qualified path plus instance id. The qualifier is a prefix, never inserted between path
-        /// segments, so the path a caller passed remains a substring of what the refusal echoes back.</summary>
+        /// <summary>Hierarchy path plus instance id — the two handles that disambiguate, in the order a caller
+        /// should try them. The id is last resort: two objects can share a path only across scenes, which this
+        /// resolver does not span, but duplicate-named siblings make paths equal in practice.</summary>
         private static string Describe(GameObject go)
         {
-            return "[" + go.scene.name + "] " + MergeSurfaces.PathOf(go) + " (id " + go.GetInstanceID() + ")";
-        }
-
-        private static string DescribeDomain(IReadOnlyList<Scene> domain)
-        {
-            if (domain.Count == 0) return "any loaded scene (none are loaded)";
-            if (domain.Count == 1) return "scene '" + domain[0].name + "'";
-            var sb = new StringBuilder("the ").Append(domain.Count).Append(" loaded scenes (");
-            for (int i = 0; i < domain.Count; i++) { if (i > 0) sb.Append(", "); sb.Append(domain[i].name); }
-            return sb.Append(")").ToString();
+            return MergeSurfaces.PathOf(go) + " (id " + go.GetInstanceID() + ")";
         }
 
         private static SceneHandleResult Refuse(SceneHandleOutcome outcome, string refusal)
