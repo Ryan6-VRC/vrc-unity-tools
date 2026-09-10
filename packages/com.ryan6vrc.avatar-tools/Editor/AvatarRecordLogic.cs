@@ -199,12 +199,75 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Every field is null-means-unchanged, so "change nothing" is expressible and is almost always a
         /// caller bug — a door that silently posted the record back unchanged would still bump the server's
         /// Version and report PASS, which reads as a successful edit that never happened.</summary>
-        internal static string CheckSomethingToDo(string newName, string newDescription, string[] newTags)
+        internal static string CheckSomethingToDo(string newName, string newDescription, string[] newTags,
+                                                  string newImagePath = null)
         {
-            if (newName == null && newDescription == null && newTags == null)
+            if (newName == null && newDescription == null && newTags == null && newImagePath == null)
                 return "nothing to change — every field is null (null means \"leave it alone\"). Pass at " +
-                       "least one of newName / newDescription / newTags.";
+                       "least one of newName / newDescription / newTags / newImagePath.";
             return null;
+        }
+
+        // ── The image ───────────────────────────────────────────────────────────────────────────
+
+        /// <summary>Reject an image the call cannot use, BEFORE anything is written.
+        ///
+        /// This runs in the synchronous guard rather than the async body on purpose: the image is attached
+        /// after the metadata write, so a path rejected late would leave a half-applied call behind — the
+        /// name landed, the thumbnail refused. Existence is checked here for the same reason.
+        ///
+        /// There is no way to CLEAR a thumbnail: the API exposes no delete-image call, only a replace. So
+        /// an empty string is a caller error rather than the "clear it" idiom an empty tag array is, and
+        /// saying so beats letting it read as an omission.
+        ///
+        /// The extension list is a caller-fixable shape check, not a mirror of server policy — the API is
+        /// what decides what it accepts, and its refusal reaches the caller intact.</summary>
+        internal static string ValidateImagePath(string newImagePath, Func<string, bool> fileExists)
+        {
+            if (newImagePath == null) return null;
+            if (newImagePath.Trim().Length == 0)
+                return "newImagePath is empty — a thumbnail can be replaced but never cleared (the API has " +
+                       "no delete-image call), so pass a path or pass null to leave it alone";
+            if (newImagePath != newImagePath.Trim())
+                return "newImagePath has leading/trailing whitespace — pass it already trimmed";
+
+            var lower = newImagePath.ToLowerInvariant();
+            if (!lower.EndsWith(".png") && !lower.EndsWith(".jpg") && !lower.EndsWith(".jpeg"))
+                return "newImagePath is not a .png/.jpg/.jpeg: " + Quote(newImagePath);
+            if (fileExists != null && !fileExists(newImagePath))
+                return "newImagePath does not exist: " + Quote(newImagePath) +
+                       " — pass the png= path a thumbnail door reported";
+            return null;
+        }
+
+        /// <summary>Whether a failed image upload is the SDK refusing a file it already holds.
+        ///
+        /// <c>UploadFile</c> throws when the candidate's MD5 matches the version already stored. That is not
+        /// a failure for this door: the requested image IS what is published. It matters because thumbnails
+        /// here are deliberately disposable and re-shot on any change, and a deterministic renderer produces
+        /// a byte-identical file whenever nothing about the avatar moved — so the no-op re-attach is the
+        /// common case, not an edge one.
+        ///
+        /// Matched on the message because <c>UploadException</c> carries no status field of any kind, so the
+        /// shape-based classifier that handles every API error cannot see it. The prefix is what both of the
+        /// SDK's two throw sites share.</summary>
+        internal static bool IsAlreadyUploaded(string exceptionMessage)
+            => exceptionMessage != null &&
+               exceptionMessage.IndexOf("was already uploaded", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        /// <summary>Report what the image half did, derived from whether the record's image URL moved.
+        ///
+        /// The URL itself never reaches output (the no-ids rule), so this reports the CHANGE as a bool. It
+        /// has to be derived here rather than read back later: <c>ReportAvatarRecord</c>'s
+        /// <c>hasThumbnail</c> is a bool off <c>ThumbnailImageUrl</c>, a different and server-derived field
+        /// that is already true on any avatar that has ever been uploaded — so it cannot distinguish a
+        /// landed attach from a no-op, and using it as the success check would pass on failure.</summary>
+        internal static string DescribeImageLanding(string beforeUrl, string afterUrl)
+        {
+            if (string.Equals(beforeUrl, afterUrl, StringComparison.Ordinal))
+                return "image DID NOT CHANGE — the API returned the record unmodified, which is how a " +
+                       "failed upload surfaces without throwing; the published thumbnail is still the old one";
+            return "image landed (the record's image url moved)";
         }
 
         // ── Landing (server-side sanitization) ──────────────────────────────────────────────────

@@ -90,6 +90,38 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return Invoke(m, new object[] { id, record, CancellationToken.None }, out task, out failReason);
         }
 
+        /// <summary>Kick <c>VRCApi.UpdateAvatarImage(id, record, pathToImage, onProgress, ct)</c>.
+        ///
+        /// Unlike <see cref="TryUpdateAvatarInfo"/> this does NOT post the record: it uploads the file and
+        /// then PUTs <c>{"imageUrl": …}</c> alone. Two fields are read off <paramref name="record"/> — the
+        /// name, only to label the uploaded file, and the image url, from which the SDK derives the file id
+        /// the new image is stored as a VERSION of. That is why the record must be one the API just handed
+        /// back: a hand-built one has no image url, so the derivation silently takes the new-file branch.
+        ///
+        /// <paramref name="onProgress"/> is passed to keep the driver's frame budget honest — the upload
+        /// contains seconds of unconditional delay, far longer than the two JSON round trips the budget was
+        /// sized for, so progress has to count as liveness.</summary>
+        internal static bool TryUpdateAvatarImage(string id, object record, string pathToImage,
+                                                  Action<string, float> onProgress,
+                                                  out object task, out string failReason)
+        {
+            task = null;
+            if (!TryMethod("UpdateAvatarImage", out var m, out failReason)) return false;
+            return Invoke(m, new object[] { id, record, pathToImage, onProgress, CancellationToken.None },
+                          out task, out failReason);
+        }
+
+        internal static string GetImageUrl(object record) => GetString(record, "ImageUrl");
+
+        /// <summary>The innermost message of a faulted task, for the one case the status classifier cannot
+        /// reach: <c>UploadException</c> exposes no status field, so its text is the only signal there is.</summary>
+        internal static string DeepestMessage(object task)
+        {
+            var ex = (Exception)task.GetType().GetProperty("Exception").GetValue(task);
+            while (ex != null && ex.InnerException != null) ex = ex.InnerException;
+            return ex?.Message;
+        }
+
         // ── Task inspection (the returned Task<VRCAvatar> is reached reflectively) ───────────────
 
         internal static bool IsCompleted(object task) => (bool)task.GetType().GetProperty("IsCompleted").GetValue(task);
@@ -343,6 +375,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             WriteBreadcrumb();
         }
 
+        /// <summary>Count observable progress as liveness, resetting the frame budget.
+        ///
+        /// The budget exists to catch a call that has genuinely stalled, and it was sized for two JSON round
+        /// trips. A file upload is neither: it holds seconds of unconditional delay and a multi-part
+        /// transfer, so a budget that cannot be reset would time out a healthy attach and report UNKNOWN on
+        /// a write that was still progressing. The SDK dispatches this callback off the main thread, which
+        /// is safe here only because the write is a single int the tick loop re-reads.</summary>
+        internal static void NoteProgress() => _frames = 0;
+
         internal static void Start(string door, string handle, Action step)
         {
             _running = true;
@@ -502,12 +543,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public static string Status() => AvatarRecordDriver.Status(Door);
     }
 
-    /// <summary>Edit an already-uploaded avatar's published metadata — name, description and tags. Metadata
-    /// only: no bundle, no re-upload. Contract and the reasons behind each guard: <c>docs/unity-tools.md</c>
-    /// §Publish.
+    /// <summary>Edit an already-uploaded avatar's published record — name, description, tags and thumbnail.
+    /// No bundle and no re-upload: the avatar itself is never rebuilt. Contract and the reasons behind each
+    /// guard: <c>docs/unity-tools.md</c> §Publish.
     ///
     /// Every field is NULL-MEANS-UNCHANGED. For tags that makes an empty array the only way to say "clear
-    /// them", so an empty array is accepted and is not treated as an omission.
+    /// them", so an empty array is accepted and is not treated as an omission. A thumbnail has no such
+    /// idiom — it can be replaced but never cleared, the API having no delete-image call — so an empty
+    /// path is a caller error rather than a clear.
+    ///
+    /// AN IMAGE MAKES THIS TWO WRITES, and the door reports them separately. The metadata edit is one PUT
+    /// that never submits the bundle or the image; attaching a thumbnail is a file upload plus a second PUT
+    /// through a different API call. So a call setting both can half-succeed — the name landing while the
+    /// image does not — which closes <c>=&gt; FAIL</c> with the metadata's landing rows still shown. There
+    /// is no rollback: the remedy is re-running, which the SDK's own cleanup branches make safe.
     ///
     /// <paramref name="expectCurrentName"/> is required: the write targets whatever blueprintId the
     /// GameObject's PipelineManager holds, so stating the name you believe is live turns a mis-wired id
@@ -527,13 +576,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal const string Door = "UpdateAvatarRecord";
 
         public static string Run(GameObject avatar, string expectCurrentName, string newName = null,
-                                 string newDescription = null, string[] newTags = null, bool whatIf = false)
+                                 string newDescription = null, string[] newTags = null,
+                                 string newImagePath = null, bool whatIf = false)
         {
             AvatarRecordDriver.ClearIfOwnedBy(Door);
             var refuse = AvatarRecordDriver.PreflightRefusal();
             if (refuse != null) return AvatarRecordDriver.Refuse(Door, refuse);
 
-            var nothing = AvatarRecordLogic.CheckSomethingToDo(newName, newDescription, newTags);
+            var nothing = AvatarRecordLogic.CheckSomethingToDo(newName, newDescription, newTags, newImagePath);
             if (nothing != null) return AvatarRecordDriver.Refuse(Door, nothing);
             if (newName != null)
             {
@@ -542,6 +592,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             var tagsWhy = AvatarRecordLogic.ValidateTags(newTags);
             if (tagsWhy != null) return AvatarRecordDriver.Refuse(Door, tagsWhy);
+            // In the SYNCHRONOUS guard, not the async body: the image is attached after the metadata write,
+            // so a path rejected later would leave the name landed and the thumbnail refused.
+            var imgWhy = AvatarRecordLogic.ValidateImagePath(newImagePath, System.IO.File.Exists);
+            if (imgWhy != null) return AvatarRecordDriver.Refuse(Door, imgWhy);
 
             if (!AvatarRecordDriver.TryResolveId(avatar, out var id, out var why))
                 return AvatarRecordDriver.Refuse(Door, why);
@@ -550,8 +604,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             string handle = avatar.name;
             string marker = whatIf ? " (whatIf)" : "";
-            object updateTask = null;
+            bool writesMetadata = newName != null || newDescription != null || newTags != null;
+            object updateTask = null, imageTask = null;
+            object carriedRec = null;          // freshest record the door holds
+            string metaLandings = "";
+            string beforeImageUrl = null;
             int stage = 0;
+
+            // Kicking the image is its own step because two paths reach it: after a metadata write, and
+            // directly from the read when the call sets only an image.
+            Func<bool> kickImage = () =>
+            {
+                beforeImageUrl = VrcApiReflect.GetImageUrl(carriedRec);
+                AvatarRecordDriver.MarkUpdateSent();
+                Action<string, float> progress = (s, f) => AvatarRecordDriver.NoteProgress();
+                if (!VrcApiReflect.TryUpdateAvatarImage(id, carriedRec, newImagePath, progress,
+                                                        out imageTask, out var imgKickWhy))
+                {
+                    AvatarRecordDriver.Finish(AvatarRecordDriver.Refuse(Door, imgKickWhy));
+                    return false;
+                }
+                stage = 2;
+                return true;
+            };
 
             AvatarRecordDriver.Start(Door, handle, () =>
             {
@@ -585,12 +660,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             plan.Append(" tags: ")
                                 .Append(AvatarRecordLogic.FormatTags(VrcApiReflect.GetTags(record)))
                                 .Append(" -> ").Append(AvatarRecordLogic.FormatTags(newTags));
+                        // The file is named and confirmed to exist (the sync guard proved that); whether it
+                        // UPLOADS is not previewable, so the plan claims only what it checked.
+                        if (newImagePath != null)
+                            plan.Append(" image: would upload ").Append(AvatarRecordLogic.Quote(newImagePath));
                         AvatarRecordDriver.Finish(
                             "[avatar-record]" + marker + " update handle=" + AvatarRecordLogic.Quote(handle) +
                             plan + " (nothing written; landed values may be sanitized server-side and are " +
                             "only knowable after a real run) => PASS");
                         return;
                     }
+
+                    carriedRec = record;
+                    // An image-only call must NOT post the record back: an unchanged post still bumps the
+                    // server's Version and would report an edit that never happened — the same reason
+                    // CheckSomethingToDo refuses a call that sets nothing.
+                    if (!writesMetadata) { kickImage(); return; }
 
                     string setWhy = null;
                     if (newName != null && !VrcApiReflect.TrySet(record, "Name", newName, out setWhy))
@@ -611,30 +696,80 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return;
                 }
 
-                if (!VrcApiReflect.IsCompleted(updateTask)) return;
-                if (VrcApiReflect.IsFaulted(updateTask))
+                if (stage == 1)
                 {
-                    AvatarRecordDriver.Finish(
-                        AvatarRecordDriver.Refuse(Door, VrcApiReflect.DescribeFault(updateTask)));
+                    if (!VrcApiReflect.IsCompleted(updateTask)) return;
+                    if (VrcApiReflect.IsFaulted(updateTask))
+                    {
+                        AvatarRecordDriver.Finish(
+                            AvatarRecordDriver.Refuse(Door, VrcApiReflect.DescribeFault(updateTask)));
+                        return;
+                    }
+                    // The UPDATE RESPONSE already carries the server-sanitized values, so no extra GetAvatar
+                    // round trip is needed. Reporting the SUBMITTED values here instead would misreport every
+                    // field the server rewrites.
+                    carriedRec = VrcApiReflect.Result(updateTask);
+                    var landings = new StringBuilder();
+                    if (newName != null)
+                        landings.Append(" | ").Append(AvatarRecordLogic.DescribeLanding(
+                            "name", newName, VrcApiReflect.GetName(carriedRec)));
+                    if (newDescription != null)
+                        landings.Append(" | ").Append(AvatarRecordLogic.DescribeLanding(
+                            "description", newDescription, VrcApiReflect.GetString(carriedRec, "Description")));
+                    if (newTags != null)
+                        landings.Append(" | tags landed=")
+                                .Append(AvatarRecordLogic.FormatTags(VrcApiReflect.GetTags(carriedRec)));
+                    metaLandings = landings.ToString();
+
+                    // Metadata first, image second. Either order is safe — VRCAvatarChanges carries no
+                    // imageUrl field, so a metadata write cannot clobber an image — and this order hands
+                    // the image call the PUT's own response, which is the freshly-fetched record its
+                    // file-id derivation needs.
+                    if (newImagePath == null)
+                    {
+                        AvatarRecordDriver.Finish(
+                            "[avatar-record] update handle=" + AvatarRecordLogic.Quote(handle) + " " +
+                            VrcApiReflect.Digest(carriedRec) + metaLandings + " => PASS");
+                        return;
+                    }
+                    kickImage();
                     return;
                 }
-                // The UPDATE RESPONSE already carries the server-sanitized values, so no extra GetAvatar
-                // round trip is needed. Reporting the SUBMITTED values here instead would misreport every
-                // field the server rewrites.
-                var landedRec = VrcApiReflect.Result(updateTask);
-                var landings = new StringBuilder();
-                if (newName != null)
-                    landings.Append(" | ").Append(AvatarRecordLogic.DescribeLanding(
-                        "name", newName, VrcApiReflect.GetName(landedRec)));
-                if (newDescription != null)
-                    landings.Append(" | ").Append(AvatarRecordLogic.DescribeLanding(
-                        "description", newDescription, VrcApiReflect.GetString(landedRec, "Description")));
-                if (newTags != null)
-                    landings.Append(" | tags landed=")
-                            .Append(AvatarRecordLogic.FormatTags(VrcApiReflect.GetTags(landedRec)));
+
+                if (!VrcApiReflect.IsCompleted(imageTask)) return;
+
+                string imageRow;
+                string verdict;
+                var reportRec = carriedRec;
+                if (VrcApiReflect.IsFaulted(imageTask))
+                {
+                    // A byte-identical re-attach is the workflow working, not failing: the file the server
+                    // holds already IS the requested image.
+                    if (AvatarRecordLogic.IsAlreadyUploaded(VrcApiReflect.DeepestMessage(imageTask)))
+                    {
+                        imageRow = "image already attached — the server holds a byte-identical file, so " +
+                                   "nothing was re-uploaded and the published thumbnail is the one requested";
+                        verdict = "PASS";
+                    }
+                    else
+                    {
+                        imageRow = "image FAILED: " + VrcApiReflect.DescribeFault(imageTask);
+                        verdict = "FAIL";
+                    }
+                }
+                else
+                {
+                    reportRec = VrcApiReflect.Result(imageTask);
+                    imageRow = AvatarRecordLogic.DescribeImageLanding(
+                        beforeImageUrl, VrcApiReflect.GetImageUrl(reportRec));
+                    verdict = imageRow.StartsWith("image DID NOT CHANGE") ? "FAIL" : "PASS";
+                }
+
+                // The metadata rows survive a failed image half: this is a partial result, and hiding the
+                // half that landed is what would make a re-run dangerous.
                 AvatarRecordDriver.Finish(
                     "[avatar-record] update handle=" + AvatarRecordLogic.Quote(handle) + " " +
-                    VrcApiReflect.Digest(landedRec) + landings + " => PASS");
+                    VrcApiReflect.Digest(reportRec) + metaLandings + " | " + imageRow + " => " + verdict);
             });
 
             return "[avatar-record]" + marker + " updating " + AvatarRecordLogic.Quote(handle) +

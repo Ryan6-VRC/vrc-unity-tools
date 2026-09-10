@@ -250,4 +250,75 @@ public class AvatarRecordLogicTests
         StringAssert.Contains("ReportAvatarRecord", r);
         StringAssert.Contains("Do NOT re-run", r);
     }
+
+    // ── The image ────────────────────────────────────────────────────────────────────────────
+
+    static bool Missing(string p) => false;
+    static bool Present(string p) => true;
+
+    [Test] public void Image_NullIsNotAnError()
+        => Assert.IsNull(AvatarRecordLogic.ValidateImagePath(null, Present));
+
+    // An empty string is the "clear it" idiom for tags. There is no delete-image call, so the same input
+    // here is a caller error — and reading it as an omission would silently drop the attach.
+    [Test] public void Image_EmptyIsRefusedAndSaysItCannotBeCleared()
+        => StringAssert.Contains("never cleared", AvatarRecordLogic.ValidateImagePath("", Present));
+
+    // Existence is checked in the guard, not the async body: the image is attached AFTER the metadata
+    // write, so a late rejection would leave the name landed and the thumbnail refused.
+    [Test] public void Image_MissingFileIsRefusedBeforeAnythingIsWritten()
+        => StringAssert.Contains("does not exist",
+                                 AvatarRecordLogic.ValidateImagePath("C:/none/x.png", Missing));
+
+    [Test] public void Image_NonImageExtensionIsRefused()
+        => StringAssert.Contains("not a .png", AvatarRecordLogic.ValidateImagePath("C:/x/y.txt", Present));
+
+    [Test] public void Image_AcceptsThePathAThumbnailDoorReports()
+        => Assert.IsNull(AvatarRecordLogic.ValidateImagePath("C:/out/thumb_Row.png", Present));
+
+    // UploadException carries no status field, so the shape-based classifier cannot see it and the message
+    // is the only signal. Both SDK throw sites share this phrase.
+    [Test] public void Image_AlreadyUploadedIsRecognisedFromTheMessage()
+    {
+        Assert.IsTrue(AvatarRecordLogic.IsAlreadyUploaded("This file was already uploaded"));
+        Assert.IsTrue(AvatarRecordLogic.IsAlreadyUploaded(
+            "This file was already uploaded, you should make a new build"));
+    }
+
+    [Test] public void Image_AnUnrelatedFailureIsNotMistakenForAlreadyUploaded()
+        => Assert.IsFalse(AvatarRecordLogic.IsAlreadyUploaded("Failed to get signature MD5, exiting upload"));
+
+    [Test] public void Image_NullMessageDoesNotThrow()
+        => Assert.IsFalse(AvatarRecordLogic.IsAlreadyUploaded(null));
+
+    // The quiet failure: UpdateAvatarImage returns the record UNMODIFIED when the upload produced no URL.
+    // An unmoved image url is the only observable, so it must read as a failure and not as success.
+    [Test] public void Image_UnmovedUrlIsReportedAsNotChanged()
+    {
+        var r = AvatarRecordLogic.DescribeImageLanding("https://api/file/abc/1", "https://api/file/abc/1");
+        StringAssert.Contains("DID NOT CHANGE", r);
+        StringAssert.Contains("still the old one", r);
+    }
+
+    [Test] public void Image_MovedUrlIsReportedAsLanded()
+        => StringAssert.Contains("image landed",
+               AvatarRecordLogic.DescribeImageLanding("https://api/file/abc/1", "https://api/file/abc/2"));
+
+    // The url is an identifier and must never reach output, whichever way the comparison went.
+    [Test] public void Image_LandingNeverEmitsTheUrl()
+    {
+        var moved = AvatarRecordLogic.DescribeImageLanding("https://api/file/abc/1", "https://api/file/abc/2");
+        var same  = AvatarRecordLogic.DescribeImageLanding("https://api/file/abc/1", "https://api/file/abc/1");
+        StringAssert.DoesNotContain("api/file", moved);
+        StringAssert.DoesNotContain("api/file", same);
+    }
+
+    // An image alone is a real edit, so the "nothing to change" refusal must not fire on it — otherwise
+    // attaching a thumbnail without touching the metadata would be inexpressible.
+    [Test] public void Image_AloneIsSomethingToDo()
+        => Assert.IsNull(AvatarRecordLogic.CheckSomethingToDo(null, null, null, "C:/out/t.png"));
+
+    [Test] public void Image_AllFourNullStillRefusesAndNamesTheImageArgument()
+        => StringAssert.Contains("newImagePath",
+                                 AvatarRecordLogic.CheckSomethingToDo(null, null, null, null));
 }
