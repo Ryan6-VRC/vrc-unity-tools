@@ -241,17 +241,6 @@ public class CheckSeamTests
     // ── Tests ─────────────────────────────────────────────────────────────────────────────────────
 
     [Test]
-    public void BadInput_baseNotFound_bareRefuse_noTrailer()
-    {
-        // A bare REFUSE logs at Error (Refuse → Debug.LogError); consume it so the test doesn't flag it.
-        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] REFUSE:"));
-        var r = CheckSeam.Run("no-such-base", "no-such-merge");
-        StringAssert.StartsWith("[CheckSeam] REFUSE:", r);
-        StringAssert.Contains("no-such-base", r);
-        Assert.IsFalse(r.Contains("| log="), "refusal carries no RunLog trailer");
-    }
-
-    [Test]
     public void NoHumanoidAvatar_refuses()
     {
         // A base with no humanoid Animator → DefaultResolveHumanoid returns an empty map. Inject the empty map

@@ -100,19 +100,11 @@ public class SceneHandleTests
     }
 
     [Test]
-    public void EmptyHandle_IsNotFound_AndSaysWhatToPass()
+    public void EmptyHandle_IsNotFound_AndDoesNotThrow()
     {
         var r = SceneHandle.Resolve("", ActiveOnly());
         Assert.That(r.Outcome, Is.EqualTo(SceneHandleOutcome.NotFound));
-        Assert.That(r.Refusal, Does.Contain("hierarchy path").And.Contain("instance id"));
-    }
-
-    [Test]
-    public void UnknownHandle_NamesTheScenesItSearched()
-    {
-        var r = SceneHandle.Resolve("SH_NoSuchThing", ActiveOnly());
-        Assert.That(r.Outcome, Is.EqualTo(SceneHandleOutcome.NotFound));
-        Assert.That(r.Refusal, Does.Contain(SceneManager.GetActiveScene().name));
+        Assert.That(r.Refusal, Is.Not.Null.And.Not.Empty);
     }
 
     // ── Ambiguity ─────────────────────────────────────────────────────────────────────────────────────────

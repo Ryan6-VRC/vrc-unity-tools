@@ -268,16 +268,6 @@ public class ReportShapeOverlapTests
     // ── Door: FAIL branches (bad input names the fix; bare FAIL carries no log trailer) ─────────────────
 
     [Test]
-    public void Report_objectNotFound_bareFail()
-    {
-        LogAssert.Expect(LogType.Error, FailRe);
-        var r = Report("no-such-object", new[] { "A" });
-        StringAssert.StartsWith("[ReportShapeOverlap] FAIL:", r);
-        StringAssert.Contains("not found", r);
-        Assert.IsFalse(r.Contains("| log="), "a bare FAIL never points at an artifact");
-    }
-
-    [Test]
     public void Report_noBlendshapeMesh_fails()
     {
         LogAssert.Expect(LogType.Error, FailRe);

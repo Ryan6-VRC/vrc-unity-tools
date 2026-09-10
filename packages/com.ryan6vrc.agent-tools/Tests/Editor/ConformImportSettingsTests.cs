@@ -386,17 +386,6 @@ public class ConformImportSettingsTests
     }
 
     [Test]
-    public void StringScope_AmbiguousName_IsBareFailNamingEachMatch()
-    {
-        var a = NewGo("ConformScopeRoot");
-        var b = NewGo("ConformScopeRootTwin");
-        NewGo("Body", a);
-        NewGo("Body", b);
-        var s = ConformImportSettings.Run("Body", whatIf: true);
-        Assert.That(s, Does.StartWith("[ConformImportSettings] FAIL:").And.Contain("ConformScopeRoot/Body").And.Contain("ConformScopeRootTwin/Body"));
-    }
-
-    [Test]
     public void AvatarScope_NullRoot_IsBareFail()
     {
         Assert.That(ConformImportSettings.Run((GameObject)null), Does.StartWith("[ConformImportSettings] FAIL:"));

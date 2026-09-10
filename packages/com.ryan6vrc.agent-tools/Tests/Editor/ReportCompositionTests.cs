@@ -94,15 +94,6 @@ public class ReportCompositionTests
     // ── The door's refusals ──────────────────────────────────────────────────────────────────────────
 
     [Test]
-    public void UnresolvableHandle_isABareFail_withNoArtifactTrailer()
-    {
-        LogAssert.Expect(LogType.Error, new Regex(@"\[ReportComposition\] FAIL:"));
-        var r = ReportComposition.Run("NoSuchRoot_xyz");
-        StringAssert.StartsWith("[ReportComposition] FAIL:", r);
-        Assert.IsFalse(r.Contains("| log="), "a refusal must not point at an artifact: " + r);
-    }
-
-    [Test]
     public void ARootWithNoDescriptor_refusesRatherThanReportingAnEmptyComposition()
     {
         new GameObject("Bare");

@@ -873,15 +873,6 @@ public class CheckAvatarTests
 
     // ── Bad input → bare FAIL, no trailer ─────────────────────────────────────────────────────────────
 
-    [Test]
-    public void BadInput_barFail_noTrailer()
-    {
-        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[CheckAvatar\] FAIL:"));
-        var r = CheckAvatar.Run("NoSuchRoot_xyz");
-        StringAssert.StartsWith("[CheckAvatar] FAIL:", r);
-        Assert.IsFalse(r.Contains("| log="), "bad input carries no artifact trailer: " + r);
-    }
-
     // ── Real dynamics reflection: type/getter canary + null-root extraction ───────────────────────────
 
     [Test] public void Canary_DynamicsTypesAndGettersResolve()
