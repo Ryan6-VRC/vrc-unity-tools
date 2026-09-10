@@ -479,7 +479,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>Revert the override and persist it. The save is not a new class of side effect: CAU saved
         /// this same scene moments earlier to persist the blueprintId, and leaving the revert unsaved would
-        /// be worse than not reverting — the residue would stay on disk while memory disagreed.</summary>
+        /// be worse than not reverting — the residue would stay on disk while memory disagreed.
+        ///
+        /// <para>TRUE means reverted <em>and</em> on disk, because that is what the row goes on to claim. An
+        /// unsaved scene (no path — a prefab stage) and a save that failed both return false: the in-memory
+        /// revert stands, but the residue is still what a reload would read, so reporting success would be a
+        /// lie the next session pays for.</para></summary>
         static bool TryRevertPortraitOffset(VRCAvatarDescriptor desc)
         {
             if (!IsPortraitOffsetOverridden(desc)) return false;
@@ -487,12 +492,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             PrefabUtility.RevertPropertyOverride(prop, InteractionMode.AutomatedAction);
 
             var scene = desc.gameObject.scene;
-            if (scene.IsValid() && !string.IsNullOrEmpty(scene.path))
-            {
-                EditorSceneManager.MarkSceneDirty(scene);
-                EditorSceneManager.SaveScene(scene);
-            }
-            return true;
+            if (!scene.IsValid() || string.IsNullOrEmpty(scene.path)) return false;
+            EditorSceneManager.MarkSceneDirty(scene);
+            return EditorSceneManager.SaveScene(scene);
         }
 
         /// <summary>Map a thrown upload exception to a classified <see cref="UploadOutcome.Failed"/>: unwrap
@@ -594,12 +596,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             var c = Counts(report);
             string marker = whatIf ? " (whatIf)" : "";
+            // Present only when it happened, so a summary quoted in a doc or skill is otherwise unchanged —
+            // and BEFORE the "| log=" trailer, which callers read as "everything after log= is the path".
+            string cleaned = c[PortraitOffsetRevertedNote] > 0
+                ? " " + PortraitOffsetRevertedNote + "=" + c[PortraitOffsetRevertedNote]
+                : "";
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[upload-avatar]{0} all: uploaded={1} reserved={2} failed={3} not-attempted={4} (transient={5} rate-limit={6} real={7}) => {8} | log={9}",
+                "[upload-avatar]{0} all: uploaded={1} reserved={2} failed={3} not-attempted={4} (transient={5} rate-limit={6} real={7}){8} => {9} | log={10}",
                 marker, c["uploaded"], c["reserved"], c["failed"], c["not-attempted"],
-                c["transient"], c["rate-limit"], c["real"], report.result, logPath);
-            if (c[PortraitOffsetRevertedNote] > 0)
-                summary += " | " + PortraitOffsetRevertedNote + "=" + c[PortraitOffsetRevertedNote];
+                c["transient"], c["rate-limit"], c["real"], cleaned, report.result, logPath);
             if (report.result == "PASS") Debug.Log(summary); else Debug.LogError(summary);
             return summary;
         }
