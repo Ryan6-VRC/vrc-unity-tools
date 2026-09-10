@@ -119,7 +119,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         public static string Run(string meshObject, string[] shapeNames = null, string outfitRoot = null)
         {
             var handle = SceneHandle.Resolve(meshObject);
-            if (!handle.Ok) return Fail(handle.Refusal);
+            if (!handle.Ok) return Fail("meshObject: " + handle.Refusal);
             var go = handle.Object;
             var smr = ResolveMesh(go, out var why); // only returns an SMR whose mesh has blendShapeCount > 0
             if (smr == null) return Fail(why);
@@ -136,7 +136,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (outfitRoot != null)
             {
                 var outfitHandle = SceneHandle.Resolve(outfitRoot);
-                if (!outfitHandle.Ok) return Fail(outfitHandle.Refusal);
+                if (!outfitHandle.Ok) return Fail("outfitRoot: " + outfitHandle.Refusal);
                 outfitGO = outfitHandle.Object;
             }
 
@@ -792,8 +792,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             Debug.LogError(e);
             return e;
         }
-
-        // ── Scene resolver (path → instance id → recursive name; mirrors CheckSeam.Resolve) ────────────────
 
         private static string PathOf(GameObject go)
         {

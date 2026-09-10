@@ -815,7 +815,5 @@ namespace Ryan6Vrc.AgentTools.Editor
             return s;
         }
 
-        // ── Scene resolver (path → instance id → name; mirrors CheckAvatar.Resolve, kept local) ────
-
     }
 }

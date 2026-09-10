@@ -62,7 +62,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// preflights (resolve target, assert a VRC_AvatarDescriptor, resolve <paramref name="pose"/>)
         /// and returns without baking or touching the project.
         /// </summary>
-        /// <param name="target">avatar root: scene hierarchy path, instance id, or name (first match).</param>
+        /// <param name="target">avatar root: scene hierarchy path, instance id, or name (refused if not unique).</param>
         /// <param name="pose">null =&gt; floor (unposed); a bundled name (the <c>Editor/Poses/RTPose_*</c>
         /// glob); or a clip asset path/GUID.</param>
         /// <param name="expression">null =&gt; no expression (a fully supported outcome); else a state name

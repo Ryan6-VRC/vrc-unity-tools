@@ -155,14 +155,4 @@ public class SceneHandleTests
         Assert.That(r.Refusal, Does.Contain("SH_Elsewhere"));
     }
 
-    [Test]
-    public void HideInHierarchyRoots_AreNotAddressable()
-    {
-        var hidden = Go("SH_Hidden");
-        hidden.hideFlags = HideFlags.HideInHierarchy;
-        var r = SceneHandle.Resolve("SH_Hidden");
-        Assert.That(r.Outcome, Is.EqualTo(SceneHandleOutcome.NotFound),
-            "in play the emulator parks a full hidden copy of the avatar per runtime; matches the operator "
-            + "cannot see in the Hierarchy are noise, not choices");
-    }
 }

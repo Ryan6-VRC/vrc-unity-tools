@@ -36,17 +36,10 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// <summary>The one string→scene-GameObject resolver behind every string scene handle in `agent-tools` and
     /// `avatar-tools`. Ladder: hierarchy path → instance id → bare name, over the ACTIVE scene.
     ///
-    /// <para>Two measured facts pin the domain, neither obvious from the API:</para>
-    /// <list type="bullet">
-    /// <item>A preview scene (NDMF's, and a Prefab Stage's) reports <c>IsValid()==true</c> and
-    /// <c>isLoaded==true</c>, but is NOT returned by <see cref="SceneManager.GetSceneAt"/> — Unity counts those
-    /// separately in <c>EditorSceneManager.previewSceneCount</c>. So enumerating buys the exclusion structurally;
-    /// an <c>isLoaded</c> filter is emphatically NOT what buys it, and adding one would read as if it were.</item>
-    /// <item><see cref="EditorUtility.InstanceIDToObject"/> is not scene-scoped, so the id rung is the only one
-    /// that can reach outside the active scene — which is why it alone returns
+    /// <para>The instance-id rung is the only one that can leave the active scene — <see
+    /// cref="EditorUtility.InstanceIDToObject"/> is not scene-scoped — which is why it alone returns
     /// <see cref="SceneHandleOutcome.OutOfDomain"/>, covering a prefab asset, a prefab stage and another
-    /// loaded scene alike.</item>
-    /// </list>
+    /// loaded scene alike.</para>
     ///
     /// <para>Not here: resolving a path RELATIVE to a known root (`RenderAvatar.ResolveDescendant`). That is a
     /// different question with one caller, and folding it in would widen this surface for nobody.</para></summary>
@@ -54,6 +47,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     {
         internal static SceneHandleResult Resolve(string handle)
         {
+            handle = handle == null ? null : handle.Trim();
             if (string.IsNullOrEmpty(handle))
                 return Refuse(SceneHandleOutcome.NotFound, "empty scene handle: pass a hierarchy path, an instance id, or an object name.");
 
@@ -80,24 +74,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 + " — tried hierarchy path, instance id, then object name.");
         }
 
-        /// <summary>Roots a handle may name. <c>HideInHierarchy</c> roots are excluded because the operator
-        /// cannot see or act on them: in play the emulator parks a full hidden copy of the avatar per runtime
-        /// (source clone, mirror reflection, shadow clone), which would otherwise make every bare name under an
-        /// avatar ambiguous against objects that are not in the Hierarchy window.</summary>
-        private static IEnumerable<Transform> Roots(Scene s)
-        {
-            foreach (var go in s.GetRootGameObjects())
-                if ((go.hideFlags & HideFlags.HideInHierarchy) == 0) yield return go.transform;
-        }
-
         // ── Rung 1: hierarchy path ────────────────────────────────────────────────────────────────────────
 
         private static SceneHandleResult ByPath(string handle, Scene scene)
         {
             var segs = handle.Trim('/').Split('/');
             var hits = new List<GameObject>();
-            foreach (var root in Roots(scene))
-                if (root.name == segs[0]) Descend(root, segs, 1, hits);
+            foreach (var root in scene.GetRootGameObjects())
+                if (root.name == segs[0]) Descend(root.transform, segs, 1, hits);
             return Decide(hits, handle, "hierarchy path");
         }
 
@@ -117,7 +101,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static SceneHandleResult ById(string handle, Scene scene)
         {
             int id;
-            if (!int.TryParse(handle.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out id))
+            if (!int.TryParse(handle, NumberStyles.Integer, CultureInfo.InvariantCulture, out id))
                 return new SceneHandleResult { Outcome = SceneHandleOutcome.NotFound };
 
             var obj = EditorUtility.InstanceIDToObject(id);
@@ -140,7 +124,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static SceneHandleResult ByName(string handle, Scene scene)
         {
             var hits = new List<GameObject>();
-            foreach (var root in Roots(scene)) CollectByName(root, handle, hits);
+            foreach (var root in scene.GetRootGameObjects()) CollectByName(root.transform, handle, hits);
             return Decide(hits, handle, "object name");
         }
 
@@ -166,7 +150,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (i > 0) sb.Append(", ");
                 sb.Append(Describe(hits[i]));
             }
-            sb.Append(" — pass one hierarchy path, or the instance id of the one you mean.");
+            bool pathsDiffer = false;
+            for (int i = 1; i < hits.Count && !pathsDiffer; i++)
+                if (MergeSurfaces.PathOf(hits[i]) != MergeSurfaces.PathOf(hits[0])) pathsDiffer = true;
+            sb.Append(pathsDiffer
+                ? " — pass one hierarchy path, or the instance id of the one you mean."
+                : " — these share a path, so pass the instance id of the one you mean.");
             return Refuse(SceneHandleOutcome.Ambiguous, sb.ToString());
         }
 

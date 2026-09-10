@@ -72,10 +72,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         public static string Run(string baseRoot, string mergeableRoot)
         {
             var baseHandle = SceneHandle.Resolve(baseRoot);
-            if (!baseHandle.Ok) return RefuseMisuse(baseHandle.Refusal);
+            if (!baseHandle.Ok) return RefuseMisuse("baseRoot: " + baseHandle.Refusal);
             var baseGO = baseHandle.Object;
             var mergeHandle = SceneHandle.Resolve(mergeableRoot);
-            if (!mergeHandle.Ok) return RefuseMisuse(mergeHandle.Refusal);
+            if (!mergeHandle.Ok) return RefuseMisuse("mergeableRoot: " + mergeHandle.Refusal);
             var mergeGO = mergeHandle.Object;
 
             var human = ResolveHumanoid(baseGO);
@@ -134,10 +134,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         public static string CheckBare(string baseRoot, string mergeableRoot, float maxOffsetMm)
         {
             var baseHandle = SceneHandle.Resolve(baseRoot);
-            if (!baseHandle.Ok) return RefuseMisuse(baseHandle.Refusal, BareLabel);
+            if (!baseHandle.Ok) return RefuseMisuse("baseRoot: " + baseHandle.Refusal, BareLabel);
             var baseGO = baseHandle.Object;
             var mergeHandle = SceneHandle.Resolve(mergeableRoot);
-            if (!mergeHandle.Ok) return RefuseMisuse(mergeHandle.Refusal, BareLabel);
+            if (!mergeHandle.Ok) return RefuseMisuse("mergeableRoot: " + mergeHandle.Refusal, BareLabel);
             var mergeGO = mergeHandle.Object;
             // Name-matching a skeleton against itself pairs every bone with itself at distance 0 and PASSes at
             // any tolerance. The seam door cannot reach this (no seam maps a root onto itself); the bare door
@@ -737,8 +737,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             map.SpanMm = (hips != null && head != null) ? Vector3.Distance(hips.position, head.position) * 1000f : 0f;
             return map;
         }
-
-        // ── Scene resolver (path → instance id → name; copied verbatim from CheckAvatar.Resolve) ────────
 
         private static string PathOf(GameObject go)
         {

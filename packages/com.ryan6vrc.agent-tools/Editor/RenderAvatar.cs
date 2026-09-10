@@ -1264,7 +1264,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // that was never going to resolve. Order the two by which one a re-grab can actually fix.
             if (root == null)
                 return Fail(label, handle.Refusal + " CaptureDiff diffs a LIVE scene target, grabbed now as frame B, "
-                    + "against a prior grab's PNG as frame A, so the target has to be present in a loaded scene");
+                    + "against a prior grab's PNG as frame A, so the target has to be present in the active scene");
             string camPath = against + ".cam.json";
             if (!File.Exists(camPath))
                 return Fail(label, "no camera manifest for " + against + " (expected " + Path.GetFileName(camPath)
@@ -1637,7 +1637,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return false;
         }
 
-        // ===== Target resolution: hierarchy path -> instance id -> name (first match) ============
 
         private static Transform FindByNameRecursive(Transform t, string name)
         {

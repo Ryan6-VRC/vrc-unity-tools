@@ -530,8 +530,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
-        // ===== Target resolution: hierarchy-path -> instance-id -> name (mirrors RenderAvatar's resolver) =====
-
         // ----- Session RunLogs ------------------------------------------------------------------
         // Both thumbnail doors used to write no RunLog at all — they borrowed RunLogFormat.Sanitize for a temp
         // PNG name and nothing else. So the fitting sweep's "which doors were driven" signal was blind to both

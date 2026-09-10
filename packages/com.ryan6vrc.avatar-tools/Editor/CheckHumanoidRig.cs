@@ -179,9 +179,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// trailer, same family discipline as a CheckAvatar bad-input refusal).
         ///
         /// Read-only: mutates no scene object, no asset, dirties nothing. <paramref name="avatarRoot"/> is
-        /// a scene handle resolved the way <c>CheckAvatar.Resolve</c> resolves its own (hierarchy path,
-        /// then instance id, then name in the active scene) — mirrored locally rather than shared, since
-        /// CheckAvatar keeps that resolver private.
+        /// a scene handle resolved by the shared <c>SceneHandle</c> (hierarchy path, then instance id,
+        /// then name, in the active scene; an ambiguous handle is refused rather than guessed).
         /// </summary>
         public static string InspectAvatar(string avatarRoot)
         {
@@ -409,9 +408,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (pass && wroteLog) Debug.Log(res); else Debug.LogWarning(res);
             return res;
         }
-
-        // ── Scene resolver — mirrors CheckAvatar.Resolve (path → instance id → name); kept local since
-        // CheckAvatar's is private to its own class. ───────────────────────────────────────────────────
 
         private static string PathOf(Transform t)
         {

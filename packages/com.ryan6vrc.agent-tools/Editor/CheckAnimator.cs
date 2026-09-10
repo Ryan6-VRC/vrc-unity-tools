@@ -58,7 +58,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Lint <paramref name="controller"/> against the v1 rule set. <paramref name="basis"/>
         /// is <c>auto</c> (detect the binding-basis root from a merge component at <paramref name="mergeSite"/>)
         /// or <c>explicit</c> (caller names <paramref name="avatarRoot"/> / <paramref name="mountRoot"/> as
-        /// active-scene hierarchy paths). Returns a one-line summary; a real run ends with the RunLog path
+        /// active-scene handles — path, instance id or unique name). Returns a one-line summary; a real run ends with the RunLog path
         /// in-band (<c>… =&gt; RESULT | log=&lt;path&gt;</c>). A bad-input/refusal early return is a bare
         /// <c>[CheckAnimator] FAIL: …</c> with no trailer.</summary>
         public static string Run(AnimatorController controller, string basis = "auto",

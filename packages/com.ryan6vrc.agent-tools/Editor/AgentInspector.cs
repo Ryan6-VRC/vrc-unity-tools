@@ -123,8 +123,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>
         /// Snapshot the GameObject at a root-relative hierarchy path in the active scene
-        /// (e.g. "Avatar/Armature/Hips"). Duplicate-named siblings resolve to the first match,
-        /// like Unity's own path lookups. Returns a one-line summary ending with the snapshot
+        /// (e.g. "Avatar/Armature/Hips"). Duplicate-named siblings refuse rather than resolving to
+        /// one of them; the refusal names each match. Returns a one-line summary ending with the snapshot
         /// path in-band (<c>… => OK | log=&lt;path&gt;</c>).
         ///
         /// <paramref name="followAssets"/> is the agent door: when on, any objectReference resolving

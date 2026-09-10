@@ -199,8 +199,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var go in WalkExcludingEditorOnly(child)) yield return go;
         }
 
-        // ----- Scene resolver (path → instance id → name; mirrors CheckAvatar.Resolve, kept local) -------
-
         private static string HierarchyPath(GameObject go)
         {
             var parts = new List<string>();

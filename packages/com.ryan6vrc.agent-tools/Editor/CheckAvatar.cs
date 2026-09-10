@@ -871,8 +871,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return err;
         }
 
-        // ── Scene resolver (path → instance id → name; mirrors RenderAvatar.Resolve, kept local) ──────────
-
         private static string PathOf(GameObject go) => MergeSurfaces.PathOf(go);
 
         // ── Types ───────────────────────────────────────────────────────────────────────────────────
