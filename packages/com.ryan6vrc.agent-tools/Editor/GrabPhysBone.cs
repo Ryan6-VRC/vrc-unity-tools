@@ -92,11 +92,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             string bad = GuardMutating();
             if (bad != null) return Fail(bad);
 
-            var go = Resolve(pbPath);
-            if (go == null)
-                return Fail("no scene object at '" + pbPath + "' — pass the hierarchy path of the "
-                    + "VRCPhysBone host (or its instance id); note a play-mode avatar is rebuilt, so an "
-                    + "edit-mode path may not exist under the built clone");
+            var handle = SceneHandle.Resolve(pbPath);
+            if (!handle.Ok)
+                return Fail(handle.Refusal + " Note a play-mode avatar is rebuilt, so an edit-mode path "
+                    + "may not exist under the built clone.");
+            var go = handle.Object;
 
             var pb = go.GetComponent<VRCPhysBoneBase>();
             if (pb == null)
@@ -815,59 +815,5 @@ namespace Ryan6Vrc.AgentTools.Editor
             return s;
         }
 
-        // ── Scene resolver (path → instance id → name; mirrors CheckAvatar.Resolve, kept local) ────
-
-        private static GameObject Resolve(string target)
-        {
-            if (string.IsNullOrEmpty(target)) return null;
-            var byPath = FindByHierarchyPath(target);
-            if (byPath != null) return byPath;
-
-            int id;
-            if (int.TryParse(target.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out id))
-            {
-                var obj = EditorUtility.InstanceIDToObject(id);
-                var go = obj as GameObject;
-                if (go != null) return go;
-                var comp = obj as Component;
-                if (comp != null) return comp.gameObject;
-            }
-
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                var hit = FindByNameRecursive(root.transform, target);
-                if (hit != null) return hit.gameObject;
-            }
-            return null;
-        }
-
-        private static GameObject FindByHierarchyPath(string path)
-        {
-            var segs = path.Trim('/').Split('/');
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                if (root.name != segs[0]) continue;
-                Transform t = root.transform;
-                bool ok = true;
-                for (int i = 1; i < segs.Length && ok; i++)
-                {
-                    t = t.Find(segs[i]);
-                    if (t == null) ok = false;
-                }
-                if (ok) return t.gameObject;
-            }
-            return null;
-        }
-
-        private static Transform FindByNameRecursive(Transform t, string name)
-        {
-            if (t.name == name) return t;
-            for (int i = 0; i < t.childCount; i++)
-            {
-                var hit = FindByNameRecursive(t.GetChild(i), name);
-                if (hit != null) return hit;
-            }
-            return null;
-        }
     }
 }

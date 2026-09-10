@@ -366,9 +366,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// no VRCAvatarDescriptor) is a bare <c>[CheckAvatar] FAIL: …</c> with no trailer.</summary>
         public static string Run(string avatarRoot)
         {
-            var avatarGO = Resolve(avatarRoot);
-            if (avatarGO == null)
-                return Refuse("avatar root '" + avatarRoot + "' not found — tried hierarchy path, instance id, then name in the active scene");
+            var handle = SceneHandle.Resolve(avatarRoot);
+            if (!handle.Ok) return Refuse(handle.Refusal);
+            var avatarGO = handle.Object;
 
             var descriptor = avatarGO.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             if (descriptor == null)
@@ -869,59 +869,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             string err = "[CheckAvatar] FAIL: " + why;
             Debug.LogError(err);
             return err;
-        }
-
-        // ── Scene resolver (path → instance id → name; mirrors RenderAvatar.Resolve, kept local) ──────────
-
-        private static GameObject Resolve(string target)
-        {
-            if (string.IsNullOrEmpty(target)) return null;
-            var byPath = FindByHierarchyPath(target);
-            if (byPath != null) return byPath;
-
-            if (int.TryParse(target.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
-            {
-                var obj = EditorUtility.InstanceIDToObject(id);
-                if (obj is GameObject go) return go;
-                if (obj is Component comp) return comp.gameObject;
-            }
-
-            foreach (var rootGo in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                var hit = FindByNameRecursive(rootGo.transform, target);
-                if (hit != null) return hit.gameObject;
-            }
-            return null;
-        }
-
-        private static GameObject FindByHierarchyPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return null;
-            var segs = path.Trim('/').Split('/');
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                if (root.name != segs[0]) continue;
-                Transform t = root.transform;
-                bool ok = true;
-                for (int i = 1; i < segs.Length && ok; i++)
-                {
-                    t = t.Find(segs[i]);
-                    if (t == null) ok = false;
-                }
-                if (ok) return t.gameObject;
-            }
-            return null;
-        }
-
-        private static Transform FindByNameRecursive(Transform t, string name)
-        {
-            if (t.name == name) return t;
-            foreach (Transform child in t)
-            {
-                var hit = FindByNameRecursive(child, name);
-                if (hit != null) return hit;
-            }
-            return null;
         }
 
         private static string PathOf(GameObject go) => MergeSurfaces.PathOf(go);

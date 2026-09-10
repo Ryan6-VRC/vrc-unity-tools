@@ -65,8 +65,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// containing it, for chasing one parameter without paying for the whole avatar.</summary>
         public static string Run(string avatarRoot, bool bake = false, string paramFilter = null)
         {
-            var root = FindByHierarchyPath(avatarRoot);
-            if (root == null) return Refuse("avatarRoot '" + (avatarRoot ?? "(null)") + "' did not resolve to a GameObject");
+            var handle = SceneHandle.Resolve(avatarRoot);
+            if (!handle.Ok) return Refuse("avatarRoot: " + handle.Refusal);
+            var root = handle.Object;
             var descriptor = root.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             if (descriptor == null)
                 return Refuse("'" + avatarRoot + "' has no VRCAvatarDescriptor — Run expects the avatar (descriptor) root");
@@ -81,9 +82,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// result is read back here — a timed-out call loses nothing and must not be re-run.</summary>
         public static string Verify(string avatarRoot)
         {
-            var root = FindByHierarchyPath(avatarRoot);
-            if (root == null) return Refuse("avatarRoot '" + (avatarRoot ?? "(null)") + "' did not resolve to a GameObject");
-            return CompositionBake.Verify(root);
+            var handle = SceneHandle.Resolve(avatarRoot);
+            if (!handle.Ok) return Refuse("avatarRoot: " + handle.Refusal);
+            return CompositionBake.Verify(handle.Object);
         }
 
         // ── The authored census ──────────────────────────────────────────────────────────────────────
@@ -566,27 +567,5 @@ namespace Ryan6Vrc.AgentTools.Editor
             return p != null ? p.objectReferenceValue as T : null;
         }
 
-        internal static GameObject FindByHierarchyPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return null;
-            var direct = GameObject.Find(path);
-            if (direct != null) return direct;
-            // GameObject.Find never returns an inactive object, and an authoring avatar is routinely parked
-            // inactive — walk the loaded scenes' roots instead rather than reporting a live avatar as absent.
-            var segs = path.Split('/');
-            for (int i = 0; i < UnityEngine.SceneManagement.SceneManager.sceneCount; i++)
-            {
-                var scene = UnityEngine.SceneManagement.SceneManager.GetSceneAt(i);
-                if (!scene.isLoaded) continue;
-                foreach (var r in scene.GetRootGameObjects())
-                {
-                    if (r.name != segs[0]) continue;
-                    var t = r.transform;
-                    for (int s = 1; s < segs.Length && t != null; s++) t = t.Find(segs[s]);
-                    if (t != null) return t.gameObject;
-                }
-            }
-            return null;
-        }
     }
 }

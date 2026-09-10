@@ -633,13 +633,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             bool pin = opts.pinned != null;
 
             // ----- Resolve target ------------------------------------------------------------
-            var root = Resolve(target);
-            if (root == null)
-                return CoreFail(target, "target not found — tried hierarchy path, instance id, then name in the active scene");
+            var handle = SceneHandle.Resolve(target);
+            if (!handle.Ok) return CoreFail(target, handle.Refusal);
+            var root = handle.Object;
             string label = root.name;
-
-            if (PrefabStageUtility.GetPrefabStage(root) != null)
-                return CoreFail(label, "target is in prefab isolation — grab from the scene");
 
             var sv = SceneView.lastActiveSceneView;
             if (sv == null)
@@ -1256,7 +1253,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <param name="against">the prior grab's png path (its <c>png=</c> trailer) — its sidecar supplies the framing.</param>
         public static string CaptureDiff(string target, string against)
         {
-            var root = Resolve(target);
+            var handle = SceneHandle.Resolve(target);
+            var root = handle.Object;
             string label = root != null ? root.name : target;
             if (string.IsNullOrEmpty(against))
                 return Fail(label, "against is empty — pass a prior grab's png path (its png= trailer)");
@@ -1265,9 +1263,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             // BOTH wrong reported the manifest first and sent the operator off to re-grab frame A with a target
             // that was never going to resolve. Order the two by which one a re-grab can actually fix.
             if (root == null)
-                return Fail(label, "target '" + target + "' not found — tried hierarchy path, instance id, then name "
-                    + "in the active scene. CaptureDiff diffs a LIVE scene target, grabbed now as frame B, against a "
-                    + "prior grab's PNG as frame A, so the target has to be present in the open scene");
+                return Fail(label, handle.Refusal + " CaptureDiff diffs a LIVE scene target, grabbed now as frame B, "
+                    + "against a prior grab's PNG as frame A, so the target has to be present in the active scene");
             string camPath = against + ".cam.json";
             if (!File.Exists(camPath))
                 return Fail(label, "no camera manifest for " + against + " (expected " + Path.GetFileName(camPath)
@@ -1640,46 +1637,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return false;
         }
 
-        // ===== Target resolution: hierarchy path -> instance id -> name (first match) ============
-
-        private static GameObject Resolve(string target)
-        {
-            if (string.IsNullOrEmpty(target)) return null;
-            var byPath = FindByHierarchyPath(target);
-            if (byPath != null) return byPath;
-
-            if (int.TryParse(target.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
-            {
-                var obj = EditorUtility.InstanceIDToObject(id);
-                if (obj is GameObject go) return go;
-                if (obj is Component comp) return comp.gameObject;
-            }
-
-            var scene = SceneManager.GetActiveScene();
-            foreach (var rootGo in scene.GetRootGameObjects())
-            {
-                var hit = FindByNameRecursive(rootGo.transform, target);
-                if (hit != null) return hit.gameObject;
-            }
-            return null;
-        }
-
-        private static GameObject FindByHierarchyPath(string path)
-        {
-            var segs = path.Trim('/').Split('/');
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                if (root.name != segs[0]) continue;
-                Transform t = root.transform; bool ok = true;
-                for (int i = 1; i < segs.Length && ok; i++)
-                {
-                    t = t.Find(segs[i]);
-                    if (t == null) ok = false;
-                }
-                if (ok) return t.gameObject;
-            }
-            return null;
-        }
 
         private static Transform FindByNameRecursive(Transform t, string name)
         {

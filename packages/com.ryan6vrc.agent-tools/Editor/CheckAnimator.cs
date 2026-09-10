@@ -58,7 +58,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Lint <paramref name="controller"/> against the v1 rule set. <paramref name="basis"/>
         /// is <c>auto</c> (detect the binding-basis root from a merge component at <paramref name="mergeSite"/>)
         /// or <c>explicit</c> (caller names <paramref name="avatarRoot"/> / <paramref name="mountRoot"/> as
-        /// active-scene hierarchy paths). Returns a one-line summary; a real run ends with the RunLog path
+        /// active-scene handles — path, instance id or unique name). Returns a one-line summary; a real run ends with the RunLog path
         /// in-band (<c>… =&gt; RESULT | log=&lt;path&gt;</c>). A bad-input/refusal early return is a bare
         /// <c>[CheckAnimator] FAIL: …</c> with no trailer.</summary>
         public static string Run(AnimatorController controller, string basis = "auto",
@@ -82,13 +82,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                 GameObject avatarGO = null, mountGO = null;
                 if (avatarRoot != null)
                 {
-                    avatarGO = FindByHierarchyPath(avatarRoot);
-                    if (avatarGO == null) return Refuse("avatarRoot '" + avatarRoot + "' did not resolve to a GameObject");
+                    var avatarHandle = SceneHandle.Resolve(avatarRoot);
+                    if (!avatarHandle.Ok) return Refuse("avatarRoot: " + avatarHandle.Refusal);
+                    avatarGO = avatarHandle.Object;
                 }
                 if (mountRoot != null)
                 {
-                    mountGO = FindByHierarchyPath(mountRoot);
-                    if (mountGO == null) return Refuse("mountRoot '" + mountRoot + "' did not resolve to a GameObject");
+                    var mountHandle = SceneHandle.Resolve(mountRoot);
+                    if (!mountHandle.Ok) return Refuse("mountRoot: " + mountHandle.Refusal);
+                    mountGO = mountHandle.Object;
                 }
                 if (mountGO != null) roots.Add(mountGO);   // mount preferred on tie
                 if (avatarGO != null) roots.Add(avatarGO);
@@ -105,7 +107,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     return Refuse("basis=auto requires mergeSite (a scene GameObject path holding a merge component that references this controller)");
                 var d = DetectAuto(controller, mergeSite, notes);
                 if (d.Refusal != null) return Refuse(d.Refusal);
-                var siteGO = FindByHierarchyPath(mergeSite);
+                var siteGO = SceneHandle.Resolve(mergeSite).Object;
                 // includeInactive: the no-arg overload skips inactive objects, and an authoring avatar is
                 // routinely parked inactive — without this the rider is silently absent in the exact state
                 // most lints run in, which is worse than not having it.
@@ -135,9 +137,10 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static AutoResult DetectAuto(AnimatorController controller, string mergeSite, List<string> notes)
         {
-            var site = FindByHierarchyPath(mergeSite);
-            if (site == null)
-                return new AutoResult { Refusal = "mergeSite '" + mergeSite + "' did not resolve to a GameObject" };
+            var siteHandle = SceneHandle.Resolve(mergeSite);
+            if (!siteHandle.Ok)
+                return new AutoResult { Refusal = "mergeSite: " + siteHandle.Refusal };
+            var site = siteHandle.Object;
 
             var descriptor = site.GetComponentInParent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             GameObject avatarGO = descriptor != null ? descriptor.gameObject : null;
@@ -810,27 +813,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static void AppendOffender(StringBuilder sb, LintOffender o) =>
             sb.Append("- **").Append(o.Kind).Append("** ").Append(o.Where).Append(" — ").Append(o.Detail).Append('\n');
-
-        // ----- Scene resolver (duplicated from AgentInspector.FindByHierarchyPath — kept local so this
-        //        tool adds no cross-file coupling) ------------------------------------------------------
-        private static GameObject FindByHierarchyPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return null;
-            var segs = path.Trim('/').Split('/');
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                if (root.name != segs[0]) continue;
-                Transform t = root.transform;
-                bool ok = true;
-                for (int i = 1; i < segs.Length && ok; i++)
-                {
-                    t = t.Find(segs[i]);
-                    if (t == null) ok = false;
-                }
-                if (ok) return t.gameObject;
-            }
-            return null;
-        }
 
         // ----- Helpers ------------------------------------------------------------------------------
 

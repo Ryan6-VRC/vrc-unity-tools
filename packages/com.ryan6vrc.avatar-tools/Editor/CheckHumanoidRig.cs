@@ -179,15 +179,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// trailer, same family discipline as a CheckAvatar bad-input refusal).
         ///
         /// Read-only: mutates no scene object, no asset, dirties nothing. <paramref name="avatarRoot"/> is
-        /// a scene handle resolved the way <c>CheckAvatar.Resolve</c> resolves its own (hierarchy path,
-        /// then instance id, then name in the active scene) — mirrored locally rather than shared, since
-        /// CheckAvatar keeps that resolver private.
+        /// a scene handle resolved by the shared <c>SceneHandle</c> (hierarchy path, then instance id,
+        /// then name, in the active scene; an ambiguous handle is refused rather than guessed).
         /// </summary>
         public static string InspectAvatar(string avatarRoot)
         {
-            var avatarGO = ResolveScene(avatarRoot);
-            if (avatarGO == null)
-                return FailAvatar("avatar root '" + avatarRoot + "' not found — tried hierarchy path, instance id, then name in the active scene");
+            var handle = Ryan6Vrc.AgentTools.Editor.SceneHandle.Resolve(avatarRoot);
+            if (!handle.Ok) return FailAvatar(handle.Refusal);
+            var avatarGO = handle.Object;
 
             var descriptor = avatarGO.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             if (descriptor == null)
@@ -408,60 +407,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             bool wroteLog = res.StartsWith(head + " | log=", StringComparison.Ordinal);
             if (pass && wroteLog) Debug.Log(res); else Debug.LogWarning(res);
             return res;
-        }
-
-        // ── Scene resolver — mirrors CheckAvatar.Resolve (path → instance id → name); kept local since
-        // CheckAvatar's is private to its own class. ───────────────────────────────────────────────────
-
-        private static GameObject ResolveScene(string target)
-        {
-            if (string.IsNullOrEmpty(target)) return null;
-            var byPath = FindByHierarchyPath(target);
-            if (byPath != null) return byPath;
-
-            if (int.TryParse(target.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
-            {
-                var obj = EditorUtility.InstanceIDToObject(id);
-                if (obj is GameObject go) return go;
-                if (obj is Component comp) return comp.gameObject;
-            }
-
-            foreach (var rootGo in UnityEngine.SceneManagement.SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                var hit = FindByNameRecursive(rootGo.transform, target);
-                if (hit != null) return hit.gameObject;
-            }
-            return null;
-        }
-
-        private static GameObject FindByHierarchyPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return null;
-            var segs = path.Trim('/').Split('/');
-            foreach (var root in UnityEngine.SceneManagement.SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                if (root.name != segs[0]) continue;
-                Transform t = root.transform;
-                bool ok = true;
-                for (int i = 1; i < segs.Length && ok; i++)
-                {
-                    t = t.Find(segs[i]);
-                    if (t == null) ok = false;
-                }
-                if (ok) return t.gameObject;
-            }
-            return null;
-        }
-
-        private static Transform FindByNameRecursive(Transform t, string name)
-        {
-            if (t.name == name) return t;
-            foreach (Transform child in t)
-            {
-                var hit = FindByNameRecursive(child, name);
-                if (hit != null) return hit;
-            }
-            return null;
         }
 
         private static string PathOf(Transform t)

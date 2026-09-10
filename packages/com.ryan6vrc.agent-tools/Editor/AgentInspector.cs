@@ -123,8 +123,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>
         /// Snapshot the GameObject at a root-relative hierarchy path in the active scene
-        /// (e.g. "Avatar/Armature/Hips"). Duplicate-named siblings resolve to the first match,
-        /// like Unity's own path lookups. Returns a one-line summary ending with the snapshot
+        /// (e.g. "Avatar/Armature/Hips"). Duplicate-named siblings refuse rather than resolving to
+        /// one of them; the refusal names each match. Returns a one-line summary ending with the snapshot
         /// path in-band (<c>… => OK | log=&lt;path&gt;</c>).
         ///
         /// <paramref name="followAssets"/> is the agent door: when on, any objectReference resolving
@@ -136,10 +136,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// </summary>
         public static string Run(string hierarchyPath, bool includeChildren = true, bool followAssets = false)
         {
-            var go = FindByHierarchyPath(hierarchyPath);
+            var handle = SceneHandle.Resolve(hierarchyPath);
+            var go = handle.Object;
             if (go == null)
             {
-                string err = "[AgentInspector] no GameObject at path '" + hierarchyPath + "' => FAIL";
+                string err = "[AgentInspector] " + handle.Refusal + " => FAIL";
                 Debug.LogError(err);
                 return err;
             }
@@ -192,28 +193,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                     : followAssets ? "re-run with followAssets: false, or snapshot a deeper path"
                                    : "snapshot a deeper path — this call is already at its narrowest flags")
                  + ")";
-        }
-
-        /// <summary>Resolve a root-relative hierarchy path in the active scene; first match wins
-        /// among duplicate-named siblings (and among duplicate-named roots, the first root that
-        /// resolves the full path).</summary>
-        private static GameObject FindByHierarchyPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return null;
-            var segs = path.Trim('/').Split('/');
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                if (root.name != segs[0]) continue;
-                Transform t = root.transform;
-                bool ok = true;
-                for (int i = 1; i < segs.Length && ok; i++)
-                {
-                    t = t.Find(segs[i]);
-                    if (t == null) ok = false;
-                }
-                if (ok) return t.gameObject;
-            }
-            return null;
         }
 
         // ----- Serialization -----------------------------------------------------------------

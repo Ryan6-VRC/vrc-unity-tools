@@ -77,8 +77,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         public static string Run(string rootPath)
         {
             if (string.IsNullOrEmpty(rootPath)) return Refuse("rootPath is null/empty");
-            var root = FindByHierarchyPath(rootPath);
-            if (root == null) return Refuse("rootPath '" + rootPath + "' did not resolve to a GameObject in the active scene");
+            var handle = SceneHandle.Resolve(rootPath);
+            if (!handle.Ok) return Refuse("rootPath: " + handle.Refusal);
+            var root = handle.Object;
 
             // ---- Collect once (full descent; includeInactive is mandatory — runtime-swap scaffolding
             //      lives on inactive GameObjects and must be seen). Bounded by component count, not
@@ -1174,27 +1175,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (rootTransform != null && rootTransform != host)
                 return "`" + Cell(GetHierarchyPath(rootTransform)) + "`";
             return "—";
-        }
-
-        // ----- Scene resolver (duplicated from AgentInspector.FindByHierarchyPath — kept local so this
-        //        tool adds no cross-file coupling; first match wins among duplicate-named siblings) -----
-        private static GameObject FindByHierarchyPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return null;
-            var segs = path.Trim('/').Split('/');
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                if (root.name != segs[0]) continue;
-                Transform t = root.transform;
-                bool ok = true;
-                for (int i = 1; i < segs.Length && ok; i++)
-                {
-                    t = t.Find(segs[i]);
-                    if (t == null) ok = false;
-                }
-                if (ok) return t.gameObject;
-            }
-            return null;
         }
 
         // Full scene-root-absolute hierarchy path (copied verbatim from AgentInspector.GetHierarchyPath).

@@ -118,8 +118,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// failure — it is reported as <c>MISSING</c> and the resolvable shapes are still analysed.</summary>
         public static string Run(string meshObject, string[] shapeNames = null, string outfitRoot = null)
         {
-            var go = Resolve(meshObject);
-            if (go == null) return Fail("scene object '" + meshObject + "' not found in the active scene");
+            var handle = SceneHandle.Resolve(meshObject);
+            if (!handle.Ok) return Fail("meshObject: " + handle.Refusal);
+            var go = handle.Object;
             var smr = ResolveMesh(go, out var why); // only returns an SMR whose mesh has blendShapeCount > 0
             if (smr == null) return Fail(why);
             var mesh = smr.sharedMesh;
@@ -134,8 +135,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             GameObject outfitGO = null;
             if (outfitRoot != null)
             {
-                outfitGO = Resolve(outfitRoot);
-                if (outfitGO == null) return Fail("outfit root '" + outfitRoot + "' not found in the active scene");
+                var outfitHandle = SceneHandle.Resolve(outfitRoot);
+                if (!outfitHandle.Ok) return Fail("outfitRoot: " + outfitHandle.Refusal);
+                outfitGO = outfitHandle.Object;
             }
 
             // The set fed to Analyze is the co-active union: caller-passed ∪ scene-worn ∪ MA ShapeChanger
@@ -789,59 +791,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             var e = "[ReportShapeOverlap] FAIL: " + why;
             Debug.LogError(e);
             return e;
-        }
-
-        // ── Scene resolver (path → instance id → recursive name; mirrors CheckSeam.Resolve) ────────────────
-
-        private static GameObject Resolve(string target)
-        {
-            if (string.IsNullOrEmpty(target)) return null;
-            var byPath = FindByHierarchyPath(target);
-            if (byPath != null) return byPath;
-
-            if (int.TryParse(target.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
-            {
-                var obj = EditorUtility.InstanceIDToObject(id);
-                if (obj is GameObject go) return go;
-                if (obj is Component comp) return comp.gameObject;
-            }
-
-            foreach (var rootGo in UnityEngine.SceneManagement.SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                var hit = FindByNameRecursive(rootGo.transform, target);
-                if (hit != null) return hit.gameObject;
-            }
-            return null;
-        }
-
-        private static GameObject FindByHierarchyPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return null;
-            var segs = path.Trim('/').Split('/');
-            foreach (var root in UnityEngine.SceneManagement.SceneManager.GetActiveScene().GetRootGameObjects())
-            {
-                if (root.name != segs[0]) continue;
-                Transform t = root.transform;
-                bool ok = true;
-                for (int i = 1; i < segs.Length && ok; i++)
-                {
-                    t = t.Find(segs[i]);
-                    if (t == null) ok = false;
-                }
-                if (ok) return t.gameObject;
-            }
-            return null;
-        }
-
-        private static Transform FindByNameRecursive(Transform t, string name)
-        {
-            if (t.name == name) return t;
-            foreach (Transform child in t)
-            {
-                var hit = FindByNameRecursive(child, name);
-                if (hit != null) return hit;
-            }
-            return null;
         }
 
         private static string PathOf(GameObject go)
