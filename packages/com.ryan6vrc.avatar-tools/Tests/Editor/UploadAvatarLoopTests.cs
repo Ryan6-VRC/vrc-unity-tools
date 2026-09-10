@@ -335,4 +335,44 @@ public class UploadAvatarLoopTests
     {
         Assert.IsFalse(UploadAvatar.IsReservedNoBundle(wasFirstUpload, stateAfter));
     }
+
+    // CAU's first-upload path writes a portraitCameraPositionOffset override on the uploaded scene
+    // instance. The one cell the door may undo is the one it caused: absent going in, present coming out.
+    [Test]
+    public void ShouldRevertPortraitOffset_overrideThisUploadIntroduced()
+    {
+        Assert.IsTrue(UploadAvatar.ShouldRevertPortraitOffset(false, true));
+    }
+
+    // The other three cells are all "not ours". The pre-existing case is the one that matters: an operator
+    // who aimed the portrait camera deliberately must keep that aim across an upload, so the predicate keys
+    // on the transition and never on the after-state alone — which is the mutant this case rules out.
+    [TestCase(true,  true,  TestName = "ShouldRevertPortraitOffset_operatorsOwnOverride_isLeftAlone")]
+    [TestCase(true,  false, TestName = "ShouldRevertPortraitOffset_overrideThatWentAway_isNotOurs")]
+    [TestCase(false, false, TestName = "ShouldRevertPortraitOffset_noOverrideEither_sideNothingToDo")]
+    public void ShouldRevertPortraitOffset_everyOtherCell_isLeftAlone(bool before, bool after)
+    {
+        Assert.IsFalse(UploadAvatar.ShouldRevertPortraitOffset(before, after));
+    }
+
+    // The flag has to survive the outcome->row hop, or the cleanup happens but the report stays silent.
+    // Both cells in one pass, so a note that defaulted to its only value rather than tracking the outcome
+    // fails here: A reverted, B did not.
+    [Test]
+    public void Loop_NotesOnlyTheRowsWhosePortraitOffsetWasReverted()
+    {
+        var avatars = new[] { MakeAvatar("A",""), MakeAvatar("B","") };
+        var outcomes = new System.Collections.Generic.Queue<UploadAvatar.UploadOutcome>(new[] {
+            UploadAvatar.UploadOutcome.Uploaded(portraitOffsetReverted: true),
+            UploadAvatar.UploadOutcome.Uploaded(),
+        });
+        var report = UploadAvatar.RunCore(avatars,
+            _ => System.Threading.Tasks.Task.FromResult(outcomes.Dequeue()),
+            () => { }).GetAwaiter().GetResult();
+
+        Assert.AreEqual("PASS", report.result);
+        Assert.AreEqual(UploadAvatar.PortraitOffsetRevertedNote, report.rows[0].notes);
+        Assert.IsNull(report.rows[1].notes);
+        foreach (var g in avatars) UnityEngine.Object.DestroyImmediate(g);
+    }
 }
