@@ -129,8 +129,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// not exist and for one this account may not see, and the door cannot tell those apart — so the
         /// text names both branches rather than asserting the one it cannot prove.</summary>
         internal static string RefuseForStatus(int? statusCode, string serverMessage)
+            => RefuseForStatus(statusCode, serverMessage, forImage: false);
+
+        /// <summary>As above, but able to name the IMAGE as what was rejected.
+        ///
+        /// Only 422 differs. Its text tells the caller to change the offending text, which is the right
+        /// instruction for a name or description and a wrong one for an image-only call — there is no text
+        /// in that request to change.</summary>
+        internal static string RefuseForStatus(int? statusCode, string serverMessage, bool forImage)
         {
             string tail = string.IsNullOrEmpty(serverMessage) ? "" : " — server said: " + Escape(serverMessage);
+            if (forImage && statusCode == 422)
+                return "the VRChat moderation filter rejected this image — shoot a different one rather " +
+                       "than retrying the same file" + tail;
             switch (statusCode)
             {
                 case 401:
@@ -255,20 +266,35 @@ namespace Ryan6Vrc.AvatarTools.Editor
             => exceptionMessage != null &&
                exceptionMessage.IndexOf("was already uploaded", StringComparison.OrdinalIgnoreCase) >= 0;
 
-        /// <summary>Report what the image half did, derived from whether the record's image URL moved.
+        /// <summary>Report what the image half did, given whether the record's image URL moved.
         ///
-        /// The URL itself never reaches output (the no-ids rule), so this reports the CHANGE as a bool. It
-        /// has to be derived here rather than read back later: <c>ReportAvatarRecord</c>'s
-        /// <c>hasThumbnail</c> is a bool off <c>ThumbnailImageUrl</c>, a different and server-derived field
-        /// that is already true on any avatar that has ever been uploaded — so it cannot distinguish a
-        /// landed attach from a no-op, and using it as the success check would pass on failure.</summary>
-        internal static string DescribeImageLanding(string beforeUrl, string afterUrl)
-        {
-            if (string.Equals(beforeUrl, afterUrl, StringComparison.Ordinal))
-                return "image DID NOT CHANGE — the API returned the record unmodified, which is how a " +
-                       "failed upload surfaces without throwing; the published thumbnail is still the old one";
-            return "image landed (the record's image url moved)";
-        }
+        /// Takes the decision as a BOOL rather than re-deriving it from the URLs, because the caller's
+        /// verdict and this sentence must not be able to disagree: a verdict recovered by string-matching
+        /// the prose would flip to PASS the moment the wording changed, which is the same defect that rules
+        /// out <c>hasThumbnail</c> below.
+        ///
+        /// The move has to be observed at the call site rather than read back later: <c>hasThumbnail</c> is
+        /// a bool off <c>ThumbnailImageUrl</c>, a different and server-derived field already true on any
+        /// avatar ever uploaded, so it cannot distinguish a landed attach from a no-op.</summary>
+        internal static string DescribeImageLanding(bool moved)
+            => moved
+                ? "image landed (the record's image url moved)"
+                : "image DID NOT CHANGE — the API returned the record unmodified, which is how a failed " +
+                  "upload surfaces without throwing; the published thumbnail is still the old one";
+
+        /// <summary>The row for an upload the SDK refused because it already holds the file.
+        ///
+        /// Deliberately does NOT claim the published thumbnail is the requested one, because the door
+        /// cannot know that. The SDK derives the file id from the record's image url but compares the MD5
+        /// against the file's LATEST version, and those differ after a run whose upload completed and whose
+        /// final url PUT did not: the record still points at the older version while the newer one matches.
+        /// The recovery this door recommends — re-running — lands exactly there, so asserting success would
+        /// turn the documented remedy into a false PASS.</summary>
+        internal static string ImageAlreadyUploadedRow()
+            => "image not re-uploaded — the server already holds a byte-identical file. Normally that " +
+               "means the requested thumbnail is published; it does NOT prove it, because the match is " +
+               "against the file's latest version and the record may reference an older one after an " +
+               "interrupted attach. Confirm in the client if it matters.";
 
         // ── Landing (server-side sanitization) ──────────────────────────────────────────────────
 
@@ -327,7 +353,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// must be told. The distinction is the whole point: a lost READ costs nothing, while a lost WRITE
         /// may have landed on the server, and reporting either as a plain failure invites a re-run that
         /// silently double-writes or a false belief that nothing changed.</summary>
-        internal enum Phase { Reading, UpdateSent }
+        /// <summary>How far an operation had got. <c>ImageSent</c> is distinct from <c>UpdateSent</c>
+        /// because the two need OPPOSITE advice: a lost metadata write must not be re-issued blindly, while
+        /// a lost image attach is safe to re-run — the SDK refuses a byte-identical re-upload outright.
+        /// Collapsing them would tell the caller to reconcile with a read that cannot see an image.</summary>
+        internal enum Phase { Reading, UpdateSent, ImageSent }
 
         /// <summary>The verdict for an operation this editor can no longer observe — a domain reload during
         /// the call, or a frame budget that expired with the request still in flight.
@@ -337,6 +367,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// it is the only way the caller can find out what is actually true.</summary>
         internal static string InterruptedVerdict(string door, string handle, Phase phase, string cause)
         {
+            if (phase == Phase.ImageSent)
+                return "[avatar-record] " + door + " handle=" + Quote(handle) + " => UNKNOWN " + cause +
+                       " while the thumbnail was uploading; any metadata in the same call had already " +
+                       "landed. No read can tell you whether the image arrived — ReportAvatarRecord " +
+                       "cannot see it. Simply RE-RUN the same call: an image the server already holds is " +
+                       "refused as a no-op, so a re-run either completes the attach or reports it absent.";
             if (phase == Phase.UpdateSent)
                 return "[avatar-record] " + door + " handle=" + Quote(handle) + " => UNKNOWN " + cause +
                        " AFTER the update was sent — it may well have landed on the server. Do NOT re-run " +

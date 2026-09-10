@@ -180,12 +180,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
-        /// <summary>Classify a faulted task into the door's REFUSE text.</summary>
-        internal static string DescribeFault(object task)
+        /// <summary>Classify a faulted task into the door's REFUSE text. <paramref name="forImage"/> only
+        /// changes the 422 text, whose "change the text" instruction names nothing an image call
+        /// submitted.</summary>
+        internal static string DescribeFault(object task, bool forImage = false)
         {
             var ex = (Exception)task.GetType().GetProperty("Exception").GetValue(task);
             var hit = FindClassifiable(ex, out var code, out var msg);
-            if (hit != null) return AvatarRecordLogic.RefuseForStatus(code, msg);
+            if (hit != null) return AvatarRecordLogic.RefuseForStatus(code, msg, forImage);
 
             // Nothing in the chain carried API signal — fall back to the innermost message, which at least
             // names a transport or cancellation failure. Scrubbed: an arbitrary exception string is the one
@@ -357,15 +359,31 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             var parts = crumb.Split(new[] { Sep }, 3);
             if (parts.Length < 3) return;
-            var phase = parts[1] == "w" ? AvatarRecordLogic.Phase.UpdateSent : AvatarRecordLogic.Phase.Reading;
+            // An UNRECOGNISED char resolves to UpdateSent, not Reading. Reading's verdict asserts "nothing
+            // was written", and a crumb this build cannot parse is exactly the case where that claim is
+            // unfounded — a stale crumb from another version of this file. Over-reporting a write costs a
+            // reconciling read; under-reporting one hides a landed edit.
+            AvatarRecordLogic.Phase phase;
+            switch (parts[1])
+            {
+                case "r": phase = AvatarRecordLogic.Phase.Reading; break;
+                case "i": phase = AvatarRecordLogic.Phase.ImageSent; break;
+                default:  phase = AvatarRecordLogic.Phase.UpdateSent; break;
+            }
             _summaryOwner = parts[0];
             _summary = AvatarRecordLogic.InterruptedVerdict(
                 parts[0], parts[2], phase, "the editor reloaded (recompile or play-mode entry)");
         }
 
+        static string PhaseChar(AvatarRecordLogic.Phase p)
+        {
+            if (p == AvatarRecordLogic.Phase.UpdateSent) return "w";
+            if (p == AvatarRecordLogic.Phase.ImageSent) return "i";
+            return "r";
+        }
+
         static void WriteBreadcrumb()
-            => SessionState.SetString(BreadcrumbKey,
-                   _door + Sep + (_phase == AvatarRecordLogic.Phase.UpdateSent ? "w" : "r") + Sep + _handle);
+            => SessionState.SetString(BreadcrumbKey, _door + Sep + PhaseChar(_phase) + Sep + _handle);
 
         /// <summary>Called by a door the instant its update request is handed to the API. Everything after
         /// this point must be reported UNKNOWN rather than FAIL if the operation is lost.</summary>
@@ -375,14 +393,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
             WriteBreadcrumb();
         }
 
+        /// <summary>As above, for the image attach — a separate phase because it is the one write that is
+        /// safe to re-run blindly, and because the read door cannot see whether it landed.</summary>
+        internal static void MarkImageSent()
+        {
+            _phase = AvatarRecordLogic.Phase.ImageSent;
+            WriteBreadcrumb();
+        }
+
         /// <summary>Count observable progress as liveness, resetting the frame budget.
         ///
         /// The budget exists to catch a call that has genuinely stalled, and it was sized for two JSON round
         /// trips. A file upload is neither: it holds seconds of unconditional delay and a multi-part
         /// transfer, so a budget that cannot be reset would time out a healthy attach and report UNKNOWN on
         /// a write that was still progressing. The SDK dispatches this callback off the main thread, which
-        /// is safe here only because the write is a single int the tick loop re-reads.</summary>
-        internal static void NoteProgress() => _frames = 0;
+        /// is safe here only because the write is a single int the tick loop re-reads.
+        ///
+        /// Gated on the calling door still owning the driver: the progress closure is handed to the SDK
+        /// with no cancellation token, so it outlives a Finish() and an orphaned upload would otherwise
+        /// keep zeroing the counter and disarm the stall detector of whatever runs NEXT.</summary>
+        internal static void NoteProgress(string door)
+        {
+            if (_running && _door == door) _frames = 0;
+        }
 
         internal static void Start(string door, string handle, Action step)
         {
@@ -613,19 +646,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // Kicking the image is its own step because two paths reach it: after a metadata write, and
             // directly from the read when the call sets only an image.
-            Func<bool> kickImage = () =>
+            Action kickImage = () =>
             {
                 beforeImageUrl = VrcApiReflect.GetImageUrl(carriedRec);
-                AvatarRecordDriver.MarkUpdateSent();
-                Action<string, float> progress = (s, f) => AvatarRecordDriver.NoteProgress();
+                AvatarRecordDriver.MarkImageSent();
+                Action<string, float> progress = (s, f) => AvatarRecordDriver.NoteProgress(Door);
                 if (!VrcApiReflect.TryUpdateAvatarImage(id, carriedRec, newImagePath, progress,
                                                         out imageTask, out var imgKickWhy))
                 {
-                    AvatarRecordDriver.Finish(AvatarRecordDriver.Refuse(Door, imgKickWhy));
-                    return false;
+                    // A bare Refuse would read as "nothing happened", which is false once the metadata PUT
+                    // has landed — and would send the caller back with an expectCurrentName the rename has
+                    // already invalidated. Report the partial instead.
+                    AvatarRecordDriver.Finish(writesMetadata
+                        ? "[avatar-record] update handle=" + AvatarRecordLogic.Quote(handle) + " " +
+                          VrcApiReflect.Digest(carriedRec) + metaLandings +
+                          " | image FAILED to start: " + imgKickWhy + " => FAIL"
+                        : AvatarRecordDriver.Refuse(Door, imgKickWhy));
+                    return;
                 }
                 stage = 2;
-                return true;
             };
 
             AvatarRecordDriver.Start(Door, handle, () =>
@@ -747,22 +786,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // holds already IS the requested image.
                     if (AvatarRecordLogic.IsAlreadyUploaded(VrcApiReflect.DeepestMessage(imageTask)))
                     {
-                        imageRow = "image already attached — the server holds a byte-identical file, so " +
-                                   "nothing was re-uploaded and the published thumbnail is the one requested";
+                        imageRow = AvatarRecordLogic.ImageAlreadyUploadedRow();
                         verdict = "PASS";
                     }
                     else
                     {
-                        imageRow = "image FAILED: " + VrcApiReflect.DescribeFault(imageTask);
+                        imageRow = "image FAILED: " + VrcApiReflect.DescribeFault(imageTask, forImage: true);
                         verdict = "FAIL";
                     }
                 }
                 else
                 {
                     reportRec = VrcApiReflect.Result(imageTask);
-                    imageRow = AvatarRecordLogic.DescribeImageLanding(
-                        beforeImageUrl, VrcApiReflect.GetImageUrl(reportRec));
-                    verdict = imageRow.StartsWith("image DID NOT CHANGE") ? "FAIL" : "PASS";
+                    // The verdict comes from the OBSERVATION, not from matching the sentence it produces:
+                    // a re-worded diagnostic must not be able to flip a live-write verdict.
+                    bool moved = !string.Equals(beforeImageUrl, VrcApiReflect.GetImageUrl(reportRec),
+                                                StringComparison.Ordinal);
+                    imageRow = AvatarRecordLogic.DescribeImageLanding(moved);
+                    verdict = moved ? "PASS" : "FAIL";
                 }
 
                 // The metadata rows survive a failed image half: this is a partial result, and hiding the

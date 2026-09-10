@@ -295,22 +295,46 @@ public class AvatarRecordLogicTests
     // An unmoved image url is the only observable, so it must read as a failure and not as success.
     [Test] public void Image_UnmovedUrlIsReportedAsNotChanged()
     {
-        var r = AvatarRecordLogic.DescribeImageLanding("https://api/file/abc/1", "https://api/file/abc/1");
+        var r = AvatarRecordLogic.DescribeImageLanding(false);
         StringAssert.Contains("DID NOT CHANGE", r);
         StringAssert.Contains("still the old one", r);
     }
 
     [Test] public void Image_MovedUrlIsReportedAsLanded()
-        => StringAssert.Contains("image landed",
-               AvatarRecordLogic.DescribeImageLanding("https://api/file/abc/1", "https://api/file/abc/2"));
+        => StringAssert.Contains("image landed", AvatarRecordLogic.DescribeImageLanding(true));
 
-    // The url is an identifier and must never reach output, whichever way the comparison went.
-    [Test] public void Image_LandingNeverEmitsTheUrl()
+    // The already-uploaded row must NOT assert the requested thumbnail is published. The SDK matches the
+    // MD5 against the file's LATEST version while the record references a version by url, and those differ
+    // after an attach whose upload completed and whose final url PUT did not — which is exactly where the
+    // recommended re-run lands. Asserting success there would make the documented remedy a false PASS.
+    [Test] public void Image_AlreadyUploadedDoesNotClaimThePublishedThumbnailIsTheRequestedOne()
     {
-        var moved = AvatarRecordLogic.DescribeImageLanding("https://api/file/abc/1", "https://api/file/abc/2");
-        var same  = AvatarRecordLogic.DescribeImageLanding("https://api/file/abc/1", "https://api/file/abc/1");
-        StringAssert.DoesNotContain("api/file", moved);
-        StringAssert.DoesNotContain("api/file", same);
+        var r = AvatarRecordLogic.ImageAlreadyUploadedRow();
+        StringAssert.Contains("does NOT prove", r);
+        StringAssert.Contains("latest version", r);
+    }
+
+    // 422 on an image tells the caller to change text the request never carried.
+    [Test] public void Image_ModerationRejectionNamesTheImageNotTheText()
+    {
+        var r = AvatarRecordLogic.RefuseForStatus(422, null, forImage: true);
+        StringAssert.Contains("image", r);
+        StringAssert.DoesNotContain("change the text", r);
+    }
+
+    [Test] public void Image_ModerationRejectionStillNamesTextWhenNotAnImage()
+        => StringAssert.Contains("change the text",
+                                 AvatarRecordLogic.RefuseForStatus(422, null, forImage: false));
+
+    // A lost image attach and a lost metadata write need OPPOSITE advice: re-running the image is safe
+    // (a byte-identical re-upload is refused as a no-op), and no read can reconcile it.
+    [Test] public void Interrupted_ImageSentSaysReRunRatherThanReconcile()
+    {
+        var r = AvatarRecordLogic.InterruptedVerdict("UpdateAvatarRecord", "Row",
+                                                     AvatarRecordLogic.Phase.ImageSent, "editor reloaded");
+        StringAssert.Contains("RE-RUN", r);
+        StringAssert.Contains("cannot see it", r);
+        StringAssert.DoesNotContain("Do NOT re-run", r);
     }
 
     // An image alone is a real edit, so the "nothing to change" refusal must not fire on it — otherwise
