@@ -111,9 +111,13 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             if (go.scene == scene) return new SceneHandleResult { Outcome = SceneHandleOutcome.Found, Object = go };
 
-            // Split by cause: a prefab ASSET is on disk and has no scene at all, while a prefab stage or a
-            // preview scene is a live scene the enumeration deliberately omits. One message for both would send
-            // the reader looking in a scene for something that is a file, or vice versa.
+            // Split by cause: a prefab ASSET is on disk and has no scene at all, while a prefab stage, a
+            // preview scene or another loaded scene is a live scene that simply is not the active one. One
+            // message for both would send the reader looking in a scene for something that is a file.
+            // Measured, against the assumption: NDMF's preview scene DOES appear in SceneManager's
+            // enumeration (it is a real additively-opened scene under Packages/, unlike
+            // EditorSceneManager.NewPreviewScene()). Nothing here depends on that — only the active scene is
+            // searched — but do not reintroduce a wider domain believing preview scenes are excluded for free.
             return Refuse(SceneHandleOutcome.OutOfDomain, go.scene.IsValid()
                 ? "instance id " + id + " ('" + go.name + "') is not in the active scene (prefab isolation, a preview scene, or another loaded scene) — open or activate the scene holding it."
                 : "instance id " + id + " ('" + go.name + "') is inside a prefab asset, not a loaded scene — place it, or pass an asset path to a door that takes one.");
