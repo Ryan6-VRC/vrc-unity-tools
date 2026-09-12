@@ -459,7 +459,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         internal static string RenderBody(GameObject root, CensusResult c, string paramFilter, string mode,
-            List<string> bakeSection, List<string> geometrySection = null)
+            List<string> bakeSection, List<string> geometrySection = null, List<string> textureSection = null)
         {
             var sb = new StringBuilder();
             sb.Append("# ReportComposition: ").Append(root.name).Append('\n');
@@ -507,6 +507,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append("\n## Geometry\n\n");
                 foreach (var l in geometrySection) sb.Append(l).Append('\n');
             }
+            if (textureSection != null)
+            {
+                sb.Append("\n## Textures\n\n");
+                foreach (var l in textureSection) sb.Append(l).Append('\n');
+            }
             // Scope is emitted in BOTH modes. It used to be the `else` arm of the bake section, so a bake
             // artifact — the one whose heading promises composed truth — lost every scope rule while still
             // rendering the whole Parameters table above, including its authored-only `synced` column.
@@ -514,8 +519,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (bakeSection == null)
                 sb.Append("Plain mode reports what is AUTHORED. It makes no namespace-resolution claim: ").Append(ScopeAuthoredNames).Append(".\n");
             else
-                sb.Append("The **Bake diff** and **Geometry** sections are measured against a fresh build — names in ")
-                  .Append("the first, triangles in the second. Everything ABOVE them — the ")
+                sb.Append("The **Bake diff**, **Geometry** and **Textures** sections are measured against a fresh build — names in ")
+                  .Append("the first, triangles in the second, texture memory in the third. Everything ABOVE them — the ")
                   .Append("merge-surface, parameter and menu tables — is still the authored census, and the bake ")
                   .Append("resolves only the names: read a row's build-time identity from the diff, not from the tables.\n");
             sb.Append("An empty writers cell reads `").Append(ScopeWriters).Append("` because the writer set for a parameter is open — an empty cell is not a finding.\n");

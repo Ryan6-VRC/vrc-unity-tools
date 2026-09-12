@@ -138,6 +138,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var diff = Diff(census, built, paramFilter, incomplete == null);
                 string geometryKeys;
                 var geometry = GeometrySection(ReadGeometry(root), ReadGeometry(clone), paramFilter, out geometryKeys);
+                // Both texture reads sit INSIDE the scope for ReadGeometry's reason: the optimizers' output
+                // textures are NDMF `__Generated` assets the post-callback deletes, so after the scope closes
+                // the built side has nothing left to measure.
+                int swapAuthored, swapBuilt;
+                var texAuthored = ReadTextures(root, out swapAuthored);
+                var texBuilt = ReadTextures(clone, out swapBuilt);
+                string textureKeys;
+                var textures = TextureSection(texAuthored, texBuilt,
+                    SdkTextureMegabytes(root), SdkTextureMegabytes(clone),
+                    swapAuthored, swapBuilt, paramFilter, out textureKeys);
                 string summary = string.Format(CultureInfo.InvariantCulture,
                     // `unattributed=` is deliberately GONE rather than kept with a narrower meaning: it used to
                     // count ambiguity and built-only rows together, so preserving the key while the number moves
@@ -145,7 +155,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // signal that the denominator changed. Renaming both halves makes the change visible.
                     // unlintableSurfaces rides here too, not only EmitPlain: bake is the EXACTNESS mode, so a
                     // surface this run could not walk is where the omission costs most.
-                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} mode=bake => OK | log={12}",
+                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} {15} mode=bake => OK | log={12}",
                     root.name, census.Surfaces.Count, census.Params.Count,
                     diff.Count(d => d.Category == "kept"), diff.Count(d => d.Category == "renamed"),
                     diff.Count(d => d.Category == "dropped"), diff.Count(d => d.Category == "merged"),
@@ -154,7 +164,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     diff.Count(d => d.Category == "not-in-scope"),
                     diff.Count(d => d.Category == "built-side-unread"), path,
                     census.UnlintableSurfaces > 0 ? " unlintableSurfaces=" + census.UnlintableSurfaces : "",
-                    geometryKeys);
+                    geometryKeys, textureKeys);
 
                 var section = new List<string>
                 {
@@ -216,7 +226,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                           + "pre-optimizer view.");
 
                 string body = "summary: " + summary + "\n\n"
-                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry);
+                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry, textures);
                 WriteArtifact(path, body);
                 Debug.Log(summary);
             }   // scope closes: the clone is destroyed and OnPostprocessAvatar fires, in that order
@@ -396,6 +406,377 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sum += r.Tris;
             }
             return sum.ToString(CultureInfo.InvariantCulture);
+        }
+
+        // ── Textures: memory, authored against built ──────────────────────────────────────────────────
+
+        /// <summary>One distinct texture on one side of the diff, with the slots that reach it.
+        /// <para><c>Unknown</c> is the THIRD state, and it is the analogue of <see cref="GeoRow.Unreadable"/>
+        /// for the same reason: a 0 in a megabyte column reads as "this costs nothing", which is a claim this
+        /// section must never manufacture. A texture whose <c>TextureFormat</c> this arithmetic cannot type,
+        /// and every non-<c>Texture2D</c> (RenderTexture, Cubemap, Texture2DArray), is Unknown — named in its
+        /// row, excluded from the total and from the ordering. AAO's own reader guesses 16 bpp on an
+        /// unrecognised format and logs an error doing it; a guess laundered into a table a reader sorts by
+        /// size is worse than an honest gap.</para></summary>
+        internal struct TexRow
+        {
+            public string Slot;        // "<renderer path>[slot].<shader property>" — first slot reaching this texture
+            public int OtherSlots;     // how many further slots reach the same texture; it is counted ONCE
+            public string SlotKey;     // every reaching slot, ordinal-sorted — the pairing key when identity fails
+            public string Identity;    // asset path, else instance id: survives a renderer merge, dies on a resize
+            public int Width, Height, Mips;
+            public string Format;
+            public long Bytes;
+            public bool Unknown;
+            public string Caveat;
+        }
+
+        /// <summary>Bytes per pixel for the formats this arithmetic can type. Verified against the SDK's own
+        /// <c>textureMegabytes</c>: summing <c>width*height*bpp</c> over the mip chain for 17 textures on a
+        /// real avatar reproduced the SDK's figure to five decimals (18.18228 MB), so these rows and the
+        /// reported total are the SAME measurement rather than two estimators printed side by side.
+        /// A format absent here is Unknown, never a guess — this is PC-facing (<c>optimization.md</c> works
+        /// PC only), so the ASTC/ETC families are deliberately absent rather than wrong.</summary>
+        private static readonly Dictionary<TextureFormat, float> BytesPerPixel = new Dictionary<TextureFormat, float>
+        {
+            { TextureFormat.DXT1, 0.5f },   { TextureFormat.DXT1Crunched, 0.5f },
+            { TextureFormat.DXT5, 1f },     { TextureFormat.DXT5Crunched, 1f },
+            { TextureFormat.BC7, 1f },      { TextureFormat.BC6H, 1f },
+            { TextureFormat.BC4, 0.5f },    { TextureFormat.BC5, 1f },
+            { TextureFormat.Alpha8, 1f },   { TextureFormat.R8, 1f },
+            { TextureFormat.R16, 2f },      { TextureFormat.RG16, 2f },
+            { TextureFormat.RGB24, 3f },    { TextureFormat.RGBA32, 4f },
+            { TextureFormat.ARGB32, 4f },   { TextureFormat.BGRA32, 4f },
+            { TextureFormat.RGB565, 2f },   { TextureFormat.RGBA4444, 2f },
+            { TextureFormat.ARGB4444, 2f }, { TextureFormat.RHalf, 2f },
+            { TextureFormat.RGHalf, 4f },   { TextureFormat.RGBAHalf, 8f },
+            { TextureFormat.RFloat, 4f },   { TextureFormat.RGFloat, 8f },
+            { TextureFormat.RGBAFloat, 16f },
+        };
+
+        /// <summary>Every texture reachable from every renderer's shared materials under <paramref name="root"/>,
+        /// active or not — the same population rule <see cref="ReadGeometry"/> states, and measured the same way:
+        /// deactivating every renderer object on a real avatar moved the SDK's <c>textureMegabytes</c> by zero,
+        /// so an inactive renderer's textures count at full weight.
+        /// <para><b>This walks every <c>Renderer</c>, not <see cref="ReadGeometry"/>'s loop</b>, which
+        /// <c>continue</c>s past particle, trail and line renderers because they carry no mesh. They carry
+        /// materials, and those textures are in the megabyte figure.</para>
+        /// <para><paramref name="swapOnlyMaterials"/> is the disclosed omission: materials no renderer's
+        /// <c>sharedMaterials</c> holds, reachable only through an <c>m_Materials</c> object-reference curve.
+        /// They are COUNTED, not rowed — the optimizers that own this stat do reach them (AAO unions the
+        /// animated materials per renderer; Limitex walks the animator and the components besides), so their
+        /// textures sit inside the SDK total while being in no row here, and an undisclosed gap in a table a
+        /// reader uses to pick a target is this section's worst failure.</para></summary>
+        internal static List<TexRow> ReadTextures(GameObject root, out int swapOnlyMaterials)
+        {
+            var rows = new List<TexRow>();
+            swapOnlyMaterials = 0;
+            if (root == null) return rows;
+
+            var order = new List<Texture>();
+            var slots = new Dictionary<Texture, List<string>>();
+            var sharedMats = new HashSet<Material>();
+
+            foreach (var r in root.GetComponentsInChildren<Renderer>(true))
+            {
+                if (r == null) continue;
+                string path = RelPath(root, r.transform);
+                var mats = r.sharedMaterials;
+                for (int i = 0; i < mats.Length; i++)
+                {
+                    var m = mats[i];
+                    if (m == null) continue;
+                    sharedMats.Add(m);
+                    foreach (var prop in m.GetTexturePropertyNames())
+                    {
+                        var t = m.GetTexture(prop);
+                        // A property the shader declares and the material leaves null is NOTHING — not a
+                        // zero-byte row, which would read as a texture that costs nothing.
+                        if (t == null) continue;
+                        List<string> reaching;
+                        if (!slots.TryGetValue(t, out reaching))
+                        {
+                            reaching = new List<string>();
+                            slots[t] = reaching;
+                            order.Add(t);
+                        }
+                        reaching.Add(path + "[" + i.ToString(CultureInfo.InvariantCulture) + "]." + prop);
+                    }
+                }
+            }
+
+            foreach (var m in SwapReachableMaterials(root))
+                if (!sharedMats.Contains(m)) swapOnlyMaterials++;
+
+            foreach (var t in order)
+            {
+                var reaching = slots[t];
+                reaching.Sort(StringComparer.Ordinal);
+                var row = new TexRow
+                {
+                    Slot = reaching[0],
+                    OtherSlots = reaching.Count - 1,
+                    SlotKey = string.Join("|", reaching.ToArray()),
+                    Width = t.width,
+                    Height = t.height,
+                    Mips = t.mipmapCount,
+                };
+                string assetPath = AssetDatabase.GetAssetPath(t);
+                row.Identity = string.IsNullOrEmpty(assetPath)
+                    ? "iid:" + t.GetInstanceID().ToString(CultureInfo.InvariantCulture)
+                    : assetPath;
+
+                var t2 = t as Texture2D;
+                if (t2 == null)
+                {
+                    row.Unknown = true;
+                    row.Format = t.GetType().Name;
+                    // A Cubemap legitimately ships uncapped — AAO's MaxTextureSize maps `is Texture2D` only —
+                    // so an unchanged row here is correct behaviour, not a lever someone forgot to pull.
+                    row.Caveat = "not a Texture2D; its bytes are not typed here and the optimizers' size caps do not apply to it";
+                }
+                else
+                {
+                    row.Format = t2.format.ToString();
+                    float bpp;
+                    if (!BytesPerPixel.TryGetValue(t2.format, out bpp))
+                    {
+                        row.Unknown = true;
+                        row.Caveat = "format " + t2.format + " is not typed by this arithmetic, so its bytes are unknown rather than guessed";
+                    }
+                    else
+                    {
+                        long px = (long)t2.width * t2.height;
+                        for (int i = 0; i < t2.mipmapCount && (px >> (2 * i)) >= 1; i++)
+                            row.Bytes += (long)Mathf.RoundToInt((px >> (2 * i)) * bpp);
+                    }
+                }
+                rows.Add(row);
+            }
+            return rows;
+        }
+
+        /// <summary>Materials any <c>m_Materials</c> object-reference curve can put into a slot, across every
+        /// clip reachable from an <c>Animator</c> under the root. Deliberately the cheap half of the question:
+        /// it exists to COUNT a disclosed omission, not to resolve one, so it reads clips and stops there. A
+        /// material a COMPONENT sets (MA Material Setter) is reached by neither this count nor the rows, and
+        /// the section's prose says so rather than letting the count imply a completeness it lacks.</summary>
+        private static IEnumerable<Material> SwapReachableMaterials(GameObject root)
+        {
+            var seen = new HashSet<Material>();
+            foreach (var animator in root.GetComponentsInChildren<Animator>(true))
+            {
+                if (animator == null || animator.runtimeAnimatorController == null) continue;
+                foreach (var clip in animator.runtimeAnimatorController.animationClips)
+                {
+                    if (clip == null) continue;
+                    foreach (var b in AnimationUtility.GetObjectReferenceCurveBindings(clip))
+                    {
+                        if (b.propertyName == null ||
+                            !b.propertyName.StartsWith("m_Materials.Array.data[", StringComparison.Ordinal)) continue;
+                        var keys = AnimationUtility.GetObjectReferenceCurve(clip, b);
+                        if (keys == null) continue;
+                        foreach (var k in keys)
+                        {
+                            var m = k.value as Material;
+                            if (m != null && seen.Add(m)) yield return m;
+                        }
+                    }
+                }
+            }
+        }
+
+        /// <summary>The <c>## Textures</c> table, and (out) the built side's summary key. Pure — rows in,
+        /// lines out — so the reconciliation every reading of this section rests on is unit-testable without
+        /// a bake.
+        /// <para><b>Pairing is identity first, slot set second, and it needs both.</b> An untouched texture
+        /// keeps its asset path and pairs straight through a renderer merge; a resized one is a NEW object
+        /// whose only surviving handle is the set of slots reaching it. Neither key alone survives both cases
+        /// — identity dies on a resize, the slot set dies on a merge — and d4rk's <c>MergeSkinnedMeshes</c> is
+        /// on in the house profile, so the merge case is the ordinary one, not the exotic one.</para></summary>
+        internal static List<string> TextureSection(List<TexRow> authored, List<TexRow> built,
+                                                    float? sdkAuthored, float? sdkBuilt,
+                                                    int swapOnlyAuthored, int swapOnlyBuilt,
+                                                    string paramFilter, out string summaryKeys)
+        {
+            var pairs = PairTextures(authored, built);
+
+            var lines = new List<string>
+            {
+                "texture memory, authored against the clone; paramFilter does not narrow this section"
+                    + (string.IsNullOrEmpty(paramFilter) ? ""
+                       : " (`" + RunLogFormat.Cell(paramFilter) + "` is active and narrows the parameter tables ONLY, so these rows and totals are of the WHOLE avatar)"),
+                "",
+                "| texture (slot) | size | format | mips | authored MB | built MB | caveat |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
+            };
+            foreach (var p in pairs)
+            {
+                bool inA = p.Authored.HasValue, inB = p.Built.HasValue;
+                var row = inB ? p.Built.Value : p.Authored.Value;
+                string presence = inA && inB ? "" : inB ? " (built-only)" : " (authored-only)";
+                var caveats = new List<string>();
+                if (inA && !string.IsNullOrEmpty(p.Authored.Value.Caveat)) caveats.Add((inB ? "authored: " : "") + p.Authored.Value.Caveat);
+                if (inB && !string.IsNullOrEmpty(p.Built.Value.Caveat)) caveats.Add((inA ? "built: " : "") + p.Built.Value.Caveat);
+                if (row.OtherSlots > 0)
+                    caveats.Add("reached by " + (row.OtherSlots + 1) + " slots; counted once, as the SDK counts it once");
+                lines.Add("| `" + RunLogFormat.Cell(row.Slot) + "`" + presence
+                        + " | " + row.Width + "x" + row.Height
+                        + " | " + RunLogFormat.Cell(row.Format)
+                        + " | " + row.Mips
+                        + " | " + MbCell(p.Authored) + " | " + MbCell(p.Built)
+                        + " | " + RunLogFormat.Cell(string.Join("; ", caveats.ToArray())) + " |");
+            }
+            lines.Add("| total (rows) | | | | " + Mb(SumBytes(authored)) + " | " + Mb(SumBytes(built)) + " | |");
+            lines.Add("| total (SDK) | | | | " + SdkCell(sdkAuthored) + " | " + SdkCell(sdkBuilt) + " | |");
+            lines.Add("");
+
+            lines.Add("**The two totals are one measurement, and their residual is the check.** The row total sums "
+                    + "this section's own arithmetic — width x height x the format's bytes per pixel, over the mip "
+                    + "chain; the SDK total is `AvatarPerformanceStats.textureMegabytes`, the figure the upload gate "
+                    + "actually rates. They are computed the same way, so the expected residual is ZERO and a test "
+                    + "asserts it. " + ResidualSentence(authored, built, sdkAuthored, sdkBuilt));
+            lines.Add("A texture reached by several slots is ONE row, labelled by its first reaching slot in "
+                    + "ordinal slot order, with the rest disclosed in its caveat — it is counted once here because "
+                    + "the SDK counts it once, so the rows do sum to the total.");
+            lines.Add("**An `unknown` MB cell is not a zero.** A non-`Texture2D` (RenderTexture, Cubemap, "
+                    + "Texture2DArray) and a `TextureFormat` this arithmetic does not type are excluded from the row "
+                    + "total and from the ordering rather than guessed at. They remain inside the SDK total, so an "
+                    + "unknown row is exactly where the two totals may legitimately disagree.");
+            lines.Add("**A built-only row is where a resize or a mint landed**; an **authored-only** row is a texture "
+                    + "the build dropped. A renderer merge moves every slot handle at once, so on a d4rk-merged "
+                    + "avatar expect paired rows to fall to those the build left untouched and the rest to split "
+                    + "into authored-only/built-only pairs: that is the pairing losing its handle, NOT mass being "
+                    + "deleted and re-added. Rows are ordered by built megabytes descending, so the levers sort to "
+                    + "the top; the row set is complete regardless.");
+            lines.Add(SwapSentence(swapOnlyAuthored, swapOnlyBuilt));
+            lines.Add("**This built column overstates what an upload ships on an unlocked Poiyomi avatar.** "
+                    + "VRCFury's `DisablePluginsWhenNotUploadingHook` inhibits Poiyomi's material lockdown during a "
+                    + "bake, and that lockdown DELETES the texture-property entries bound to every shader feature "
+                    + "the material leaves disabled. Those textures leave on upload and stay here, so the gap runs "
+                    + "in the direction a reader would not guess: the real avatar is lighter than this table, by an "
+                    + "amount that grows with how many features are off. liltoon's inhibited module strips shader "
+                    + "settings rather than textures and does not move this figure.");
+
+            summaryKeys = "textureMB=" + SdkCell(sdkBuilt);
+            return lines;
+        }
+
+        /// <summary>The SDK's own <c>textureMegabytes</c> for <paramref name="go"/> — the figure the upload gate
+        /// rates, and the only one <c>optimization.md</c> §Measuring lets a rank conversation use.
+        /// <para>Returns null rather than 0 on any failure, and the stat field is itself nullable: a 0 here would
+        /// be a confident claim that the avatar carries no textures. The call is ~2 ms for the whole stat vector,
+        /// so it is free beside the bake that had to happen anyway.</para></summary>
+        private static float? SdkTextureMegabytes(GameObject go)
+        {
+            if (go == null) return null;
+            try
+            {
+                var stats = new VRC.SDKBase.Validation.Performance.Stats.AvatarPerformanceStats(false);
+                VRC.SDKBase.Validation.Performance.AvatarPerformance
+                    .CalculatePerformanceStats(go.name, go, stats, false);
+                return stats.textureMegabytes;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        private struct TexPair { public TexRow? Authored, Built; }
+
+        /// <summary>Identity first, then the slot set, then unpaired. Each built row is claimed at most once,
+        /// and a claimed row cannot be claimed again by the weaker key — the same "an exact match is not
+        /// another row's rename" discipline the parameter diff holds, for the same reason.</summary>
+        private static List<TexPair> PairTextures(List<TexRow> authored, List<TexRow> built)
+        {
+            var pairs = new List<TexPair>();
+            var takenBuilt = new bool[built.Count];
+
+            var byIdentity = new Dictionary<string, int>(StringComparer.Ordinal);
+            var bySlotKey = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (int i = 0; i < built.Count; i++)
+            {
+                if (!byIdentity.ContainsKey(built[i].Identity)) byIdentity[built[i].Identity] = i;
+                if (!bySlotKey.ContainsKey(built[i].SlotKey)) bySlotKey[built[i].SlotKey] = i;
+            }
+
+            foreach (var a in authored)
+            {
+                int j;
+                if (byIdentity.TryGetValue(a.Identity, out j) && !takenBuilt[j])
+                {
+                    takenBuilt[j] = true;
+                    pairs.Add(new TexPair { Authored = a, Built = built[j] });
+                }
+                else if (bySlotKey.TryGetValue(a.SlotKey, out j) && !takenBuilt[j])
+                {
+                    takenBuilt[j] = true;
+                    pairs.Add(new TexPair { Authored = a, Built = built[j] });
+                }
+                else pairs.Add(new TexPair { Authored = a, Built = null });
+            }
+            for (int i = 0; i < built.Count; i++)
+                if (!takenBuilt[i]) pairs.Add(new TexPair { Authored = null, Built = built[i] });
+
+            // Ordered by BUILT megabytes descending so the levers sort to the top; an authored-only row sorts
+            // on what it used to cost, and an unknown row sorts last rather than as a zero.
+            return pairs
+                .OrderByDescending(p => p.Built.HasValue && !p.Built.Value.Unknown ? p.Built.Value.Bytes
+                                      : p.Authored.HasValue && !p.Authored.Value.Unknown ? p.Authored.Value.Bytes : -1L)
+                .ThenBy(p => (p.Built ?? p.Authored.Value).Slot, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        /// <summary>An Unknown row contributes nothing to the row total — its bytes are unknown, not zero —
+        /// which is exactly why its cell says `unknown` where a total could not.</summary>
+        private static long SumBytes(List<TexRow> side)
+        {
+            long sum = 0;
+            foreach (var r in side) if (!r.Unknown) sum += r.Bytes;
+            return sum;
+        }
+
+        private static string Mb(long bytes)
+        {
+            return (bytes / 1048576f).ToString("F4", CultureInfo.InvariantCulture);
+        }
+
+        private static string MbCell(TexRow? row)
+        {
+            if (!row.HasValue) return "—";
+            return row.Value.Unknown ? "unknown" : Mb(row.Value.Bytes);
+        }
+
+        /// <summary>A null stat is an ABSENT figure, never a 0 — <c>textureMB=0</c> is a confident claim that
+        /// the avatar carries no textures, and the SDK's stat fields are nullable.</summary>
+        private static string SdkCell(float? mb)
+        {
+            return mb.HasValue ? mb.Value.ToString("F4", CultureInfo.InvariantCulture) : "unknown";
+        }
+
+        private static string ResidualSentence(List<TexRow> authored, List<TexRow> built, float? sdkA, float? sdkB)
+        {
+            var parts = new List<string>();
+            if (sdkA.HasValue) parts.Add("authored " + (sdkA.Value - SumBytes(authored) / 1048576f).ToString("F4", CultureInfo.InvariantCulture));
+            if (sdkB.HasValue) parts.Add("built " + (sdkB.Value - SumBytes(built) / 1048576f).ToString("F4", CultureInfo.InvariantCulture));
+            if (parts.Count == 0) return "The SDK reported no figure on either side, so no residual is computable.";
+            return "Residual (SDK minus rows), in MB: " + string.Join(", ", parts.ToArray())
+                 + ". A non-zero residual names mass inside the rated figure that no row above accounts for — "
+                 + "read the `unknown` rows and the swap disclosure before reading it as a defect.";
+        }
+
+        private static string SwapSentence(int authored, int built)
+        {
+            if (authored == 0 && built == 0)
+                return "**Materials reachable only through an animated swap: none on either side.** Where they exist "
+                     + "their textures are inside the SDK total and in no row here; on this avatar that gap is closed "
+                     + "by measurement rather than by assumption.";
+            return "**Materials reachable only through an animated swap: " + authored + " authored, " + built + " built.** "
+                 + "Their textures are inside the SDK total and in NO row above — a disclosed omission, not a silent "
+                 + "one, and a likely source of a non-zero residual. This count reads `m_Materials` object-reference "
+                 + "curves on clips reachable from an `Animator` under the root; a material a COMPONENT sets (MA "
+                 + "Material Setter) is reached by neither the rows nor this count.";
         }
 
         /// <summary>One row of the diff. <c>Caveat</c> is kept OUT of <c>Surface</c> rather than concatenated into
