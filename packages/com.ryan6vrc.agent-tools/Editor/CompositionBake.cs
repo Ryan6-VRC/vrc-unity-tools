@@ -431,12 +431,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Caveat;
         }
 
-        /// <summary>Bytes per pixel for the formats this arithmetic can type. Verified against the SDK's own
-        /// <c>textureMegabytes</c>: summing <c>width*height*bpp</c> over the mip chain for 17 textures on a
-        /// real avatar reproduced the SDK's figure to five decimals (18.18228 MB), so these rows and the
-        /// reported total are the SAME measurement rather than two estimators printed side by side.
-        /// A format absent here is Unknown, never a guess — this is PC-facing (<c>optimization.md</c> works
-        /// PC only), so the ASTC/ETC families are deliberately absent rather than wrong.</summary>
+        /// <summary>Bytes per pixel, <b>every entry measured black-box against the SDK's own
+        /// <c>textureMegabytes</c></b> — one texture of each format on a bare renderer, the reported figure
+        /// divided by the mip chain's pixel count. Not inferred from the format's name or its bit layout:
+        /// <c>RGB24</c> rates <b>4</b>, not 3, because the SDK counts it 32-bit-aligned, and that one entry
+        /// would otherwise leave a permanent ~25% residual on any avatar carrying an uncompressed texture.
+        /// <para>A format absent here is Unknown, never a guess. The ASTC/ETC families are absent because
+        /// this is PC-facing (<c>optimization.md</c> works PC only) and they are unmeasured — not because
+        /// they are impossible.</para></summary>
         private static readonly Dictionary<TextureFormat, float> BytesPerPixel = new Dictionary<TextureFormat, float>
         {
             { TextureFormat.DXT1, 0.5f },   { TextureFormat.DXT1Crunched, 0.5f },
@@ -445,7 +447,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             { TextureFormat.BC4, 0.5f },    { TextureFormat.BC5, 1f },
             { TextureFormat.Alpha8, 1f },   { TextureFormat.R8, 1f },
             { TextureFormat.R16, 2f },      { TextureFormat.RG16, 2f },
-            { TextureFormat.RGB24, 3f },    { TextureFormat.RGBA32, 4f },
+            { TextureFormat.RGB24, 4f },    { TextureFormat.RGBA32, 4f },
             { TextureFormat.ARGB32, 4f },   { TextureFormat.BGRA32, 4f },
             { TextureFormat.RGB565, 2f },   { TextureFormat.RGBA4444, 2f },
             { TextureFormat.ARGB4444, 2f }, { TextureFormat.RHalf, 2f },
@@ -453,6 +455,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             { TextureFormat.RFloat, 4f },   { TextureFormat.RGFloat, 8f },
             { TextureFormat.RGBAFloat, 16f },
         };
+
+        /// <summary>The mip chain's pixel count, <c>area &gt;&gt; 2i</c> per level.
+        /// <para><b>This is an area shift, and that is deliberate — it is what the SDK does.</b> The obvious
+        /// objection is that a non-square texture's real chain stops quartering once a dimension reaches 1,
+        /// so a per-dimension walk would count more. Measured on a 2048x8 DXT1: the SDK reports 10922 bytes,
+        /// which is this area shift exactly; the per-dimension walk gives 11007. Matching the SDK is the
+        /// whole point of this section, so the arithmetically-tidier loop is the wrong one.</para></summary>
+        private static long MipChainPixels(int width, int height, int mips)
+        {
+            long px = (long)width * height, total = 0;
+            for (int i = 0; i < mips && (px >> (2 * i)) >= 1; i++) total += px >> (2 * i);
+            return total;
+        }
 
         /// <summary>Every texture reachable from every renderer's shared materials under <paramref name="root"/>,
         /// active or not — the same population rule <see cref="ReadGeometry"/> states, and measured the same way:
@@ -477,19 +492,47 @@ namespace Ryan6Vrc.AgentTools.Editor
             var slots = new Dictionary<Texture, List<string>>();
             var sharedMats = new HashSet<Material>();
 
+            // Unity permits same-named siblings and vendor avatars ship them, so a bare RelPath would give two
+            // renderers one slot string — and then two DIFFERENT textures one SlotKey, where first-wins
+            // pairing silently drops the second. GeometrySection's KeyRows solved this with an ordinal
+            // suffix; the same discipline, applied to the path before any slot string is built from it.
+            var pathUse = new Dictionary<string, int>(StringComparer.Ordinal);
+            var unreadableMaterials = new List<string>();
+
             foreach (var r in root.GetComponentsInChildren<Renderer>(true))
             {
                 if (r == null) continue;
-                string path = RelPath(root, r.transform);
+                string basePath = RelPath(root, r.transform), path = basePath;
+                int used;
+                if (pathUse.TryGetValue(basePath, out used))
+                {
+                    path = basePath + " #" + (used + 1).ToString(CultureInfo.InvariantCulture);
+                    pathUse[basePath] = used + 1;
+                }
+                else pathUse[basePath] = 1;
+
                 var mats = r.sharedMaterials;
                 for (int i = 0; i < mats.Length; i++)
                 {
                     var m = mats[i];
                     if (m == null) continue;
                     sharedMats.Add(m);
-                    foreach (var prop in m.GetTexturePropertyNames())
+                    string[] props;
+                    // A material with a missing or broken shader throws here. ReadGeometry gives every
+                    // problem renderer an Unreadable row precisely so one bad asset cannot take down the
+                    // whole artifact; this is that, for materials.
+                    try { props = m.GetTexturePropertyNames(); }
+                    catch (Exception e)
                     {
-                        var t = m.GetTexture(prop);
+                        unreadableMaterials.Add(path + "[" + i.ToString(CultureInfo.InvariantCulture) + "] `"
+                                              + m.name + "` (" + e.GetType().Name + ")");
+                        continue;
+                    }
+                    foreach (var prop in props)
+                    {
+                        Texture t;
+                        try { t = m.GetTexture(prop); }
+                        catch (Exception) { continue; }
                         // A property the shader declares and the material leaves null is NOTHING — not a
                         // zero-byte row, which would read as a texture that costs nothing.
                         if (t == null) continue;
@@ -521,39 +564,96 @@ namespace Ryan6Vrc.AgentTools.Editor
                     Height = t.height,
                     Mips = t.mipmapCount,
                 };
-                string assetPath = AssetDatabase.GetAssetPath(t);
-                row.Identity = string.IsNullOrEmpty(assetPath)
-                    ? "iid:" + t.GetInstanceID().ToString(CultureInfo.InvariantCulture)
-                    : assetPath;
+                // The asset PATH alone is not an identity: every sub-asset of one file shares it, and d4rk
+                // mints every non-material object it creates into a single shared TrashBin asset with no
+                // count cap — so a path-keyed first-wins pair would marry unrelated textures. The local file
+                // id disambiguates within the file; a runtime-only texture has no asset at all.
+                string guid, assetPath = AssetDatabase.GetAssetPath(t);
+                long localId;
+                row.Identity = !string.IsNullOrEmpty(assetPath)
+                             && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(t, out guid, out localId)
+                    ? guid + "::" + localId.ToString(CultureInfo.InvariantCulture)
+                    : "iid:" + t.GetInstanceID().ToString(CultureInfo.InvariantCulture);
 
-                var t2 = t as Texture2D;
-                if (t2 == null)
-                {
-                    row.Unknown = true;
-                    row.Format = t.GetType().Name;
-                    // A Cubemap legitimately ships uncapped — AAO's MaxTextureSize maps `is Texture2D` only —
-                    // so an unchanged row here is correct behaviour, not a lever someone forgot to pull.
-                    row.Caveat = "not a Texture2D; its bytes are not typed here and the optimizers' size caps do not apply to it";
-                }
-                else
-                {
-                    row.Format = t2.format.ToString();
-                    float bpp;
-                    if (!BytesPerPixel.TryGetValue(t2.format, out bpp))
-                    {
-                        row.Unknown = true;
-                        row.Caveat = "format " + t2.format + " is not typed by this arithmetic, so its bytes are unknown rather than guessed";
-                    }
-                    else
-                    {
-                        long px = (long)t2.width * t2.height;
-                        for (int i = 0; i < t2.mipmapCount && (px >> (2 * i)) >= 1; i++)
-                            row.Bytes += (long)Mathf.RoundToInt((px >> (2 * i)) * bpp);
-                    }
-                }
+                TypeBytes(t, ref row);
                 rows.Add(row);
             }
+            foreach (var bad in unreadableMaterials)
+                rows.Add(new TexRow
+                {
+                    Slot = bad, SlotKey = bad, Identity = "unreadable:" + bad,
+                    Format = "unreadable", Unknown = true,
+                    Caveat = "this material's texture properties could not be read, so any texture only it "
+                           + "reaches is in neither the rows nor the row total",
+                });
             return rows;
+        }
+
+        /// <summary>Fill a row's <c>Format</c> and <c>Bytes</c> — or mark it Unknown. Every branch below is
+        /// measured against the SDK on a bare renderer rather than reasoned from the type:
+        /// <list type="bullet">
+        /// <item><b><c>Texture2D</c></b> — the mip chain times the format's bytes per pixel.</item>
+        /// <item><b><c>Cubemap</c></b> — the SDK counts ONE face's mip chain, not six (128 DXT1 reported 10922
+        /// bytes, a single face's chain; six would be 65532). So a cubemap is typed exactly like a 2D texture,
+        /// and the six-face reading would have overcounted it 6x.</item>
+        /// <item><b><c>Texture2DArray</c></b> — <c>w * h * depth * bpp</c> with NO mip chain (128x128x4 DXT1
+        /// reported 32768, which is base level times four slices). This branch is why the section still
+        /// reconciles on a d4rk-optimized avatar: d4rk atlases into <c>Texture2DArray</c>, so leaving arrays
+        /// Unknown would collapse the built column toward zero on exactly the avatars that carry the most
+        /// texture memory, and print the gap as an unexplained residual.</item>
+        /// <item><b><c>RenderTexture</c></b> — the SDK counts it as ZERO (a 256 RenderTexture on a renderer
+        /// moved <c>textureMegabytes</c> not at all). Excluded from the row total to match, and its row says
+        /// so, because an Unknown that reads as "may explain the residual" would be the wrong steer: this one
+        /// provably cannot.</item>
+        /// </list>
+        /// <c>Texture3D</c> and anything else is Unknown — unmeasured, and rare enough on an avatar that
+        /// guessing it is not worth a wrong number.</summary>
+        internal static void TypeBytes(Texture t, ref TexRow row)
+        {
+            var t2 = t as Texture2D;
+            if (t2 != null || t is Cubemap)
+            {
+                var fmt = t2 != null ? t2.format : ((Cubemap)t).format;
+                row.Format = fmt.ToString() + (t2 == null ? " (cubemap)" : "");
+                float bpp;
+                if (!BytesPerPixel.TryGetValue(fmt, out bpp))
+                {
+                    row.Unknown = true;
+                    row.Caveat = "format " + fmt + " is not typed by this arithmetic, so its bytes are unknown rather than guessed";
+                    return;
+                }
+                if (t2 == null) row.Caveat = "cubemap: the SDK rates one face's mip chain, not six";
+                row.Bytes = (long)Math.Round(MipChainPixels(t.width, t.height, t.mipmapCount) * (double)bpp);
+                return;
+            }
+
+            var arr = t as Texture2DArray;
+            if (arr != null)
+            {
+                row.Format = arr.format + " (array x" + arr.depth.ToString(CultureInfo.InvariantCulture) + ")";
+                float bpp;
+                if (!BytesPerPixel.TryGetValue(arr.format, out bpp))
+                {
+                    row.Unknown = true;
+                    row.Caveat = "array format " + arr.format + " is not typed by this arithmetic";
+                    return;
+                }
+                row.Caveat = "texture array: the SDK rates base level times slice count, with no mip chain";
+                row.Bytes = (long)Math.Round((double)arr.width * arr.height * arr.depth * bpp);
+                return;
+            }
+
+            if (t is RenderTexture)
+            {
+                row.Unknown = true;
+                row.Format = "RenderTexture";
+                row.Caveat = "the SDK rates a RenderTexture at zero, so this row is outside BOTH totals and cannot explain a residual";
+                return;
+            }
+
+            row.Unknown = true;
+            row.Format = t.GetType().Name;
+            row.Caveat = "this texture type is not typed by this arithmetic, so its bytes are unknown rather than guessed";
         }
 
         /// <summary>Materials any <c>m_Materials</c> object-reference curve can put into a slot, across every
@@ -564,10 +664,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static IEnumerable<Material> SwapReachableMaterials(GameObject root)
         {
             var seen = new HashSet<Material>();
-            foreach (var animator in root.GetComponentsInChildren<Animator>(true))
-            {
-                if (animator == null || animator.runtimeAnimatorController == null) continue;
-                foreach (var clip in animator.runtimeAnimatorController.animationClips)
+            foreach (var controller in SwapSearchControllers(root))
+                foreach (var clip in controller.animationClips)
                 {
                     if (clip == null) continue;
                     foreach (var b in AnimationUtility.GetObjectReferenceCurveBindings(clip))
@@ -583,6 +681,37 @@ namespace Ryan6Vrc.AgentTools.Editor
                         }
                     }
                 }
+        }
+
+        /// <summary>Every controller a swap curve could live on. <b>The descriptor's playable layers are the
+        /// load-bearing half, not the child Animators</b>: an avatar's FX, Gesture and Action controllers sit
+        /// in <c>baseAnimationLayers</c> / <c>specialAnimationLayers</c>, and nothing in the stack puts them
+        /// on the root Animator — NDMF writes built controllers back to the descriptor slots, VRCFury's own
+        /// holder destroys the root Animator mid-build, and Modular Avatar never assigns one. A walk over
+        /// child Animators alone therefore finds nothing on essentially every avatar and reports it as a
+        /// measured zero, which is worse than not counting at all. <see cref="BuiltDeclarations"/> reads the
+        /// same two layer sets for the same reason.</summary>
+        private static IEnumerable<RuntimeAnimatorController> SwapSearchControllers(GameObject root)
+        {
+            var seen = new HashSet<RuntimeAnimatorController>();
+            var descriptor = root.GetComponentInChildren<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>(true);
+            if (descriptor != null)
+            {
+                var layers = new List<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor.CustomAnimLayer>();
+                if (descriptor.baseAnimationLayers != null) layers.AddRange(descriptor.baseAnimationLayers);
+                if (descriptor.specialAnimationLayers != null) layers.AddRange(descriptor.specialAnimationLayers);
+                foreach (var layer in layers)
+                {
+                    // isDefault means the slot ships the SDK's own controller; its clips are not this
+                    // avatar's authoring and counting them would inflate the disclosure with SDK content.
+                    if (layer.isDefault || layer.animatorController == null) continue;
+                    if (seen.Add(layer.animatorController)) yield return layer.animatorController;
+                }
+            }
+            foreach (var animator in root.GetComponentsInChildren<Animator>(true))
+            {
+                if (animator == null || animator.runtimeAnimatorController == null) continue;
+                if (seen.Add(animator.runtimeAnimatorController)) yield return animator.runtimeAnimatorController;
             }
         }
 
@@ -620,6 +749,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (inB && !string.IsNullOrEmpty(p.Built.Value.Caveat)) caveats.Add((inA ? "built: " : "") + p.Built.Value.Caveat);
                 if (row.OtherSlots > 0)
                     caveats.Add("reached by " + (row.OtherSlots + 1) + " slots; counted once, as the SDK counts it once");
+                // The displayed size/format/mips are the BUILT side's where there is one, and a resize is the
+                // headline case this table exists to rank — so a hidden authored shape is named rather than
+                // dropped. GeometrySection's "active differs" cell is the same guard on the same hazard.
+                if (inA && inB)
+                {
+                    var a = p.Authored.Value;
+                    var b = p.Built.Value;
+                    if (a.Width != b.Width || a.Height != b.Height || a.Format != b.Format || a.Mips != b.Mips)
+                        caveats.Add("authored shape: " + a.Width + "x" + a.Height + " " + a.Format + ", " + a.Mips + " mips");
+                }
                 lines.Add("| `" + RunLogFormat.Cell(row.Slot) + "`" + presence
                         + " | " + row.Width + "x" + row.Height
                         + " | " + RunLogFormat.Cell(row.Format)
@@ -628,21 +767,28 @@ namespace Ryan6Vrc.AgentTools.Editor
                         + " | " + RunLogFormat.Cell(string.Join("; ", caveats.ToArray())) + " |");
             }
             lines.Add("| total (rows) | | | | " + Mb(SumBytes(authored)) + " | " + Mb(SumBytes(built)) + " | |");
-            lines.Add("| total (SDK) | | | | " + SdkCell(sdkAuthored) + " | " + SdkCell(sdkBuilt) + " | |");
+            lines.Add("| total (SDK) | | | | " + SdkCell(sdkAuthored) + " (pre-bake) | " + SdkCell(sdkBuilt) + " | |");
             lines.Add("");
 
             lines.Add("**The two totals are one measurement, and their residual is the check.** The row total sums "
-                    + "this section's own arithmetic — width x height x the format's bytes per pixel, over the mip "
-                    + "chain; the SDK total is `AvatarPerformanceStats.textureMegabytes`, the figure the upload gate "
-                    + "actually rates. They are computed the same way, so the expected residual is ZERO and a test "
-                    + "asserts it. " + ResidualSentence(authored, built, sdkAuthored, sdkBuilt));
+                    + "this section's own arithmetic — the mip chain's pixels times the format's measured bytes per "
+                    + "pixel; the SDK total is `AvatarPerformanceStats.textureMegabytes`. They are computed the same "
+                    + "way, so the expected residual is ZERO and a test asserts it. "
+                    + ResidualSentence(authored, built, sdkAuthored, sdkBuilt));
+            lines.Add("**Only the BUILT SDK total is a rank figure.** The authored one is a pre-bake read, which "
+                    + "`optimization.md` §Measuring rules out for any rank conversation — MA, VRCFury and the "
+                    + "optimizers all reshape what is counted. It is here to make the authored rows checkable, not "
+                    + "to be quoted; `textureMB=` on the summary line is the built one.");
             lines.Add("A texture reached by several slots is ONE row, labelled by its first reaching slot in "
                     + "ordinal slot order, with the rest disclosed in its caveat — it is counted once here because "
                     + "the SDK counts it once, so the rows do sum to the total.");
-            lines.Add("**An `unknown` MB cell is not a zero.** A non-`Texture2D` (RenderTexture, Cubemap, "
-                    + "Texture2DArray) and a `TextureFormat` this arithmetic does not type are excluded from the row "
-                    + "total and from the ordering rather than guessed at. They remain inside the SDK total, so an "
-                    + "unknown row is exactly where the two totals may legitimately disagree.");
+            lines.Add("**An `unknown` MB cell is not a zero.** A `TextureFormat` this arithmetic does not type, and a "
+                    + "texture type it does not type (`Texture3D`), are excluded from the row total and from the "
+                    + "ordering rather than guessed at — those rows are where the two totals can legitimately "
+                    + "disagree. Cubemaps and texture arrays are **not** among them: both are measured and typed "
+                    + "(a cubemap at one face's mip chain, an array at base level times slice count). A "
+                    + "**RenderTexture** is `unknown` for the opposite reason — the SDK rates it at zero, so it sits "
+                    + "outside BOTH totals and provably cannot explain a residual.");
             lines.Add("**A built-only row is where a resize or a mint landed**; an **authored-only** row is a texture "
                     + "the build dropped. A renderer merge moves every slot handle at once, so on a d4rk-merged "
                     + "avatar expect paired rows to fall to those the build left untouched and the rest to split "
@@ -667,7 +813,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <para>Returns null rather than 0 on any failure, and the stat field is itself nullable: a 0 here would
         /// be a confident claim that the avatar carries no textures. The call is ~2 ms for the whole stat vector,
         /// so it is free beside the bake that had to happen anyway.</para></summary>
-        private static float? SdkTextureMegabytes(GameObject go)
+        internal static float? SdkTextureMegabytes(GameObject go)
         {
             if (go == null) return null;
             try
