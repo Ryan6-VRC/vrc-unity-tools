@@ -1078,13 +1078,12 @@ public class OwnMaterialTests
     // normal Standard-shader material, so an IsLocked false positive FAILs its host test first (with poi
     // absent there is no unlock to fall back on) — a dedicated one could only re-assert that.
     [Test]
-    public void Own_Persists_The_New_Material_Without_Saving_Unrelated_Dirty_Assets()
+    public void Own_Saves_Dirty_Source_But_Not_Unrelated_Dirty_Assets()
     {
         var probe = new AnimatorTestHelpers.DirtyMaterialProbe(Scratch, "Unrelated");
         var vendor = VendorMat("Scoped");
         vendor.SetFloat("_Glossiness", 0.4f);
         EditorUtility.SetDirty(vendor);
-        AssetDatabase.SaveAssetIfDirty(vendor);
 
         string result = OwnMaterial.Run(AssetDatabase.GetAssetPath(vendor), Owned);
 

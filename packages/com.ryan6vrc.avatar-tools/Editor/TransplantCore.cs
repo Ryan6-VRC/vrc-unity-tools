@@ -45,17 +45,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
             => path == prefix || path.StartsWith(prefix + "/", StringComparison.Ordinal);
 
         /// <summary>
-        /// Copy one asset without <see cref="AssetDatabase.CopyAsset"/>, which first saves every dirty asset
-        /// in the project. The destination receives a fresh meta/GUID when it is imported.
+        /// Copy one asset without <see cref="AssetDatabase.CopyAsset"/>, which saves every dirty asset in the
+        /// project. Saves only the source, preserves its importer settings under a fresh GUID, and refuses a
+        /// package destination.
         /// </summary>
         public static bool CopyAssetFile(string sourcePath, string destinationPath)
         {
             if (string.IsNullOrEmpty(sourcePath) || string.IsNullOrEmpty(destinationPath)) return false;
+            if (UnderSegment(destinationPath.Replace('\\', '/'), "Packages")) return false;
             string sourceFile = AssetFilePath(sourcePath);
             string destinationFile = AssetFilePath(destinationPath);
             string sourceMeta = sourceFile + ".meta";
             string destinationMeta = destinationFile + ".meta";
             if (!File.Exists(sourceFile) || File.Exists(destinationFile) || File.Exists(destinationMeta)) return false;
+            var sourceAsset = AssetDatabase.LoadMainAssetAtPath(sourcePath);
+            if (sourceAsset != null) AssetDatabase.SaveAssetIfDirty(sourceAsset);
 
             try
             {
@@ -77,9 +81,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 AssetDatabase.ImportAsset(destinationPath, ImportAssetOptions.ForceSynchronousImport);
                 if (AssetDatabase.LoadMainAssetAtPath(destinationPath) != null) return true;
             }
-            catch
+            catch (Exception ex)
             {
-                // The caller owns the diagnostic vocabulary; this primitive keeps the copy operation boolean.
+                Debug.LogWarning("[CopyAssetFile] failed to copy '" + sourcePath + "' to '" + destinationPath
+                    + "': " + ex.GetType().Name + ": " + ex.Message);
             }
 
             if (!AssetDatabase.DeleteAsset(destinationPath))

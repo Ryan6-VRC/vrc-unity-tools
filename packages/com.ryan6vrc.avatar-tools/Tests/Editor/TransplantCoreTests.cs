@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEngine;
 using Ryan6Vrc.AvatarTools.Editor;
 
@@ -66,6 +67,63 @@ public class TransplantCoreTests
         Assert.AreEqual(0, r.unresolved.Count);
         Assert.AreEqual(1, r.resolved.Count);
         Assert.AreEqual(typeof(TransplantCoreTests_NsB.TcDupProbe), r.resolved[0]);
+    }
+
+    // ── CopyAssetFile ─────────────────────────────────────────────────────────────────────────
+
+    [Test]
+    public void CopyAssetFile_Saves_Dirty_Source_But_Not_Unrelated_Dirty_Assets()
+    {
+        const string root = "Assets/Agent/Scratch/TransplantCoreCopyTests";
+        AnimatorTestHelpers.EnsureFolder(root);
+        try
+        {
+            string sourcePath = root + "/Source.mat";
+            string destinationPath = root + "/Destination.mat";
+            var source = new Material(Shader.Find("Standard"));
+            source.SetFloat("_Glossiness", 0.1f);
+            AssetDatabase.CreateAsset(source, sourcePath);
+            AssetDatabase.SaveAssetIfDirty(source);
+            var unrelated = new AnimatorTestHelpers.DirtyMaterialProbe(root, "Unrelated");
+
+            source.SetFloat("_Glossiness", 0.4f);
+            EditorUtility.SetDirty(source);
+            Assert.IsTrue(TransplantCore.CopyAssetFile(sourcePath, destinationPath));
+
+            var copied = AssetDatabase.LoadAssetAtPath<Material>(destinationPath);
+            Assert.IsNotNull(copied);
+            Assert.AreEqual(0.4f, copied.GetFloat("_Glossiness"), 1e-6f,
+                "the copy reflects the source's dirty in-memory state");
+            unrelated.AssertWasNotSaved();
+        }
+        finally
+        {
+            AssetDatabase.DeleteAsset(root);
+        }
+    }
+
+    [Test]
+    public void CopyAssetFile_Refuses_A_Package_Destination()
+    {
+        const string root = "Assets/Agent/Scratch/TransplantCoreCopyTests";
+        const string destinationPath =
+            "Packages/com.ryan6vrc.avatar-tools/Tests/__CopyAssetFileRefusal.mat";
+        AnimatorTestHelpers.EnsureFolder(root);
+        try
+        {
+            string sourcePath = root + "/Source.mat";
+            AssetDatabase.CreateAsset(new Material(Shader.Find("Standard")), sourcePath);
+            Assert.IsNull(AssetDatabase.LoadMainAssetAtPath(destinationPath), "refusal fixture starts absent");
+
+            Assert.IsFalse(TransplantCore.CopyAssetFile(sourcePath, destinationPath));
+
+            Assert.IsNull(AssetDatabase.LoadMainAssetAtPath(destinationPath),
+                "an immutable package destination remains untouched");
+        }
+        finally
+        {
+            AssetDatabase.DeleteAsset(root);
+        }
     }
 
     // ── VrcComponentTable (resolved through ResolveTypes, matching the transplant engine's own lookup) ──

@@ -17,7 +17,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <c>scope=All</c> it also forks your OWN gimmick's clips.
     ///
     /// Copy is absent-only (existence via <see cref="AssetDatabase.LoadMainAssetAtPath"/>): an absent owned
-    /// copy uses <see cref="TransplantCore.CopyAssetFile"/> to mint a GUID-stable local asset without saving
+    /// copy uses <see cref="TransplantCore.CopyAssetFile"/> to mint a local asset without saving
     /// unrelated dirty assets. An EXISTING owned copy is reused as-is and never re-copied, preserving hand
     /// edits. Re-runs with every copy present and reference retargeted are PASS with 0 copies / 0 retargets.
     /// After retargeting, a post-condition re-scans every motion slot and FAILs loud naming any in-scope clip
