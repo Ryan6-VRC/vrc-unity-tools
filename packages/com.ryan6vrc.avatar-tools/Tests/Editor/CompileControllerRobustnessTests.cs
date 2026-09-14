@@ -189,4 +189,19 @@ public class CompileControllerRobustnessTests
         Assert.IsFalse(AssetDatabase.IsValidFolder(TestRoot + "/g4_new"), "freshly-created ancestor folder removed too");
         AnimatorTestHelpers.DeleteRefusalArtifact(result);
     }
+    [Test]
+    public void Compile_Persists_Its_Outputs_Without_Saving_Unrelated_Dirty_Assets()
+    {
+        var probe = new AnimatorTestHelpers.DirtyMaterialProbe(TestRoot, "Unrelated");
+        string src = TestRoot + "/Scoped_Fx.yaml";
+        File.WriteAllText(src, AnimatorSchemaYamlTests.DebounceDoc.Replace("Debounce_Fx", "Scoped_Fx"));
+
+        string result = CompileController.Run(src, TestRoot + "/scoped_out", whatIf: false);
+
+        StringAssert.Contains("=> OK", result);
+        Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<AnimatorController>(
+            TestRoot + "/scoped_out/Scoped_Fx.controller"), "the requested controller persisted");
+        probe.AssertWasNotSaved();
+    }
+
 }

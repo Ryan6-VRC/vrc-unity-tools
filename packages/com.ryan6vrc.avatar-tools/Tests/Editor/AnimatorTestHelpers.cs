@@ -151,4 +151,35 @@ public static class AnimatorTestHelpers
         }
         return list;
     }
+    public sealed class DirtyMaterialProbe
+    {
+        private readonly string _diskBefore;
+
+        public DirtyMaterialProbe(string root, string name)
+        {
+            EnsureFolder(root);
+            Path = root.TrimEnd('/') + "/" + name + ".mat";
+            Material = new Material(Shader.Find("Standard"));
+            Material.SetFloat("_Glossiness", 0.1f);
+            AssetDatabase.CreateAsset(Material, Path);
+            AssetDatabase.SaveAssetIfDirty(Material);
+            _diskBefore = File.ReadAllText(Path);
+
+            Material.SetFloat("_Glossiness", 0.9f);
+            EditorUtility.SetDirty(Material);
+            Assert.AreEqual(_diskBefore, File.ReadAllText(Path), "probe mutation starts only in memory");
+        }
+
+        public string Path { get; }
+        public Material Material { get; }
+
+        public void AssertWasNotSaved()
+        {
+            Assert.AreEqual(_diskBefore, File.ReadAllText(Path),
+                "the door must not persist an unrelated dirty material");
+            Assert.IsTrue(EditorUtility.IsDirty(Material),
+                "the unrelated material remains dirty for its owner to restore or save");
+        }
+    }
+
 }

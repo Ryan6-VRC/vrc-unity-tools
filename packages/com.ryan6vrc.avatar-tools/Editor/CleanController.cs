@@ -66,14 +66,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 whatIf   = whatIf,
             };
             // Noted up front so even an early FAIL's artifact carries the output location — the
-            // failure class where a bad outDir is the likely culprit (CopyAsset failed).
+            // failure class where a bad outDir is the likely culprit (asset copy failed).
             data.Note("outDir=" + outDir);
 
             try
             {
                 // ── whatIf: report-only preview — resolve preconditions and report the plan,
                 //    creating/modifying NO asset and touching NO descriptor. Returns before any
-                //    EnsureFolderExists/CopyAsset/CreateAsset/SaveAssets/descriptor wiring. ─────
+                //    EnsureFolderExists/CopyAssetFile/CreateAsset/SaveAssetIfDirty/descriptor wiring. ─────
                 if (whatIf)
                 {
                     string previewSourceFxPath = AssetDatabase.GetAssetPath(sourceFx);
@@ -198,10 +198,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 bool ctrlExists = AssetDatabase.LoadMainAssetAtPath(destPath) != null;
                 if (!ctrlExists)
                 {
-                    bool copied = AssetDatabase.CopyAsset(sourceFxPath, destPath);
+                    bool copied = TransplantCore.CopyAssetFile(sourceFxPath, destPath);
                     if (!copied)
                     {
-                        return Fail(data, label, "AssetDatabase.CopyAsset failed: " + sourceFxPath + " -> " + destPath);
+                        return Fail(data, label, "asset copy failed: " + sourceFxPath + " -> " + destPath);
                     }
                 }
                 data.CleanFxReused = ctrlExists;
@@ -308,11 +308,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 data.MenuPath     = menuPath;
                 data.MenuControls = 0;
 
-                // Persist the copied controller with trimmed layers. No Refresh(): every write above went
-                // through the AssetDatabase (EnsureFolderExists → CreateFolder, CopyAsset, CreateAsset,
-                // SetDirty), so there is no out-of-band filesystem change to re-scan — and a Refresh is a
-                // project-wide import sweep, the most expensive call in this tool.
-                AssetDatabase.SaveAssets();
+                // Persist only the copied controller and side assets. CopyAssetFile imports its filesystem
+                // copy immediately; the remaining writes use CreateAsset/SetDirty, so no project-wide refresh
+                // or save is needed.
+                AssetDatabase.SaveAssetIfDirty(ctrl);
+                AssetDatabase.SaveAssetIfDirty(exprParams);
+                AssetDatabase.SaveAssetIfDirty(exprMenu);
 
                 // ── Step 5: Wire the descriptor ───────────────────────────────────────────
                 var desc = ownedRoot.GetComponent<VRCAvatarDescriptor>()

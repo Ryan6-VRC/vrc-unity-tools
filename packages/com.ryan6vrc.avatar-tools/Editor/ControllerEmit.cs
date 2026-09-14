@@ -426,14 +426,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     EmitMenu();           // in-memory only; CompileController persists
 
                     EditorUtility.SetDirty(_controller);
-                    AssetDatabase.SaveAssets();
+                    AssetDatabase.SaveAssetIfDirty(_controller);
 
                     StampProvenance(path);
 
                     // Reload from disk so EmitResult holds the authoritative persisted objects (a reimport can
                     // remap instances). This makes the returned graph exactly what round-trip verification sees.
                     // The reload does NOT depend on a reimport having happened: when StampProvenance skips (the
-                    // scratch door), nothing was re-minted and these loads return the same live, SaveAssets-backed
+                    // scratch door), nothing was re-minted and these loads return the same live, persisted
                     // instances — so it stays correct either way.
                     ReloadFromDisk(path);
                     return _result;

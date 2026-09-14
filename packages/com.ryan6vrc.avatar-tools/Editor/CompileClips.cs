@@ -228,7 +228,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 if (!whatIf)
                 {
-                    AssetDatabase.SaveAssets();
+                    foreach (var spec in doc.Clips)
+                    {
+                        string clipPath = outClean + "/" + TransplantCore.Sanitize(spec.Name) + ".anim";
+                        var emittedClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipPath);
+                        if (emittedClip != null) AssetDatabase.SaveAssetIfDirty(emittedClip);
+                    }
 
                     // ── Content-provenance stamp. Reload each emitted clip FROM DISK and stamp the hash of THAT
                     //    on-disk clip — never the in-memory `built` clip. Float/tangent serialization can drift
