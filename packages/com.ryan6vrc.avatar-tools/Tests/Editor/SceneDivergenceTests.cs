@@ -218,4 +218,14 @@ public class SceneDivergenceTests
         List<string> after = SceneDivergence.StripDanglingOverrides(lines);
         Assert.AreEqual(before, after.Count, "nothing in the base fixture is dangling");
     }
+
+    // The churn list is shared with ReportPrefab through PrefabChurn, which also counts Unity's own generated
+    // families (m_RootOrder, m_AABB, m_LocalEulerAnglesHint) as churn FOR THE REPORT. This gate must keep its
+    // narrower set: a sibling reorder is ordinary work, and discounting it here is the silent discard the class
+    // exists to prevent. Pins that the wider set did not leak in.
+    [Test]
+    public void Classify_rootOrderChange_isStillDivergence()
+    {
+        Assert.IsTrue(Lossy(Base + "  m_RootOrder: 3\n", Base + "  m_RootOrder: 4\n"));
+    }
 }

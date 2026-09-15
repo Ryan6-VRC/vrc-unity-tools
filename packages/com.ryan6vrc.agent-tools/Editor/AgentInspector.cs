@@ -209,6 +209,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (prefab != null)
                 w.Prop("prefabSource", AssetDatabase.GetAssetPath(prefab));
             w.Prop("isPrefabInstance", PrefabUtility.IsPartOfPrefabInstance(go));
+            // This dump is the flattened result. Only the outermost root can be handed to the door that reads
+            // the chain level by level (a nested root answers with the outermost's lists from a scene).
+            if (PrefabUtility.IsOutermostPrefabInstanceRoot(go))
+                w.Prop("prefabOverridesDoor", "ReportPrefab.Run(\"" + GetHierarchyPath(go.transform) + "\")");
 
             w.PropName("components");
             w.BeginArray();
