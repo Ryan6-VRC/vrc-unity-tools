@@ -4,6 +4,7 @@ using System.IO;
 using System.Text;
 using UnityEditor.SceneManagement;
 using UnityEngine.SceneManagement;
+using Ryan6Vrc.AgentTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
@@ -32,19 +33,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
     internal static class SceneDivergence
     {
         // Framework churn: content the load re-manufactures, so restoring from disk loses nothing real.
-        // A CLOSED, MEASURED list (AvatarProject corpus, 2026-08-15) — MA's load-time version stamp,
-        // VRCFury's version bump on deserialize, and the editor's selection-mode field. Its failure mode is
-        // deliberately a loud refuse: a framework upgrade that adds a serialized field will make affected
+        // The list is `PrefabChurn.SceneStampKeys` (agent-tools) — CLOSED and MEASURED (AvatarProject corpus,
+        // 2026-08-15): MA's load-time version stamp, VRCFury's version bump on deserialize, and the editor's
+        // selection-mode field. Deliberately NARROWER than the set ReportPrefab counts as churn: there is no
+        // safe side of this diff, so a sibling reorder or a bone re-point must never be discounted here. Its
+        // failure mode is a loud refuse: a framework upgrade that adds a serialized field will make affected
         // scenes refuse until someone saves them, and the refusal NAMES the residual keys so the next reader
-        // can tell allowlist rot from real work and extend this list rather than distrust the gate.
-        private static readonly HashSet<string> ChurnKeys = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "_modularAvatarVersionTag",
-            "UpdatedAtVersion",
-            "MinimumVersion",
-            "vrcfuryVersion",
-            "m_selectionMode",
-        };
+        // can tell allowlist rot from real work and extend that list rather than distrust the gate.
 
         // Past this many differing lines the divergence is self-evidently large — refuse rather than pay
         // Myers' O((N+M)·D) to characterize it. Also bounds the trace this keeps for the backtrack.
@@ -157,7 +152,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <para><b>There is no safe side of the diff.</b> The restore replaces memory with disk, so any
         /// divergence is a loss of memory state — a deletion-only edit (an object removed in memory) shows up
         /// as disk-only lines and is real work the reopen undoes. Only two classes may be discounted: churn
-        /// the load re-manufactures (<see cref="ChurnKeys"/>), and prefab-override entries whose target is a
+        /// the load re-manufactures (<see cref="PrefabChurn.SceneStampKeys"/>), and prefab-override entries whose target is a
         /// dangling <c>{fileID: 0}</c>, which Unity prunes AT SAVE — so the copy never emits them and the disk
         /// side's copies are noise. A fileID-0 target cannot be resolved and so cannot be edited: nothing real
         /// hides in that class.</para>
@@ -231,7 +226,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static List<int> DropChurn(List<int> indices, List<string> lines)
         {
             var kept = new List<int>();
-            foreach (int i in indices) if (!ChurnKeys.Contains(KeyOf(lines[i]))) kept.Add(i);
+            foreach (int i in indices) if (!PrefabChurn.IsSceneStamp(KeyOf(lines[i]))) kept.Add(i);
             return kept;
         }
 

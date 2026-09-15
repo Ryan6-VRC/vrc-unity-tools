@@ -174,7 +174,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     + "commits everything else in that scene too — ask before saving a scene that is not "
                     + "yours (unity.md §Sharp edges). Named framework churn is already discounted, so a "
                     + "difference reported here is either real work or a churn class newer than the list in "
-                    + "SceneDivergence.ChurnKeys");
+                    + "PrefabChurn.SceneStampKeys");
 
             // BEFORE any session state exists. Creating the RunLog dir leaves the AssetDatabase blind to it, so
             // the first write pays a full Refresh — and a Refresh with a compile pending reloads the domain,
