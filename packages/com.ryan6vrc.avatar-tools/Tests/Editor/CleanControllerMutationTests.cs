@@ -106,6 +106,7 @@ public class CleanControllerMutationTests
     {
         var src = BuildSourceFx(Root + "/Src.controller");
         var d = BuildAvatarWithFxSlot();
+        var probe = new AnimatorTestHelpers.DirtyMaterialProbe(Root, "Unrelated");
         string s = CleanController.Run(src, _avatar, Root, new[] { "GestureLeft", "GestureRight" });
         StringAssert.Contains("=> PASS", s);
         var clean = AssetDatabase.LoadAssetAtPath<AnimatorController>(Root + "/Src_Clean.controller");
@@ -116,6 +117,7 @@ public class CleanControllerMutationTests
         Assert.IsTrue(d.customExpressions, "customExpressions must be enabled or VRChat ignores the assets");
         Assert.IsNotNull(d.expressionParameters); Assert.AreEqual(0, d.expressionParameters.parameters.Length);
         Assert.IsNotNull(d.expressionsMenu); Assert.AreEqual(0, d.expressionsMenu.controls.Count);
+        probe.AssertWasNotSaved();
     }
 
     [Test]

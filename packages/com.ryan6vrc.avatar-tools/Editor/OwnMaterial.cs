@@ -201,8 +201,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             TransplantCore.EnsureFolderExists(outClean);
-            if (!AssetDatabase.CopyAsset(sourcePath, targetPath))
-                return Fail(data, coLabel, "CopyAsset failed: " + sourcePath + " -> " + targetPath);
+            if (!TransplantCore.CopyAssetFile(sourcePath, targetPath))
+                return Fail(data, coLabel, "asset copy failed: " + sourcePath + " -> " + targetPath);
 
             // ── Normalize O (Flow step 4, copy-to-new only — an in-place O is already normal since the
             //    in-place guard above FAILs a variant/locked owned source before we ever get here).
@@ -213,13 +213,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (normalizeTarget == null)
             {
                 AssetDatabase.DeleteAsset(targetPath);
-                return Fail(data, coLabel, "owned copy load failed immediately after CopyAsset: " + targetPath);
+                return Fail(data, coLabel, "owned copy failed to load: " + targetPath);
             }
             if (normalizeTarget.parent != null)
             {
                 FlattenVariant(normalizeTarget);
                 EditorUtility.SetDirty(normalizeTarget);
-                AssetDatabase.SaveAssets();
+                AssetDatabase.SaveAssetIfDirty(normalizeTarget);
                 AssetDatabase.ImportAsset(targetPath, ImportAssetOptions.ForceUpdate);
                 data.Note("flattened variant source into a standalone material before forking");
             }
@@ -346,7 +346,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>
         /// Shared mutating span for both copy-to-new (own/branch, <paramref name="createdO"/>=true — O was
-        /// just created by <c>CopyAsset</c> at <paramref name="targetPath"/>) and in-place (augment,
+        /// just created by <c>CopyAssetFile</c> at <paramref name="targetPath"/>) and in-place (augment,
         /// <paramref name="createdO"/>=false — <paramref name="targetPath"/> IS the caller's pre-existing
         /// owned material): loads O, runs the fork rule (Flow step 5) against <paramref name="textureHome"/>,
         /// persists, then rebuilds the disk-truthful <c>slots[]</c> table from the reloaded asset (Flow step 6).
@@ -358,7 +358,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         static string ForkSlotsAndPersist(string targetPath, string textureHome, HashSet<string> requested,
                                           RunData data, string label, bool createdO)
         {
-            var newlyWrittenTex = new List<string>();     // texture dsts where CopyAsset actually ran this run
+            var newlyWrittenTex = new List<string>();     // texture dsts copied during this run
             bool homeCreatedThisRun = false;               // did THIS run mkdir H(O)? (prune only then, only if empty)
 
             // Hoisted above rollback (which needs `owned`/`slotBackup`) and above the try (so the finally
@@ -448,9 +448,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (row.disposition != "forked") continue;
                     if (row.needsCopy)
                     {
-                        if (!AssetDatabase.CopyAsset(row.sourcePath, row.ownedPath))
+                        if (!TransplantCore.CopyAssetFile(row.sourcePath, row.ownedPath))
                         {
-                            data.Offender("CopyAsset failed (texture): " + row.sourcePath + " -> " + row.ownedPath);
+                            data.Offender("asset copy failed (texture): " + row.sourcePath + " -> " + row.ownedPath);
                             continue;
                         }
                         newlyWrittenTex.Add(row.ownedPath);
@@ -519,7 +519,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 owned.shaderKeywords = keywordsBeforeFork;
 
                 EditorUtility.SetDirty(owned);
-                AssetDatabase.SaveAssets();
+                AssetDatabase.SaveAssetIfDirty(owned);
 
                 // ── Disk-truthful post-condition (Flow step 6): reimport + reload, then rebuild slots[] and
                 //    the counts from the RELOADED O — never from pre-write intent. ──
@@ -981,7 +981,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// a property sidesteps it. Every shader property (float/range/color/vector/int/texture +
         /// tiling/offset) is read off <paramref name="o"/> next — still resolving through its parent chain —
         /// then <c>o.parent</c> is severed and everything is re-applied as <paramref name="o"/>'s own
-        /// explicit values. Un-timed: caller still owns <c>SetDirty</c>/<c>SaveAssets</c>/reimport.
+        /// explicit values. Un-timed: caller still owns <c>SetDirty</c>/<c>SaveAssetIfDirty</c>/reimport.
         /// </summary>
         static void FlattenVariant(Material o)
         {

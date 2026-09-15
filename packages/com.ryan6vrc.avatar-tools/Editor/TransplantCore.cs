@@ -44,6 +44,82 @@ namespace Ryan6Vrc.AvatarTools.Editor
         static bool UnderSegment(string path, string prefix)
             => path == prefix || path.StartsWith(prefix + "/", StringComparison.Ordinal);
 
+        /// <summary>
+        /// Copy one asset without <see cref="AssetDatabase.CopyAsset"/>, which saves every dirty asset in the
+        /// project. Saves only the source, preserves its importer settings under a fresh GUID, and refuses a
+        /// package destination.
+        /// </summary>
+        public static bool CopyAssetFile(string sourcePath, string destinationPath)
+        {
+            if (string.IsNullOrEmpty(sourcePath) || string.IsNullOrEmpty(destinationPath)) return false;
+            if (UnderSegment(destinationPath.Replace('\\', '/'), "Packages")) return false;
+            string sourceFile = AssetFilePath(sourcePath);
+            string destinationFile = AssetFilePath(destinationPath);
+            string sourceMeta = sourceFile + ".meta";
+            string destinationMeta = destinationFile + ".meta";
+            if (!File.Exists(sourceFile) || File.Exists(destinationFile) || File.Exists(destinationMeta)) return false;
+            var sourceAsset = AssetDatabase.LoadMainAssetAtPath(sourcePath);
+            if (sourceAsset != null) AssetDatabase.SaveAssetIfDirty(sourceAsset);
+
+            try
+            {
+                File.Copy(sourceFile, destinationFile);
+                if (File.Exists(sourceMeta))
+                {
+                    string meta = File.ReadAllText(sourceMeta);
+                    const string marker = "guid: ";
+                    int guidStart = meta.IndexOf(marker, StringComparison.Ordinal);
+                    if (guidStart < 0) throw new InvalidDataException("source meta has no guid");
+                    guidStart += marker.Length;
+                    int cr = meta.IndexOf('\r', guidStart);
+                    int lf = meta.IndexOf('\n', guidStart);
+                    int guidEnd = cr < 0 ? lf : lf < 0 ? cr : Math.Min(cr, lf);
+                    if (guidEnd < 0) guidEnd = meta.Length;
+                    meta = meta.Substring(0, guidStart) + Guid.NewGuid().ToString("N") + meta.Substring(guidEnd);
+                    File.WriteAllText(destinationMeta, meta);
+                }
+                AssetDatabase.ImportAsset(destinationPath, ImportAssetOptions.ForceSynchronousImport);
+                if (AssetDatabase.LoadMainAssetAtPath(destinationPath) != null) return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[CopyAssetFile] failed to copy '" + sourcePath + "' to '" + destinationPath
+                    + "': " + ex.GetType().Name + ": " + ex.Message);
+            }
+
+            if (!AssetDatabase.DeleteAsset(destinationPath))
+            {
+                if (File.Exists(destinationFile)) File.Delete(destinationFile);
+                if (File.Exists(destinationMeta)) File.Delete(destinationMeta);
+            }
+            return false;
+        }
+
+        static string AssetFilePath(string assetPath)
+        {
+            string normalized = assetPath.Replace('\\', '/');
+            if (!UnderSegment(normalized, "Packages")) return Path.GetFullPath(assetPath);
+
+            var package = UnityEditor.PackageManager.PackageInfo.FindForAssetPath(normalized);
+            if (package == null)
+            {
+                int slash = normalized.IndexOf('/', "Packages/".Length);
+                string packageName = slash < 0 ? normalized.Substring("Packages/".Length)
+                                               : normalized.Substring("Packages/".Length, slash - "Packages/".Length);
+                foreach (var candidate in UnityEditor.PackageManager.PackageInfo.GetAllRegisteredPackages())
+                {
+                    if (candidate.name == packageName) { package = candidate; break; }
+                }
+            }
+            if (package == null || string.IsNullOrEmpty(package.resolvedPath)) return Path.GetFullPath(assetPath);
+
+            string prefix = "Packages/" + package.name;
+            string relative = normalized.Length == prefix.Length
+                ? ""
+                : normalized.Substring(prefix.Length + 1);
+            return Path.Combine(package.resolvedPath, relative.Replace('/', Path.DirectorySeparatorChar));
+        }
+
         // ── Type-name resolution ──────────────────────────────────────────────────────────────────
 
         /// <summary>Outcome of <see cref="ResolveTypes"/>: the resolved types plus the names that

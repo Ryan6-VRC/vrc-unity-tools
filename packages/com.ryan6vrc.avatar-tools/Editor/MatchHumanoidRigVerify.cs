@@ -147,8 +147,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static void CopyFresh(string src, string dst)
         {
             if (AssetDatabase.LoadAssetAtPath<GameObject>(dst) != null) AssetDatabase.DeleteAsset(dst);
-            AssetDatabase.CopyAsset(src, dst);
-            AssetDatabase.ImportAsset(dst, ImportAssetOptions.ForceSynchronousImport);
+            if (!TransplantCore.CopyAssetFile(src, dst))
+                throw new InvalidOperationException("asset copy failed: " + src + " -> " + dst);
         }
 
         private static SkeletonBone[] BuildSkeleton(GameObject go)

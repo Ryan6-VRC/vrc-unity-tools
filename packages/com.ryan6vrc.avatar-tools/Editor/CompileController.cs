@@ -234,7 +234,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ── 7/8. Finalize: whatIf sweeps the temp; a real compile saves the asset ────────────────
             if (whatIf) { if (tempFolder != null) AssetDatabase.DeleteAsset(tempFolder); }
-            else AssetDatabase.SaveAssets();
+            else
+            {
+                AssetDatabase.SaveAssetIfDirty(built.Controller);
+                var paramsAsset = AssetDatabase.LoadMainAssetAtPath(paramsPath);
+                if (paramsAsset != null) AssetDatabase.SaveAssetIfDirty(paramsAsset);
+                var menuAsset = AssetDatabase.LoadMainAssetAtPath(menuPath);
+                if (menuAsset != null) AssetDatabase.SaveAssetIfDirty(menuAsset);
+            }
 
             string res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "compilecontroller_" + name, summary, body, ".md");
             Debug.Log(res);

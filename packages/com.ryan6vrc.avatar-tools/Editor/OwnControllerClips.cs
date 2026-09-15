@@ -17,9 +17,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <c>scope=All</c> it also forks your OWN gimmick's clips.
     ///
     /// Copy is absent-only (existence via <see cref="AssetDatabase.LoadMainAssetAtPath"/>): an absent owned
-    /// copy triggers <see cref="AssetDatabase.CopyAsset"/> (GUID-stable, like CleanController); an EXISTING owned copy
-    /// is reused as-is and never re-copied (re-copying would clobber the owner's hand-edits). Idempotent
-    /// re-runs (a re-run with every copy present + every ref retargeted is PASS with 0 copies / 0 retargets).
+    /// copy uses <see cref="TransplantCore.CopyAssetFile"/> to mint a local asset without saving
+    /// unrelated dirty assets. An EXISTING owned copy is reused as-is and never re-copied, preserving hand
+    /// edits. Re-runs with every copy present and reference retargeted are PASS with 0 copies / 0 retargets.
     /// After retargeting, a post-condition re-scans every motion slot and FAILs loud naming any in-scope clip
     /// still referenced (closing the copy-set vs. retarget-walk asymmetry). This tool MUTATES the controller.
     ///
@@ -109,7 +109,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 log.Count("clipsInScope", inScope.Count);
 
                 // A clip that is a SUB-ASSET (embedded in a controller/fbx) cannot be materialized as a
-                // standalone .anim via CopyAsset — fail loud rather than copy the wrong container.
+                // standalone .anim by copying its container file — fail loud rather than copy the wrong asset.
                 foreach (var clip in inScope)
                 {
                     if (!AssetDatabase.IsMainAsset(clip))
@@ -188,9 +188,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     bool exists = AssetDatabase.LoadMainAssetAtPath(dst) != null;
                     if (!exists)
                     {
-                        if (!AssetDatabase.CopyAsset(src, dst))
+                        if (!TransplantCore.CopyAssetFile(src, dst))
                         {
-                            log.Offender("CopyAsset failed: " + src + " -> " + dst);
+                            log.Offender("asset copy failed: " + src + " -> " + dst);
                             continue;
                         }
                         copiesMade++;
@@ -220,14 +220,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 int retargets = RetargetAll(controller, map);
                 log.Count("retargets", retargets);
                 EditorUtility.SetDirty(controller);
-                AssetDatabase.SaveAssets();
+                AssetDatabase.SaveAssetIfDirty(controller);
 
                 // ── Post-condition, DISK-TRUTHFUL: reimport the controller (a force-override write onto an
-                //    immutable controller silently no-ops — SaveAssets can't persist it), then re-scan every
+                //    immutable controller silently no-ops — SaveAssetIfDirty can't persist it), then re-scan every
                 //    motion slot on the reloaded asset. FAIL naming any in-scope clip still referenced (a
                 //    residual means the walk missed a slot OR the write did not land). ──
                 // COVERAGE GAP, on the record (spike 2026-07-08, verdict controller=WRITE LANDED): the FAIL
-                // branch here is not fabricable in EditMode on this Unity/OS combo — SaveAssets bypasses the OS
+                // branch here is not fabricable in EditMode on this Unity/OS combo — SaveAssetIfDirty bypasses the OS
                 // read-only attribute, so no test can stage a silent no-op on an immutable .controller. The clean
                 // path is covered by OwnControllerClipsTests' happy-path/recursive tests; the FAIL branch is only
                 // ever exercised in production, against Packages/ immutables. Keep the guard.

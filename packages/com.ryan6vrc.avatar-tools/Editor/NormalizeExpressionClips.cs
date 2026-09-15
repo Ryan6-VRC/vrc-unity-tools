@@ -84,8 +84,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         { AnimationUtility.SetEditorCurve(clip, analysis.allCandidateBindings[key], null); removedCurves++; }
                 EditorUtility.SetDirty(clip);
             }
-            AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
+            foreach (var clip in arr) AssetDatabase.SaveAssetIfDirty(clip);
 
             return $"[NormalizeExpressionClips] +{addedCurves} curve(s) +{addedKeys} key(s) " +
                    $"-{removedCurves} curve(s) across {clips.Count} clip(s) => PASS";

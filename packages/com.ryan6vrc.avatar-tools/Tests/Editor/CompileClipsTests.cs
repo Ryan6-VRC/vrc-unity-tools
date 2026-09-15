@@ -54,6 +54,7 @@ public class CompileClipsTests
     [Test]
     public void Emits_visible_anim_per_clip_with_ref_handles()
     {
+        var probe = new AnimatorTestHelpers.DirtyMaterialProbe(Root, "Unrelated");
         string s = CompileClips.Run(WriteYaml(TwoPoses), Out);
         StringAssert.Contains("=> PASS", s);
         Assert.AreEqual(2, AnimatorTestHelpers.Count(s, "emitted"));
@@ -61,6 +62,7 @@ public class CompileClipsTests
         Assert.IsNotNull(wave);
         Assert.AreEqual(HideFlags.None, wave.hideFlags);
         StringAssert.Contains(Out + "/Wave.anim", s);
+        probe.AssertWasNotSaved();
     }
 
     [Test]

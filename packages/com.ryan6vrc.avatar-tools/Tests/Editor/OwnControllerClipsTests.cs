@@ -56,6 +56,7 @@ public class OwnControllerClipsTests
         var ctrl = AnimatorController.CreateAnimatorControllerAtPath(cp);
         ctrl.layers[0].stateMachine.AddState("S").motion = v;
         AnimatorTestHelpers.Save(ctrl, cp);
+        var probe = new AnimatorTestHelpers.DirtyMaterialProbe(Root, "Unrelated");
 
         string s = OwnControllerClips.Run(ctrl, Out);
         StringAssert.Contains("=> PASS", s);
@@ -64,6 +65,7 @@ public class OwnControllerClipsTests
         Assert.AreEqual(0, AnimatorTestHelpers.Count(s, "residual"));
         Assert.IsTrue(AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Look.anim") != null, "owned copy exists");
         StringAssert.StartsWith(Out, AssetDatabase.GetAssetPath(StateMotionClip(ctrl)));
+        probe.AssertWasNotSaved();
     }
 
     [Test]

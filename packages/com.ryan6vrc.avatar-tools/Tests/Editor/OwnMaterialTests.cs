@@ -1077,4 +1077,21 @@ public class OwnMaterialTests
     // No separate "a normal material is unaffected by locked detection" test: every PASS in this file owns a
     // normal Standard-shader material, so an IsLocked false positive FAILs its host test first (with poi
     // absent there is no unlock to fall back on) — a dedicated one could only re-assert that.
+    [Test]
+    public void Own_Saves_Dirty_Source_But_Not_Unrelated_Dirty_Assets()
+    {
+        var probe = new AnimatorTestHelpers.DirtyMaterialProbe(Scratch, "Unrelated");
+        var vendor = VendorMat("Scoped");
+        vendor.SetFloat("_Glossiness", 0.4f);
+        EditorUtility.SetDirty(vendor);
+
+        string result = OwnMaterial.Run(AssetDatabase.GetAssetPath(vendor), Owned);
+
+        StringAssert.Contains("=> PASS", result);
+        var owned = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Scoped.mat");
+        Assert.IsNotNull(owned, "the requested owned material persisted");
+        Assert.AreEqual(0.4f, owned.GetFloat("_Glossiness"), 1e-6f);
+        probe.AssertWasNotSaved();
+    }
+
 }

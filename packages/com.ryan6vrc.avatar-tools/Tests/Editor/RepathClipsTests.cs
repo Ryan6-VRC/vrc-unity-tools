@@ -215,4 +215,18 @@ public class RepathClipsTests
         StringAssert.Contains("=> PASS", s);
         StringAssert.Contains("stale move?", s);
     }
+    [Test]
+    public void Repath_Persists_The_Clip_Without_Saving_Unrelated_Dirty_Assets()
+    {
+        string cp = Root + "/Scoped.controller", clip = Root + "/Scoped.anim";
+        var ctrl = BuildWithClip(cp, clip, "Before");
+        var probe = new AnimatorTestHelpers.DirtyMaterialProbe(Root, "Unrelated");
+
+        string result = RepathClips.Run(ctrl, new[] { "Before" }, new[] { "After" });
+
+        StringAssert.Contains("=> PASS", result);
+        Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(clip, "After"), "the requested clip rewrite persisted");
+        probe.AssertWasNotSaved();
+    }
+
 }
