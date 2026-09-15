@@ -19,6 +19,7 @@ public class ReportPrefabTests
     private const string TmpDir = "Assets/AgentReportPrefabTmp";
     private const string BasePath = TmpDir + "/Base.prefab";
     private const string VarPath = TmpDir + "/Var.prefab";
+    private const string NestedPath = TmpDir + "/Nested.prefab";
     private const string ScenePath = TmpDir + "/Fixture.unity";
     private static readonly List<string> Artifacts = new List<string>();
 
@@ -40,14 +41,16 @@ public class ReportPrefabTests
     [OneTimeTearDown]
     public void DeleteWrittenSnapshots()
     {
-        if (Artifacts.Count > 0) AssetDatabase.DeleteAssets(Artifacts.ToArray(), new List<string>());
+        var failed = new List<string>();
+        if (Artifacts.Count > 0) AssetDatabase.DeleteAssets(Artifacts.ToArray(), failed);
         Artifacts.Clear();
+        Assert.IsEmpty(failed, "snapshot artifacts left behind in the operator's durable Snapshots dir");
     }
 
     // ----- fixture ---------------------------------------------------------------------------------------
 
-    /// <summary>Base(Keep[BoxCollider], Drop) → Var = Base − Drop − BoxCollider + Add, Keep inactive.
-    /// Returns the scene instance of Var, whose `Add` is moved to (1,2,3).</summary>
+    /// <summary>Base(Keep[BoxCollider], Drop) → Var = Base − Drop − BoxCollider + Add + an instance of Nested,
+    /// Keep inactive. Returns the scene instance of Var, whose `Add` is moved to (1,2,3).</summary>
     private static GameObject BuildChain(bool placeInScene)
     {
         var baseGo = new GameObject("Base");
@@ -59,6 +62,10 @@ public class ReportPrefabTests
         }
         finally { Object.DestroyImmediate(baseGo); }
 
+        var nestedGo = new GameObject("Nested");
+        try { new GameObject("Leaf").transform.SetParent(nestedGo.transform); PrefabUtility.SaveAsPrefabAsset(nestedGo, NestedPath); }
+        finally { Object.DestroyImmediate(nestedGo); }
+
         var baseAsset = AssetDatabase.LoadAssetAtPath<GameObject>(BasePath);
         var inst = (GameObject)PrefabUtility.InstantiatePrefab(baseAsset);
         try
@@ -67,6 +74,8 @@ public class ReportPrefabTests
             Object.DestroyImmediate(inst.transform.Find("Keep").GetComponent<BoxCollider>()); // records a removed component
             var add = new GameObject("Add"); add.transform.SetParent(inst.transform);     // records an added GameObject
             inst.transform.Find("Keep").gameObject.SetActive(false);                       // records a property override
+            var nested = (GameObject)PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(NestedPath));
+            nested.transform.SetParent(inst.transform);                                     // an added nested instance Var's file owns
             PrefabUtility.SaveAsPrefabAsset(inst, VarPath);
         }
         finally { Object.DestroyImmediate(inst); }
@@ -136,11 +145,17 @@ public class ReportPrefabTests
 
         string l1 = Level(body, 1);
         StringAssert.Contains("(Variant)", l1);
-        StringAssert.Contains("Add under `.`", l1);
-        StringAssert.Contains("Drop under `.`", l1);
-        StringAssert.Contains("BoxCollider on `Keep`", l1);
+        // Section-anchored, so swapping the added and removed lists cannot pass.
+        StringAssert.Contains("**added objects** (2)\n- Add under `.`", l1);
+        StringAssert.Contains("**removed objects** (1)\n- Drop under `.`", l1);
+        StringAssert.Contains("**removed components** (1)\n- BoxCollider on `Keep`", l1);
+        StringAssert.Contains("**added components** (0)", l1);
         StringAssert.Contains("| authored | `GameObject(Keep)` | `m_IsActive` | 1 | 0 |", l1);
         StringAssert.DoesNotContain("m_LocalPosition.x", l1);   // the scene's move must not leak down a level
+        // The nested instance is owned by Var's file, so it is listed here with its own counts — and only here.
+        StringAssert.Contains("**instances owned by this file** (1)\n- `Nested` <- `" + NestedPath + "`", l1);
+        StringAssert.Contains("[added here]", l1);
+        StringAssert.Contains("**instances owned by this file** (0)", l0);
 
         string l2 = Level(body, 2);
         StringAssert.Contains("(Regular)", l2);
@@ -154,7 +169,7 @@ public class ReportPrefabTests
         string body = Body(Run("Var", all: true));
         string l0 = Level(body, 0);
         StringAssert.Contains("| default | `Transform(.)` | `m_LocalRotation` |", l0);
-        StringAssert.Contains("default=", l0);
+        StringAssert.DoesNotContain("| default |", Level(Body(Run("Var")), 0));
     }
 
     // ----- Run on the asset directly --------------------------------------------------------------------
@@ -166,9 +181,9 @@ public class ReportPrefabTests
         string body = Body(Run(VarPath));
         string l0 = Level(body, 0);
         StringAssert.Contains("(Variant)", l0);
-        StringAssert.Contains("Add under `.`", l0);
-        StringAssert.Contains("Drop under `.`", l0);
-        StringAssert.Contains("BoxCollider on `Keep`", l0);
+        StringAssert.Contains("**added objects** (2)\n- Add under `.`", l0);
+        StringAssert.Contains("**removed objects** (1)\n- Drop under `.`", l0);
+        StringAssert.Contains("**removed components** (1)\n- BoxCollider on `Keep`", l0);
         StringAssert.Contains("`m_IsActive`", l0);
         StringAssert.Contains("(Regular)", Level(body, 1));
     }
@@ -198,7 +213,7 @@ public class ReportPrefabTests
     public void Run_unresolvable_refuses()
     {
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(@"\[ReportPrefab\] FAIL"));
-        StringAssert.Contains("FAIL", ReportPrefab.Run("NoSuchThing"));
+        StringAssert.Contains("FAIL: handle:", ReportPrefab.Run("NoSuchThing"));
     }
 
     // ----- Dependents ------------------------------------------------------------------------------------
@@ -213,6 +228,15 @@ public class ReportPrefabTests
         string body = Body(summary);
         StringAssert.Contains("- variant " + VarPath, body);
         StringAssert.Contains("  - scene " + ScenePath, body);   // indented: the scene contains Var, which contains Base
+    }
+
+    [Test]
+    public void Dependents_nester_isNestsAndCaseVariantHandleStillResolves()
+    {
+        BuildChain(true);
+        string body = Body(Dependents(NestedPath.Replace("Assets/", "assets/")));   // a non-canonical handle must hit the canonical map
+        StringAssert.Contains("- nests " + VarPath, body);
+        StringAssert.Contains("  - scene " + ScenePath, body);
     }
 
     [Test]

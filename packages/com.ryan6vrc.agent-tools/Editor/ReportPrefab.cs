@@ -64,7 +64,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (kind == PrefabAssetType.NotAPrefab) return Refuse("'" + handle + "' is not a prefab asset");
                 if (kind == PrefabAssetType.Model) return Refuse("'" + handle + "' is a Model: nothing sits above an FBX to report. AgentInspector.Run reads its hierarchy.");
                 if (kind == PrefabAssetType.MissingAsset) return Refuse("'" + handle + "' has a missing source asset — restore or re-import it before reading its overrides");
-                levels.Add(new Level { Root = asset, Path = handle, Kind = kind.ToString(), HasParent = kind == PrefabAssetType.Variant });
+                levels.Add(new Level { Root = asset, Path = AssetDatabase.GetAssetPath(asset), Kind = kind.ToString(), HasParent = kind == PrefabAssetType.Variant });
             }
             else
             {
@@ -78,8 +78,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var outer = PrefabUtility.GetOutermostPrefabInstanceRoot(go);
                     var nearest = PrefabUtility.GetNearestPrefabInstanceRoot(go);
                     return Refuse("'" + handle + "' is inside the instance rooted at '" + HierarchyPath(outer.transform)
-                        + "' — from a scene the five override lists answer for that OUTERMOST root only. Run(\"" + HierarchyPath(outer.transform) + "\") for the scene level, or Run(\""
-                        + PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(nearest) + "\") for the nested asset's own overrides.");
+                        + "' — from a scene the five override lists answer for that OUTERMOST root only. Run(\"" + HierarchyPath(outer.transform) + "\") for the scene level"
+                        + (nearest != outer ? ", or Run(\"" + PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(nearest) + "\") for the nested asset's own overrides." : "."));
                 }
                 levels.Add(new Level { Root = go, Path = HierarchyPath(go.transform), Kind = "scene instance", IsScene = true, HasParent = true });
             }
@@ -96,6 +96,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 levels.Add(new Level { Root = src, Path = AssetDatabase.GetAssetPath(src), Kind = kind.ToString(), HasParent = kind == PrefabAssetType.Variant });
                 cur = src;
             }
+            bool truncated = PrefabUtility.GetCorrespondingObjectFromSource(cur) != null;
             var stage = PrefabStageUtility.GetCurrentPrefabStage();
             if (stage != null)
                 foreach (var l in levels)
@@ -103,7 +104,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         return Refuse("a prefab stage is open on '" + stage.assetPath + "', which is level " + levels.IndexOf(l) + " of this chain: an asset read would report the on-disk content, not the stage's edits. Save and close the stage first.");
 
             var doc = new StringBuilder();
-            var summary = new StringBuilder("[ReportPrefab] " + levels[0].Root.name + ": levels=" + levels.Count);
+            var summary = new StringBuilder("[ReportPrefab] " + levels[0].Root.name + ": levels=" + levels.Count + (truncated ? "(truncated at MaxChainDepth=" + MaxChainDepth + ")" : ""));
             doc.Append("# ReportPrefab: ").Append(levels[0].Root.name).Append('\n');
             doc.Append("_One block per level, outermost first. Each level's lists are the PrefabInstance that level's FILE owns; an inherited nested instance is listed at the level that owns it. Object paths are relative to the level's root. Tiers: `default` = Unity's root transform/name defaults; `churn` = a framework or editor stamp (`PrefabChurn`); `dangling` = the target no longer exists; `inert` = equals its source (a float within ")
                .Append(Epsilon.ToString(CultureInfo.InvariantCulture)).Append(", a rotation within ~0.2°, an object ref whose corresponding source is the source) — present in the file and still a pin against the parent changing, but not a difference today; `authored` = the rest. `constraint=` marks a Transform whose instance object carries a VRC constraint, so its value may be the edit-mode solve rather than a hand; physbone-driven bones are NOT marked._\n\n");
@@ -128,6 +129,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 doc.Append('\n');
             }
 
+            if (truncated) doc.Append("_chain truncated: more levels sit above L").Append(levels.Count - 1).Append(" (MaxChainDepth=").Append(MaxChainDepth).Append("); Run the last asset path listed to continue._\n");
             summary.Append(" => OK");
             var result = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "prefab_" + levels[0].Root.name, summary.ToString(), doc.ToString(), ".md");
             Debug.Log(result);
@@ -317,9 +319,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static Row Classify(PropertyModification m, Dictionary<Object, SerializedObject> sos, Dictionary<Object, Mapped> map, ref int constraintDriven)
         {
             var row = new Row { Prop = Cell(m.propertyPath), Target = TargetLabel(m.target, map), Value = Cell(m.objectReference != null ? m.objectReference.name : m.value) };
+            if (m.target == null) { row.Tier = Tier.Dangling; row.Target = "(target missing)"; return row; }
             if (PrefabUtility.IsDefaultOverride(m)) { row.Tier = Tier.Default; return row; }
             if (PrefabChurn.IsChurn(m.propertyPath)) { row.Tier = Tier.Churn; return row; }
-            if (m.target == null) { row.Tier = Tier.Dangling; row.Target = "(target missing)"; return row; }
 
             var sp = Source(sos, m.target, m.propertyPath);
             if (sp == null)
@@ -327,7 +329,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 int idx = ArrayIndex(m.propertyPath);
                 if (idx >= 0)
                 {
-                    var size = Source(sos, m.target, m.propertyPath.Substring(0, m.propertyPath.IndexOf(".Array.data[", StringComparison.Ordinal)) + ".Array.size");
+                    var size = Source(sos, m.target, m.propertyPath.Substring(0, m.propertyPath.LastIndexOf(".Array.data[", StringComparison.Ordinal)) + ".Array.size");
                     if (size != null && idx >= size.intValue) { row.Tier = Tier.Authored; row.Source = "(no element " + idx + " in source)"; row.Note = "new element"; return row; }
                 }
                 row.Tier = Tier.Dangling; row.Source = "(no such field on " + m.target.GetType().Name + ")"; return row;
@@ -353,9 +355,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                     {
                         var srcRef = sp.objectReferenceValue;
                         equal = SameOrCorresponds(m.objectReference, srcRef);
-                        // Modular Avatar stamps its resolved object refs on load: a null source filled with a live
-                        // object on an MA component is the stamp, not authoring.
-                        if (!equal && srcRef == null && m.objectReference != null && m.target.GetType().FullName.StartsWith("nadena.dev.modular_avatar", StringComparison.Ordinal))
+                        // Modular Avatar stamps its resolved AvatarObjectReference.targetObject on load: a null source
+                        // filled with a live object in exactly that field on an MA component is the stamp, not authoring.
+                        // Any other MA object field filled from null is an authored override and stays one.
+                        if (!equal && srcRef == null && m.objectReference != null && m.propertyPath.EndsWith(".targetObject", StringComparison.Ordinal)
+                            && m.target.GetType().FullName.StartsWith("nadena.dev.modular_avatar", StringComparison.Ordinal))
                         { row.Tier = Tier.Churn; row.Note = "MA load-time stamp"; return row; }
                         break;
                     }
@@ -510,7 +514,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Dependents -----------------------------------------------------------------------------
 
-        /// <summary>Everything under <c>Assets/</c> that contains <paramref name="assetPath"/> — a variant of it,
+        /// <summary>Every prefab and scene under <c>Assets/</c> that contains <paramref name="assetPath"/> — a variant of it,
         /// a prefab nesting an instance of it, a scene placing it — walked transitively through variants and
         /// nesters (a variant of a nester still contains it). A prefab that merely references it (a constraint
         /// source, a mesh) is listed as <c>references</c> and not walked.</summary>
@@ -520,6 +524,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var target = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
             if (target == null || PrefabUtility.GetPrefabAssetType(target) == PrefabAssetType.NotAPrefab)
                 return Refuse("Dependents: '" + assetPath + "' is not a prefab or model asset");
+            assetPath = AssetDatabase.GetAssetPath(target); // the map's keys are canonical; a case-variant handle must match them
 
             // Reverse map over Assets/: one non-recursive GetDependencies per prefab and scene. The batch
             // overload returns a union with no per-path attribution, so it cannot build this.
