@@ -36,7 +36,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal const double Epsilon = 1e-4;       // numeric override equals its source below this
         internal const double RotationDotEpsilon = 1e-6; // |dot(q, src)| >= 1 - this ⇒ same rotation (≈0.16°; a float quaternion's own norm noise is ~1e-7)
 
-        private enum Tier { Default, Churn, Dangling, Inert, Authored }
+        private enum Tier { Default, Churn, Dangling, Inert, Shadowed, Authored }
 
         private sealed class Level
         {
@@ -106,7 +106,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var doc = new StringBuilder();
             var summary = new StringBuilder("[ReportPrefab] " + levels[0].Root.name + ": levels=" + levels.Count + (truncated ? "(truncated at MaxChainDepth=" + MaxChainDepth + ")" : ""));
             doc.Append("# ReportPrefab: ").Append(levels[0].Root.name).Append('\n');
-            doc.Append("_One block per level, outermost first. Each level's lists are the PrefabInstance that level's FILE owns; an inherited nested instance is listed at the level that owns it. Object paths are relative to the level's root. Tiers: `default` = Unity's root transform/name defaults; `churn` = a framework or editor stamp (`PrefabChurn`); `dangling` = the target no longer exists; `inert` = equals its source (a float within ")
+            doc.Append("_One block per level, outermost first. Each level's lists are the PrefabInstance that level's FILE owns; an inherited nested instance is listed at the level that owns it. Object paths are relative to the level's root. Tiers: `default` = Unity's root transform/name defaults; `churn` = a framework or editor stamp (`PrefabChurn`); `dangling` = the target no longer exists; `shadowed` = the target is on or under an object or component this level removes: no effect while the removal stands, applies again if it is reverted — part of that removal's record, never strippable on its own (the target path is where the removed object sat; its removal row counts it); `inert` = equals its source (a float within ")
                .Append(Epsilon.ToString(CultureInfo.InvariantCulture)).Append(", a rotation within ~0.2°, an object ref whose corresponding source is the source) — present in the file and still a pin against the parent changing, but not a difference today; `authored` = the rest. `constraint=` marks a Transform whose instance object carries a VRC constraint, so its value may be the edit-mode solve rather than a hand; physbone-driven bones are NOT marked._\n\n");
 
             for (int k = 0; k < levels.Count; k++)
@@ -123,8 +123,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                     continue;
                 }
                 var added = new HashSet<GameObject>();
-                AppendStructure(doc, summary, l, k, added, all);
-                AppendOverrides(doc, summary, l, k, all);
+                var shadows = new Shadows(l);
+                var overrides = new StringBuilder();
+                var overridesSummary = new StringBuilder();
+                AppendOverrides(overrides, overridesSummary, l, k, all, shadows);   // before structure: the removal rows print its shadow counts
+                AppendStructure(doc, summary, l, k, added, all, shadows);
+                doc.Append(overrides);
+                summary.Append(overridesSummary);
                 AppendOwnedInstances(doc, summary, l, added, all);
                 doc.Append('\n');
             }
@@ -138,7 +143,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Structure --------------------------------------------------------------------------------
 
-        private static void AppendStructure(StringBuilder doc, StringBuilder summary, Level l, int k, HashSet<GameObject> added, bool all)
+        private static void AppendStructure(StringBuilder doc, StringBuilder summary, Level l, int k, HashSet<GameObject> added, bool all, Shadows shadows)
         {
             var root = l.Root.transform;
             var addedGo = PrefabUtility.GetAddedGameObjects(l.Root);
@@ -160,7 +165,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             rows.Clear();
             foreach (var r in removedGo)
                 rows.Add(Cell(r.assetGameObject != null ? r.assetGameObject.name : "?") + " under `"
-                       + Cell(r.parentOfRemovedGameObjectInInstance != null ? RelPath(r.parentOfRemovedGameObjectInInstance.transform, root) : "?") + "`");
+                       + Cell(r.parentOfRemovedGameObjectInInstance != null ? RelPath(r.parentOfRemovedGameObjectInInstance.transform, root) : "?") + "`"
+                       + shadows.CountNote(r.assetGameObject));
             AppendList(doc, "removed objects", rows, all);
 
             rows.Clear();
@@ -172,7 +178,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             rows.Clear();
             foreach (var c in removedComp)
                 rows.Add(Cell(c.assetComponent != null ? c.assetComponent.GetType().Name : "?") + " on `"
-                       + Cell(c.containingInstanceGameObject != null ? RelPath(c.containingInstanceGameObject.transform, root) : "?") + "`");
+                       + Cell(c.containingInstanceGameObject != null ? RelPath(c.containingInstanceGameObject.transform, root) : "?") + "`"
+                       + shadows.CountNote(c.assetComponent));
             AppendList(doc, "removed components", rows, all);
         }
 
@@ -227,12 +234,63 @@ namespace Ryan6Vrc.AgentTools.Editor
             public bool AnyDefault;
         }
 
-        private static void AppendOverrides(StringBuilder doc, StringBuilder summary, Level l, int k, bool all)
+        /// <summary>This level's removals, keyed by their PARENT-asset objects — the space a modification's
+        /// <c>target</c> lives in. A removed object has no instance at this level, so the instance map cannot
+        /// label an override on it; the label is rebuilt from where the removal row says the object sat.</summary>
+        private sealed class Shadows
+        {
+            private readonly List<KeyValuePair<GameObject, string>> _objects = new List<KeyValuePair<GameObject, string>>();
+            private readonly Dictionary<Component, string> _components = new Dictionary<Component, string>();
+            private readonly Dictionary<Object, int> _counts = new Dictionary<Object, int>();
+
+            public Shadows(Level l)
+            {
+                var root = l.Root.transform;
+                foreach (var r in PrefabUtility.GetRemovedGameObjects(l.Root))
+                {
+                    if (r.assetGameObject == null || r.parentOfRemovedGameObjectInInstance == null) continue;
+                    string parent = RelPath(r.parentOfRemovedGameObjectInInstance.transform, root);
+                    _objects.Add(new KeyValuePair<GameObject, string>(r.assetGameObject, (parent == "." ? "" : parent + "/") + r.assetGameObject.name));
+                }
+                foreach (var c in PrefabUtility.GetRemovedComponents(l.Root))
+                    if (c.assetComponent != null && c.containingInstanceGameObject != null)
+                        _components[c.assetComponent] = RelPath(c.containingInstanceGameObject.transform, root);
+            }
+
+            /// <summary>True when <paramref name="target"/> is a removed component or on/under a removed object;
+            /// yields its instance-relative path and the removal it sits under, and counts it against that removal.</summary>
+            public bool TryShadow(Object target, out string path, out string note)
+            {
+                path = note = null;
+                var comp = target as Component;
+                if (comp != null && _components.TryGetValue(comp, out path)) { note = "on removed " + comp.GetType().Name; Bump(comp); return true; }
+                var go = comp != null ? comp.gameObject : target as GameObject;
+                if (go == null) return false;
+                foreach (var kv in _objects)
+                {
+                    if (!go.transform.IsChildOf(kv.Key.transform)) continue;
+                    string sub = RelPath(go.transform, kv.Key.transform);
+                    path = kv.Value + (sub == "." ? "" : "/" + sub);
+                    note = "under removed " + kv.Key.name; Bump(kv.Key); return true;
+                }
+                return false;
+            }
+
+            private void Bump(Object removal) { int n; _counts.TryGetValue(removal, out n); _counts[removal] = n + 1; }
+
+            public string CountNote(Object removal)
+            {
+                int n;
+                return removal != null && _counts.TryGetValue(removal, out n) ? " (" + n + " shadowed override" + (n == 1 ? "" : "s") + ")" : "";
+            }
+        }
+
+        private static void AppendOverrides(StringBuilder doc, StringBuilder summary, Level l, int k, bool all, Shadows shadows)
         {
             var mods = PrefabUtility.GetPropertyModifications(l.Root) ?? new PropertyModification[0];
             var map = BuildInstanceMap(l.Root);
             var sos = new Dictionary<Object, SerializedObject>();
-            var counts = new int[5];
+            var counts = new int[Enum.GetValues(typeof(Tier)).Length];
             var churnHist = new Dictionary<string, int>();
             var rows = new List<Row>();
             var rotations = new Dictionary<Object, RotationGroup>();
@@ -252,7 +310,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         g.AnyDefault |= PrefabUtility.IsDefaultOverride(m);
                         continue;
                     }
-                    var row = Classify(m, sos, map, ref constraintDriven);
+                    var row = Classify(m, sos, map, shadows, ref constraintDriven);
                     counts[(int)row.Tier]++;
                     if (row.Tier == Tier.Churn) { var tok = PrefabChurn.ChurnToken(m.propertyPath) ?? "ma-stamp"; int c; churnHist.TryGetValue(tok, out c); churnHist[tok] = c + 1; }
                     if (row.Tier == Tier.Default && m.propertyPath.StartsWith("m_LocalPosition.", StringComparison.Ordinal) && m.target != null)
@@ -274,7 +332,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 float rootRotDeg = 0f;
                 foreach (var g in rotations.Values)
                 {
-                    var row = ClassifyRotation(g, sos, map, ref constraintDriven, out float deg);
+                    var row = ClassifyRotation(g, sos, map, shadows, ref constraintDriven, out float deg);
                     counts[(int)row.Tier]++;
                     if (g.AnyDefault && deg >= 0.01f) { rootMoved = true; rootRotDeg = deg; }
                     if (all || row.Tier == Tier.Authored) rows.Add(row);
@@ -283,6 +341,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 doc.Append("**overrides** authored=").Append(counts[(int)Tier.Authored])
                    .Append(" churn=").Append(counts[(int)Tier.Churn])
                    .Append(" inert=").Append(counts[(int)Tier.Inert])
+                   .Append(" shadowed=").Append(counts[(int)Tier.Shadowed])
                    .Append(" dangling=").Append(counts[(int)Tier.Dangling])
                    .Append(" default=").Append(counts[(int)Tier.Default]);
                 if (constraintDriven > 0) doc.Append(" (constraint-driven among authored: ").Append(constraintDriven).Append(')');
@@ -295,7 +354,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (rootMoved)
                     doc.Append("_root moved (default tier): pos Δ=(").Append(F(rootPosDelta[0])).Append(", ").Append(F(rootPosDelta[1])).Append(", ").Append(F(rootPosDelta[2]))
                        .Append(") rot Δ=").Append(F(rootRotDeg)).Append("°_\n");
-                summary.Append(" authored=").Append(counts[(int)Tier.Authored]).Append(" dangling=").Append(counts[(int)Tier.Dangling]);
+                summary.Append(" authored=").Append(counts[(int)Tier.Authored]).Append(" dangling=").Append(counts[(int)Tier.Dangling]).Append(" shadowed=").Append(counts[(int)Tier.Shadowed]);
 
                 if (rows.Count > 0)
                 {
@@ -316,7 +375,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        private static Row Classify(PropertyModification m, Dictionary<Object, SerializedObject> sos, Dictionary<Object, Mapped> map, ref int constraintDriven)
+        private static Row Classify(PropertyModification m, Dictionary<Object, SerializedObject> sos, Dictionary<Object, Mapped> map, Shadows shadows, ref int constraintDriven)
         {
             var row = new Row { Prop = Cell(m.propertyPath), Target = TargetLabel(m.target, map), Value = Cell(m.objectReference != null ? m.objectReference.name : m.value) };
             if (m.target == null) { row.Tier = Tier.Dangling; row.Target = "(target missing)"; return row; }
@@ -324,6 +383,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (PrefabChurn.IsChurn(m.propertyPath)) { row.Tier = Tier.Churn; return row; }
 
             var sp = Source(sos, m.target, m.propertyPath);
+            // A live target with no instance at this level: the removal decides the tier, whatever the value holds.
+            string shadowPath, shadowNote;
+            if (shadows.TryShadow(m.target, out shadowPath, out shadowNote))
+            {
+                row.Tier = Tier.Shadowed; row.Target = Cell(m.target.GetType().Name + "(" + shadowPath + ")"); row.Note = shadowNote;
+                if (sp != null) row.Source = Cell(Describe(sp, m.target, m.propertyPath));
+                return row;
+            }
             if (sp == null)
             {
                 int idx = ArrayIndex(m.propertyPath);
@@ -371,7 +438,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return row;
         }
 
-        private static Row ClassifyRotation(RotationGroup g, Dictionary<Object, SerializedObject> sos, Dictionary<Object, Mapped> map, ref int constraintDriven, out float degrees)
+        private static Row ClassifyRotation(RotationGroup g, Dictionary<Object, SerializedObject> sos, Dictionary<Object, Mapped> map, Shadows shadows, ref int constraintDriven, out float degrees)
         {
             degrees = 0f;
             var row = new Row { Prop = "m_LocalRotation", Target = TargetLabel(g.Target, map) };
@@ -384,6 +451,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             bool same = SameRotation(src, q);
             degrees = same ? 0f : Quaternion.Angle(src, q);
             if (g.AnyDefault) { row.Tier = Tier.Default; return row; }
+            string shadowPath, shadowNote;
+            if (shadows.TryShadow(g.Target, out shadowPath, out shadowNote))
+            {
+                row.Tier = Tier.Shadowed; row.Target = Cell(g.Target.GetType().Name + "(" + shadowPath + ")"); row.Note = shadowNote;
+                degrees = 0f; return row;
+            }
             row.Tier = same ? Tier.Inert : Tier.Authored;
             if (!same) row.Note = "Δ=" + F(degrees) + "° " + (ConstraintNote(g.Target, map, ref constraintDriven) ?? "");
             return row;

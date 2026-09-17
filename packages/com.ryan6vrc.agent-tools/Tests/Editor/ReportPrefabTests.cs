@@ -1,5 +1,6 @@
 // Pins ReportPrefab's per-level attribution on a chain built here from scratch: a regular prefab, a variant
-// of it that removes one child, adds one, removes one component and flips one property, and a scene instance
+// of it that removes one child, adds one, removes one component, flips one property and leaves overrides on
+// what it removed, and a scene instance
 // of the variant with one authored move. The load-bearing claim is that each edit lands at the LEVEL that made
 // it and nowhere else — the flattened read every other door gives cannot say that. Fixture assets go under a
 // throwaway folder and are deleted in TearDown; the Snapshot artifacts each call writes are recorded and
@@ -49,8 +50,9 @@ public class ReportPrefabTests
 
     // ----- fixture ---------------------------------------------------------------------------------------
 
-    /// <summary>Base(Keep[BoxCollider], Drop) → Var = Base − Drop − BoxCollider + Add + an instance of Nested,
-    /// Keep inactive. Returns the scene instance of Var, whose `Add` is moved to (1,2,3).</summary>
+    /// <summary>Base(Keep[BoxCollider], Drop(Sub)) → Var = Base − Drop − BoxCollider + Add + an instance of Nested,
+    /// Keep inactive, plus three overrides left on the removed targets (collider size, Sub's position, Drop's
+    /// rotation). Returns the scene instance of Var, whose `Add` is moved to (1,2,3).</summary>
     private static GameObject BuildChain(bool placeInScene)
     {
         var baseGo = new GameObject("Base");
@@ -58,6 +60,7 @@ public class ReportPrefabTests
         {
             var keep = new GameObject("Keep"); keep.transform.SetParent(baseGo.transform); keep.AddComponent<BoxCollider>();
             var drop = new GameObject("Drop"); drop.transform.SetParent(baseGo.transform);
+            new GameObject("Sub").transform.SetParent(drop.transform);
             PrefabUtility.SaveAsPrefabAsset(baseGo, BasePath);
         }
         finally { Object.DestroyImmediate(baseGo); }
@@ -72,6 +75,17 @@ public class ReportPrefabTests
         {
             Object.DestroyImmediate(inst.transform.Find("Drop").gameObject);          // records a removed GameObject
             Object.DestroyImmediate(inst.transform.Find("Keep").GetComponent<BoxCollider>()); // records a removed component
+            // Overrides on targets this level removes. Appended rather than edited in, since the removed objects
+            // have no instance left to edit; the shadowed test asserts they survived the save. Before the edits
+            // below: SetPropertyModifications writes back a list that does not yet hold a just-made live edit.
+            var mods = new List<PropertyModification>(PrefabUtility.GetPropertyModifications(inst));
+            var dropSrc = baseAsset.transform.Find("Drop");
+            mods.Add(new PropertyModification { target = baseAsset.transform.Find("Keep").GetComponent<BoxCollider>(), propertyPath = "m_Size.x", value = "2" });
+            mods.Add(new PropertyModification { target = dropSrc.Find("Sub"), propertyPath = "m_LocalPosition.x", value = "5" });
+            var rot = Quaternion.Euler(0f, 90f, 0f);
+            foreach (var axis in new[] { "x", "y", "z", "w" })
+                mods.Add(new PropertyModification { target = dropSrc, propertyPath = "m_LocalRotation." + axis, value = rot["xyzw".IndexOf(axis)].ToString(System.Globalization.CultureInfo.InvariantCulture) });
+            PrefabUtility.SetPropertyModifications(inst, mods.ToArray());
             var add = new GameObject("Add"); add.transform.SetParent(inst.transform);     // records an added GameObject
             inst.transform.Find("Keep").gameObject.SetActive(false);                       // records a property override
             var nested = (GameObject)PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(NestedPath));
@@ -186,6 +200,31 @@ public class ReportPrefabTests
         StringAssert.Contains("**removed components** (1)\n- BoxCollider on `Keep`", l0);
         StringAssert.Contains("`m_IsActive`", l0);
         StringAssert.Contains("(Regular)", Level(body, 1));
+    }
+
+    [Test]
+    public void Run_overrideOnRemovedTarget_isShadowedUnderItsRemoval()
+    {
+        BuildChain(false);
+        var asset = AssetDatabase.LoadAssetAtPath<GameObject>(VarPath);
+        int onRemoved = 0;
+        foreach (var m in PrefabUtility.GetPropertyModifications(asset))
+            if (m.target != null && (m.propertyPath == "m_Size.x" || m.propertyPath == "m_LocalPosition.x" && m.target.name == "Sub" || m.propertyPath.StartsWith("m_LocalRotation.") && m.target.name == "Drop"))
+                onRemoved++;
+        Assert.AreEqual(6, onRemoved, "fixture: the overrides on removed targets must survive the save with live targets, or this test proves nothing");
+
+        string summary = Run(VarPath, all: true);
+        StringAssert.Contains("authored=1 dangling=0 shadowed=3", summary);   // m_IsActive is the level's only authoring
+        string l0 = Level(Body(summary), 0);
+        StringAssert.Contains("**removed objects** (1)\n- Drop under `.` (2 shadowed overrides)", l0);
+        StringAssert.Contains("**removed components** (1)\n- BoxCollider on `Keep` (1 shadowed override)", l0);
+        StringAssert.Contains("| shadowed | `BoxCollider(Keep)` | `m_Size.x` |", l0);
+        StringAssert.Contains("| shadowed | `Transform(Drop/Sub)` | `m_LocalPosition.x` |", l0);
+        StringAssert.Contains("| shadowed | `Transform(Drop)` | `m_LocalRotation` |", l0);
+        StringAssert.Contains("under removed Drop |", l0);
+        StringAssert.Contains("on removed BoxCollider |", l0);
+        StringAssert.DoesNotContain("?/", l0);
+        StringAssert.DoesNotContain("| shadowed |", Level(Body(Run(VarPath)), 0));   // rowed only under all:true, like every non-authored tier
     }
 
     // ----- Refusals --------------------------------------------------------------------------------------
