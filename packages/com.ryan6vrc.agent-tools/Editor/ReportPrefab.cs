@@ -266,14 +266,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (comp != null && _components.TryGetValue(comp, out path)) { note = "on removed " + comp.GetType().Name; Bump(comp); return true; }
                 var go = comp != null ? comp.gameObject : target as GameObject;
                 if (go == null) return false;
-                foreach (var kv in _objects)
-                {
-                    if (!go.transform.IsChildOf(kv.Key.transform)) continue;
-                    string sub = RelPath(go.transform, kv.Key.transform);
-                    path = kv.Value + (sub == "." ? "" : "/" + sub);
-                    note = "under removed " + kv.Key.name; Bump(kv.Key); return true;
-                }
-                return false;
+                // Nearest removal wins when one sits inside another: reverting the outer one leaves the inner standing.
+                int best = -1;
+                for (int i = 0; i < _objects.Count; i++)
+                    if (go.transform.IsChildOf(_objects[i].Key.transform) && (best < 0 || _objects[i].Key.transform.IsChildOf(_objects[best].Key.transform)))
+                        best = i;
+                if (best < 0) return false;
+                var removal = _objects[best];
+                string sub = RelPath(go.transform, removal.Key.transform);
+                path = removal.Value + (sub == "." ? "" : "/" + sub);
+                note = "under removed " + removal.Key.name; Bump(removal.Key); return true;
             }
 
             private void Bump(Object removal) { int n; _counts.TryGetValue(removal, out n); _counts[removal] = n + 1; }
