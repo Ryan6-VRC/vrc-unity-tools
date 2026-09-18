@@ -21,6 +21,12 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// authored facts a collider decision reads (angle limits, existing collider coverage, capsule extent,
     /// which bones weight the body and garment near the chain). Numbers only — a Report, never a verdict.
     ///
+    /// Collision model: a chain bone is the segment from a joint to its child (plus the virtual endpoint bone
+    /// when <c>endpointPosition</c> is set), with the SDK's per-bone radius scaled by the joint's world scale;
+    /// collider slack is segment-to-segment. The root joint itself is not simulated, so it is printed but does
+    /// not count toward <c>insideBodyAtRest</c>. The body is a baked point cloud, so <c>bodySlack</c> is the
+    /// joint's collision sphere against the nearest body vertex — an overlap claim, not an inside/outside one.
+    ///
     /// Surface: the NDMF preview proxy where one exists (a composed body with its shrink/shape reactions
     /// applied), else the scene instance (reactions sit at weight 0 there — the header says which was read).
     /// Edit mode only, so this is the rest-pose approximation of what a play-mode probe measures exactly:
@@ -44,6 +50,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             public string Name; public int Depth; public Vector3 Pos; public float Radius;
             public float BodyGap; public float BodySlack; public float ColliderSlack; public string NearestCollider;
+            public Transform T; public float MaxAngleX, MaxAngleZ;
         }
 
         internal class ChainRow
@@ -53,13 +60,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             public bool LateralLocked; public string Limits; public string Constraint; public string Colliders;
             public Dictionary<string, float> BodyWeights = new Dictionary<string, float>();
             public Dictionary<string, float> GarmentWeights = new Dictionary<string, float>();
-            public int BodyNear, GarmentNear;
+            public int BodyNear, GarmentNear; public string LockedJoint = ""; public HashSet<string> GarmentSurfaces = new HashSet<string>();
         }
 
         internal struct ColliderRow
         {
             public VRCPhysBoneColliderBase Col; public string Path; public string RootName; public Vector3 A, B; public float Radius;
             public string Shape; public float EndToEnd; public List<string> Referencing; public List<string> NotReferencing;
+            public bool Inactive; public bool InsideBounds;
         }
 
         // ── Door ────────────────────────────────────────────────────────────────────────────────────────────
@@ -76,15 +84,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (!handle.Ok) return Fail("avatarRoot: " + handle.Refusal);
             var root = handle.Object;
             if (string.IsNullOrWhiteSpace(bodyMesh)) return Fail("bodyMesh: pass the body renderer's path under the root or its name");
-            var bodyGo = ResolveDescendant(root, bodyMesh);
+            var bodyGo = ResolveDescendant(root, bodyMesh, out string ambiguous);
+            if (ambiguous != null) return Fail("bodyMesh: `" + bodyMesh + "` names more than one object under " + root.name + " — pass a path: " + ambiguous);
             if (bodyGo == null) return Fail("bodyMesh: nothing named or at `" + bodyMesh + "` under " + root.name);
             var bodySmr = bodyGo.GetComponent<SkinnedMeshRenderer>();
             if (bodySmr == null || bodySmr.sharedMesh == null) return Fail("bodyMesh: `" + bodyMesh + "` carries no SkinnedMeshRenderer with a mesh");
 
             var chains = root.GetComponentsInChildren<VRCPhysBone>(true)
                 .Where(b => b.enabled && b.gameObject.activeInHierarchy)
-                .Where(b => chainPrefix == null || RelPath(root.transform, EffectiveRoot(b)).StartsWith(chainPrefix.Trim('/'), StringComparison.Ordinal)
-                                                || EffectiveRoot(b).name == chainPrefix)
+                .Where(b => chainPrefix == null || UnderPrefix(root.transform, EffectiveRoot(b), chainPrefix))
                 .ToList();
             if (chains.Count == 0) return Fail(chainPrefix == null ? "no active VRCPhysBone under " + root.name
                                                                    : "chainPrefix: no active chain root at or named `" + chainPrefix + "` under " + root.name);
@@ -93,19 +101,35 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             var proxies = ProxyMap();
             var bodyPts = Bake(bodySmr, proxies, out string bodySurface);
-            var garmentSmrs = root.GetComponentsInChildren<SkinnedMeshRenderer>(true)
-                .Where(s => s != bodySmr && s.gameObject.activeInHierarchy && s.sharedMesh != null).ToList();
-
             var rows = chains.Select(b => Measure(b, root.transform, bodyPts)).ToList();
+            DedupeKeys(rows);
+            // The garment a chain moves is the set of renderers skinned to any of its joints — not "every other
+            // renderer", which would fold hair, eyes and underwear into one bucket and mask which bones the
+            // skirt actually rides.
+            var jointSet = new HashSet<Transform>(rows.SelectMany(r => r.Joints).Select(j => j.T));
+            var garmentSmrs = root.GetComponentsInChildren<SkinnedMeshRenderer>(true)
+                .Where(s => s != bodySmr && s.gameObject.activeInHierarchy && s.sharedMesh != null && s.bones.Any(b => b != null && jointSet.Contains(b))).ToList();
             var colliders = ColliderRows(root, rows);
             foreach (var r in rows) FinishChain(r, colliders, bodySmr, garmentSmrs, proxies);
+            var surfaces = new HashSet<string> { bodySurface }; foreach (var r in rows) surfaces.UnionWith(r.GarmentSurfaces);
+            string surface = surfaces.Count == 1 ? bodySurface : "mixed(body=" + bodySurface + ")";
 
-            return Emit(root, bodySmr, bodySurface, rows, colliders, pumpNote, chainPrefix);
+            return Emit(root, bodySmr, surface, rows, colliders, pumpNote, chainPrefix);
         }
 
         // ── Chains ──────────────────────────────────────────────────────────────────────────────────────────
 
         internal static Transform EffectiveRoot(VRCPhysBone b) => b.rootTransform != null ? b.rootTransform : b.transform;
+
+        // A prefix scopes by relative path, or by the bare name of the chain root or any ancestor under the
+        // avatar root (`Skirt_Root` reaches every chain hung under it without the caller spelling the path).
+        internal static bool UnderPrefix(Transform avatar, Transform chainRoot, string prefix)
+        {
+            prefix = prefix.Trim('/');
+            if (RelPath(avatar, chainRoot).StartsWith(prefix, StringComparison.Ordinal)) return true;
+            for (var t = chainRoot; t != null && t != avatar; t = t.parent) if (Key(t.name) == prefix) return true;
+            return false;
+        }
 
         // Joints: the effective root and every descendant not pruned by ignoreTransforms (a listed transform
         // prunes itself and its children — the field's own tooltip). A root with several children under
@@ -115,7 +139,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var root = EffectiveRoot(b);
             var ignore = new HashSet<Transform>(b.ignoreTransforms.Where(t => t != null));
             var list = new List<Transform>();
-            void Walk(Transform t) { if (ignore.Contains(t)) return; list.Add(t); foreach (Transform c in t) Walk(c); }
+            void Walk(Transform t) { if (t != root && ignore.Contains(t)) return; list.Add(t); foreach (Transform c in t) Walk(c); }
             Walk(root);
             return list;
         }
@@ -126,41 +150,58 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             var row = new ChainRow { Bone = b, Root = EffectiveRoot(b), Key = Key(EffectiveRoot(b).name) };
             var joints = Joints(b);
-            int maxDepth = Math.Max(1, joints.Max(j => Depth(j, row.Root)));
+            int maxDepth = Math.Max(1, joints.Count == 0 ? 1 : joints.Max(j => Depth(j, row.Root)));
             foreach (var j in joints)
             {
                 int d = Depth(j, row.Root);
                 float t = (float)d / maxDepth;
-                float r = b.radius * (b.radiusCurve != null && b.radiusCurve.length > 0 ? b.radiusCurve.Evaluate(t) : 1f);
+                float scale = AbsMax(j.lossyScale);
+                float r = b.radius * Curve(b.radiusCurve, t) * scale;
                 float gap = bodyPts.Count == 0 ? float.NaN : NearestDistance(j.position, bodyPts);
-                var jr = new JointRow { Name = Key(j.name), Depth = d, Pos = j.position, Radius = r, BodyGap = gap, BodySlack = gap - r,
-                                        ColliderSlack = float.PositiveInfinity, NearestCollider = "—" };
+                var jr = new JointRow { Name = Key(j.name), Depth = d, Pos = j.position, Radius = r, BodyGap = gap, BodySlack = gap - r, T = j,
+                                        ColliderSlack = float.PositiveInfinity, NearestCollider = "—",
+                                        MaxAngleX = b.maxAngleX * Curve(b.maxAngleXCurve, t), MaxAngleZ = b.maxAngleZ * Curve(b.maxAngleZCurve, t) };
                 row.Joints.Add(jr);
-                if (!float.IsNaN(jr.BodySlack)) row.MinBodySlack = Math.Min(row.MinBodySlack, jr.BodySlack);
+                // The root joint is the chain's anchor, not a simulated bone: its sphere overlapping the body is
+                // the normal case for a skirt hung from the waist and no fix addresses it.
+                if (d > 0 && !float.IsNaN(jr.BodySlack)) row.MinBodySlack = Math.Min(row.MinBodySlack, jr.BodySlack);
             }
-            row.Limits = Limits(b, out row.LateralLocked);
+            row.Limits = Limits(b, row.Joints, out row.LateralLocked, out row.LockedJoint);
             row.Constraint = ConstraintSources(row.Root, avatar);
             return row;
         }
 
-        // Lateral freedom: Hinge locks Z outright; Polar and Angle expose it as maxAngleZ / maxAngleX.
-        internal static string Limits(VRCPhysBone b, out bool lateralLocked)
+        internal static float Curve(AnimationCurve c, float t) => c != null && c.length > 0 ? Mathf.Max(0f, c.Evaluate(t)) : 1f;
+        internal static float AbsMax(Vector3 v) => Mathf.Max(Mathf.Abs(v.x), Mathf.Abs(v.y), Mathf.Abs(v.z));
+
+        // Lateral freedom per joint, since the SDK evaluates the max-angle curves along the chain: Hinge locks Z
+        // outright; Polar and Angle expose it as maxAngleZ / maxAngleX at that joint. The flag names the first
+        // simulated joint whose lateral freedom is under LateralLockDeg.
+        internal static string Limits(VRCPhysBone b, List<JointRow> joints, out bool lateralLocked, out string lockedJoint)
         {
-            lateralLocked = false;
-            switch (b.limitType)
+            lateralLocked = false; lockedJoint = "";
+            string rot = " rot=" + V(b.limitRotation);
+            if (b.limitType == VRCPhysBoneBase.LimitType.None) return "none";
+            if (b.limitType == VRCPhysBoneBase.LimitType.Hinge) { lateralLocked = true; lockedJoint = "all"; return "Hinge max=" + F(b.maxAngleX) + rot; }
+            bool polar = b.limitType == VRCPhysBoneBase.LimitType.Polar;
+            foreach (var j in joints)
             {
-                case VRCPhysBoneBase.LimitType.None: return "none";
-                case VRCPhysBoneBase.LimitType.Angle:
-                    lateralLocked = b.maxAngleX < LateralLockDeg;
-                    return "Angle max=" + F(b.maxAngleX) + " rot=" + V(b.limitRotation);
-                case VRCPhysBoneBase.LimitType.Hinge:
-                    lateralLocked = true;
-                    return "Hinge max=" + F(b.maxAngleX) + " rot=" + V(b.limitRotation);
-                case VRCPhysBoneBase.LimitType.Polar:
-                    lateralLocked = b.maxAngleZ < LateralLockDeg;
-                    return "Polar maxX=" + F(b.maxAngleX) + " maxZ=" + F(b.maxAngleZ) + " rot=" + V(b.limitRotation);
-                default: return b.limitType.ToString();
+                if (j.Depth == 0) continue;
+                float lateral = polar ? j.MaxAngleZ : j.MaxAngleX;
+                if (lateral < LateralLockDeg) { lateralLocked = true; lockedJoint = j.Name; break; }
             }
+            bool curved = (b.maxAngleXCurve != null && b.maxAngleXCurve.length > 0) || (b.maxAngleZCurve != null && b.maxAngleZCurve.length > 0);
+            string curveNote = curved ? " (curved)" : "";
+            return polar ? "Polar maxX=" + F(b.maxAngleX) + " maxZ=" + F(b.maxAngleZ) + curveNote + rot
+                         : "Angle max=" + F(b.maxAngleX) + curveNote + rot;
+        }
+
+        // Two chains rooted on same-named bones (a base and an outfit each carrying `Hair`) would print as one
+        // row; suffix the duplicates with their relative path so the collider audit columns stay readable.
+        private static void DedupeKeys(List<ChainRow> rows)
+        {
+            foreach (var g in rows.GroupBy(r => r.Key).Where(g => g.Count() > 1).ToList())
+                foreach (var r in g) r.Key = r.Key + " (" + RelPath(r.Root.root, r.Root) + ")";
         }
 
         // The nearest VRC constraint on the chain root or an ancestor below the avatar root, with its sources:
@@ -193,17 +234,18 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static List<ColliderRow> ColliderRows(GameObject root, List<ChainRow> rows)
         {
             var all = new List<VRCPhysBoneColliderBase>();
-            foreach (var c in root.GetComponentsInChildren<VRCPhysBoneCollider>(true)) if (c.gameObject.activeInHierarchy) all.Add(c);
+            foreach (var c in root.GetComponentsInChildren<VRCPhysBoneCollider>(true)) if (c.isActiveAndEnabled) all.Add(c);
             foreach (var r in rows) foreach (var c in r.Bone.colliders) if (c != null && !all.Contains(c)) all.Add(c);
             var list = new List<ColliderRow>();
             foreach (var c in all)
             {
-                var cr = new ColliderRow { Col = c, Path = RelPath(root.transform, c.transform), Radius = c.radius, Referencing = new List<string>(), NotReferencing = new List<string>() };
+                var cr = new ColliderRow { Col = c, Path = RelPath(root.transform, c.transform), Radius = c.radius, Referencing = new List<string>(), NotReferencing = new List<string>(),
+                                           Inactive = !c.isActiveAndEnabled, InsideBounds = c.insideBounds };
                 var rt = c.rootTransform != null ? c.rootTransform : c.transform;
                 cr.RootName = Key(rt.name);
                 // rootTransform scale multiplies radius/height in the SDK's shape; measured from lossyScale's
                 // largest axis, the same choice the session's bounds check agreed with on a uniformly scaled rig.
-                float s = Mathf.Max(rt.lossyScale.x, rt.lossyScale.y, rt.lossyScale.z);
+                float s = AbsMax(rt.lossyScale);
                 cr.Radius = c.radius * s;
                 var center = rt.TransformPoint(c.position);
                 if (c.shapeType == VRCPhysBoneColliderBase.ShapeType.Capsule)
@@ -229,23 +271,38 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static void FinishChain(ChainRow r, List<ColliderRow> colliders, SkinnedMeshRenderer body, List<SkinnedMeshRenderer> garments,
                                         Dictionary<GameObject, SkinnedMeshRenderer> proxies)
         {
-            var refd = colliders.Where(c => r.Bone.colliders.Contains(c.Col) && c.Col.shapeType != VRCPhysBoneColliderBase.ShapeType.Plane).ToList();
-            r.Colliders = refd.Count == 0 ? "—" : string.Join(", ", refd.Select(c => Key(c.Col.name)));
+            var all = colliders.Where(c => r.Bone.colliders.Contains(c.Col)).ToList();
+            // Measured against active, enabled, non-plane, non-containing colliders only: a disabled collider is
+            // out of the SDK's collision scene, a plane has no segment, and an insideBounds collider keeps the
+            // chain *inside* it, so its slack would carry the opposite sign.
+            var refd = all.Where(c => !c.Inactive && !c.InsideBounds && c.Col.shapeType != VRCPhysBoneColliderBase.ShapeType.Plane).ToList();
+            r.Colliders = all.Count == 0 ? "—" : string.Join(", ", all.Select(c => Key(c.Col.name)
+                + (c.Inactive ? " (inactive)" : c.InsideBounds ? " (insideBounds)" : c.Col.shapeType == VRCPhysBoneColliderBase.ShapeType.Plane ? " (plane)" : "")));
+            // Bone segments: joint to each child joint, plus the virtual endpoint bone off every leaf when
+            // endpointPosition is set. Slack is segment-to-segment, with the bone radius the larger of its two
+            // ends (conservative).
+            var byT = r.Joints.ToDictionary(j => j.T, j => j);
+            var ep = r.Bone.endpointPosition;
             for (int i = 0; i < r.Joints.Count; i++)
             {
                 var j = r.Joints[i];
-                foreach (var c in refd)
-                {
-                    float slack = SegmentDistance(j.Pos, c.A, c.B) - c.Radius - j.Radius;
-                    if (slack < j.ColliderSlack) { j.ColliderSlack = slack; j.NearestCollider = Key(c.Col.name); }
-                }
+                var ends = new List<(Vector3, float)>();
+                foreach (Transform c in j.T) if (byT.TryGetValue(c, out var cj)) ends.Add((cj.Pos, cj.Radius));
+                if (ends.Count == 0 && ep != Vector3.zero) ends.Add((j.T.TransformPoint(ep), j.Radius));
+                if (ends.Count == 0 && j.Depth > 0) ends.Add((j.Pos, j.Radius)); // a leaf with no endpoint bone: its own sphere
+                foreach (var (end, endR) in ends)
+                    foreach (var c in refd)
+                    {
+                        float slack = SegmentSegmentDistance(j.Pos, end, c.A, c.B) - c.Radius - Mathf.Max(j.Radius, endR);
+                        if (slack < j.ColliderSlack) { j.ColliderSlack = slack; j.NearestCollider = Key(c.Col.name); }
+                    }
                 r.Joints[i] = j;
                 if (!float.IsPositiveInfinity(j.ColliderSlack)) r.MinColliderSlack = Math.Min(r.MinColliderSlack, j.ColliderSlack);
             }
             // Weight readout over the vertices near this chain's joints: the body's bones vs the garment's.
             // Relative motion between those two bone sets is what walks the body into the garment.
-            r.BodyNear = WeightsNear(body, proxies, r, r.BodyWeights);
-            foreach (var g in garments) r.GarmentNear += WeightsNear(g, proxies, r, r.GarmentWeights);
+            r.BodyNear = WeightsNear(body, proxies, r, r.BodyWeights, out _);
+            foreach (var g in garments) { r.GarmentNear += WeightsNear(g, proxies, r, r.GarmentWeights, out string gs); if (gs != null) r.GarmentSurfaces.Add(gs); }
         }
 
         // ── Geometry ────────────────────────────────────────────────────────────────────────────────────────
@@ -262,6 +319,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             var pts = new List<Vector3>();
             try
             {
+                // useScale:true + localToWorldMatrix lands vertices at their world positions once (measured on a
+                // ring skinned under a root scaled x2: baked 0.100, world 0.200). useScale:false bakes them
+                // already world-scaled, so the matrix would double the scale.
                 src.BakeMesh(m, true);
                 var l2w = src.transform.localToWorldMatrix;
                 foreach (var v in m.vertices) pts.Add(l2w.MultiplyPoint3x4(v));
@@ -313,6 +373,31 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Mathf.Sqrt(best);
         }
 
+        // Closest distance between segments p0-p1 and q0-q1 (Ericson, Real-Time Collision Detection, 5.1.9).
+        internal static float SegmentSegmentDistance(Vector3 p0, Vector3 p1, Vector3 q0, Vector3 q1)
+        {
+            var d1 = p1 - p0; var d2 = q1 - q0; var r = p0 - q0;
+            float a = Vector3.Dot(d1, d1), e = Vector3.Dot(d2, d2), f = Vector3.Dot(d2, r);
+            float s, t;
+            const float eps = 1e-12f;
+            if (a <= eps && e <= eps) return r.magnitude;
+            if (a <= eps) { s = 0f; t = Mathf.Clamp01(f / e); }
+            else
+            {
+                float c = Vector3.Dot(d1, r);
+                if (e <= eps) { t = 0f; s = Mathf.Clamp01(-c / a); }
+                else
+                {
+                    float b = Vector3.Dot(d1, d2); float denom = a * e - b * b;
+                    s = denom != 0f ? Mathf.Clamp01((b * f - c * e) / denom) : 0f;
+                    t = (b * s + f) / e;
+                    if (t < 0f) { t = 0f; s = Mathf.Clamp01(-c / a); }
+                    else if (t > 1f) { t = 1f; s = Mathf.Clamp01((b - c) / a); }
+                }
+            }
+            return ((p0 + d1 * s) - (q0 + d2 * t)).magnitude;
+        }
+
         internal static float SegmentDistance(Vector3 p, Vector3 a, Vector3 b)
         {
             var ab = b - a; float len2 = ab.sqrMagnitude;
@@ -324,10 +409,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Top skin-weight bones over the vertices of `smr` within (joint radius + WeightBandMeters) of any joint
         // of the chain, read off the flat GetAllBoneWeights walk (the top-4 struct truncates). Returns the
         // vertex count that fed the readout; weights are accumulated into `acc` by bone name.
-        private static int WeightsNear(SkinnedMeshRenderer smr, Dictionary<GameObject, SkinnedMeshRenderer> proxies, ChainRow r, Dictionary<string, float> acc)
+        private static int WeightsNear(SkinnedMeshRenderer smr, Dictionary<GameObject, SkinnedMeshRenderer> proxies, ChainRow r, Dictionary<string, float> acc, out string surface)
         {
+            surface = null;
             var mesh = smr.sharedMesh; if (mesh == null) return 0;
-            var pts = Bake(smr, proxies, out _);
+            var pts = Bake(smr, proxies, out surface);
             if (pts.Count != mesh.vertexCount) return 0; // a proxy with a different topology cannot index this mesh's weights
             var bones = smr.bones;
             var per = mesh.GetBonesPerVertex(); var w = mesh.GetAllBoneWeights();
@@ -372,10 +458,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var reg = mgr?.GetMethod("RegisterConstraint", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
                 var upd = sched?.GetMethod("UpdateConstraints", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
                 if (reg == null || upd == null) return "constraintDriven=" + driven.Count + " constraintPump=unavailable";
+                var before = chains.Select(b => EffectiveRoot(b).position).ToArray();
                 foreach (var c in driven) reg.Invoke(null, new object[] { c });
                 var ps = upd.GetParameters();
                 upd.Invoke(null, ps.Length == 1 ? new object[] { true } : Array.Empty<object>());
-                return "constraintDriven=" + driven.Count + " constraintPump=ok";
+                // A pump that landed nothing prints drift=0.0cm — RegisterConstraint no-ops on an uninitialised
+                // manager without throwing, so "ok" alone would assert what it never observed.
+                float drift = 0f; for (int i = 0; i < chains.Count; i++) drift = Mathf.Max(drift, (EffectiveRoot(chains[i]).position - before[i]).magnitude);
+                return "constraintDriven=" + driven.Count + " constraintPump=ok drift=" + Cm(drift);
             }
             catch (Exception e) { return "constraintDriven=" + driven.Count + " constraintPump=failed(" + e.GetType().Name + ")"; }
         }
@@ -395,7 +485,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var sb = new StringBuilder();
             sb.Append("# Clearance: ").Append(root.name).Append(" / ").Append(body.name).Append("\n\n");
             sb.Append("`").Append(summary).Append("`\n\n");
-            sb.Append("_Rest pose, edit mode: no physbone solve, no motion. `bodyGap` is joint centre to the nearest baked body vertex (sampling error about half an edge length); `bodySlack` = bodyGap − joint radius, negative = the chain's own collision sphere already overlaps the body standing still, which no collider fixes. `colliderSlack` = surface-to-surface gap to the nearest collider this chain references, negative = touching at rest (constant push: jitter or a hem kick). Surface `ndmf-proxy` = the composed preview with reactions applied; `scene` = raw instance, reactions at 0. `restContactCm=` and `insideBodyCm=` are the tokens a rule reads._\n\n");
+            sb.Append("_Rest pose, edit mode: no physbone solve, no motion. `bodyGap` is joint centre to the nearest baked body vertex (the body is a vertex sample, so a joint over the middle of a large triangle reads farther than the surface is); `bodySlack` = bodyGap − joint radius, negative = the joint's collision sphere overlaps a body vertex standing still, which no collider fixes; the root joint is printed but not counted, since it is the anchor, not a simulated bone. `colliderSlack` = surface-to-surface gap between each bone segment (joint to child, plus the endpoint bone) and the nearest active collider this chain references, negative = touching at rest (constant push: jitter or a hem kick); `—` = no measurable collider referenced, which is not a clean pass. Surface `ndmf-proxy` = the composed preview with reactions applied; `scene` = raw instance, reactions at 0; `mixed` = body and garment read from different surfaces. `restContactCm=` and `insideBodyCm=` are the tokens a rule reads._\n\n");
             if (chainPrefix != null) sb.Append("chainPrefix=`").Append(chainPrefix).Append("`\n\n");
 
             sb.Append("## Chains\n\n| chain | joints | restContactCm | insideBodyCm | nearest collider | limits | colliders | root constraint |\n|---|---|---|---|---|---|---|---|\n");
@@ -403,10 +493,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 var worst = r.Joints.OrderBy(j => j.ColliderSlack).FirstOrDefault();
                 sb.Append("| `").Append(Cell(r.Key)).Append("` | ").Append(r.Joints.Count)
-                  .Append(" | restContactCm=").Append(Cm(float.IsPositiveInfinity(r.MinColliderSlack) ? 0f : Mathf.Max(0f, -r.MinColliderSlack)))
+                  .Append(" | ").Append(float.IsPositiveInfinity(r.MinColliderSlack) ? "—" : "restContactCm=" + Cm(Mathf.Max(0f, -r.MinColliderSlack)))
                   .Append(" | insideBodyCm=").Append(Cm(float.IsPositiveInfinity(r.MinBodySlack) || float.IsNaN(r.MinBodySlack) ? 0f : Mathf.Max(0f, -r.MinBodySlack)))
                   .Append(" | ").Append(r.Joints.Count > 0 ? Cell(worst.NearestCollider) : "—")
-                  .Append(" | ").Append(Cell(r.Limits)).Append(r.LateralLocked ? " **lateralLocked**" : "")
+                  .Append(" | ").Append(Cell(r.Limits)).Append(r.LateralLocked ? " **lateralLocked" + (r.LockedJoint == "all" ? "" : "@" + Cell(r.LockedJoint)) + "**" : "")
                   .Append(" | ").Append(Cell(r.Colliders)).Append(" | ").Append(Cell(r.Constraint)).Append(" |\n");
             }
 
@@ -420,16 +510,17 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             sb.Append("\n## Colliders\n\n_`endToEnd` is the measured extent: capsule `height` is the core segment and the rounded ends add 2×radius. `notReferencing` lists region chains this collider does not cover._\n\n| collider | root | shape | referencing | notReferencing |\n|---|---|---|---|---|\n");
             foreach (var c in colliders)
-                sb.Append("| `").Append(Cell(c.Path)).Append("` | `").Append(Cell(c.RootName)).Append("` | ").Append(Cell(c.Shape))
+                sb.Append("| `").Append(Cell(c.Path)).Append("` | `").Append(Cell(c.RootName)).Append("` | ").Append(Cell(c.Shape)).Append(c.Inactive ? " (inactive)" : "").Append(c.InsideBounds ? " (insideBounds)" : "")
                   .Append(" | ").Append(c.Referencing.Count == 0 ? "—" : Cell(string.Join(", ", c.Referencing)))
                   .Append(" | ").Append(c.NotReferencing.Count == 0 ? "—" : Cell(string.Join(", ", c.NotReferencing))).Append(" |\n");
             if (colliders.Count == 0) sb.Append("| — | — | — | — | — |\n");
 
             sb.Append("\n## Weights near each chain\n\n_Top skin-weight bones over the body and garment vertices within joint radius + ").Append(Cm(WeightBandMeters))
-              .Append(" of the chain; share = summed weight / vertices counted. Body and garment riding different bones is the relative motion that clips._\n\n| chain | body verts | body bones | garment verts | garment bones |\n|---|---|---|---|---|\n");
+              .Append(" of the chain; share = summed weight / vertices counted; garment = the renderers skinned to this chain's joints. Body and garment riding different bones is the relative motion that clips._\n\n| chain | body verts | body bones | garment verts | garment bones | garment surface |\n|---|---|---|---|---|---|\n");
             foreach (var r in rows)
                 sb.Append("| `").Append(Cell(r.Key)).Append("` | ").Append(r.BodyNear).Append(" | ").Append(Cell(TopWeights(r.BodyWeights, r.BodyNear)))
-                  .Append(" | ").Append(r.GarmentNear).Append(" | ").Append(Cell(TopWeights(r.GarmentWeights, r.GarmentNear))).Append(" |\n");
+                  .Append(" | ").Append(r.GarmentNear).Append(" | ").Append(Cell(TopWeights(r.GarmentWeights, r.GarmentNear)))
+                  .Append(" | ").Append(r.GarmentSurfaces.Count == 0 ? "—" : Cell(string.Join(",", r.GarmentSurfaces))).Append(" |\n");
 
             var res = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "clearance_" + body.name, summary, sb.ToString(), ".md");
             Debug.Log(res);
@@ -454,12 +545,16 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Play-mode clones suffix bone names with `$…`; strip so a key printed here joins a key printed there.
         internal static string Key(string name) { int i = name.IndexOf('$'); return i < 0 ? name : name.Substring(0, i); }
 
-        private static GameObject ResolveDescendant(GameObject root, string spec)
+        // Relative path first, then a name match that refuses on duplicates (naming the candidates) rather than
+        // picking one and reporting authoritatively about an arbitrary object.
+        private static GameObject ResolveDescendant(GameObject root, string spec, out string ambiguous)
         {
+            ambiguous = null;
             var byPath = root.transform.Find(spec.Trim('/'));
             if (byPath != null) return byPath.gameObject;
-            foreach (var t in root.GetComponentsInChildren<Transform>(true)) if (t.name == spec) return t.gameObject;
-            return null;
+            var hits = root.GetComponentsInChildren<Transform>(true).Where(t => t.name == spec && t != root.transform).ToList();
+            if (hits.Count > 1) { ambiguous = string.Join(" | ", hits.Select(h => RelPath(root.transform, h))); return null; }
+            return hits.Count == 1 ? hits[0].gameObject : null;
         }
 
         internal static string RelPath(Transform root, Transform t)

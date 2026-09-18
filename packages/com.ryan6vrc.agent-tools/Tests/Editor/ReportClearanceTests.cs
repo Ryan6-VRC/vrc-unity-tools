@@ -162,22 +162,81 @@ public class ReportClearanceTests
         StringAssert.Contains("Hips=1.00", body);              // body weights near the chain
     }
 
-    // Chain joint inside the ring: root at (0.09, 0, 0) with radius 0.03 → gap 0.01, slack −0.02 →
-    // insideBodyCm=2.0cm and the summary counts it, with no collider at all.
+    // Same rig under a root scaled ×2: every world distance doubles (bake must not apply the scale twice), the
+    // joint radius scales with the joint, and the capsule's extent scales with its root. Root joint: gap
+    // 2×0.0424 = 8.5cm, radius 4.0cm, slack 4.5cm; capsule endToEnd 2×0.14 = 28.0cm.
+    [Test]
+    public void ScaledRootDoublesEveryDistanceOnce()
+    {
+        _root.transform.localScale = Vector3.one * 2f;
+        var hips = Child(_root, "Hips", Vector3.zero);
+        Body("Body", hips.transform, 0.10f, 0f);
+        var chainRoot = Child(hips, "Skirt_1", new Vector3(0.13f, 0.03f, 0f));
+        Child(chainRoot, "Skirt_1.001", new Vector3(0f, -0.10f, 0f));
+        var pb = chainRoot.AddComponent<VRCPhysBone>();
+        pb.radius = 0.02f; pb.radiusCurve = new AnimationCurve();
+        var col = Child(hips, "Col_Pelvis", Vector3.zero).AddComponent<VRCPhysBoneCollider>();
+        col.rootTransform = hips.transform; col.shapeType = VRCPhysBoneColliderBase.ShapeType.Capsule;
+        col.radius = 0.02f; col.height = 0.10f; col.position = new Vector3(0.13f, 0f, 0f); col.rotation = Quaternion.identity;
+        pb.colliders.Add(col);
+
+        var r = ReportClearance.Run(_root.name, "Body");
+        var body = File.ReadAllText(LogPath(r));
+        StringAssert.Contains("| 8.5cm | 4.5cm |", body);
+        StringAssert.Contains("endToEnd=28.0cm", body);
+        StringAssert.Contains("restContactCm=8.0cm", body);   // 2 × the unscaled 4.0cm contact
+    }
+
+    // A disabled collider is out of the SDK's collision scene: listed with a marker, never measured.
+    [Test]
+    public void DisabledColliderIsListedNotMeasured()
+    {
+        var hips = Child(_root, "Hips", Vector3.zero);
+        Body("Body", hips.transform, 0.10f, 0f);
+        var chainRoot = Child(hips, "Skirt_1", new Vector3(0.13f, 0.03f, 0f));
+        Child(chainRoot, "Skirt_1.001", new Vector3(0f, -0.10f, 0f));
+        var pb = chainRoot.AddComponent<VRCPhysBone>(); pb.radius = 0.02f;
+        var col = Child(hips, "Col_Pelvis", Vector3.zero).AddComponent<VRCPhysBoneCollider>();
+        col.rootTransform = hips.transform; col.shapeType = VRCPhysBoneColliderBase.ShapeType.Capsule;
+        col.radius = 0.02f; col.height = 0.10f; col.position = new Vector3(0.13f, 0f, 0f);
+        col.enabled = false;
+        pb.colliders.Add(col);
+
+        var r = ReportClearance.Run(_root.name, "Body");
+        StringAssert.Contains("restContact=0", r);
+        var body = File.ReadAllText(LogPath(r));
+        StringAssert.Contains("Col_Pelvis (inactive)", body);
+        StringAssert.Contains("| `Skirt_1` | 2 | — |", body);
+    }
+
+    [Test]
+    public void SegmentSegmentDistanceHandlesCrossingAndParallel()
+    {
+        Assert.AreEqual(1f, ReportClearance.SegmentSegmentDistance(Vector3.zero, Vector3.right, new Vector3(0.5f, 1f, -1f), new Vector3(0.5f, 1f, 1f)), 1e-5f);
+        Assert.AreEqual(2f, ReportClearance.SegmentSegmentDistance(Vector3.zero, Vector3.right, new Vector3(3f, 0f, 0f), new Vector3(4f, 0f, 0f)), 1e-5f);
+        Assert.AreEqual(0f, ReportClearance.SegmentSegmentDistance(Vector3.zero, Vector3.up, new Vector3(-1f, 0.5f, 0f), new Vector3(1f, 0.5f, 0f)), 1e-5f);
+    }
+
+    // A simulated joint inside the ring: root at (0.09, 0.10, 0) with its child 0.10 below at (0.09, 0, 0),
+    // radius 0.03 → the child's gap is 0.01, slack −0.02 → insideBodyCm=2.0cm and the summary counts it, with
+    // no collider at all. The root joint is never counted (the anchor is not simulated), and a chain with no
+    // collider prints `—` for rest contact rather than a clean zero.
     [Test]
     public void ChainInsideBodyAtRestIsCountedWithoutAnyCollider()
     {
         var hips = Child(_root, "Hips", Vector3.zero);
         Body("Body", hips.transform, 0.10f, 0f);
-        var chainRoot = Child(hips, "Skirt_1", new Vector3(0.09f, 0f, 0f));
+        var chainRoot = Child(hips, "Skirt_1", new Vector3(0.09f, 0.10f, 0f));
         Child(chainRoot, "Skirt_1.001", new Vector3(0f, -0.10f, 0f));
         chainRoot.AddComponent<VRCPhysBone>().radius = 0.03f;
 
-        var r = ReportClearance.Run(_root.name, "Body", "Hips/Skirt_1");
+        var r = ReportClearance.Run(_root.name, "Body", "Skirt_1");   // bare root name scopes too
         StringAssert.Contains("insideBodyAtRest=1", r);
         StringAssert.Contains("restContact=0", r);
         StringAssert.Contains("colliders=0", r);
-        StringAssert.Contains("insideBodyCm=2.0cm", File.ReadAllText(LogPath(r)));
+        var body = File.ReadAllText(LogPath(r));
+        StringAssert.Contains("insideBodyCm=2.0cm", body);
+        StringAssert.Contains("| `Skirt_1` | 2 | — |", body);       // no measurable collider → dash, not 0.0cm
     }
 
     [Test]
