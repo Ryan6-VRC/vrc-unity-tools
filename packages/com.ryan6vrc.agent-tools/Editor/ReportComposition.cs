@@ -149,7 +149,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor, string paramFilter)
         {
             var res = new CensusResult();
-            var surfaces = MergeSurfaces.Enumerate(root, descriptor, vrcfOnly: false,
+            var surfaces = MergeSurfaces.Enumerate(root, descriptor,
                 (c, anchor) =>
                 {
                     string m = "[ReportComposition] frame field '" + anchor + "' on " + c.GetType().Name + " @ "

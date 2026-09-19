@@ -56,9 +56,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Every (controller, frame) pair merged onto <paramref name="root"/>. Each pair is walked
         /// once — dedup is per (controller, frame root, kind), not global, so a controller shared across
         /// frames is resolved once per frame. <paramref name="descriptor"/> may be null (a bare module prefab
-        /// has none, and contributes no descriptor layers). <paramref name="vrcfOnly"/> skips MA frames
-        /// outright, for the anchor-seam door: that class is one-directional, so enumerating MA surfaces
-        /// there would only manufacture frame notes for a class MA surfaces cannot be in.
+        /// has none, and contributes no descriptor layers).
         /// <paramref name="onUnreflected"/> receives (component, anchor) whenever a required frame field
         /// fails to reflect — the controller is still returned, never dropped, so drift cannot yield a false
         /// clean read. <paramref name="onMaFrame"/> fires for every MA frame discovered, BEFORE the dedup —
@@ -70,7 +68,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// treat it as a gap rather than as one of the surfaces it walked.</summary>
         internal static List<Surface> Enumerate(
             GameObject root, VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor,
-            bool vrcfOnly, Action<Component, string> onUnreflected,
+            Action<Component, string> onUnreflected,
             Action<Component, FrameResult> onMaFrame = null,
             Action<Component, string> onUnlintable = null)
         {
@@ -100,7 +98,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             // (a) Descriptor playable-layer controllers — avatar-root frame, no merge component to read.
-            if (descriptor != null && !vrcfOnly)
+            if (descriptor != null)
                 CollectDescriptorLayers(descriptor, root, (c, label) => Add(
                     c, root, new List<GameObject> { root }, null, FrameKind.DescriptorLayer, label, null, false,
                     new FrameResult { Root = root, Kind = FrameKind.DescriptorLayer }),
@@ -111,7 +109,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 if (c == null) continue;
 
-                if (!vrcfOnly && TryMaFrame(c, root, out var maCtrl, out var maFrame))
+                if (TryMaFrame(c, root, out var maCtrl, out var maFrame))
                 {
                     string anchor = FrameAnchorOverride(maFrame.UnreflectedAnchor);
                     if (anchor != null) onUnreflected(c, anchor);
