@@ -126,8 +126,8 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// why an offscreen camera drew ZERO placeholder px under the arming that poisons this path (2026-08-13),
     /// but it is not always false at the moment of a render: an edit-mode thumbnail capture has drawn a whole
     /// hair mesh as placeholder. With the flag forced true, a cold shader drew placeholder whether the pref was
-    /// on or off (2026-09-19). So a scratch-camera path pins the flag, not the pref, and scans its output as
-    /// this one does — RenderThumbnailCore.Capture is the worked instance.
+    /// on or off (2026-09-19). So a scratch-camera path pins the flag, not the pref —
+    /// RenderThumbnailCore.Capture is the worked instance.
     ///
     /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
     /// (target upright, facing world +Z, unrotated). A target rotated in the scene shows the scene's

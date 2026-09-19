@@ -215,13 +215,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal const int CaptureHeight = 900;
 
         /// <summary>The outcome of a <see cref="Capture"/>: whether anything drew, the PNG bytes (null when
-        /// nothing drew or a placeholder was found — the front-end fails loud rather than writing a blank or a
-        /// half-compiled frame), and where the view point landed in the frame (reported, not gated — a bad crop
-        /// is visible in the PNG).</summary>
+        /// nothing drew — the front-end fails loud rather than writing a blank), and where the view point
+        /// landed in the frame (reported, not gated — a bad crop is visible in the PNG).</summary>
         internal struct CaptureResult
         {
             internal int Drawn;
-            internal int Placeholder;           // exact #00FFFF px; any is a FAIL (see CountPixels)
             internal byte[] Png;
             internal Vector3 HeadViewport;
         }
@@ -272,7 +270,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // ShaderUtil.allowAsyncCompilation is false. It is false at rest but has been observed true at
                 // an edit-mode capture, which then drew the flat #00FFFF placeholder under an OK verdict. The
                 // project pref (EditorSettings.asyncShaderCompilation, RenderAvatar's lever) does not reach
-                // this path. Pinned for the render only; the scan below is the backstop.
+                // this path. Pinned for the render only. There is deliberately no pixel scan behind it: a
+                // saturated cyan emission renders exact #00FFFF too, and a thumbnail is judged by eye before use.
                 bool allowAsyncWas = ShaderUtil.allowAsyncCompilation;
                 ShaderUtil.allowAsyncCompilation = false;
                 try { cam.Render(); }
@@ -295,9 +294,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     RenderTexture.active = prevActive;
                 }
 
-                CountPixels(tex.GetPixels32(), W, H, out int drawn, out int placeholder);
-                byte[] png = drawn > 0 && placeholder == 0 ? tex.EncodeToPNG() : null;
-                return new CaptureResult { Drawn = drawn, Placeholder = placeholder, Png = png, HeadViewport = headViewport };
+                // ---- Empty-frame guard: did ANYTHING draw? ----
+                // Reference = each row's own column-0 pixel of the read-back texture, NOT a computed color.
+                // Sampling the render is what keeps this color-space-agnostic (a computed reference in a Linear
+                // project writing an sRGB target reads the whole background as "drawn" and defeats the guard),
+                // and per-row is what makes it exact under a vertical gradient, which is constant along a row.
+                Color32[] pixels = tex.GetPixels32();
+                int drawn = 0;
+                for (int y = 0; y < H; y++)
+                {
+                    Color32 rowRef = pixels[y * W];
+                    for (int x = 0; x < W; x++)
+                    {
+                        Color32 p = pixels[y * W + x];
+                        if (Math.Abs(p.r - rowRef.r) > SilhouetteChannelThreshold
+                            || Math.Abs(p.g - rowRef.g) > SilhouetteChannelThreshold
+                            || Math.Abs(p.b - rowRef.b) > SilhouetteChannelThreshold)
+                            drawn++;
+                    }
+                }
+
+                byte[] png = drawn > 0 ? tex.EncodeToPNG() : null;
+                return new CaptureResult { Drawn = drawn, Png = png, HeadViewport = headViewport };
             }
             finally
             {
@@ -317,62 +335,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (tex != null) UnityEngine.Object.DestroyImmediate(tex);
             }
         }
-
-        /// <summary>
-        /// Classify a read-back frame. <paramref name="drawn"/> is the empty-frame guard: a pixel counts when it
-        /// differs from ITS OWN ROW's column-0 pixel — sampling the render, not a computed colour, keeps it
-        /// colour-space-agnostic (a computed reference in a Linear project writing an sRGB target reads the
-        /// whole background as drawn), and per-row keeps it exact under a vertical gradient.
-        /// <paramref name="placeholder"/> counts exact <c>#00FFFF</c> across the WHOLE frame, not just drawn px:
-        /// a placeholder surface reaching column 0 would otherwise become its own row's reference and hide.
-        /// A backdrop cannot false-trip it — 0 and 1 are fixed points of the sRGB curve, so a gradient reaches
-        /// exact cyan only at a stop that IS cyan, which <see cref="RefusePlaceholderBg"/> refuses up front: no
-        /// per-pixel test tells a cyan backdrop from a placeholder, and a drawn-only count is blind wherever the
-        /// subject reaches column 0. The floor is 0; MSAA edge blends fall off exact cyan, so they cannot trip
-        /// it and a flat interior cannot hide in them.
-        /// </summary>
-        internal static void CountPixels(Color32[] pixels, int w, int h, out int drawn, out int placeholder)
-        {
-            drawn = 0; placeholder = 0;
-            for (int y = 0; y < h; y++)
-            {
-                Color32 rowRef = pixels[y * w];
-                for (int x = 0; x < w; x++)
-                {
-                    Color32 p = pixels[y * w + x];
-                    bool isDrawn = Math.Abs(p.r - rowRef.r) > SilhouetteChannelThreshold
-                        || Math.Abs(p.g - rowRef.g) > SilhouetteChannelThreshold
-                        || Math.Abs(p.b - rowRef.b) > SilhouetteChannelThreshold;
-                    if (isDrawn) drawn++;
-                    if (p.r == 0 && p.g == 255 && p.b == 255) placeholder++;
-                }
-            }
-        }
-
-        internal static bool IsPlaceholderColor(Color c)
-        {
-            Color32 c32 = c;
-            return c32.r == 0 && c32.g == 255 && c32.b == 255;
-        }
-
-        /// <summary>Null, or the refusal for a backdrop stop the placeholder scan could not tell apart.</summary>
-        internal static string RefusePlaceholderBg(Color top, Color bottom)
-            => IsPlaceholderColor(top) || IsPlaceholderColor(bottom)
-                ? "bg stop #00FFFF is the shader-compile placeholder colour, which the capture's placeholder scan "
-                  + "cannot tell from a backdrop — use #00FEFF, which reads identically"
-                : null;
-
-        /// <summary>The placeholder FAIL reason, shared by both front-ends. The compile flag is editor-global and
-        /// cannot attribute the hit, so it only orders the remedies.</summary>
-        internal static string BuildPlaceholderFailReason(int count, bool compiling)
-            => "flat #00FFFF placeholder px in the frame — " + count + " px (floor 0). Unity draws that for a "
-               + "shader variant still compiling; this capture pins synchronous compilation, so a path escaped "
-               + "the pin. No PNG was written. "
-               + (compiling
-                   ? "Shader compilation is still in flight: re-shoot first."
-                   : "No shader compilation is in flight, so a re-shoot may not clear it.")
-               + " A count that repeats on an unchanged avatar is an authored unlit or emissive pure-cyan "
-               + "surface, not a placeholder; this tool cannot shoot that avatar as it stands.";
 
         /// <summary>Validate the camera knobs, after <c>fov</c> itself has passed. Null when valid, else the
         /// refusal reason. Ranges are written <c>!(lo &lt;= x &amp;&amp; x &lt;= hi)</c> so NaN is refused too.

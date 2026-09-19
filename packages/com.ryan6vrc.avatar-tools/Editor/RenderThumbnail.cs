@@ -121,8 +121,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Color bgTop = RenderThumbnailCore.DefaultBackground, bgBottom = RenderThumbnailCore.DefaultBackground;
             if (bg != null && !RenderThumbnailCore.TryParseBg(bg, out bgTop, out bgBottom))
                 return Fail(label, "unparseable bg '" + bg + "' — expected #RRGGBB, #RRGGBBAA, or #TOP:#BOTTOM");
-            string bgErr = RenderThumbnailCore.RefusePlaceholderBg(bgTop, bgBottom);
-            if (bgErr != null) return Fail(label, bgErr);
 
             // Bounded because the distance solve goes as 1/tan(fov/2): at 90 a bust frame puts the camera
             // 0.23 m from the view point, inside the hair mesh, which renders as hair interior and would
@@ -398,11 +396,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     + " head=(" + headViewport.x.ToString("0.00", CultureInfo.InvariantCulture)
                     + "," + headViewport.y.ToString("0.00", CultureInfo.InvariantCulture) + ")";
 
-                // Placeholder before nothing-drew: a frame the placeholder fills edge to edge reads Drawn=0.
-                if (capture.Placeholder > 0)
-                    result = Fail(label, RenderThumbnailCore.BuildPlaceholderFailReason(
-                        capture.Placeholder, ShaderUtil.anythingCompiling));
-                else if (nothingDrew)
+                if (nothingDrew)
                 {
                     // Fail loud, uniform (=> FAIL:) — do NOT write a blank PNG. Named honestly: a frame the
                     // subject fills EDGE TO EDGE also reads uniform, because then column 0 is subject too.

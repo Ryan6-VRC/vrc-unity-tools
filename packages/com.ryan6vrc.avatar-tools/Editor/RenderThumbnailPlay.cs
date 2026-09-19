@@ -443,8 +443,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Color bgTop = RenderThumbnailCore.DefaultBackground, bgBottom = RenderThumbnailCore.DefaultBackground;
             if (bg != null && !RenderThumbnailCore.TryParseBg(bg, out bgTop, out bgBottom))
                 return Fail("unparseable bg '" + bg + "' — expected #RRGGBB, #RRGGBBAA, or #TOP:#BOTTOM");
-            string bgErr = RenderThumbnailCore.RefusePlaceholderBg(bgTop, bgBottom);
-            if (bgErr != null) return Fail(bgErr);
             if (!(fov >= RenderThumbnailCore.MinFov && fov <= RenderThumbnailCore.MaxFov))
                 return Fail("fov " + fov.ToString(CultureInfo.InvariantCulture) + " out of range 10–90");
             if (yaw.HasValue && (float.IsNaN(yaw.Value) || float.IsInfinity(yaw.Value)))
@@ -606,21 +604,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                     string verdict;
                     string pngPath = null;
-                    string noPngWhy = null;   // the log body names which FAIL left no PNG
-                    // Placeholder before nothing-drew: a frame the placeholder fills edge to edge reads Drawn=0.
-                    if (cap.Placeholder > 0)
-                    {
-                        noPngWhy = "placeholder px";
-                        verdict = "[RenderThumbnailPlay] " + tag + " " + common + " => FAIL: "
-                            + RenderThumbnailCore.BuildPlaceholderFailReason(
-                                cap.Placeholder, ShaderUtil.anythingCompiling);
-                    }
-                    else if (cap.Drawn == 0)
-                    {
-                        noPngWhy = "nothing drew";
+                    if (cap.Drawn == 0)
                         verdict = "[RenderThumbnailPlay] " + tag + " " + common + " => FAIL: nothing drew (every pixel "
                             + "matches its row background) — check the local-layer cull, or the subject fills the frame";
-                    }
                     else
                     {
                         pngPath = System.IO.Path.Combine(Application.temporaryCachePath,
@@ -640,7 +626,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         + "- framing: " + framingToken + " " + RenderThumbnailCore.KnobToken(zoom, pitch, headroom) + "\n"
                         + "- settle: " + elapsed + " frames\n"
                         + "- still moving at capture: " + movingToken + "\n"
-                        + "- png: " + (pngPath ?? "(none — " + noPngWhy + ")") + "\n");
+                        + "- png: " + (pngPath ?? "(none — nothing drew)") + "\n");
                     verdict = pngAt < 0 ? loggedShoot : RenderThumbnailCore.SpliceTrailers(loggedShoot, verdictBody, pngPath);
                     FinishShoot(step, tag, verdict);
                 }

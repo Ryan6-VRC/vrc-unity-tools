@@ -6,7 +6,7 @@ using Ryan6Vrc.AvatarTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Tests
 {
     // Pure helpers ONLY (FramingGeometry / TryParseBg / YawOf / PitchOf / BundledPoses / NormalizeToken /
-    // ResolvePose / SolveCamera / ValidateCameraKnobs / CountPixels).
+    // ResolvePose / SolveCamera / ValidateCameraKnobs).
     // Everything expression-side resolves against a BAKED avatar, so it is a scene object verified live
     // (execute_code) by the coordinator, never in NUnit. No test here may create a GameObject,
     // add a VRC_AvatarDescriptor, or call RenderThumbnail.Run — that class of EditMode test
@@ -368,43 +368,6 @@ namespace Ryan6Vrc.AvatarTools.Tests
             StringAssert.Contains("headroom", RenderThumbnailCore.ValidateCameraKnobs(30f, 1f, 0f, float.NaN));
             // zoom 1.6 is in range, but at fov 90 it would put the camera inside the head.
             StringAssert.Contains("lower zoom or fov", RenderThumbnailCore.ValidateCameraKnobs(90f, 1.6f, 0f, 0f));
-        }
-
-        // ----- Placeholder scan ------------------------------------------------------------------------
-
-        private static readonly Color32 Cyan = new Color32(0, 255, 255, 255);
-        private static readonly Color32 Grey = new Color32(59, 59, 61, 255);
-        private static readonly Color32 Skin = new Color32(240, 210, 200, 255);
-
-        private static Color32[] Frame(int w, int h, Color32 bg) => Enumerable.Repeat(bg, w * h).ToArray();
-
-        [Test]
-        public void Pixels_CyanSubject_IsCounted_EvenWhereItReachesColumnZero()
-        {
-            const int W = 8, H = 4;
-            var px = Frame(W, H, Grey);
-            for (int x = 0; x < 4; x++) px[1 * W + x] = Cyan;   // row 1: cyan from the left edge — its own row ref
-            px[2 * W + 5] = Cyan;                              // row 2: an interior cyan pixel
-            px[3 * W + 6] = Skin;                              // an ordinary drawn pixel
-            RenderThumbnailCore.CountPixels(px, W, H, out int drawn, out int placeholder);
-            Assert.AreEqual(5, placeholder, "every exact-cyan px counts, including a row whose reference is cyan");
-            // The empty-frame guard is unchanged: against row 1's cyan reference, its cyan reads as background
-            // and its grey as drawn — the blind spot a drawn-only placeholder count would have inherited.
-            Assert.AreEqual(6, drawn);
-        }
-
-        // No per-pixel test tells a #00FFFF backdrop from a placeholder, so such a stop is refused up front —
-        // a near-cyan one is not.
-        [Test]
-        public void Bg_PlaceholderCyanStop_IsRefused_NearCyanIsNot()
-        {
-            var cyan = new Color(0f, 1f, 1f);
-            var near = new Color(0f, 254f / 255f, 1f);
-            StringAssert.Contains("#00FEFF", RenderThumbnailCore.RefusePlaceholderBg(cyan, cyan));
-            Assert.IsNotNull(RenderThumbnailCore.RefusePlaceholderBg(Color.black, cyan), "either gradient stop");
-            Assert.IsNull(RenderThumbnailCore.RefusePlaceholderBg(near, near));
-            Assert.IsTrue(RenderThumbnailCore.TryParseBg("#00FFFF:#000000", out Color top, out Color bottom));
-            Assert.IsNotNull(RenderThumbnailCore.RefusePlaceholderBg(top, bottom), "parsed hex reaches the refusal");
         }
     }
 }
