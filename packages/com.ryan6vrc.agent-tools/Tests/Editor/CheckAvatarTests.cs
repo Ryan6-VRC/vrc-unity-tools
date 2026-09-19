@@ -1123,7 +1123,6 @@ public class CheckAvatarTests
     [TestCase("BoneProxy")]
     [TestCase("MergeArmature")]
     [TestCase("WorldFixedObject")]
-    [TestCase("VisibleHeadAccessory")]
     [TestCase("ReplaceObject")]
     public void AnchorSeam_EveryTrackedRelocatorType_Fires(string shortName)
     {
@@ -1134,6 +1133,33 @@ public class CheckAvatarTests
         var log = SeamLog();
         Assert.AreEqual(1, SeamCount(log), log);
         StringAssert.Contains("moved-by=ModularAvatar" + shortName, log);
+    }
+
+    // VisibleHeadAccessory reparents only the clones it creates, never its own node, so the sensor stays
+    // under the mount and the builder renames it.
+    [Test]
+    public void AnchorSeam_VisibleHeadAccessory_NotARelocator()
+    {
+        var prop = NewSeamRig("AS15", out var aim, out var sensor, out _);
+        AddMaRelocator(aim, "VisibleHeadAccessory");
+        AddCarrier(sensor, Receiver, "Touch");
+        AddVrcfFullController(prop, NewParamController("AsCtrl15", "Touch"), null);
+        Assert.AreEqual(0, SeamCount(SeamLog()));
+    }
+
+    // A FullController mounted on the avatar root still contains every MA destination, so the builder's
+    // walk finds the moved carrier. The same rig with the mount on Prop is AS1.
+    [Test]
+    public void AnchorSeam_MountOnTheAvatarRoot_Clean()
+    {
+        var a = NewAvatar("AS16");
+        var aim = NewChild(NewChild(a, "Prop"), "Aim");
+        AddMaRelocator(aim, "BoneProxy");
+        AddCarrier(NewChild(aim, "Sensor"), Receiver, "Touch");
+        AddVrcfFullController(a, NewParamController("AsCtrl16", "Touch"), null);
+        var log = SeamLog();
+        Assert.AreEqual(0, SeamCount(log), log);
+        StringAssert.Contains(CheckAvatar.AnchorSeamScopeLine, log); // the walk saw the relocator
     }
 
     // ArmatureLink runs after the FullController has renamed, so it is never the anchor. The control

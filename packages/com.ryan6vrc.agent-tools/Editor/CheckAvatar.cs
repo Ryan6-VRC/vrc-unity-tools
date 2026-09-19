@@ -116,8 +116,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal const string AnchorSeamScopeLine =
             "anchor-seam is scoped to VRCFury FullController parameter renames: a VRCContactReceiver, " +
             "VRCRaycast or VRCPhysBone whose parameter its FullController declares, under one of the MA " +
-            "components that reparent a node (BoneProxy, MergeArmature, WorldFixedObject, " +
-            "VisibleHeadAccessory, ReplaceObject). The FullController's global-parameter settings are not " +
+            "components that reparent a node (BoneProxy, MergeArmature, WorldFixedObject, and ReplaceObject " +
+            "for the replacement's own subtree only). A FullController mounted on the avatar root is " +
+            "exempt, since every MA destination stays under it. The FullController's global-parameter settings are not " +
             "evaluated, and a parameter it keeps global is not renamed, so is not broken. Merged clip " +
             "bindings are not in scope: a relocated one survives, and one whose target the build destroys " +
             "is named by VRCFury's own build warning.";
@@ -134,9 +135,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             "it there, or anchor with a VRCFury ArmatureLink, which moves after the rename " +
             "(docs/nondestructive.md §Choosing a framework).";
 
-        // The MA components that reparent a node: BoneProxyProcessor, MergeArmatureHook,
-        // WorldFixedObjectProcessor and VisibleHeadAccessoryProcessor SetParent the GameObject they sit on,
-        // and ReplaceObjectPass SetParents the replacement (its own GameObject) into the target's place. Each
+        // The MA components that reparent a node: BoneProxyProcessor, MergeArmatureHook and
+        // WorldFixedObjectProcessor SetParent the GameObject they sit on, and ReplaceObjectPass SetParents the
+        // replacement (its own GameObject) into the target's place. VisibleHeadAccessoryProcessor is absent: it
+        // reparents only the clones it creates, never the node it sits on. Each
         // acts only once its target RESOLVES, and this class does not check that — deliberately: an entry is
         // scanned as a bare prefab where no target can resolve, so gating on resolution would report every
         // module clean. The finding is the authored shape, not a predicted move. Membership is a type-name
@@ -147,7 +149,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             "nadena.dev.modular_avatar.core.ModularAvatarBoneProxy",
             "nadena.dev.modular_avatar.core.ModularAvatarMergeArmature",
             "nadena.dev.modular_avatar.core.ModularAvatarWorldFixedObject",
-            "nadena.dev.modular_avatar.core.ModularAvatarVisibleHeadAccessory",
             "nadena.dev.modular_avatar.core.ModularAvatarReplaceObject",
         };
 
@@ -405,7 +406,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // VRCFury FullControllers only: their frame drift was already surfaced by Enumerate above, so the
             // walk reports only the reflection points it adds.
             rep.AnchorsPresent = CollectAnchors(avatarGO);
-            foreach (var hit in CollectAnchorSeams(avatarGO, rep.AnchorsPresent, (c, anchor) => SurfaceUnreflected(c, anchor, rep), reportFrameDrift: false))
+            foreach (var hit in CollectAnchorSeams(avatarGO, rep.AnchorsPresent, (c, anchor) => SurfaceUnreflected(c, anchor, rep), reportFrameDrift: false, avatarRoot: avatarGO))
                 rep.AnchorSeams.Add(new Offender
                 {
                     Kind = "anchor-seam",
@@ -449,7 +450,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             var rep = new Report { Root = root };
             var anchors = CollectAnchors(root);
-            foreach (var hit in CollectAnchorSeams(root, anchors, (c, anchor) => SurfaceUnreflected(c, anchor, rep), reportFrameDrift: true))
+            foreach (var hit in CollectAnchorSeams(root, anchors, (c, anchor) => SurfaceUnreflected(c, anchor, rep), reportFrameDrift: true,
+                avatarRoot: root.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>() != null ? root : null))
                 lines.Add(string.Format(CultureInfo.InvariantCulture,
                     "{0} @ `{1}` parameter `{2}`, moved by {3} @ `{4}` [VRCFury FullController @ {5}]",
                     hit.Carrier.GetType().Name, PathOf(hit.Carrier.gameObject), hit.Parameter, hit.AnchorLabel,
@@ -647,7 +649,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         // parameter-carrying component under its mount whose parameter names one of them, then the nearest MA
         // relocator between that component and the mount. The mount and everything above it are excluded: a
         // relocator there moves the FullController's whole subtree, component included, so the builder still
-        // finds it. Nested FullControllers each report their own.
+        // finds it. A mount on the avatar root is skipped whole: every MA destination lies under it. Nested
+        // FullControllers each report their own.
         internal struct AnchorSeamHit
         {
             public Component FullController;
@@ -658,7 +661,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         internal static List<AnchorSeamHit> CollectAnchorSeams(GameObject root, Dictionary<GameObject, string> anchors,
-            Action<Component, string> onUnreflected, bool reportFrameDrift)
+            Action<Component, string> onUnreflected, bool reportFrameDrift, GameObject avatarRoot)
         {
             var hits = new List<AnchorSeamHit>();
             if (root == null || anchors == null || anchors.Count == 0) return hits;
@@ -667,9 +670,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (fc == null || !TryVrcfFrame(fc, out var controllers, out var frame)) continue;
                 if (reportFrameDrift && frame.UnreflectedAnchor != null) onUnreflected(fc, frame.UnreflectedAnchor);
                 if (frame.UnreflectedAnchor == "VRCF.content") continue; // no model to read; already surfaced
+                var mount = frame.Root != null ? frame.Root : fc.gameObject;
+                if (avatarRoot != null && mount == avatarRoot) continue;
                 var declared = DeclaredParameters(fc, controllers, onUnreflected);
                 if (declared.Count == 0) continue;
-                var mount = frame.Root != null ? frame.Root : fc.gameObject;
                 foreach (var carrier in mount.GetComponentsInChildren<Component>(true))
                 {
                     if (carrier == null) continue;
