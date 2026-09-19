@@ -82,7 +82,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <param name="whatIf">preflight only: resolve target/descriptor/pose, report, bake nothing.
         /// <paramref name="expression"/> is echoed unresolved — it needs the baked controller.</param>
         /// <param name="zoom">scale on the framing's span (0.6–1.6): &gt;1 tighter, &lt;1 wider. Framing
-        /// scale only — perspective is <paramref name="fov"/>'s.</param>
+        /// scale only — perspective is <paramref name="fov"/>'s. Jointly bounded: zoom × tan(fov/2) ≤ 1, the
+        /// closest shot fov 90 already reaches, so a high zoom at a wide fov is refused.</param>
         /// <param name="pitch">camera elevation offset in degrees (±20), added to head-follow: positive =
         /// camera higher, looking down.</param>
         /// <param name="headroom">aim shift as a fraction of the framed span (±0.3): positive opens more frame

@@ -398,7 +398,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        /// <summary>The knobs as the verdict echoes them — the exact values to pass back to reproduce a shot.</summary>
+        /// <summary>The knobs as the verdict echoes them — the values to pass back to reproduce a shot, to the printed precision.</summary>
         internal static string KnobToken(float zoom, float pitch, float headroom)
             => "zoom=" + zoom.ToString("0.##", CultureInfo.InvariantCulture)
                + " pitch=" + pitch.ToString("0.#", CultureInfo.InvariantCulture)

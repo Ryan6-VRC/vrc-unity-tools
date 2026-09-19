@@ -321,18 +321,20 @@ namespace Ryan6Vrc.AvatarTools.Tests
         {
             var c = Goldens[0];   // bust, frontal-ish, no head pitch
             var baseSol = c.Solve();
-            float baseDist = (baseSol.Position - c.Viewpoint).magnitude;
 
+            // Every term of the camera's offset from the view point — the aim-drop, the lateral looking-room
+            // and the solved distance — is proportional to the span at a fixed orientation, so zoom must scale
+            // the whole offset by exactly 1/zoom. A zoom that moved distance but not the aim-drop, or the
+            // reverse, fails here.
             var zoomed = c.Solve(zoom: 1.25f);
-            Assert.Less((zoomed.Position - c.Viewpoint).magnitude, baseDist, "zoom > 1 moves the camera closer");
+            AssertNear((baseSol.Position - c.Viewpoint) / 1.25f, zoomed.Position - c.Viewpoint,
+                "zoom scales the camera's whole offset from the view point by 1/zoom");
+            Assert.AreEqual(1f, Vector3.Dot(baseSol.Rotation * Vector3.forward, zoomed.Rotation * Vector3.forward),
+                1e-5f, "zoom leaves the view direction unchanged");
 
-            // Distance scales exactly 1/zoom: measure it along the view axis from the camera to the aim plane.
-            RenderThumbnailCore.FramingGeometry("bust", out float span, out float drop);
+            RenderThumbnailCore.FramingGeometry("bust", out float span, out float _);
             float d0 = (span * 0.5f) / Mathf.Tan(c.Fov * 0.5f * Mathf.Deg2Rad);
             Vector3 aim0 = baseSol.Position + baseSol.Rotation * Vector3.forward * d0;
-            Vector3 aimZ = zoomed.Position + zoomed.Rotation * Vector3.forward * (d0 / 1.25f);
-            Assert.AreEqual(aim0.y + span * drop - span / 1.25f * drop, aimZ.y, 1e-4f,
-                "zoom keeps the aim-drop a fraction of the (zoomed) span");
 
             var lifted = c.Solve(headroom: 0.2f);
             Vector3 aimH = lifted.Position + lifted.Rotation * Vector3.forward * d0;

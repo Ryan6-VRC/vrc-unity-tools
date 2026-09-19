@@ -422,7 +422,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <param name="fov">vertical FOV degrees (10–90).</param>
         /// <param name="yaw">null =&gt; automatic oblique; else an offset added to head tracking.</param>
         /// <param name="settleFrames">player-loop frames to settle before capture (default 90).</param>
-        /// <param name="zoom">scale on the framing's span (0.6–1.6): &gt;1 tighter. Identical to edit mode's.</param>
+        /// <param name="zoom">scale on the framing's span (0.6–1.6): &gt;1 tighter; zoom × tan(fov/2) ≤ 1. Identical to edit mode's.</param>
         /// <param name="pitch">camera elevation offset, degrees (±20): positive = higher. Identical to edit mode's.</param>
         /// <param name="headroom">aim shift, fraction of span (±0.3): positive = more above the head.</param>
         public static string Shoot(string pose = null, string expression = null, string framing = "bust",
