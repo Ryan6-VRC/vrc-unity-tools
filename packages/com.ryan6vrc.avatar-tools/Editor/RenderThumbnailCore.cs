@@ -56,6 +56,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private const float PitchFollow = 0.5f;
         private const float MaxTrackYaw = 60f;    // guards a user clip, never reached by the bundled poses
         private const float MaxCamPitch = 20f;    // ditto: PitchFollow peaks near 15 deg on this library
+        // Caller camera knobs — ranges the shared validator refuses outside. Each is RELATIVE to the framing
+        // token (zoom scales its span, headroom shifts its aim, pitch offsets its head-follow), so no knob can
+        // author the camera outright. The head-follow term keeps its own ±MaxCamPitch clamp and only the
+        // total widens to MaxTotalPitch: at default knobs every clip frames exactly as it did before them.
+        internal const float MinZoom = 0.6f, MaxZoom = 1.6f;
+        internal const float MaxPitchOffset = 20f;
+        internal const float MaxHeadroom = 0.3f;
+        private const float MaxTotalPitch = 35f;
         private const float LateralOffset = 0.06f; // fraction of span, looking-room in the landscape frame
         internal const float MinFov = 10f, MaxFov = 90f;
 
@@ -83,6 +91,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             internal Quaternion Rotation;
             internal Quaternion LightHolderRotation; // camera-relative rig yaw; play mode uses scene lights and ignores it
             internal float CamYaw;                   // resolved (tracking + oblique), for the verdict
+            internal float CamElevation;             // resolved pitch, positive = camera above, looking down
         }
 
         /// <summary>
@@ -95,7 +104,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal static CameraSolution SolveCamera(
             string framingToken, float span, float aimDrop, float fov, float? yaw,
             float headYaw, float headPitch, Vector3 viewpoint, Quaternion rootRot,
-            float rootLossyScaleY, float viewPositionY, float rootEulerY)
+            float rootLossyScaleY, float viewPositionY, float rootEulerY,
+            float zoom = 1f, float pitch = 0f, float headroom = 0f)
         {
             // The deadband decides the oblique's side for the near-frontal poses (many of the bundled clips
             // turn the head only a few degrees) rather than letting retarget noise pick, which would swing the
@@ -111,7 +121,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             float camYaw = Mathf.Clamp(headYaw, -MaxTrackYaw, MaxTrackYaw) + shotOffset;
             // Negated: a positive rotation about +X lowers the camera, and a chin-RAISED pose has to be
             // shot from slightly ABOVE (from below it is a nostril shot).
-            float camPitch = Mathf.Clamp(-headPitch * PitchFollow, -MaxCamPitch, MaxCamPitch);
+            // `pitch` is an elevation (positive = camera higher), so it SUBTRACTS here: camPitch is a rotation
+            // about +X, where positive lowers the camera.
+            float camPitch = Mathf.Clamp(
+                Mathf.Clamp(-headPitch * PitchFollow, -MaxCamPitch, MaxCamPitch) - pitch,
+                -MaxTotalPitch, MaxTotalPitch);
 
             // Angles apply in the posed clone's root basis so an avatar sitting rotated in the scene still
             // photographs frontally — the case that matters most on the floor path, where no sampling
@@ -123,7 +137,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // viewpoint so the feet stay seated. framingToken is already lowercased by the caller.
             float viewFollow = framingToken == "full" ? ViewHeightFollow : 0f;
             float scaledSpan = span * rootLossyScaleY
-                * Mathf.Lerp(1f, viewPositionY / ReferenceViewHeight, viewFollow);
+                * Mathf.Lerp(1f, viewPositionY / ReferenceViewHeight, viewFollow) / zoom;
             float distance = (scaledSpan * 0.5f) / Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
 
             // Aim below the view point (the eyes sit near the TOP of the subject, not its centre) and
@@ -131,8 +145,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // frame that would otherwise waste its width on a vertical subject.
             // Vector3.up, not the root's up: camera roll stays world-level below, so the drop that decides
             // where the head sits in frame has to share that basis. Divergent only for a tilted root.
+            // headroom raises the aim by a fraction of the span, opening the frame above the head.
             Vector3 aim = viewpoint
-                        - Vector3.up * (scaledSpan * aimDrop)
+                        - Vector3.up * (scaledSpan * (aimDrop - headroom))
                         + screenRight * (scaledSpan * LateralOffset) * -lateralSign;
 
             Vector3 pos = aim + rootRot * (orbit * (Vector3.forward * distance));
@@ -145,6 +160,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // lights and ignores it.
                 LightHolderRotation = Quaternion.Euler(0f, rootEulerY + camYaw, 0f),
                 CamYaw = camYaw,
+                CamElevation = -camPitch,
             };
         }
 
@@ -199,11 +215,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal const int CaptureHeight = 900;
 
         /// <summary>The outcome of a <see cref="Capture"/>: whether anything drew, the PNG bytes (null when
-        /// nothing drew — the front-end fails loud rather than writing a blank), and where the view point
-        /// landed in the frame (reported, not gated — a bad crop is visible in the PNG).</summary>
+        /// nothing drew or a placeholder was found — the front-end fails loud rather than writing a blank or a
+        /// half-compiled frame), and where the view point landed in the frame (reported, not gated — a bad crop
+        /// is visible in the PNG).</summary>
         internal struct CaptureResult
         {
             internal int Drawn;
+            internal int Placeholder;           // exact #00FFFF px; any is a FAIL (see CountPixels)
             internal byte[] Png;
             internal Vector3 HeadViewport;
         }
@@ -250,7 +268,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 };
                 cam.targetTexture = rt;
                 cam.pixelRect = new Rect(0, 0, W, H);
-                cam.Render();
+                // A bespoke Camera.Render() compiles a cold shader variant synchronously only while
+                // ShaderUtil.allowAsyncCompilation is false. It is false at rest but has been observed true at
+                // an edit-mode capture, which then drew the flat #00FFFF placeholder under an OK verdict. The
+                // project pref (EditorSettings.asyncShaderCompilation, RenderAvatar's lever) does not reach
+                // this path. Pinned for the render only; the scan below is the backstop.
+                bool allowAsyncWas = ShaderUtil.allowAsyncCompilation;
+                ShaderUtil.allowAsyncCompilation = false;
+                try { cam.Render(); }
+                finally { ShaderUtil.allowAsyncCompilation = allowAsyncWas; }
 
                 // Where the face landed, while the camera still exists. The VIEW POINT, not the aim — the camera
                 // is aimed exactly at the aim by construction, so projecting that would print (0.5,0.5) forever.
@@ -269,28 +295,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     RenderTexture.active = prevActive;
                 }
 
-                // ---- Empty-frame guard: did ANYTHING draw? ----
-                // Reference = each row's own column-0 pixel of the read-back texture, NOT a computed color.
-                // Sampling the render is what keeps this color-space-agnostic (a computed reference in a Linear
-                // project writing an sRGB target reads the whole background as "drawn" and defeats the guard),
-                // and per-row is what makes it exact under a vertical gradient, which is constant along a row.
-                Color32[] pixels = tex.GetPixels32();
-                int drawn = 0;
-                for (int y = 0; y < H; y++)
-                {
-                    Color32 rowRef = pixels[y * W];
-                    for (int x = 0; x < W; x++)
-                    {
-                        Color32 p = pixels[y * W + x];
-                        if (Math.Abs(p.r - rowRef.r) > SilhouetteChannelThreshold
-                            || Math.Abs(p.g - rowRef.g) > SilhouetteChannelThreshold
-                            || Math.Abs(p.b - rowRef.b) > SilhouetteChannelThreshold)
-                            drawn++;
-                    }
-                }
-
-                byte[] png = drawn > 0 ? tex.EncodeToPNG() : null;
-                return new CaptureResult { Drawn = drawn, Png = png, HeadViewport = headViewport };
+                CountPixels(tex.GetPixels32(), W, H, out int drawn, out int placeholder);
+                byte[] png = drawn > 0 && placeholder == 0 ? tex.EncodeToPNG() : null;
+                return new CaptureResult { Drawn = drawn, Placeholder = placeholder, Png = png, HeadViewport = headViewport };
             }
             finally
             {
@@ -310,6 +317,92 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (tex != null) UnityEngine.Object.DestroyImmediate(tex);
             }
         }
+
+        /// <summary>
+        /// Classify a read-back frame. <paramref name="drawn"/> is the empty-frame guard: a pixel counts when it
+        /// differs from ITS OWN ROW's column-0 pixel — sampling the render, not a computed colour, keeps it
+        /// colour-space-agnostic (a computed reference in a Linear project writing an sRGB target reads the
+        /// whole background as drawn), and per-row keeps it exact under a vertical gradient.
+        /// <paramref name="placeholder"/> counts exact <c>#00FFFF</c> across the WHOLE frame, not just drawn px:
+        /// a placeholder surface reaching column 0 would otherwise become its own row's reference and hide.
+        /// A backdrop cannot false-trip it — 0 and 1 are fixed points of the sRGB curve, so a gradient reaches
+        /// exact cyan only at a stop that IS cyan, which <see cref="RefusePlaceholderBg"/> refuses up front: no
+        /// per-pixel test tells a cyan backdrop from a placeholder, and a drawn-only count is blind wherever the
+        /// subject reaches column 0. The floor is 0; MSAA edge blends fall off exact cyan, so they cannot trip
+        /// it and a flat interior cannot hide in them.
+        /// </summary>
+        internal static void CountPixels(Color32[] pixels, int w, int h, out int drawn, out int placeholder)
+        {
+            drawn = 0; placeholder = 0;
+            for (int y = 0; y < h; y++)
+            {
+                Color32 rowRef = pixels[y * w];
+                for (int x = 0; x < w; x++)
+                {
+                    Color32 p = pixels[y * w + x];
+                    bool isDrawn = Math.Abs(p.r - rowRef.r) > SilhouetteChannelThreshold
+                        || Math.Abs(p.g - rowRef.g) > SilhouetteChannelThreshold
+                        || Math.Abs(p.b - rowRef.b) > SilhouetteChannelThreshold;
+                    if (isDrawn) drawn++;
+                    if (p.r == 0 && p.g == 255 && p.b == 255) placeholder++;
+                }
+            }
+        }
+
+        internal static bool IsPlaceholderColor(Color c)
+        {
+            Color32 c32 = c;
+            return c32.r == 0 && c32.g == 255 && c32.b == 255;
+        }
+
+        /// <summary>Null, or the refusal for a backdrop stop the placeholder scan could not tell apart.</summary>
+        internal static string RefusePlaceholderBg(Color top, Color bottom)
+            => IsPlaceholderColor(top) || IsPlaceholderColor(bottom)
+                ? "bg stop #00FFFF is the shader-compile placeholder colour, which the capture's placeholder scan "
+                  + "cannot tell from a backdrop — use #00FEFF, which reads identically"
+                : null;
+
+        /// <summary>The placeholder FAIL reason, shared by both front-ends. The compile flag is editor-global and
+        /// cannot attribute the hit, so it only orders the remedies.</summary>
+        internal static string BuildPlaceholderFailReason(int count, bool compiling)
+            => "flat #00FFFF placeholder px in the frame — " + count + " px (floor 0). Unity draws that for a "
+               + "shader variant still compiling; this capture pins synchronous compilation, so a path escaped "
+               + "the pin. No PNG was written. "
+               + (compiling
+                   ? "Shader compilation is still in flight: re-shoot first."
+                   : "No shader compilation is in flight, so a re-shoot may not clear it.")
+               + " A count that repeats on an unchanged avatar is an authored unlit or emissive pure-cyan "
+               + "surface, not a placeholder; this tool cannot shoot that avatar as it stands.";
+
+        /// <summary>Validate the camera knobs, after <c>fov</c> itself has passed. Null when valid, else the
+        /// refusal reason. Ranges are written <c>!(lo &lt;= x &amp;&amp; x &lt;= hi)</c> so NaN is refused too.
+        /// The joint bound keeps the camera no closer than the closest shot the fov bound already allowed
+        /// (fov 90 at zoom 1): distance goes as 1/(zoom·tan(fov/2)), and closer puts it inside the hair,
+        /// which renders as hair interior and still passes the empty-frame guard.</summary>
+        internal static string ValidateCameraKnobs(float fov, float zoom, float pitch, float headroom)
+        {
+            var ic = CultureInfo.InvariantCulture;
+            if (!(zoom >= MinZoom && zoom <= MaxZoom))
+                return "zoom " + zoom.ToString(ic) + " out of range — expected " + MinZoom.ToString(ic) + "–"
+                    + MaxZoom.ToString(ic) + " (a scale on the framing's span: >1 tighter, <1 wider)";
+            if (!(pitch >= -MaxPitchOffset && pitch <= MaxPitchOffset))
+                return "pitch " + pitch.ToString(ic) + " out of range — expected ±" + MaxPitchOffset.ToString(ic)
+                    + " degrees of camera elevation (positive = camera higher, looking down)";
+            if (!(headroom >= -MaxHeadroom && headroom <= MaxHeadroom))
+                return "headroom " + headroom.ToString(ic) + " out of range — expected ±" + MaxHeadroom.ToString(ic)
+                    + " (a fraction of the framed span; positive = more frame above the head)";
+            float nearness = zoom * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+            if (nearness > Mathf.Tan(MaxFov * 0.5f * Mathf.Deg2Rad) + 1e-4f)
+                return "zoom " + zoom.ToString(ic) + " at fov " + fov.ToString(ic) + " puts the camera closer than the "
+                    + "tool allows (zoom × tan(fov/2) must stay ≤ 1, the closest fov 90 already reached) — lower zoom or fov";
+            return null;
+        }
+
+        /// <summary>The knobs as the verdict echoes them — the exact values to pass back to reproduce a shot.</summary>
+        internal static string KnobToken(float zoom, float pitch, float headroom)
+            => "zoom=" + zoom.ToString("0.##", CultureInfo.InvariantCulture)
+               + " pitch=" + pitch.ToString("0.#", CultureInfo.InvariantCulture)
+               + " headroom=" + headroom.ToString("0.##", CultureInfo.InvariantCulture);
 
         // ===== Framing / background / token helpers (pure) =====
 

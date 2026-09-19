@@ -422,8 +422,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <param name="fov">vertical FOV degrees (10–90).</param>
         /// <param name="yaw">null =&gt; automatic oblique; else an offset added to head tracking.</param>
         /// <param name="settleFrames">player-loop frames to settle before capture (default 90).</param>
+        /// <param name="zoom">scale on the framing's span (0.6–1.6): &gt;1 tighter. Identical to edit mode's.</param>
+        /// <param name="pitch">camera elevation offset, degrees (±20): positive = higher. Identical to edit mode's.</param>
+        /// <param name="headroom">aim shift, fraction of span (±0.3): positive = more above the head.</param>
         public static string Shoot(string pose = null, string expression = null, string framing = "bust",
-            string bg = null, float fov = 30f, float? yaw = null, int settleFrames = DefaultSettleFrames)
+            string bg = null, float fov = 30f, float? yaw = null, int settleFrames = DefaultSettleFrames,
+            float zoom = 1f, float pitch = 0f, float headroom = 0f)
         {
             if (!_prepared) return Fail("no prepared session — call Run(target) first");
             if (!Application.isPlaying) return Fail("not in play mode — enter play (manage_editor play) after Run(), then Shoot()");
@@ -439,10 +443,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Color bgTop = RenderThumbnailCore.DefaultBackground, bgBottom = RenderThumbnailCore.DefaultBackground;
             if (bg != null && !RenderThumbnailCore.TryParseBg(bg, out bgTop, out bgBottom))
                 return Fail("unparseable bg '" + bg + "' — expected #RRGGBB, #RRGGBBAA, or #TOP:#BOTTOM");
+            string bgErr = RenderThumbnailCore.RefusePlaceholderBg(bgTop, bgBottom);
+            if (bgErr != null) return Fail(bgErr);
             if (!(fov >= RenderThumbnailCore.MinFov && fov <= RenderThumbnailCore.MaxFov))
                 return Fail("fov " + fov.ToString(CultureInfo.InvariantCulture) + " out of range 10–90");
             if (yaw.HasValue && (float.IsNaN(yaw.Value) || float.IsInfinity(yaw.Value)))
                 return Fail("yaw must be finite, or null for the automatic oblique");
+            string knobErr = RenderThumbnailCore.ValidateCameraKnobs(fov, zoom, pitch, headroom);
+            if (knobErr != null) return Fail(knobErr);
             if (settleFrames < 0 || settleFrames > 600)
                 return Fail("settleFrames " + settleFrames + " out of range 0–600 (negative would capture instantly while claiming settled)");
 
@@ -559,7 +567,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         RenderThumbnailCore.HeadFacing(_root.transform.rotation, _headBone, _restHeadLocal, out headYaw, out headPitch);
                     }
                     var sol = RenderThumbnailCore.SolveCamera(framingToken, span, aimDrop, fov, yaw, headYaw, headPitch,
-                        vp, _root.transform.rotation, _root.transform.lossyScale.y, _viewPositionY, _root.transform.eulerAngles.y);
+                        vp, _root.transform.rotation, _root.transform.lossyScale.y, _viewPositionY, _root.transform.eulerAngles.y,
+                        zoom, pitch, headroom);
 
                     var camGO = EditorUtility.CreateGameObjectWithHideFlags("__rtp_cam", HideFlags.DontSave, typeof(Camera));
                     RenderThumbnailCore.CaptureResult cap;
@@ -588,15 +597,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         + "," + cap.HeadViewport.y.ToString("0.00", CultureInfo.InvariantCulture) + ")";
                     string common = "Shoot " + _root.name + " pose=" + poseName + " expression=" + expressionName
                         + " framing=" + framingToken + " fov=" + fov.ToString("0.#", CultureInfo.InvariantCulture)
+                        + " " + RenderThumbnailCore.KnobToken(zoom, pitch, headroom)
                         + " headYaw=" + headYaw.ToString("0.#", CultureInfo.InvariantCulture)
                         + " camYaw=" + sol.CamYaw.ToString("0.#", CultureInfo.InvariantCulture)
+                        + " headPitch=" + headPitch.ToString("0.#", CultureInfo.InvariantCulture)
+                        + " camPitch=" + sol.CamElevation.ToString("0.#", CultureInfo.InvariantCulture)
                         + " " + head + " settled=" + elapsed + "f moving=" + movingToken;
 
                     string verdict;
                     string pngPath = null;
-                    if (cap.Drawn == 0)
+                    string noPngWhy = null;   // the log body names which FAIL left no PNG
+                    // Placeholder before nothing-drew: a frame the placeholder fills edge to edge reads Drawn=0.
+                    if (cap.Placeholder > 0)
+                    {
+                        noPngWhy = "placeholder px";
+                        verdict = "[RenderThumbnailPlay] " + tag + " " + common + " => FAIL: "
+                            + RenderThumbnailCore.BuildPlaceholderFailReason(
+                                cap.Placeholder, ShaderUtil.anythingCompiling);
+                    }
+                    else if (cap.Drawn == 0)
+                    {
+                        noPngWhy = "nothing drew";
                         verdict = "[RenderThumbnailPlay] " + tag + " " + common + " => FAIL: nothing drew (every pixel "
                             + "matches its row background) — check the local-layer cull, or the subject fills the frame";
+                    }
                     else
                     {
                         pngPath = System.IO.Path.Combine(Application.temporaryCachePath,
@@ -613,9 +637,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     string loggedShoot = RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-shoot", _root.name, verdictBody,
                         "# RenderThumbnailPlay Shoot\n\n- tag: `" + tag + "`\n- target: `" + _root.name + "`\n"
                         + "- pose: " + poseName + "\n- expression: " + expressionName + "\n"
-                        + "- framing: " + framingToken + "\n- settle: " + elapsed + " frames\n"
+                        + "- framing: " + framingToken + " " + RenderThumbnailCore.KnobToken(zoom, pitch, headroom) + "\n"
+                        + "- settle: " + elapsed + " frames\n"
                         + "- still moving at capture: " + movingToken + "\n"
-                        + "- png: " + (pngPath ?? "(none — nothing drew)") + "\n");
+                        + "- png: " + (pngPath ?? "(none — " + noPngWhy + ")") + "\n");
                     verdict = pngAt < 0 ? loggedShoot : RenderThumbnailCore.SpliceTrailers(loggedShoot, verdictBody, pngPath);
                     FinishShoot(step, tag, verdict);
                 }

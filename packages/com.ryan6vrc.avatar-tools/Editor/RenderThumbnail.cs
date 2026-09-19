@@ -81,6 +81,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// toward world +X (screen-left).</param>
         /// <param name="whatIf">preflight only: resolve target/descriptor/pose, report, bake nothing.
         /// <paramref name="expression"/> is echoed unresolved — it needs the baked controller.</param>
+        /// <param name="zoom">scale on the framing's span (0.6–1.6): &gt;1 tighter, &lt;1 wider. Framing
+        /// scale only — perspective is <paramref name="fov"/>'s.</param>
+        /// <param name="pitch">camera elevation offset in degrees (±20), added to head-follow: positive =
+        /// camera higher, looking down.</param>
+        /// <param name="headroom">aim shift as a fraction of the framed span (±0.3): positive opens more frame
+        /// above the head — the knob for a prop over the crown.</param>
         public static string Run(
             string target,
             string pose = null,
@@ -89,7 +95,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string bg = null,
             float fov = 30f,
             float? yaw = null,
-            bool whatIf = false)
+            bool whatIf = false,
+            float zoom = 1f,
+            float pitch = 0f,
+            float headroom = 0f)
         {
             var handle = Ryan6Vrc.AgentTools.Editor.SceneHandle.Resolve(target);
             if (!handle.Ok) return Fail(target, handle.Refusal);
@@ -111,6 +120,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Color bgTop = RenderThumbnailCore.DefaultBackground, bgBottom = RenderThumbnailCore.DefaultBackground;
             if (bg != null && !RenderThumbnailCore.TryParseBg(bg, out bgTop, out bgBottom))
                 return Fail(label, "unparseable bg '" + bg + "' — expected #RRGGBB, #RRGGBBAA, or #TOP:#BOTTOM");
+            string bgErr = RenderThumbnailCore.RefusePlaceholderBg(bgTop, bgBottom);
+            if (bgErr != null) return Fail(label, bgErr);
 
             // Bounded because the distance solve goes as 1/tan(fov/2): at 90 a bust frame puts the camera
             // 0.23 m from the view point, inside the hair mesh, which renders as hair interior and would
@@ -121,9 +132,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     + RenderThumbnailCore.MaxFov.ToString(CultureInfo.InvariantCulture));
             if (yaw.HasValue && (float.IsNaN(yaw.Value) || float.IsInfinity(yaw.Value)))
                 return Fail(label, "yaw must be a finite number of degrees, or null for the automatic oblique");
+            string knobErr = RenderThumbnailCore.ValidateCameraKnobs(fov, zoom, pitch, headroom);
+            if (knobErr != null) return Fail(label, knobErr);
 
             string camToken = "fov=" + fov.ToString("0.#", CultureInfo.InvariantCulture)
-                + " yaw=" + (yaw.HasValue ? yaw.Value.ToString("0.#", CultureInfo.InvariantCulture) : "auto");
+                + " yaw=" + (yaw.HasValue ? yaw.Value.ToString("0.#", CultureInfo.InvariantCulture) : "auto")
+                + " " + RenderThumbnailCore.KnobToken(zoom, pitch, headroom);
 
             if (whatIf)
             {
@@ -354,7 +368,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var solution = RenderThumbnailCore.SolveCamera(
                     framingToken, span, aimDrop, fov, yaw, headYaw, headPitch, viewpoint,
                     baked.transform.rotation, baked.transform.lossyScale.y,
-                    descriptorBaked.ViewPosition.y, baked.transform.eulerAngles.y);
+                    descriptorBaked.ViewPosition.y, baked.transform.eulerAngles.y, zoom, pitch, headroom);
                 cam.transform.position = solution.Position;
                 cam.transform.rotation = solution.Rotation;
                 // The rig is camera-relative by construction; without this, orbiting lights a yawed shot from
@@ -375,12 +389,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName
                     + " expression=" + expressionName + shapesToken + " framing=" + framingToken
                     + " fov=" + fov.ToString("0.#", CultureInfo.InvariantCulture)
+                    + " " + RenderThumbnailCore.KnobToken(zoom, pitch, headroom)
                     + " headYaw=" + headYaw.ToString("0.#", CultureInfo.InvariantCulture)
                     + " camYaw=" + camYaw.ToString("0.#", CultureInfo.InvariantCulture)
+                    + " headPitch=" + headPitch.ToString("0.#", CultureInfo.InvariantCulture)
+                    + " camPitch=" + solution.CamElevation.ToString("0.#", CultureInfo.InvariantCulture)
                     + " head=(" + headViewport.x.ToString("0.00", CultureInfo.InvariantCulture)
                     + "," + headViewport.y.ToString("0.00", CultureInfo.InvariantCulture) + ")";
 
-                if (nothingDrew)
+                // Placeholder before nothing-drew: a frame the placeholder fills edge to edge reads Drawn=0.
+                if (capture.Placeholder > 0)
+                    result = Fail(label, RenderThumbnailCore.BuildPlaceholderFailReason(
+                        capture.Placeholder, ShaderUtil.anythingCompiling));
+                else if (nothingDrew)
                 {
                     // Fail loud, uniform (=> FAIL:) — do NOT write a blank PNG. Named honestly: a frame the
                     // subject fills EDGE TO EDGE also reads uniform, because then column 0 is subject too.
