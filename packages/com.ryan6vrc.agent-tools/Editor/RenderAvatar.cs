@@ -120,13 +120,14 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// baseline; a cold lilToon/Poiyomi avatar is unmeasured and could be far worse, up to an
     /// <c>execute_code</c> timeout that presents as a hang. Slow and true beats fast and false, but read a
     /// stalled first grab as this before diagnosing it as anything else.
-    /// <b>Only Scene-View capture needs this.</b> A bespoke <c>Camera.Render()</c> — avatar-tools'
-    /// RenderThumbnail, or any scratch-camera readback — compiles synchronously already:
-    /// <c>ShaderUtil.allowAsyncCompilation</c> reads false at rest and a manual render honours it, while this
-    /// path takes the project pref instead. Measured 2026-08-13 under the arming that reliably poisons this
-    /// one: an offscreen camera drew 20,616 foreground px and ZERO placeholder px, <c>anythingCompiling</c>
-    /// false throughout. Do not mirror this guard into the thumbnail door — it would be cargo-cult, and it
-    /// would flip a global pref for a path that was never exposed.
+    /// <b>The pref is this path's lever only.</b> A bespoke <c>Camera.Render()</c> — avatar-tools'
+    /// RenderThumbnail, or any scratch-camera readback — ignores the project pref and compiles synchronously
+    /// exactly while <c>ShaderUtil.allowAsyncCompilation</c> is false. That flag reads false at rest, which is
+    /// why an offscreen camera drew ZERO placeholder px under the arming that poisons this path (2026-08-13),
+    /// but it is not always false at the moment of a render: an edit-mode thumbnail capture has drawn a whole
+    /// hair mesh as placeholder. With the flag forced true, a cold shader drew placeholder whether the pref was
+    /// on or off (2026-09-19). So a scratch-camera path pins the flag, not the pref —
+    /// RenderThumbnailCore.Capture is the worked instance.
     ///
     /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
     /// (target upright, facing world +Z, unrotated). A target rotated in the scene shows the scene's

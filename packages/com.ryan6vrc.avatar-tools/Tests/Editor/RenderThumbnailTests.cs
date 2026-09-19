@@ -6,7 +6,7 @@ using Ryan6Vrc.AvatarTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Tests
 {
     // Pure helpers ONLY (FramingGeometry / TryParseBg / YawOf / PitchOf / BundledPoses / NormalizeToken /
-    // ResolvePose).
+    // ResolvePose / SolveCamera / ValidateCameraKnobs).
     // Everything expression-side resolves against a BAKED avatar, so it is a scene object verified live
     // (execute_code) by the coordinator, never in NUnit. No test here may create a GameObject,
     // add a VRC_AvatarDescriptor, or call RenderThumbnail.Run — that class of EditMode test
@@ -258,6 +258,116 @@ namespace Ryan6Vrc.AvatarTools.Tests
                     "advertised pose '" + name + "' does not resolve");
             }
             StringAssert.Contains("path/GUID", err);
+        }
+
+        // ----- Camera knobs -----------------------------------------------------------------------------
+
+        // Default knobs must reproduce the camera from before the knobs existed. These goldens were read off
+        // the pre-knob SolveCamera by reflection, NOT computed from this code — computing them here would pass
+        // by construction. Cases 3 and 4 saturate the head-follow pitch clamp in both directions (fwd.y =
+        // ∓sin 20°), which is what a widened total clamp would have silently changed.
+        private static CameraSolutionCase[] Goldens => new[]
+        {
+            new CameraSolutionCase("bust", 30f, null, 0f, 0f, new Vector3(0f, 1.2f, 0f), 0f, 1f, 1.2f,
+                new Vector3(0.16259706f, 1.15920007f, 0.613598764f), new Vector3(-0.2249511f, 0f, -0.9743701f), 13f),
+            new CameraSolutionCase("half", 30f, -20f, 10f, 12f, new Vector3(0.1f, 1.3f, 0.05f), 0f, 1f, 1.3f,
+                new Vector3(-0.128807187f, 1.30903161f, 1.14031422f), new Vector3(0.1726969f, -0.104528494f, -0.979413033f), -10f),
+            new CameraSolutionCase("full", 40f, null, -8f, 60f, new Vector3(0f, 1.1f, 0f), 35f, 1.2f, 1.1f,
+                new Vector3(0.41922757f, 1.26474643f, 2.09065318f), new Vector3(-0.2273322f, -0.342020124f, -0.9117798f), -21f),
+            new CameraSolutionCase("bust", 25f, 0f, 3f, -50f, new Vector3(-0.2f, 1.25f, 0.3f), -90f, 0.9f, 1.25f,
+                new Vector3(-0.84762913f, 0.9772387f, 0.333940864f), new Vector3(0.9384048f, 0.3420202f, -0.04917995f), 3f),
+        };
+
+        internal struct CameraSolutionCase
+        {
+            internal string Token; internal float Fov; internal float? Yaw; internal float HeadYaw, HeadPitch;
+            internal Vector3 Viewpoint; internal float RootEulerY, Scale, ViewY;
+            internal Vector3 Pos, Fwd; internal float CamYaw;
+            internal CameraSolutionCase(string token, float fov, float? yaw, float headYaw, float headPitch,
+                Vector3 viewpoint, float rootEulerY, float scale, float viewY, Vector3 pos, Vector3 fwd, float camYaw)
+            {
+                Token = token; Fov = fov; Yaw = yaw; HeadYaw = headYaw; HeadPitch = headPitch; Viewpoint = viewpoint;
+                RootEulerY = rootEulerY; Scale = scale; ViewY = viewY; Pos = pos; Fwd = fwd; CamYaw = camYaw;
+            }
+
+            internal RenderThumbnailCore.CameraSolution Solve(float zoom = 1f, float pitch = 0f, float headroom = 0f)
+            {
+                RenderThumbnailCore.FramingGeometry(Token, out float span, out float drop);
+                return RenderThumbnailCore.SolveCamera(Token, span, drop, Fov, Yaw, HeadYaw, HeadPitch, Viewpoint,
+                    Quaternion.Euler(0f, RootEulerY, 0f), Scale, ViewY, RootEulerY, zoom, pitch, headroom);
+            }
+        }
+
+        private static void AssertNear(Vector3 expected, Vector3 actual, string what)
+            => Assert.Less((expected - actual).magnitude, 1e-4f, what + ": expected " + expected.ToString("F5")
+                + ", got " + actual.ToString("F5"));
+
+        [Test]
+        public void Camera_DefaultKnobs_ReproduceThePreKnobSolve()
+        {
+            foreach (var c in Goldens)
+            {
+                var sol = c.Solve();
+                AssertNear(c.Pos, sol.Position, c.Token + " position");
+                AssertNear(c.Fwd, sol.Rotation * Vector3.forward, c.Token + " forward");
+                Assert.AreEqual(c.CamYaw, sol.CamYaw, 1e-4f, c.Token + " camYaw");
+            }
+        }
+
+        // Aim = position + forward * distance; recovered here as the point the camera looks at, at its
+        // solved distance, so the knobs are asserted on the quantities they are defined over.
+        [Test]
+        public void Camera_ZoomScalesDistance_HeadroomRaisesAim_PitchRaisesCamera()
+        {
+            var c = Goldens[0];   // bust, frontal-ish, no head pitch
+            var baseSol = c.Solve();
+
+            // Every term of the camera's offset from the view point — the aim-drop, the lateral looking-room
+            // and the solved distance — is proportional to the span at a fixed orientation, so zoom must scale
+            // the whole offset by exactly 1/zoom. A zoom that moved distance but not the aim-drop, or the
+            // reverse, fails here.
+            var zoomed = c.Solve(zoom: 1.25f);
+            AssertNear((baseSol.Position - c.Viewpoint) / 1.25f, zoomed.Position - c.Viewpoint,
+                "zoom scales the camera's whole offset from the view point by 1/zoom");
+            Assert.AreEqual(1f, Vector3.Dot(baseSol.Rotation * Vector3.forward, zoomed.Rotation * Vector3.forward),
+                1e-5f, "zoom leaves the view direction unchanged");
+
+            RenderThumbnailCore.FramingGeometry("bust", out float span, out float _);
+            float d0 = (span * 0.5f) / Mathf.Tan(c.Fov * 0.5f * Mathf.Deg2Rad);
+            Vector3 aim0 = baseSol.Position + baseSol.Rotation * Vector3.forward * d0;
+
+            var lifted = c.Solve(headroom: 0.2f);
+            Vector3 aimH = lifted.Position + lifted.Rotation * Vector3.forward * d0;
+            Assert.AreEqual(aim0.y + 0.2f * span, aimH.y, 1e-4f, "headroom raises the aim by headroom × span");
+
+            var high = c.Solve(pitch: 10f);
+            Assert.Greater(high.Position.y, baseSol.Position.y, "positive pitch puts the camera higher");
+            Assert.AreEqual(10f, high.CamElevation, 1e-4f, "camPitch reports elevation in the knob's sign");
+            Assert.Less((high.Rotation * Vector3.forward).y, 0f, "a higher camera looks down");
+        }
+
+        [Test]
+        public void Camera_PitchOffset_AddsAfterTheHeadFollowClamp()
+        {
+            var sat = Goldens[2];   // headPitch 60: head-follow saturates at 20° elevation
+            Assert.AreEqual(20f, sat.Solve().CamElevation, 1e-4f, "head-follow keeps its own ±20 clamp");
+            Assert.AreEqual(35f, sat.Solve(pitch: 20f).CamElevation, 1e-4f, "the offset stacks, then the total clamps at 35");
+            Assert.AreEqual(0f, sat.Solve(pitch: -20f).CamElevation, 1e-4f, "the offset is not eaten by the inner clamp");
+        }
+
+        [Test]
+        public void Knobs_RefuseOutOfRangeAndNaN_AndTheTooCloseCorner()
+        {
+            Assert.IsNull(RenderThumbnailCore.ValidateCameraKnobs(30f, 1f, 0f, 0f));
+            Assert.IsNull(RenderThumbnailCore.ValidateCameraKnobs(90f, 1f, 0f, 0f), "today's closest shot stays legal");
+            StringAssert.Contains("zoom", RenderThumbnailCore.ValidateCameraKnobs(30f, 1.7f, 0f, 0f));
+            StringAssert.Contains("zoom", RenderThumbnailCore.ValidateCameraKnobs(30f, float.NaN, 0f, 0f));
+            StringAssert.Contains("pitch", RenderThumbnailCore.ValidateCameraKnobs(30f, 1f, -21f, 0f));
+            StringAssert.Contains("pitch", RenderThumbnailCore.ValidateCameraKnobs(30f, 1f, float.NaN, 0f));
+            StringAssert.Contains("headroom", RenderThumbnailCore.ValidateCameraKnobs(30f, 1f, 0f, 0.31f));
+            StringAssert.Contains("headroom", RenderThumbnailCore.ValidateCameraKnobs(30f, 1f, 0f, float.NaN));
+            // zoom 1.6 is in range, but at fov 90 it would put the camera inside the head.
+            StringAssert.Contains("lower zoom or fov", RenderThumbnailCore.ValidateCameraKnobs(90f, 1.6f, 0f, 0f));
         }
     }
 }

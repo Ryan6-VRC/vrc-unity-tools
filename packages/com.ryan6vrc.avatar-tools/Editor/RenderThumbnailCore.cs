@@ -56,6 +56,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private const float PitchFollow = 0.5f;
         private const float MaxTrackYaw = 60f;    // guards a user clip, never reached by the bundled poses
         private const float MaxCamPitch = 20f;    // ditto: PitchFollow peaks near 15 deg on this library
+        // Caller camera knobs — ranges the shared validator refuses outside. Each is RELATIVE to the framing
+        // token (zoom scales its span, headroom shifts its aim, pitch offsets its head-follow), so no knob can
+        // author the camera outright. The head-follow term keeps its own ±MaxCamPitch clamp and only the
+        // total widens to MaxTotalPitch: at default knobs every clip frames exactly as it did before them.
+        internal const float MinZoom = 0.6f, MaxZoom = 1.6f;
+        internal const float MaxPitchOffset = 20f;
+        internal const float MaxHeadroom = 0.3f;
+        private const float MaxTotalPitch = 35f;
         private const float LateralOffset = 0.06f; // fraction of span, looking-room in the landscape frame
         internal const float MinFov = 10f, MaxFov = 90f;
 
@@ -83,6 +91,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             internal Quaternion Rotation;
             internal Quaternion LightHolderRotation; // camera-relative rig yaw; play mode uses scene lights and ignores it
             internal float CamYaw;                   // resolved (tracking + oblique), for the verdict
+            internal float CamElevation;             // resolved pitch, positive = camera above, looking down
         }
 
         /// <summary>
@@ -95,7 +104,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal static CameraSolution SolveCamera(
             string framingToken, float span, float aimDrop, float fov, float? yaw,
             float headYaw, float headPitch, Vector3 viewpoint, Quaternion rootRot,
-            float rootLossyScaleY, float viewPositionY, float rootEulerY)
+            float rootLossyScaleY, float viewPositionY, float rootEulerY,
+            float zoom = 1f, float pitch = 0f, float headroom = 0f)
         {
             // The deadband decides the oblique's side for the near-frontal poses (many of the bundled clips
             // turn the head only a few degrees) rather than letting retarget noise pick, which would swing the
@@ -111,7 +121,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             float camYaw = Mathf.Clamp(headYaw, -MaxTrackYaw, MaxTrackYaw) + shotOffset;
             // Negated: a positive rotation about +X lowers the camera, and a chin-RAISED pose has to be
             // shot from slightly ABOVE (from below it is a nostril shot).
-            float camPitch = Mathf.Clamp(-headPitch * PitchFollow, -MaxCamPitch, MaxCamPitch);
+            // `pitch` is an elevation (positive = camera higher), so it SUBTRACTS here: camPitch is a rotation
+            // about +X, where positive lowers the camera.
+            float camPitch = Mathf.Clamp(
+                Mathf.Clamp(-headPitch * PitchFollow, -MaxCamPitch, MaxCamPitch) - pitch,
+                -MaxTotalPitch, MaxTotalPitch);
 
             // Angles apply in the posed clone's root basis so an avatar sitting rotated in the scene still
             // photographs frontally — the case that matters most on the floor path, where no sampling
@@ -123,7 +137,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // viewpoint so the feet stay seated. framingToken is already lowercased by the caller.
             float viewFollow = framingToken == "full" ? ViewHeightFollow : 0f;
             float scaledSpan = span * rootLossyScaleY
-                * Mathf.Lerp(1f, viewPositionY / ReferenceViewHeight, viewFollow);
+                * Mathf.Lerp(1f, viewPositionY / ReferenceViewHeight, viewFollow) / zoom;
             float distance = (scaledSpan * 0.5f) / Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
 
             // Aim below the view point (the eyes sit near the TOP of the subject, not its centre) and
@@ -131,8 +145,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // frame that would otherwise waste its width on a vertical subject.
             // Vector3.up, not the root's up: camera roll stays world-level below, so the drop that decides
             // where the head sits in frame has to share that basis. Divergent only for a tilted root.
+            // headroom raises the aim by a fraction of the span, opening the frame above the head.
             Vector3 aim = viewpoint
-                        - Vector3.up * (scaledSpan * aimDrop)
+                        - Vector3.up * (scaledSpan * (aimDrop - headroom))
                         + screenRight * (scaledSpan * LateralOffset) * -lateralSign;
 
             Vector3 pos = aim + rootRot * (orbit * (Vector3.forward * distance));
@@ -145,6 +160,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // lights and ignores it.
                 LightHolderRotation = Quaternion.Euler(0f, rootEulerY + camYaw, 0f),
                 CamYaw = camYaw,
+                CamElevation = -camPitch,
             };
         }
 
@@ -250,7 +266,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 };
                 cam.targetTexture = rt;
                 cam.pixelRect = new Rect(0, 0, W, H);
-                cam.Render();
+                // A bespoke Camera.Render() compiles a cold shader variant synchronously only while
+                // ShaderUtil.allowAsyncCompilation is false. It is false at rest but has been observed true at
+                // an edit-mode capture, which then drew the flat #00FFFF placeholder under an OK verdict. The
+                // project pref (EditorSettings.asyncShaderCompilation, RenderAvatar's lever) does not reach
+                // this path. Pinned for the render only. There is deliberately no pixel scan behind it: a
+                // saturated cyan emission renders exact #00FFFF too, and a thumbnail is judged by eye before use.
+                bool allowAsyncWas = ShaderUtil.allowAsyncCompilation;
+                ShaderUtil.allowAsyncCompilation = false;
+                try { cam.Render(); }
+                finally { ShaderUtil.allowAsyncCompilation = allowAsyncWas; }
 
                 // Where the face landed, while the camera still exists. The VIEW POINT, not the aim — the camera
                 // is aimed exactly at the aim by construction, so projecting that would print (0.5,0.5) forever.
@@ -310,6 +335,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (tex != null) UnityEngine.Object.DestroyImmediate(tex);
             }
         }
+
+        /// <summary>Validate the camera knobs, after <c>fov</c> itself has passed. Null when valid, else the
+        /// refusal reason. Ranges are written <c>!(lo &lt;= x &amp;&amp; x &lt;= hi)</c> so NaN is refused too.
+        /// The joint bound keeps the camera no closer than the closest shot the fov bound already allowed
+        /// (fov 90 at zoom 1): distance goes as 1/(zoom·tan(fov/2)), and closer puts it inside the hair,
+        /// which renders as hair interior and still passes the empty-frame guard.</summary>
+        internal static string ValidateCameraKnobs(float fov, float zoom, float pitch, float headroom)
+        {
+            var ic = CultureInfo.InvariantCulture;
+            if (!(zoom >= MinZoom && zoom <= MaxZoom))
+                return "zoom " + zoom.ToString(ic) + " out of range — expected " + MinZoom.ToString(ic) + "–"
+                    + MaxZoom.ToString(ic) + " (a scale on the framing's span: >1 tighter, <1 wider)";
+            if (!(pitch >= -MaxPitchOffset && pitch <= MaxPitchOffset))
+                return "pitch " + pitch.ToString(ic) + " out of range — expected ±" + MaxPitchOffset.ToString(ic)
+                    + " degrees of camera elevation (positive = camera higher, looking down)";
+            if (!(headroom >= -MaxHeadroom && headroom <= MaxHeadroom))
+                return "headroom " + headroom.ToString(ic) + " out of range — expected ±" + MaxHeadroom.ToString(ic)
+                    + " (a fraction of the framed span; positive = more frame above the head)";
+            float nearness = zoom * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+            if (nearness > Mathf.Tan(MaxFov * 0.5f * Mathf.Deg2Rad) + 1e-4f)
+                return "zoom " + zoom.ToString(ic) + " at fov " + fov.ToString(ic) + " puts the camera closer than the "
+                    + "tool allows (zoom × tan(fov/2) must stay ≤ 1, the closest fov 90 already reached) — lower zoom or fov";
+            return null;
+        }
+
+        /// <summary>The knobs as the verdict echoes them — the values to pass back to reproduce a shot, to the printed precision.</summary>
+        internal static string KnobToken(float zoom, float pitch, float headroom)
+            => "zoom=" + zoom.ToString("0.##", CultureInfo.InvariantCulture)
+               + " pitch=" + pitch.ToString("0.#", CultureInfo.InvariantCulture)
+               + " headroom=" + headroom.ToString("0.##", CultureInfo.InvariantCulture);
 
         // ===== Framing / background / token helpers (pure) =====
 
