@@ -368,6 +368,40 @@ public class ControllerFixpointTests
     public void GateExit_OnlyPrefabIntegrityFailed_IsOne()
         => Assert.AreEqual(1, ControllerFixpoint.GateExit(0, 1));
 
+    // ── ModelImporterOffense: the SDK panel's two mesh-importer refusals, read off committed .meta text ─
+
+    static string[] ModelMeta(string readable, string bsNormals, string legacy) => new[]
+    {
+        "fileFormatVersion: 2", "ModelImporter:", "  animations:", "    isReadable: " + readable,
+        "  tangentSpace:",
+        "    legacyComputeAllNormalsFromSmoothingGroupsWhenMeshHasBlendShapes: " + legacy,
+        "    blendShapeNormalImportMode: " + bsNormals,
+    };
+
+    [Test]
+    public void ModelImporterOffense_ReadableWithLegacy_Passes()
+        => Assert.IsNull(ControllerFixpoint.ModelImporterOffense(ModelMeta("1", "1", "1")));
+
+    // Normals None (2) is the other setting the panel accepts; the legacy flag is irrelevant there.
+    [Test]
+    public void ModelImporterOffense_NormalsNoneWithoutLegacy_Passes()
+        => Assert.IsNull(ControllerFixpoint.ModelImporterOffense(ModelMeta("1", "2", "0")));
+
+    [Test]
+    public void ModelImporterOffense_BothRefusals_NamesBoth()
+        => Assert.AreEqual("Read/Write disabled (isReadable: 0); blendshape normals = Calculate without legacy",
+            ControllerFixpoint.ModelImporterOffense(ModelMeta("0", "1", "0")));
+
+    // An unreadable setting cannot be shown to pass, so a stripped field fails rather than defaulting clean.
+    [Test]
+    public void ModelImporterOffense_FieldAbsent_Fails()
+        => Assert.AreEqual("isReadable absent",
+            ControllerFixpoint.ModelImporterOffense(ModelMeta("1", "1", "1").Where(l => !l.Contains("isReadable")).ToArray()));
+
+    [Test]
+    public void ModelImporterOffense_NotAModelImporter_IsIgnored()
+        => Assert.IsNull(ControllerFixpoint.ModelImporterOffense(new[] { "fileFormatVersion: 2", "TextureImporter:", "  isReadable: 0" }));
+
     // ── ForeignProjectPathLines: the committed-prefab provenance predicate ──────────────────────────
     //
     // Pure text in, offender handles out — no AssetDatabase, no live object, so the whole predicate is

@@ -940,6 +940,61 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
+        // A committed model .meta whose importer the VRChat SDK panel refuses an upload over. The panel walks
+        // every mesh on the avatar, inactive included, and errors on two ModelImporter settings: Read/Write off,
+        // and blendshape normals set to Calculate without the legacy flag. A library mesh that fails either
+        // fails the panel on every avatar carrying the entry. No consuming venue can fix that, because a VPM
+        // resolve rewrites Packages/, and `ConformImportSettings` names such an offender without writing it. So
+        // the fix belongs in this .meta, and the gate is the only place that can catch it. It reads the text,
+        // for the same reason DuplicateCommittedGuid does: it covers every committed model, prefab or not.
+        //
+        // Serialized values: `blendShapeNormalImportMode` 0 = Import, 1 = Calculate, 2 = None. Import and None
+        // pass whatever the legacy flag says. A missing field is an offender, because an unreadable setting
+        // cannot be shown to pass. Returns null for a .meta that is not a ModelImporter.
+        internal static string ModelImporterOffense(IEnumerable<string> metaLines)
+        {
+            bool model = false;
+            string readable = null, bsNormals = null, legacy = null;
+            foreach (var raw in metaLines)
+            {
+                var line = raw.Trim();
+                if (line == "ModelImporter:") model = true;
+                else if (readable == null && line.StartsWith("isReadable:", StringComparison.Ordinal))
+                    readable = line.Substring("isReadable:".Length).Trim();
+                else if (bsNormals == null && line.StartsWith("blendShapeNormalImportMode:", StringComparison.Ordinal))
+                    bsNormals = line.Substring("blendShapeNormalImportMode:".Length).Trim();
+                else if (legacy == null && line.StartsWith("legacyComputeAllNormalsFromSmoothingGroupsWhenMeshHasBlendShapes:", StringComparison.Ordinal))
+                    legacy = line.Substring("legacyComputeAllNormalsFromSmoothingGroupsWhenMeshHasBlendShapes:".Length).Trim();
+            }
+            if (!model) return null;
+            var why = new List<string>();
+            if (readable != "1") why.Add(readable == null ? "isReadable absent" : "Read/Write disabled (isReadable: " + readable + ")");
+            if (bsNormals == null) why.Add("blendShapeNormalImportMode absent");
+            else if (bsNormals == "1" && legacy != "1")
+                why.Add(legacy == null ? "blendshape normals = Calculate, legacy flag absent" : "blendshape normals = Calculate without legacy");
+            return why.Count == 0 ? null : string.Join("; ", why);
+        }
+
+        // Every committed ModelImporter .meta in the library, dot-directories skipped (DuplicateCommittedGuid's
+        // walk and reason). One offender line per model, or null when none fails.
+        internal static string ModelImporterOffenders(string root)
+        {
+            var rootFull = Path.GetFullPath(root);
+            var bad = new List<string>();
+            foreach (var meta in Directory.GetFiles(root, "*.meta", SearchOption.AllDirectories))
+            {
+                var rel = Path.GetFullPath(meta).Substring(rootFull.Length).TrimStart('/', '\\').Replace('\\', '/');
+                if (rel.Split('/').Any(s => s.StartsWith(".", StringComparison.Ordinal))) continue;
+                var why = ModelImporterOffense(File.ReadLines(meta));
+                if (why != null) bad.Add(rel.Substring(0, rel.Length - ".meta".Length) + ": " + why);
+            }
+            if (bad.Count == 0) return null;
+            bad.Sort(StringComparer.Ordinal);
+            return string.Join(" | ", bad) + " — the SDK panel refuses an upload over these on any avatar " +
+                   "carrying the mesh; set Read/Write on and legacy blendshape normals on in the committed " +
+                   ".meta (reimport through an Editor that mounts this checkout, then commit what it wrote)";
+        }
+
         // The gate's whole contract with gate.ps1: 0 iff nothing failed in either pass. Every FAIL this tool
         // logs is worthless if this expression says 0 anyway, and it is the one line where a mistake makes a
         // broken gate look like a passing one, so it is lifted out of RunGate for the same reason as the rest.
@@ -1083,6 +1138,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // exit expression needs no new term.
             var dup = DuplicateCommittedGuid(root);
             if (dup != null) { Debug.Log($"[gate] duplicate-guid FAIL: {dup}"); prefabFailed++; }
+
+            // Fourth pass: every committed model imports with the settings the SDK panel requires
+            // (ModelImporterOffense). Folded into prefabFailed for the same reason as the third pass.
+            var models = ModelImporterOffenders(root);
+            if (models != null) { Debug.Log($"[gate] model-importer FAIL: {models}"); prefabFailed++; }
 
             SweepScratch(); // authoritative cleanup: all Check refs are out of scope now, no Refresh follows
 
