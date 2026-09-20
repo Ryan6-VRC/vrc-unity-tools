@@ -362,6 +362,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // not in _result.Menu until EmitMenu's own assignment. This list is the only handle that covers
             // the in-flight ones, and it exists for the failure path alone; success ignores it.
             private readonly List<VRCExpressionsMenu> _menuPages = new List<VRCExpressionsMenu>();
+            // The `trees:` entries, by name, and the BlendTree each one has been built into. A shared tree is
+            // built LAZILY, on its first reference, and every later reference resolves to the same object —
+            // that identity is the construct. _sharedBuilding is the in-progress set: a shared tree reached
+            // again while its own children are still being built is a cycle, which would otherwise recurse
+            // until the stack ran out.
+            private readonly Dictionary<string, BlendTreeSpec> _sharedSpecs;
+            private readonly Dictionary<string, BlendTree> _sharedBuilt = new Dictionary<string, BlendTree>();
+            private readonly List<string> _sharedBuilding = new List<string>();
 
             public BuildContext(AnimDocument doc, string outDir, string sourceText)
             {
@@ -372,6 +380,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // — the mechanism VRChat uses to drive any Animator parameter from a clip (AAPs are just the
                 // float-smoother case). The gate is "is this a declared Animator parameter", not the aap flag.
                 _paramNames = new HashSet<string>(doc.Parameters.Select(p => p.Name));
+                _sharedSpecs = new Dictionary<string, BlendTreeSpec>();
+                foreach (var t in doc.Trees) if (t != null && t.Name != null) _sharedSpecs[t.Name] = t;
             }
 
             public EmitResult Run()
@@ -920,8 +930,38 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                     return m;
                 }
+                if (mr.Shared != null) return BuildShared(mr.Shared, stateContext);
                 if (mr.Tree != null) return BuildTree(mr.Tree, treeName, stateContext);
-                throw new EmitException("motion ref sets none of clip/ref/tree");
+                throw new EmitException("motion ref sets none of clip/ref/tree/shared");
+            }
+
+            // Resolve a `shared:` reference to the ONE BlendTree its `trees:` entry builds. First reference
+            // builds it; every later one returns the same object, so the controller carries a single sub-asset
+            // with N parent PPtrs — measured to serialize as one !u!206 document whatever the parent count.
+            //
+            // The key is passed as BuildTree's positional name, which is load-bearing: a trees: entry carries
+            // no `name:` (the key IS the name), so `spec.Name ?? name` would otherwise fall through to the
+            // caller's positional default — making the built name depend on WHICH reference site happened to
+            // populate the memo first, and giving every child a spurious explicit name: on the next decompile.
+            private Motion BuildShared(string name, string stateContext)
+            {
+                if (_sharedBuilt.TryGetValue(name, out var already)) return already;
+                if (!_sharedSpecs.TryGetValue(name, out var spec))
+                    throw new EmitException($"motion references shared tree '{name}' not declared under trees:");
+                int at = _sharedBuilding.IndexOf(name);
+                if (at >= 0)
+                {
+                    var loop = string.Join(" -> ", _sharedBuilding.Skip(at)) + " -> " + name;
+                    throw new EmitException($"shared tree '{name}' contains itself: {loop}");
+                }
+                _sharedBuilding.Add(name);
+                try
+                {
+                    var bt = BuildTree(spec, name, stateContext);
+                    _sharedBuilt[name] = bt;
+                    return bt;
+                }
+                finally { _sharedBuilding.RemoveAt(_sharedBuilding.Count - 1); }
             }
 
             // Resolve a guid[+fileID] motion ref. A non-zero fileID names a SUB-ASSET (e.g. one clip inside a

@@ -47,6 +47,44 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var c in doc.Clips)
                 if (c != null && c.Name != null) clipNames.Add(c.Name);
 
+            // Shared trees. A `shared:` naming no entry is a dangling reference; an entry nothing names is
+            // dead weight the lazy emit would never build, so it is refused rather than silently ignored.
+            // A SINGLY-referenced entry is legal and compiles normally — the next decompile re-inlines it,
+            // which is documented asymmetry, not an error (refusing it would bite an author trimming a shared
+            // tree down to its last consumer, with hand-inlining the body as the only remedy).
+            var treeNames = new HashSet<string>();
+            foreach (var t in doc.Trees)
+                if (t != null && t.Name != null) treeNames.Add(t.Name);
+            var treeUses = new Dictionary<string, int>();
+            foreach (var name in treeNames) treeUses[name] = 0;
+            var unknownShared = new List<string>();
+            foreach (var layer in doc.Layers)
+            {
+                if (layer == null) continue;
+                var states = new List<State>();
+                layer.Root.CollectStates(states);
+                foreach (var st in states)
+                    if (st != null) CountSharedUses(st.Motion, treeUses, unknownShared);
+            }
+            foreach (var t in doc.Trees)
+                if (t != null) foreach (var ch in t.Children)
+                    if (ch != null) CountSharedUses(ch.Motion, treeUses, unknownShared);
+            foreach (var name in unknownShared)
+                errors.Add($"# dangling-shared: a motion references shared tree '{name}' which is not declared under trees: (at document)");
+            foreach (var t in doc.Trees)
+            {
+                if (t == null) continue;
+                if (string.IsNullOrEmpty(t.Name))
+                {
+                    errors.Add("# unnamed-tree: a trees: entry has no name (at document)");
+                    continue;
+                }
+                if (treeUses[t.Name] == 0)
+                    errors.Add($"# unreferenced-tree: trees: entry '{t.Name}' is never referenced by a 'shared:' motion — reference it or delete it (at tree '{t.Name}')");
+                CheckMotionClips(new MotionRef { Tree = t }, $"tree '{t.Name}'", $"tree '{t.Name}'", clipNames, errors);
+                CheckTreeAxes(t, $"tree '{t.Name}'", paramTypes, errors);
+            }
+
             // Rule 7 — the menu tree. Keyed on the WIRE type, not the animator type: emission lists the
             // expression parameter as `vrc.type ?? type` (ControllerEmit.EmitVrcParameters), and a menu
             // control is read by VRChat against that listed type. Validating against the animator type
@@ -168,8 +206,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var st in sm.States)
             {
                 if (st == null) continue;
-                if (st.Motion != null) CheckMotionClips(st.Motion, layer, st.Name, clips, errors);
-                if (st.Motion != null) CheckBlendAxes(st.Motion, layer, st.Name, paramTypes, errors);
+                if (st.Motion != null) CheckMotionClips(st.Motion, $"state '{st.Name}'", $"layer '{layer}' state '{st.Name}'", clips, errors);
+                if (st.Motion != null) CheckBlendAxes(st.Motion, $"layer '{layer}' state '{st.Name}'", paramTypes, errors);
                 foreach (var t in st.Transitions)
                     CheckConditions(t, layer, $"state '{st.Name}'", paramTypes, errors);
             }
@@ -217,55 +255,77 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
+        // `subject`/`at` are the two halves of a location. A motion lives either in a state — subject
+        // "state 'S'", at "layer 'L' state 'S'" — or, since `trees:`, in a shared tree, which belongs to no
+        // layer and no state: subject and at are both "tree 'T'". Without the second form a trees: body would
+        // report `at layer '' state ''`, and the offender string is what these rules exist to produce.
+
+        // Tally `shared:` references under one motion, recursing INLINE tree children only. A shared tree's own
+        // children are walked once from doc.Trees, not per reference site — otherwise a tree referenced twice
+        // would count its own children's references twice, and a cycle would not terminate here at all.
+        private static void CountSharedUses(MotionRef m, Dictionary<string, int> uses, List<string> unknown)
+        {
+            if (m == null) return;
+            if (m.Shared != null)
+            {
+                if (uses.ContainsKey(m.Shared)) uses[m.Shared]++;
+                else if (!unknown.Contains(m.Shared)) unknown.Add(m.Shared);
+                return;
+            }
+            if (m.Tree != null)
+                foreach (var ch in m.Tree.Children)
+                    if (ch != null) CountSharedUses(ch.Motion, uses, unknown);
+        }
+
         // Rule 5 — every inline-clip reference must name a declared clip; recurse blend-tree children.
-        private static void CheckMotionClips(MotionRef m, string layer, string state,
+        private static void CheckMotionClips(MotionRef m, string subject, string at,
             HashSet<string> clips, List<string> errors)
         {
             if (m == null) return;
             if (m.Clip != null && !clips.Contains(m.Clip))
-                errors.Add($"# dangling-clip: state '{state}' references clip '{m.Clip}' which is not declared (at layer '{layer}' state '{state}')");
+                errors.Add($"# dangling-clip: {subject} references clip '{m.Clip}' which is not declared (at {at})");
             if (m.Tree != null)
                 foreach (var child in m.Tree.Children)
-                    if (child != null) CheckMotionClips(child.Motion, layer, state, clips, errors);
+                    if (child != null) CheckMotionClips(child.Motion, subject, at, clips, errors);
         }
 
         // Rule 7 — a blend-tree axis must be a Float animator param. Unity silently freezes a non-float axis
         // at its first child (the value never reaches the float channel the tree reads — no error anywhere),
         // so this is a fatal gate. 1D/2D read Tree.Param (+ ParamY when 2D); Direct reads each child's
         // DirectWeight. Undeclared axes are skipped — the controller-level undeclared-param check owns those.
-        private static void CheckBlendAxes(MotionRef m, string layer, string state,
+        private static void CheckBlendAxes(MotionRef m, string at,
             Dictionary<string, AnimParamType> paramTypes, List<string> errors)
         {
             if (m == null || m.Tree == null) return;
-            CheckTreeAxes(m.Tree, layer, state, paramTypes, errors);
+            CheckTreeAxes(m.Tree, at, paramTypes, errors);
         }
 
-        private static void CheckTreeAxes(BlendTreeSpec t, string layer, string state,
+        private static void CheckTreeAxes(BlendTreeSpec t, string at,
             Dictionary<string, AnimParamType> paramTypes, List<string> errors)
         {
             if (t == null) return;
             if (t.Kind == TreeKind.Direct)
             {
                 foreach (var ch in t.Children)
-                    if (ch != null) RequireFloatAxis(ch.DirectWeight, layer, state, paramTypes, errors);
+                    if (ch != null) RequireFloatAxis(ch.DirectWeight, at, paramTypes, errors);
             }
             else
             {
-                RequireFloatAxis(t.Param, layer, state, paramTypes, errors);
-                if (t.Kind != TreeKind.OneD) RequireFloatAxis(t.ParamY, layer, state, paramTypes, errors);
+                RequireFloatAxis(t.Param, at, paramTypes, errors);
+                if (t.Kind != TreeKind.OneD) RequireFloatAxis(t.ParamY, at, paramTypes, errors);
             }
             foreach (var ch in t.Children)
                 if (ch != null && ch.Motion != null && ch.Motion.Tree != null)
-                    CheckTreeAxes(ch.Motion.Tree, layer, state, paramTypes, errors);
+                    CheckTreeAxes(ch.Motion.Tree, at, paramTypes, errors);
         }
 
-        private static void RequireFloatAxis(string param, string layer, string state,
+        private static void RequireFloatAxis(string param, string at,
             Dictionary<string, AnimParamType> paramTypes, List<string> errors)
         {
             if (string.IsNullOrEmpty(param)) return;                    // no axis param here
             if (!paramTypes.TryGetValue(param, out var type)) return;   // undeclared -> other lint's concern
             if (type != AnimParamType.Float)
-                errors.Add($"# blend-axis-type: param '{param}' ({TypeToken(type)}) is a blend-tree axis but must be float; declare it 'type: float' and sync int via 'vrc: {{ type: int }}' (at layer '{layer}' state '{state}')");
+                errors.Add($"# blend-axis-type: param '{param}' ({TypeToken(type)}) is a blend-tree axis but must be float; declare it 'type: float' and sync int via 'vrc: {{ type: int }}' (at {at})");
         }
 
         // `name` arrives ESCAPED (an addressing form — a '/' in a name is '\/'), while States/Machines carry the

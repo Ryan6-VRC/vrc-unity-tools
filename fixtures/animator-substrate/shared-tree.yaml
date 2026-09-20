@@ -1,0 +1,100 @@
+# Shared (named) blend tree — worked example for the `trees:` / `shared:` construct.
+#
+# One blend tree, authored once under `trees:`, driving from three places: two states play it directly and a
+# third state's own tree carries it as a child. The compile emits ONE BlendTree sub-asset with three parent
+# references, not three copies, and DecompileController recovers the sharing rather than inlining it back.
+#
+# The shape is the real one: a face-tracking rig runs its blendshape driver under a local root tree, a remote
+# root tree, and a bare edit-here state, and wants all three to be the same object so a change lands once.
+# Without `shared:`, the document has to repeat the body per parent — for that rig, 30 KB three times, and a
+# controller carrying 234 redundant sub-assets.
+#
+# Rules worth knowing before you copy this (docs/animator-schema.md owns them):
+#   - A `trees:` entry takes its name from its KEY; a `name:` inside the body is refused.
+#   - Placement (`directWeight`, `threshold`, `x`/`y`) belongs on the `shared:` REFERENCE, not on the entry —
+#     one tree placed in several parents is placed differently in each.
+#   - A shared tree may reference shared trees; a cycle is a named compile refusal.
+#   - An entry nothing references is refused. An entry referenced ONCE compiles fine, and the next decompile
+#     inlines it — one parent is not sharing.
+#
+# Compiles with CompileController; CheckAnimator PASS.
+
+schema: 1
+controller: SharedTree_Fx
+basis: avatar-root
+role: fx
+
+defaults:
+  writeDefaults: on          # an always-on Direct driver tree is the WD-ON idiom (runtime.md sanctioned mix)
+
+parameters:
+  DirectBlend: { type: float, default: 1.0 }        # the always-1 weight every Direct child rides
+  Intensity:   { type: float, default: 0.0, vrc: { synced: true } }
+  Mode:        { type: float, default: 0.0 }        # 0 = local root, 1 = remote root
+  Brow:        { type: float, aap: true }           # the driven output
+  Jaw:         { type: float, aap: true }
+
+clips:
+  brow_min: { set: { Brow: 0.0 } }
+  brow_max: { set: { Brow: 1.0 } }
+  jaw_min:  { set: { Jaw: 0.0 } }
+  jaw_max:  { set: { Jaw: 1.0 } }
+
+# The shared driver. Two 1D sub-trees mapping Intensity onto each output's ±range — the generated-plumbing
+# shape that embeds rather than externalizing (animator-schema.md §external clips).
+trees:
+  Blendshape Driver:
+    tree: direct
+    normalized: false
+    children:
+      - tree: 1d
+        name: Brow
+        param: Intensity
+        directWeight: DirectBlend
+        children:
+          - { clip: brow_min, threshold: 0.0 }
+          - { clip: brow_max, threshold: 1.0 }
+      - tree: 1d
+        name: Jaw
+        param: Intensity
+        directWeight: DirectBlend
+        children:
+          - { clip: jaw_min, threshold: 0.0 }
+          - { clip: jaw_max, threshold: 1.0 }
+
+layers:
+  - name: Driver
+    states:
+      # Parent 1 — a state's own tree carries the shared driver as one child among others.
+      Local Root:
+        motion:
+          tree: direct
+          name: Local Root
+          normalized: false
+          children:
+            - { shared: Blendshape Driver, directWeight: DirectBlend }
+        transitions:
+          - { to: Remote Root, when: [ Mode greater 0.5 ] }
+
+      # Parent 2 — the mirror-image root, carrying the SAME object.
+      Remote Root:
+        motion:
+          tree: direct
+          name: Remote Root
+          normalized: false
+          children:
+            - { shared: Blendshape Driver, directWeight: DirectBlend }
+        transitions:
+          - { to: Local Root, when: [ Mode less 0.5 ] }
+
+      # Parent 3 — the driver alone, as a state motion. Unreachable by design: it is the node a human opens
+      # to edit the tree, and editing it here changes what both roots play.
+      Edit Driver:
+        motion: { shared: Blendshape Driver }
+
+    default: Local Root
+    layout:
+      nodes: { Local Root: [30, 180], Remote Root: [270, 180], Edit Driver: [30, 300] }
+      entry: [50, 120]
+      exit:  [50, 80]
+      any:   [50, 40]

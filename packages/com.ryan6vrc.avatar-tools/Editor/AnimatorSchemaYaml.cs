@@ -459,6 +459,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case "parameters": BindParameters(doc, ToMap(kv.Value, "parameters")); break;
                     case "layers": BindLayers(doc, ToList(kv.Value, "layers")); break;
                     case "clips": BindClips(doc, ToMap(kv.Value, "clips")); break;
+                    case "trees": BindTrees(doc, ToMap(kv.Value, "trees")); break;
                     case "menu": doc.Menu = BindMenu(ToList(kv.Value, "menu"), "menu"); break;
                     default: throw new SchemaException($"unknown top-level key '{key}'");
                 }
@@ -1002,13 +1003,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             if (v == null) return null;   // motion: ~ -> deliberate empty state
             var m = ToMap(v, $"{ctx} motion");
-            bool hasClip = m.ContainsKey("clip"), hasRef = m.ContainsKey("ref"), hasTree = m.ContainsKey("tree");
-            int n = (hasClip ? 1 : 0) + (hasRef ? 1 : 0) + (hasTree ? 1 : 0);
-            if (n == 0) throw new SchemaException($"{ctx}: motion must set exactly one of clip/ref/tree");
-            if (n > 1) throw new SchemaException($"{ctx}: motion sets more than one of clip/ref/tree");
+            bool hasClip = m.ContainsKey("clip"), hasRef = m.ContainsKey("ref"),
+                 hasTree = m.ContainsKey("tree"), hasShared = m.ContainsKey("shared");
+            int n = (hasClip ? 1 : 0) + (hasRef ? 1 : 0) + (hasTree ? 1 : 0) + (hasShared ? 1 : 0);
+            if (n == 0) throw new SchemaException($"{ctx}: motion must set exactly one of clip/ref/tree/shared");
+            if (n > 1) throw new SchemaException($"{ctx}: motion sets more than one of clip/ref/tree/shared");
 
-            // Caller-specific strictness stays here: a state's clip form is closed (no sibling keys).
+            // Caller-specific strictness stays here: a state's clip and shared forms are closed (no siblings).
             if (hasClip && m.Count != 1) throw new SchemaException($"{ctx}: motion clip form takes only 'clip'");
+            if (hasShared && m.Count != 1) throw new SchemaException($"{ctx}: motion shared form takes only 'shared'");
             return DecodeMotionRef(m, ctx, $"{ctx} motion.clip", $"{ctx} motion.ref");
         }
 
@@ -1027,6 +1030,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (rv is Dictionary<string, object> gm) mr.RefGuid = BindGuid(gm, ctx);
                 else mr.RefPath = ToStr(rv, refLabel);
             }
+            // BEFORE the tree fallthrough: the final branch is an unguarded `else` that reads m["tree"], so a
+            // `shared:` map reaching it would throw KeyNotFoundException — a crash instead of a named refusal.
+            else if (m.ContainsKey("shared")) mr.Shared = ToStr(m["shared"], $"{ctx} motion.shared");
             else mr.Tree = BindTree(m, ctx);
             return mr;
         }
@@ -1088,9 +1094,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static TreeChild BindTreeChild(Dictionary<string, object> m, string ctx)
         {
             var child = new TreeChild();
-            bool hasClip = m.ContainsKey("clip"), hasRef = m.ContainsKey("ref"), hasTree = m.ContainsKey("tree");
-            int n = (hasClip ? 1 : 0) + (hasRef ? 1 : 0) + (hasTree ? 1 : 0);
-            if (n > 1) throw new SchemaException($"{ctx} tree child: sets more than one motion of clip/ref/tree");
+            bool hasClip = m.ContainsKey("clip"), hasRef = m.ContainsKey("ref"),
+                 hasTree = m.ContainsKey("tree"), hasShared = m.ContainsKey("shared");
+            int n = (hasClip ? 1 : 0) + (hasRef ? 1 : 0) + (hasTree ? 1 : 0) + (hasShared ? 1 : 0);
+            if (n > 1) throw new SchemaException($"{ctx} tree child: sets more than one motion of clip/ref/tree/shared");
             // n == 0 is a legal EMPTY child (an unassigned blend-tree slot) — Unity permits it, and it is the
             // normalized form of a broken ref after the first compile nulls the motion. Leave Motion null.
             if (n == 1)
@@ -1100,7 +1107,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 switch (kv.Key)
                 {
-                    case "clip": case "ref": case "tree": break;   // motion, handled above
+                    case "clip": case "ref": case "tree": case "shared": break;   // motion, handled above
                     case "param": case "paramY": case "children": case "normalized": case "name":
                         if (!hasTree) throw new SchemaException($"{ctx} tree child: '{kv.Key}' is only valid on a nested-tree child");
                         break; // consumed by nested tree motion
@@ -1129,6 +1136,37 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 case "direct": return TreeKind.Direct;
                 default: throw new SchemaException(
                     $"invalid tree kind '{v}' (expected 1d, simpleDirectional2d, freeformDirectional2d, freeformCartesian2d, direct)");
+            }
+        }
+
+        // The child-placement/modifier keys BindTree deliberately ignores (BindTreeChild consumes them off the
+        // same map when a tree IS a child). Named here so BindTrees can refuse them on a top-level entry.
+        private static readonly string[] ChildPlacementKeys =
+            { "directWeight", "threshold", "timeScale", "mirror", "cycleOffset", "x", "y", "posX", "posY" };
+
+        // `trees:` — the named blend trees a `shared:` motion slot references. The map KEY is the tree's
+        // identity, so a `name:` inside the body is refused rather than silently shadowing the key: a decompile
+        // never writes one, and a hand-authored one would give the same tree two names that could disagree.
+        private static void BindTrees(AnimDocument doc, Dictionary<string, object> map)
+        {
+            // Duplicate tree names are already refused by stage-1's per-mapping guard (line-numbered).
+            foreach (var kv in map)
+            {
+                string name = kv.Key;
+                var m = ToMap(kv.Value, $"tree '{name}'");
+                if (!m.ContainsKey("tree"))
+                    throw new SchemaException($"tree '{name}': a trees: entry must declare a tree kind ('tree: direct' etc.)");
+                if (m.ContainsKey("name"))
+                    throw new SchemaException($"tree '{name}': a trees: entry takes its name from its key — remove the 'name' field");
+                // BindTree tolerates child-placement keys because a nested tree IS a child and the two field
+                // sets share one map. A trees: entry is never a child, so those keys would silently vanish —
+                // the placement belongs on the `shared:` reference site instead.
+                foreach (var k in ChildPlacementKeys)
+                    if (m.ContainsKey(k))
+                        throw new SchemaException($"tree '{name}': '{k}' places a tree inside its parent — put it on the 'shared:' reference, not on the trees: entry");
+                var spec = BindTree(m, $"tree '{name}'");
+                spec.Name = name;
+                doc.Trees.Add(spec);
             }
         }
 
