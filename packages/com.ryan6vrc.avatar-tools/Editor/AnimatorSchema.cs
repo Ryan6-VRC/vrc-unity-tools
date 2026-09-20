@@ -87,6 +87,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public List<ParamSpec> Parameters = new List<ParamSpec>();
         public List<Layer> Layers = new List<Layer>();
         public List<ClipSpec> Clips = new List<ClipSpec>();
+        // Named blend trees the document declares once and several motion slots reference by name
+        // (MotionRef.Shared). Keyed by BlendTreeSpec.Name exactly as Clips is keyed by ClipSpec.Name, so a
+        // `trees:` entry's KEY carries its identity and its body emits no `name:` of its own. Emission builds
+        // one BlendTree sub-asset per entry, lazily on first reference and memoized, so every reference site
+        // points at the same object rather than a copy.
+        public List<BlendTreeSpec> Trees = new List<BlendTreeSpec>();
         public List<MenuControl> Menu;          // null == no menu: block (emit writes no menu asset)
         public Dictionary<string, object> ReservedNotes = new Dictionary<string, object>();
         public string SourcePath;
@@ -240,13 +246,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
     }
     public struct Condition { public string Param; public CondOp Op; public float Value; }
 
-    // Motion: exactly one of Clip / RefPath / RefGuid / Tree is set (Clip refers into AnimDocument.Clips by name).
+    // Motion: exactly one of Clip / RefPath / RefGuid / Tree / Shared is set. Clip refers into
+    // AnimDocument.Clips by name; Shared refers into AnimDocument.Trees by name, and is the one form that
+    // does NOT own its motion — every MotionRef carrying the same Shared name resolves to a single BlendTree
+    // sub-asset, which is the whole point of the construct.
     public sealed class MotionRef
     {
         public string Clip;                     // inline-clip name
         public string RefPath;                  // "Assets/.../Walk.anim"
         public GuidRef RefGuid;                 // { guid, fileID, unresolved }
         public BlendTreeSpec Tree;
+        public string Shared;                   // named tree under AnimDocument.Trees
     }
     public sealed class GuidRef { public string Guid; public long FileID; public bool Unresolved; }
 

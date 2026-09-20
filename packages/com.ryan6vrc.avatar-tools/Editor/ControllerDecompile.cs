@@ -75,6 +75,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private readonly Dictionary<string, ClipSpec> _clips = new Dictionary<string, ClipSpec>();
             private readonly Dictionary<string, AnimationClip> _clipObjs = new Dictionary<string, AnimationClip>();
 
+            // Blend trees reached from more than one parent slot, decoded ONCE into a `trees:` entry that every
+            // reference site then names. Populated by CountTreeParents before the walk; _sharedName maps the
+            // object to the key it was given, _sharedDone marks the entry as already decoded (a shared tree is
+            // reached N times by construction, and its body must be decoded on the first visit only).
+            private Dictionary<BlendTree, string> _sharedName;
+            private readonly Dictionary<string, BlendTreeSpec> _sharedDone = new Dictionary<string, BlendTreeSpec>();
+
             // Per-layer addressing maps, rebuilt for each layer (state names recur across machines, so these
             // are never layer-global lookups keyed by bare name — they are object-keyed).
             private Dictionary<AnimatorState, AnimatorStateMachine> _stateOwner;
@@ -136,6 +143,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _doc.ControllerName = _controller.name;
 
                 DecodeParameters();
+                // Before any motion is decoded: which blend trees have more than one parent. DecodeMotion
+                // consults this to emit a `shared:` reference instead of a copy of the body.
+                _sharedName = CountTreeParents();
                 for (_layerIndex = 0; _layerIndex < _controller.layers.Length; _layerIndex++)
                 {
                     var layer = _controller.layers[_layerIndex];
@@ -151,6 +161,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _layerIndex = -1; // out of the loop: anything refused below belongs to the document
                 _result.LayerCount = _controller.layers.Length;
                 _doc.Clips.AddRange(_clips.Values);
+                _doc.Trees.AddRange(_sharedDone.Values);   // first-reference order, as _clips is
 
                 _result.OrphanCount = CountOrphans();
                 _result.Doc = _doc;
@@ -1022,7 +1033,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return new MotionRef { RefPath = p }; // standalone project .anim
                 }
                 if (m is BlendTree bt)
+                {
+                    // A multi-parent tree becomes one `trees:` entry the reference sites name. Decoded on the
+                    // FIRST visit only; expectedName is its own name so MeaningfulName nulls spec.Name and the
+                    // map key alone carries identity — the body must emit no `name:` (BindTrees refuses one).
+                    if (_sharedName != null && _sharedName.TryGetValue(bt, out var key))
+                    {
+                        if (!_sharedDone.ContainsKey(key))
+                        {
+                            // Registered BEFORE decoding the body, so first-reference ordering survives and a
+                            // re-entrant visit terminates. No cycle guard is needed here and none is wanted:
+                            // Unity's own importer breaks a BlendTree cycle on load, nulling the offending
+                            // child and logging "BlendTree cycle detected" — measured, including with the
+                            // cycle written straight into the asset text, so the decoder cannot observe one.
+                            // UnityItselfRefusesToBuildABlendTreeCycle pins that. (The COMPILE side still
+                            // needs its guard: an authored document can express a cycle Unity never sees.)
+                            _sharedDone[key] = null;
+                            var spec = DecodeTree(bt, loc, bt.name);
+                            // DecodeTree nulled Name (actual == expected); restore it as the map KEY, which is
+                            // where BlendTreeSpec.Name lives for a trees: entry. EmitTrees suppresses the
+                            // `name:` line, so the key is written once and the body stays recompilable.
+                            spec.Name = key;
+                            _sharedDone[key] = spec;
+                        }
+                        return new MotionRef { Shared = key };
+                    }
                     return new MotionRef { Tree = DecodeTree(bt, loc, expectedTreeName) };
+                }
 
                 Refuse($"motion in {loc}: unsupported Motion type '{m.GetType().Name}'");
                 return null;
@@ -1640,6 +1677,73 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     b.Fields[ControllerEmit.PlayAudioKeys.Clips] = paths;
                 }
                 return b;
+            }
+
+            // ----- shared blend trees: which BlendTrees have more than one parent slot -----
+
+            // Sharing is a property of the LIVE graph, so this counts parent EDGES over the same reachable set
+            // the decoder walks. Three things it deliberately does not do, each of which silently breaks the
+            // round-trip if copied from CountOrphans below:
+            //
+            //  - It does not dedupe the COUNT, only the recursion. CountOrphans opens with `!reachable.Add(m)`
+            //    and returns, which visits every node once — copy that and every tree counts 1 and nothing is
+            //    ever shared.
+            //  - It does not require a saved asset. CountOrphans bails on an empty _controllerPath; inheriting
+            //    that would make every in-memory controller take the inline path, so the tests would pass with
+            //    the feature inert.
+            //  - It does not sweep LoadAllAssetsAtPath. An ORPHAN tree referencing a live one would push that
+            //    tree to 2 parents; the recompile drops orphans, so the next decompile would see 1 and inline.
+            //    D1 != D2 — on exactly the vendor-lineage controllers this construct exists for.
+            //
+            // A tree reached twice through ONE parent (the same motion in two child slots) counts 2, which is
+            // sharing and is meant to be.
+            private Dictionary<BlendTree, string> CountTreeParents()
+            {
+                var parents = new Dictionary<BlendTree, int>();
+                var descended = new HashSet<BlendTree>();
+                var order = new List<BlendTree>();
+
+                void Visit(Motion m)
+                {
+                    if (!(m is BlendTree bt)) return;
+                    if (!parents.ContainsKey(bt)) { parents[bt] = 0; order.Add(bt); }
+                    parents[bt]++;
+                    if (!descended.Add(bt)) return;   // gate the RECURSION only — the edge above is always counted
+                    foreach (var ch in bt.children) Visit(ch.motion);
+                }
+                void VisitSm(AnimatorStateMachine sm, HashSet<AnimatorStateMachine> seen)
+                {
+                    if (sm == null || !seen.Add(sm)) return;
+                    foreach (var cs in sm.states) if (cs.state != null) Visit(cs.state.motion);
+                    foreach (var child in sm.stateMachines) VisitSm(child.stateMachine, seen);
+                }
+                var seenSm = new HashSet<AnimatorStateMachine>();
+                foreach (var layer in _controller.layers)
+                    if (layer.syncedLayerIndex < 0) VisitSm(layer.stateMachine, seenSm);
+
+                // Name collisions and unnamed trees INLINE rather than refuse: both decompile cleanly today
+                // (each copy carries its own name:), "Blend Tree" is Unity's default for a UI-made tree, and a
+                // document-scoped refusal here would have a remedy — renaming — that means writing to a vendor
+                // asset. The cost is a missed dedup, and the fixpoint holds either way: an inlined copy rebuilds
+                // at one parent and inlines again.
+                var byName = new Dictionary<string, int>();
+                foreach (var bt in order)
+                    if (parents[bt] >= 2 && !string.IsNullOrEmpty(bt.name))
+                        byName[bt.name] = byName.TryGetValue(bt.name, out var n) ? n + 1 : 1;
+
+                var shared = new Dictionary<BlendTree, string>();
+                foreach (var bt in order)
+                {
+                    if (parents[bt] < 2 || string.IsNullOrEmpty(bt.name)) continue;
+                    if (byName[bt.name] > 1)
+                    {
+                        _result.Notes.Add($"blend tree '{bt.name}' has {parents[bt]} parents but shares its name "
+                            + "with another shared tree — inlined per parent rather than shared.");
+                        continue;
+                    }
+                    shared[bt] = bt.name;
+                }
+                return shared;
             }
 
             // ----- orphan reachability (mirror ControllerRules.RuleOrphanSubAsset, plus clip reachability) -----

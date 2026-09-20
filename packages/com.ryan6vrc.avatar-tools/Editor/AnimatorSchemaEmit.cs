@@ -44,6 +44,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (doc.Parameters.Count > 0) EmitParameters(sb, doc.Parameters);
             if (doc.Layers.Count > 0) EmitLayers(sb, doc.Layers);
             if (doc.Clips.Count > 0) EmitClips(sb, doc.Clips);
+            if (doc.Trees.Count > 0) EmitTrees(sb, doc.Trees);
             EmitNotes(sb, doc.ReservedNotes);
 
             return sb.ToString();
@@ -95,6 +96,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (v.Osc) parts.Add("osc: true");
             if (v.VrcType.HasValue) parts.Add("type: " + ParamTypeToken(v.VrcType.Value));
             return parts.Count == 0 ? "{}" : "{ " + string.Join(", ", parts) + " }";
+        }
+
+        // ----- shared (named) blend trees -----
+
+        // One entry per tree that several motion slots reference by name. Block form throughout, like a
+        // keyframed clip: these are the document's largest single objects, and a shared tree is shared
+        // precisely because a human needs to read it in one place.
+        private static void EmitTrees(StringBuilder sb, List<BlendTreeSpec> trees)
+        {
+            L(sb, "trees:");
+            foreach (var t in trees)
+            {
+                L(sb, "  " + Key(t.Name) + ":");
+                EmitTreeBlock(sb, t, 4, nameIsKey: true);
+            }
         }
 
         // ----- clips -----
@@ -279,6 +295,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static void EmitMotion(StringBuilder sb, MotionRef mr, int g)
         {
+            if (mr.Shared != null)
+            {
+                L(sb, Sp(g) + "motion: " + FlowMotion(mr));
+                return;
+            }
             if (mr.Tree != null)
             {
                 L(sb, Sp(g) + "motion:");
@@ -293,6 +314,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static string FlowMotion(MotionRef mr)
         {
             if (mr.Clip != null) return "{ clip: " + ScalarStr(mr.Clip) + " }";
+            if (mr.Shared != null) return "{ shared: " + ScalarStr(mr.Shared) + " }";
             if (mr.RefPath != null) return "{ ref: " + ScalarStr(mr.RefPath) + " }";
             if (mr.RefGuid != null) return "{ ref: " + FlowGuid(mr.RefGuid) + " }";
             return "{}"; // degenerate: a motion that sets nothing (the parser refuses it, upstream's concern)
@@ -308,10 +330,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // The state's own blend tree renders in block form (the human-facing surface); nested child
         // trees render inline (flow) so recursion stays a single-line value.
-        private static void EmitTreeBlock(StringBuilder sb, BlendTreeSpec spec, int indent)
+        // nameIsKey == this tree is a `trees:` entry, whose map key already carries the name. Emitting `name:`
+        // as well would produce a document the parser refuses (BindTrees), i.e. decompile output that cannot
+        // recompile — so the suppression is a correctness requirement, not tidiness.
+        private static void EmitTreeBlock(StringBuilder sb, BlendTreeSpec spec, int indent, bool nameIsKey = false)
         {
             L(sb, Sp(indent) + "tree: " + TreeKindToken(spec.Kind));
-            if (!string.IsNullOrEmpty(spec.Name)) L(sb, Sp(indent) + "name: " + ScalarStr(spec.Name));
+            if (!nameIsKey && !string.IsNullOrEmpty(spec.Name)) L(sb, Sp(indent) + "name: " + ScalarStr(spec.Name));
             if (!string.IsNullOrEmpty(spec.Param)) L(sb, Sp(indent) + "param: " + ScalarStr(spec.Param));
             if (!string.IsNullOrEmpty(spec.ParamY)) L(sb, Sp(indent) + "paramY: " + ScalarStr(spec.ParamY));
             if (spec.Normalized.HasValue) L(sb, Sp(indent) + "normalized: " + Bool(spec.Normalized.Value));
@@ -334,6 +359,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (mr != null)
             {
                 if (mr.Clip != null) parts.Add("clip: " + ScalarStr(mr.Clip));
+                else if (mr.Shared != null) parts.Add("shared: " + ScalarStr(mr.Shared));
                 else if (mr.RefPath != null) parts.Add("ref: " + ScalarStr(mr.RefPath));
                 else if (mr.RefGuid != null) parts.Add("ref: " + FlowGuid(mr.RefGuid));
                 else if (mr.Tree != null) parts.AddRange(TreeInner(mr.Tree));
