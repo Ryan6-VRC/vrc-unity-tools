@@ -55,20 +55,44 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var treeNames = new HashSet<string>();
             foreach (var t in doc.Trees)
                 if (t != null && t.Name != null) treeNames.Add(t.Name);
-            var treeUses = new Dictionary<string, int>();
-            foreach (var name in treeNames) treeUses[name] = 0;
+            // LIVENESS IS TRANSITIVE, and that is the whole subtlety. A flat tally that credits a reference
+            // from inside ANY trees: body lets a self-edge — or a mutually-referencing clique — sustain its
+            // own count: nothing refuses it, and emission (lazy, driven only from state motions) never builds
+            // it, so a declared object leaves the controller with no diagnostic at all. So: seed from the
+            // STATE motions, then propagate through the bodies of trees already known live.
+            var byName = new Dictionary<string, BlendTreeSpec>();
+            foreach (var t in doc.Trees)
+                if (t != null && t.Name != null && !byName.ContainsKey(t.Name)) byName[t.Name] = t;
+
             var unknownShared = new List<string>();
+            var live = new HashSet<string>();
+            var pending = new List<string>();
+            void Reach(MotionRef m)
+            {
+                foreach (var name in SharedRefsIn(m, unknownShared, treeNames))
+                    if (live.Add(name)) pending.Add(name);
+            }
             foreach (var layer in doc.Layers)
             {
                 if (layer == null) continue;
                 var states = new List<State>();
                 layer.Root.CollectStates(states);
                 foreach (var st in states)
-                    if (st != null) CountSharedUses(st.Motion, treeUses, unknownShared);
+                    if (st != null) Reach(st.Motion);
             }
+            while (pending.Count > 0)
+            {
+                var name = pending[pending.Count - 1];
+                pending.RemoveAt(pending.Count - 1);
+                if (!byName.TryGetValue(name, out var t) || t == null) continue;
+                foreach (var ch in t.Children)
+                    if (ch != null) Reach(ch.Motion);
+            }
+            // A dangling `shared:` is worth naming wherever it sits, so scan every body for unknown names —
+            // a dead tree's typo is still a typo, and the entry earns its own unreferenced-tree line too.
             foreach (var t in doc.Trees)
                 if (t != null) foreach (var ch in t.Children)
-                    if (ch != null) CountSharedUses(ch.Motion, treeUses, unknownShared);
+                    if (ch != null) SharedRefsIn(ch.Motion, unknownShared, treeNames);
             foreach (var name in unknownShared)
                 errors.Add($"# dangling-shared: a motion references shared tree '{name}' which is not declared under trees: (at document)");
             foreach (var t in doc.Trees)
@@ -79,8 +103,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     errors.Add("# unnamed-tree: a trees: entry has no name (at document)");
                     continue;
                 }
-                if (treeUses[t.Name] == 0)
-                    errors.Add($"# unreferenced-tree: trees: entry '{t.Name}' is never referenced by a 'shared:' motion — reference it or delete it (at tree '{t.Name}')");
+                if (!live.Contains(t.Name))
+                    errors.Add($"# unreferenced-tree: trees: entry '{t.Name}' is not reachable from any state — a reference only from another unreachable trees: entry does not make it live; reference it or delete it (at tree '{t.Name}')");
                 CheckMotionClips(new MotionRef { Tree = t }, $"tree '{t.Name}'", $"tree '{t.Name}'", clipNames, errors);
                 CheckTreeAxes(t, $"tree '{t.Name}'", paramTypes, errors);
             }
@@ -260,21 +284,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // layer and no state: subject and at are both "tree 'T'". Without the second form a trees: body would
         // report `at layer '' state ''`, and the offender string is what these rules exist to produce.
 
-        // Tally `shared:` references under one motion, recursing INLINE tree children only. A shared tree's own
-        // children are walked once from doc.Trees, not per reference site — otherwise a tree referenced twice
-        // would count its own children's references twice, and a cycle would not terminate here at all.
-        private static void CountSharedUses(MotionRef m, Dictionary<string, int> uses, List<string> unknown)
+        // The `shared:` names directly under one motion, recursing INLINE tree children only — never through a
+        // `shared:` itself, whose own body is walked once from doc.Trees by the liveness worklist. Stopping at
+        // the reference is what keeps a cycle terminating here. Any name not declared under trees: is appended
+        // to `unknown` (deduped) for the dangling-shared rule.
+        private static List<string> SharedRefsIn(MotionRef m, List<string> unknown, HashSet<string> declared)
         {
-            if (m == null) return;
-            if (m.Shared != null)
+            var found = new List<string>();
+            void Walk(MotionRef mr)
             {
-                if (uses.ContainsKey(m.Shared)) uses[m.Shared]++;
-                else if (!unknown.Contains(m.Shared)) unknown.Add(m.Shared);
-                return;
+                if (mr == null) return;
+                if (mr.Shared != null)
+                {
+                    if (declared.Contains(mr.Shared)) { if (!found.Contains(mr.Shared)) found.Add(mr.Shared); }
+                    else if (!unknown.Contains(mr.Shared)) unknown.Add(mr.Shared);
+                    return;
+                }
+                if (mr.Tree != null)
+                    foreach (var ch in mr.Tree.Children)
+                        if (ch != null) Walk(ch.Motion);
             }
-            if (m.Tree != null)
-                foreach (var ch in m.Tree.Children)
-                    if (ch != null) CountSharedUses(ch.Motion, uses, unknown);
+            Walk(m);
+            return found;
         }
 
         // Rule 5 — every inline-clip reference must name a declared clip; recurse blend-tree children.

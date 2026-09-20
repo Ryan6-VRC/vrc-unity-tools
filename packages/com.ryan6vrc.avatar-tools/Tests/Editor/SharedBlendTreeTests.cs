@@ -332,6 +332,160 @@ layers:
             "a trees: entry nothing references is refused by name — got: " + string.Join(" | ", errors));
     }
 
+    // LIVENESS IS TRANSITIVE. An entry referenced only from another `trees:` body is reachable only if that
+    // body is itself reachable — otherwise a self-edge or a mutually-referencing clique sustains its own use
+    // count, escapes `unreferenced-tree`, and is then never built (emit is lazy and driven from state
+    // motions), so a declared object leaves the controller with no diagnostic at all.
+    [Test]
+    public void SelfReferencingDeadTreeIsRefused()
+    {
+        const string doc = @"schema: 1
+controller: SelfDead_Fx
+basis: avatar-root
+role: fx
+parameters:
+  W: { type: float, default: 1.0 }
+  Out: { type: float, aap: true }
+clips:
+  low: { set: { Out: 0.0 } }
+trees:
+  A:
+    tree: direct
+    children:
+      - { shared: A, directWeight: W }
+layers:
+  - name: L
+    states:
+      S: { motion: { clip: low } }
+    default: S
+";
+        var errors = SchemaValidation.Validate(AnimatorSchemaYaml.Parse(doc, "selfdead.yaml"));
+        Assert.IsTrue(errors.Any(e => e.Contains("unreferenced-tree") && e.Contains("'A'")),
+            "a tree whose only reference is its own self-edge is not live — got: " + string.Join(" | ", errors));
+    }
+
+    [Test]
+    public void MutuallyReferencingDeadTreesAreRefused()
+    {
+        const string doc = @"schema: 1
+controller: ClqDead_Fx
+basis: avatar-root
+role: fx
+parameters:
+  W: { type: float, default: 1.0 }
+  Out: { type: float, aap: true }
+clips:
+  low: { set: { Out: 0.0 } }
+trees:
+  A:
+    tree: direct
+    children:
+      - { shared: B, directWeight: W }
+  B:
+    tree: direct
+    children:
+      - { shared: A, directWeight: W }
+layers:
+  - name: L
+    states:
+      S: { motion: { clip: low } }
+    default: S
+";
+        var errors = SchemaValidation.Validate(AnimatorSchemaYaml.Parse(doc, "clqdead.yaml"));
+        Assert.IsTrue(errors.Any(e => e.Contains("unreferenced-tree") && e.Contains("'A'")), "A is dead");
+        Assert.IsTrue(errors.Any(e => e.Contains("unreferenced-tree") && e.Contains("'B'")), "B is dead");
+    }
+
+    // A tree reached transitively through a LIVE shared tree is live, and must not be refused.
+    [Test]
+    public void TransitivelyReachedTreeIsNotRefused()
+    {
+        const string doc = @"schema: 1
+controller: Chain_Fx
+basis: avatar-root
+role: fx
+parameters:
+  W: { type: float, default: 1.0 }
+  Out: { type: float, aap: true }
+clips:
+  low: { set: { Out: 0.0 } }
+trees:
+  Outer:
+    tree: direct
+    children:
+      - { shared: Inner, directWeight: W }
+  Inner:
+    tree: direct
+    children:
+      - { clip: low, directWeight: W }
+layers:
+  - name: L
+    states:
+      S1: { motion: { shared: Outer } }
+      S2: { motion: { shared: Outer } }
+    default: S1
+";
+        var errors = SchemaValidation.Validate(AnimatorSchemaYaml.Parse(doc, "chain.yaml"));
+        Assert.IsFalse(errors.Any(e => e.Contains("unreferenced-tree")),
+            "a tree reached through a live shared tree is live — got: " + string.Join(" | ", errors));
+    }
+
+    // NO CYCLE GUARD ON THE READ SIDE, deliberately — Unity will not let one exist. Its importer breaks a
+    // BlendTree cycle on load, nulling the offending child and logging "BlendTree cycle detected"; measured
+    // both through AddChild and with the cycle written straight into the asset text, which is the stronger
+    // case since hand edits and vendor tooling write .controller YAML directly. So the decoder can never
+    // observe a cycle, and a guard there would be unreachable code. This test is what keeps that true: if a
+    // future Unity preserves the edge, it fails and the read side owes a guard.
+    //
+    // The COMPILE side is a different story and does carry one (CyclicSharedTreesRefuse): an authored
+    // document can express a cycle that never reaches Unity at all.
+    [Test]
+    public void UnityItselfRefusesToBuildABlendTreeCycle()
+    {
+        string path = TestRoot + "/UnityGuard.controller";
+        var ac = AnimatorController.CreateAnimatorControllerAtPath(path);
+        var a = new BlendTree { name = "CycA", blendType = BlendTreeType.Direct, hideFlags = HideFlags.HideInHierarchy };
+        var b = new BlendTree { name = "CycB", blendType = BlendTreeType.Direct, hideFlags = HideFlags.HideInHierarchy };
+        var f1 = new BlendTree { name = "F1", blendType = BlendTreeType.Direct, hideFlags = HideFlags.HideInHierarchy };
+        var f2 = new BlendTree { name = "F2", blendType = BlendTreeType.Direct, hideFlags = HideFlags.HideInHierarchy };
+        foreach (var t in new[] { a, b, f1, f2 }) AssetDatabase.AddObjectToAsset(t, ac);
+        a.AddChild(f1);
+        b.AddChild(f2);
+        var sm = ac.layers[0].stateMachine;
+        sm.AddState("SA").motion = a;
+        sm.AddState("SB").motion = b;
+        EditorUtility.SetDirty(ac);
+        AssetDatabase.SaveAssets();
+
+        long aId, bId, f1Id, f2Id;
+        AssetDatabase.TryGetGUIDAndLocalFileIdentifier(a, out _, out aId);
+        AssetDatabase.TryGetGUIDAndLocalFileIdentifier(b, out _, out bId);
+        AssetDatabase.TryGetGUIDAndLocalFileIdentifier(f1, out _, out f1Id);
+        AssetDatabase.TryGetGUIDAndLocalFileIdentifier(f2, out _, out f2Id);
+
+        string abs = System.IO.Path.GetFullPath(path);
+        string text = System.IO.File.ReadAllText(abs);
+        string from1 = "m_Motion: {fileID: " + f1Id + "}";
+        string from2 = "m_Motion: {fileID: " + f2Id + "}";
+        Assert.IsTrue(text.Contains(from1) && text.Contains(from2), "both placeholder edges are in the text");
+        text = text.Replace(from1, "m_Motion: {fileID: " + bId + "}")    // CycA -> CycB
+                   .Replace(from2, "m_Motion: {fileID: " + aId + "}");   // CycB -> CycA
+        System.IO.File.WriteAllText(abs, text);
+
+        LogAssert.ignoreFailingMessages = true;   // the importer logs its refusal at error level
+        try { AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate); }
+        finally { LogAssert.ignoreFailingMessages = false; }
+
+        var reloaded = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
+        var rSm = reloaded.layers[0].stateMachine;
+        var ra = rSm.states.First(s => s.state.name == "SA").state.motion as BlendTree;
+        Assert.AreEqual(1, ra.children.Length, "the child slot survives the import");
+        Assert.IsNull(ra.children[0].motion, "but Unity broke the cycle, so the decoder never sees one");
+
+        var w = ControllerDecompile.Walk(reloaded);
+        Assert.IsEmpty(w.Refusals, "with the cycle broken the walk is clean");
+    }
+
     [Test]
     public void DanglingSharedReferenceIsRefused()
     {

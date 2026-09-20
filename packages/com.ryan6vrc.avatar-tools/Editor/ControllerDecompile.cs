@@ -1041,8 +1041,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         if (!_sharedDone.ContainsKey(key))
                         {
-                            // Registered BEFORE decoding the body: a shared tree nested inside itself would
-                            // otherwise recurse forever. Placeholder keeps first-reference ordering intact.
+                            // Registered BEFORE decoding the body, so first-reference ordering survives and a
+                            // re-entrant visit terminates. No cycle guard is needed here and none is wanted:
+                            // Unity's own importer breaks a BlendTree cycle on load, nulling the offending
+                            // child and logging "BlendTree cycle detected" — measured, including with the
+                            // cycle written straight into the asset text, so the decoder cannot observe one.
+                            // UnityItselfRefusesToBuildABlendTreeCycle pins that. (The COMPILE side still
+                            // needs its guard: an authored document can express a cycle Unity never sees.)
                             _sharedDone[key] = null;
                             var spec = DecodeTree(bt, loc, bt.name);
                             // DecodeTree nulled Name (actual == expected); restore it as the map KEY, which is
