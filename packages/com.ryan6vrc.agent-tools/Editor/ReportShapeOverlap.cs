@@ -342,9 +342,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                             bool live = (parked == null) ^ inverted;
                             if (live) { ri.AnyDeclarationLive = true; ri.InactiveAncestor = null; }
                             else if (!ri.AnyDeclarationLive && parked != null) ri.InactiveAncestor = PathOf(parked.gameObject);
-                            // Canonicalize: MA discards a Delete row's Value (it forces the shape to 100), so two
-                            // Deletes with differing stale Value fields must NOT read as a conflict — compare Delete
-                            // on type only. Set keeps its value, so Set=100 vs Set=50 still conflicts.
+                            // Canonicalize: MA ignores a Delete row's Value — the shape is a vertex selector, not a
+                            // weight it writes — so two Deletes with differing stale Value fields must NOT read as a
+                            // conflict; compare Delete on type only. Set keeps its value, so Set=100 vs Set=50 still conflicts.
                             ri.Declares.Add((changeType, changeType == 0 ? 0f : value));
                         }
                         catch (Exception e)
@@ -640,7 +640,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // ── Resolution — one row per union shape ────────────────────────────────────────────────────────
             sb.Append("\n## Resolution — reaction / current weight / resolved-target / overlap\n");
-            sb.Append("_resolved-target: Set→its value, Delete→100 (bakes fully-applied), no reaction→0 (declared-or-zero). " +
+            sb.Append("_resolved-target: Set→its value, Delete→deleted (MA removes the shape's selected vertices at build, or " +
+                "NaN-hides them when it finds the host animated — this tool cannot tell which; no weight is written), " +
+                "no reaction→0 (declared-or-zero). " +
                 "**MISMATCH** marks a row worn (weight≠0) that NOTHING declares — the double-subtraction hazard; " +
                 "disposition is not `current≠resolved-target`, and a declared row is not flagged however far its weight sits " +
                 "from its target. **`[inactive: <path>]` is an annotation, not a flag**: every declaration of that shape sits " +
@@ -753,7 +755,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             : changeType == 1 ? "Set=" + Num(value)
             : "UNKNOWN(" + changeType.ToString(CultureInfo.InvariantCulture) + ")";
         private static string ResolvedTarget(int changeType, float value) =>
-            changeType == 0 ? "100" : changeType == 1 ? Num(value) : "unknown";
+            changeType == 0 ? "deleted" : changeType == 1 ? Num(value) : "unknown";
 
         // Compact weight/value formatter: integral weights render clean (100, 0, 42), fractional keep up to 3 dp.
         // A NONZERO weight must never render as "0": worn/mismatch classification is strictly `!= 0`, so a tiny

@@ -854,7 +854,7 @@ public class ReportShapeOverlapTests
     // ── Task 2: resolution table + weight audit + disposition + summary ─────────────────────────────────
 
     // A ShapeChanger row carrying a custom Set value (the base fixture hardcodes 100) — needed to distinguish a
-    // Set's resolved-target (its own value) from a Delete's (always 100).
+    // Set's resolved-target (its own value) from a Delete's (always `deleted`, whatever its Value field holds).
     private ModularAvatarShapeChanger AddShapeChangerValued(GameObject avatar, string name, GameObject target,
         params (string shape, ShapeChangeType type, float value)[] rows)
     {
@@ -923,9 +923,10 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("none", row); // no reaction owns it
     }
 
-    // (c) A Delete reaction bakes to fully-applied ⇒ resolved-target 100 (regardless of its Value field).
+    // (c) A Delete reaction removes (or NaN-hides) the shape's vertices and writes no weight ⇒ resolved-target
+    // `deleted`, regardless of its Value field. Value=30 here so a leaked value could never read as the token.
     [Test]
-    public void Report_deleteReaction_resolvedTargetIs100()
+    public void Report_deleteReaction_resolvedTargetIsDeleted()
     {
         var avatar = NewAvatarRoot("Avatar");
         var m = MakeMesh(20);
@@ -935,10 +936,10 @@ public class ReportShapeOverlapTests
 
         var row = ResolutionRow(ReadLog(Report(Path(body), new string[0], Path(avatar))), "Del_Shape");
         StringAssert.Contains("Delete", row);
-        StringAssert.Contains("| 100 |", row); // resolved-target column = 100 for a Delete, not the Value
+        StringAssert.Contains("| deleted |", row); // resolved-target column = deleted for a Delete, never its Value
     }
 
-    // (d) A Set reaction's resolved-target = its declared Value (here 42, distinct from a Delete's 100).
+    // (d) A Set reaction's resolved-target = its declared Value (here 42, distinct from a Delete's `deleted`).
     [Test]
     public void Report_setReaction_resolvedTargetIsValue()
     {
@@ -1019,9 +1020,9 @@ public class ReportShapeOverlapTests
         Assert.IsFalse(r.Contains("PASS") || r.Contains("=> FAIL"), "a Report emits no verdict token");
     }
 
-    // Two Delete rows on one shape with differing STORED Value fields are NOT a conflict: MA discards a Delete's
-    // Value (forces the shape to 100), so conflict detection must compare Delete on type only. (Regression: raw
-    // (type,value) comparison spuriously flagged 100 vs 30 as a conflict.)
+    // Two Delete rows on one shape with differing STORED Value fields are NOT a conflict: MA ignores a Delete's
+    // Value (the shape is a vertex selector), so conflict detection must compare Delete on type only. (Regression:
+    // raw (type,value) comparison spuriously flagged 100 vs 30 as a conflict.)
     [Test]
     public void Report_twoDeleteRowsDifferingValues_noConflict()
     {
@@ -1038,7 +1039,7 @@ public class ReportShapeOverlapTests
 
         var row = ResolutionRow(ReadLog(Report(Path(body), new string[0], Path(avatar))), "DelClash");
         StringAssert.Contains("Delete", row);
-        StringAssert.Contains("| 100 |", row);       // resolved-target 100, not "conflict"
+        StringAssert.Contains("| deleted |", row);   // resolved-target deleted, not "conflict"
         StringAssert.DoesNotContain("CONFLICT", row);
     }
 
