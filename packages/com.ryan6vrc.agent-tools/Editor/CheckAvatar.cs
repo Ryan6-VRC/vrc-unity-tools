@@ -294,15 +294,17 @@ namespace Ryan6Vrc.AgentTools.Editor
         // the tolerance sits an order of magnitude under the smallest intended difference.
         internal const float SameShapeToleranceMeters = 0.002f;
 
-        // A collider's placed shape in world metres. Measured from its OWN root, not the merge target: both
-        // frameworks keep a collider's referenced bone as its own transform at its placed world pose (MA
-        // reparents world-position-stays; VRCFury moves it as "Original Object"), so the placed scene is where
-        // the build leaves it. Capsule `height` is the core segment, so the ends sit at ±height/2 on the axis.
+        // A collider's shape in world metres, its local fields read through `frame`'s position and rotation
+        // (scale always from its own root). Both frameworks keep a collider's referenced bone as its own
+        // transform, but where it lands differs: MA reparents it world-position-stays, so the placed root is
+        // the shipped frame; a VRCFury ArmatureLink with align on (the default for a recursive link) snaps it
+        // onto the avatar bone, so the merge target's pose is. The ends sit at ±height/2 on the axis — a
+        // consistent comparator whichever way `height` counts its caps.
         private struct ColliderShape { public string Type; public bool Inside; public float Radius; public Vector3 Center, Axis, EndA, EndB; }
 
         // Null when any field cannot be read — the caller treats that as matching everything (fail toward
-        // flagging), never as distinct.
-        private static ColliderShape? ReadColliderShape(Component collider)
+        // flagging), never as distinct. A null frame is the collider's own root.
+        private static ColliderShape? ReadColliderShape(Component collider, Transform frame = null)
         {
             try
             {
@@ -319,8 +321,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (root == null) root = collider.transform;
                 var ls = root.lossyScale;
                 float s = Mathf.Max(Mathf.Abs(ls.x), Mathf.Abs(ls.y), Mathf.Abs(ls.z));
-                var center = root.TransformPoint((Vector3)pos);
-                var axis = root.rotation * (Quaternion)rot * Vector3.up;
+                if (frame == null) frame = root;
+                var center = frame == root ? root.TransformPoint((Vector3)pos)
+                    : frame.position + frame.rotation * Vector3.Scale(ls, (Vector3)pos);
+                var axis = frame.rotation * (Quaternion)rot * Vector3.up;
                 var half = axis * ((float)height * 0.5f * s);
                 return new ColliderShape {
                     Type = shape.ToString(), Inside = (bool)inside, Radius = (float)radius * s,
@@ -359,7 +363,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // absent-vs-false distinction the shape cell spells `—`. Component is the host itself, kept only so a
         // collider group can be split by shape; it is never printed.
         private struct ConflictHost { public string Path; public string Type; public string Bone; public bool Mergeable; public string Detail; public bool? Live; public Component Component; }
-        private struct MergeConflict { public string Category; public string FinalPath; public List<ConflictHost> Hosts; }
+        private struct MergeConflict { public string Category; public string FinalPath; public List<ConflictHost> Hosts; public int Seq; }
 
         // Whether a dynamics component is running, measured RELATIVE TO THE AVATAR ROOT. Absolute
         // activeInHierarchy would be wrong here: this root can itself be deactivated (parking the avatars
@@ -379,22 +383,28 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // A collider group's hosts partitioned into same-shape clusters (single-linkage, so a chain of near
         // matches joins one cluster — toward flagging), each in the group's host order, clusters ordered by
-        // their first host. Any host whose shape cannot be read keeps the whole group together.
-        private static List<List<ConflictHost>> SplitByShape(List<ConflictHost> hosts)
+        // their first host. Any host whose shape cannot be read keeps the whole group together. A mergeable
+        // host is read twice — at its placed root (MA) and snapped onto `final` (VRCFury align) — and a pair
+        // matches if any reading of one matches any reading of the other, since which framework merges it is
+        // not known here.
+        private static List<List<ConflictHost>> SplitByShape(List<ConflictHost> hosts, Transform final)
         {
-            var shapes = new List<ColliderShape>();
+            var shapes = new List<List<ColliderShape>>();
             foreach (var h in hosts)
             {
                 var s = h.Component != null ? ReadColliderShape(h.Component) : null;
                 if (s == null) return new List<List<ConflictHost>> { hosts };
-                shapes.Add(s.Value);
+                var readings = new List<ColliderShape> { s.Value };
+                var snapped = h.Mergeable && final != null ? ReadColliderShape(h.Component, final) : null;
+                if (snapped != null) readings.Add(snapped.Value);
+                shapes.Add(readings);
             }
             var parent = new int[hosts.Count];
             for (int i = 0; i < parent.Length; i++) parent[i] = i;
             int Find(int i) { while (parent[i] != i) i = parent[i] = parent[parent[i]]; return i; }
             for (int i = 0; i < hosts.Count; i++)
                 for (int j = i + 1; j < hosts.Count; j++)
-                    if (SameColliderShape(shapes[i], shapes[j])) parent[Find(j)] = Find(i);
+                    if (AnyReadingMatches(shapes[i], shapes[j])) parent[Find(j)] = Find(i);
             var byRoot = new Dictionary<int, List<ConflictHost>>();
             var clusters = new List<List<ConflictHost>>();
             for (int i = 0; i < hosts.Count; i++)
@@ -404,6 +414,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                 c.Add(hosts[i]);
             }
             return clusters;
+        }
+
+        private static bool AnyReadingMatches(List<ColliderShape> a, List<ColliderShape> b)
+        {
+            foreach (var x in a) foreach (var y in b) if (SameColliderShape(x, y)) return true;
+            return false;
         }
 
         // Scoped to what this change actually established: a PHYSBONE group carrying ≥2 hosts of mixed live
@@ -857,7 +873,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var kv in groups)
                 {
                     if (kv.Value.Count < 2) continue;
-                    var clusters = kv.Key.cat == "collider" ? SplitByShape(kv.Value) : new List<List<ConflictHost>> { kv.Value };
+                    var clusters = kv.Key.cat == "collider" ? SplitByShape(kv.Value, kv.Key.final) : new List<List<ConflictHost>> { kv.Value };
                     foreach (var cluster in clusters)
                     {
                         if (cluster.Count < 2) continue;
@@ -867,6 +883,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                             Category = kv.Key.cat,
                             FinalPath = kv.Key.final != null ? PathOf(kv.Key.final.gameObject) : "—",
                             Hosts = cluster,
+                            Seq = rep.MergeConflicts.Count,
                         });
                     }
                 }
@@ -874,13 +891,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // the List-ordered maSceneRef/clipBinding blocks. Host order within a group is already stable.
                 // FinalPath is not unique — two distinct final bones can share a hierarchy path (Unity allows
                 // duplicate sibling names) — so tiebreak on the first host's path (List.Sort is unstable) to keep
-                // the order total and the RunLog byte-stable; every group has ≥2 hosts, so Hosts[0] is safe.
+                // the order total and the RunLog byte-stable; every group has ≥2 hosts, so Hosts[0] is safe. Two
+                // shape clusters of one group can still share that first path (several colliders on one
+                // GameObject), so the last key is emission order, which follows the component walk.
                 rep.MergeConflicts.Sort((x, y) =>
                 {
                     int c = string.CompareOrdinal(x.Category, y.Category);
                     if (c != 0) return c;
                     c = string.CompareOrdinal(x.FinalPath, y.FinalPath);
-                    return c != 0 ? c : string.CompareOrdinal(x.Hosts[0].Path, y.Hosts[0].Path);
+                    if (c != 0) return c;
+                    c = string.CompareOrdinal(x.Hosts[0].Path, y.Hosts[0].Path);
+                    return c != 0 ? c : x.Seq.CompareTo(y.Seq);
                 });
             }
             catch (Exception e)

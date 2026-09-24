@@ -1394,11 +1394,12 @@ public class CheckAvatarMergeConflictTests
     // pair folds the merge bone onto the base bone. Bones are coincident unless a test moves one.
 
     private static VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider Capsule(
-        Transform bone, string name, float radius, float height, Vector3 position = default, Quaternion? rotation = null)
+        Transform bone, string name, float radius, float height, Vector3 position = default, Quaternion? rotation = null,
+        VRC.Dynamics.VRCPhysBoneColliderBase.ShapeType shape = VRC.Dynamics.VRCPhysBoneColliderBase.ShapeType.Capsule)
     {
         var host = NewChild(bone.gameObject, name);
         var c = host.AddComponent<VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider>();
-        c.shapeType = VRC.Dynamics.VRCPhysBoneColliderBase.ShapeType.Capsule;
+        c.shapeType = shape;
         c.rootTransform = bone;
         c.radius = radius;
         c.height = height;
@@ -1470,15 +1471,76 @@ public class CheckAvatarMergeConflictTests
         StringAssert.Contains("mergeConflict=0", InspectLog());
     }
 
-    // Placement is compared in world space from each collider's own root: identical local fields on a
-    // rotated merge bone are a different capsule.
+    // A mergeable collider is read in two frames because the frameworks land it differently. VRCFury's
+    // aligning ArmatureLink snaps the merge bone onto the base bone, so identical local fields on a rotated
+    // merge bone ship as a duplicate...
     [Test]
-    public void MergeConflict_SameLocalFieldsOnRotatedRoot_IsQuiet()
+    public void MergeConflict_SameLocalFieldsOnRotatedMergeBone_IsFlagged()
     {
         var (_, b, m) = ColliderScene("MCRotRoot");
         m.localRotation = Quaternion.Euler(0f, 0f, 30f);
         var baseCol = Capsule(b, "BaseCol", 0.07f, 0.25f);
         var mergeCol = Capsule(m, "MergeCol", 0.07f, 0.25f);
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, mergeCol);
+        StringAssert.Contains("mergeConflict=1", InspectLog());
+    }
+
+    // ...while MA keeps the merge bone's placed pose, so local fields that compensate its rotation place the
+    // same capsule in the world.
+    [Test]
+    public void MergeConflict_CompensatedLocalFieldsOnRotatedMergeBone_IsFlagged()
+    {
+        var (_, b, m) = ColliderScene("MCRotComp");
+        m.localRotation = Quaternion.Euler(0f, 0f, 30f);
+        var baseCol = Capsule(b, "BaseCol", 0.07f, 0.25f);
+        var mergeCol = Capsule(m, "MergeCol", 0.07f, 0.25f, default, Quaternion.Euler(0f, 0f, -30f));
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, mergeCol);
+        StringAssert.Contains("mergeConflict=1", InspectLog());
+    }
+
+    [Test]
+    public void MergeConflict_IdenticalSpheres_AreFlagged()
+    {
+        var (_, b, m) = ColliderScene("MCSphere");
+        var sphere = VRC.Dynamics.VRCPhysBoneColliderBase.ShapeType.Sphere;
+        var baseCol = Capsule(b, "BaseCol", 0.05f, 0f, new Vector3(0f, 0.1f, 0f), null, sphere);
+        var mergeCol = Capsule(m, "MergeCol", 0.05f, 0f, new Vector3(0f, 0.1f, 0f), null, sphere);
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, mergeCol);
+        StringAssert.Contains("mergeConflict=1", InspectLog());
+    }
+
+    // A plane is infinite: sliding its origin within the plane is the same plane, moving it along the
+    // normal is not.
+    [Test]
+    public void MergeConflict_PlaneSlidWithinPlane_IsFlagged()
+    {
+        var plane = VRC.Dynamics.VRCPhysBoneColliderBase.ShapeType.Plane;
+        var (_, b, m) = ColliderScene("MCPlaneIn");
+        var baseCol = Capsule(b, "BaseCol", 0f, 0f, default, null, plane);
+        var slid = Capsule(m, "MergeCol", 0f, 0f, new Vector3(0.05f, 0f, 0f), null, plane);
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, slid);
+        StringAssert.Contains("mergeConflict=1", InspectLog());
+    }
+
+    [Test]
+    public void MergeConflict_PlaneMovedAlongNormal_IsQuiet()
+    {
+        var plane = VRC.Dynamics.VRCPhysBoneColliderBase.ShapeType.Plane;
+        var (_, b, m) = ColliderScene("MCPlaneOut");
+        var baseCol = Capsule(b, "BaseCol", 0f, 0f, default, null, plane);
+        var raised = Capsule(m, "MergeCol", 0f, 0f, new Vector3(0f, 0.01f, 0f), null, plane);
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, raised);
+        StringAssert.Contains("mergeConflict=0", InspectLog());
+    }
+
+    // Inside-bounds inverts the solid, so an otherwise identical pair is two shapes.
+    [Test]
+    public void MergeConflict_InsideBoundsMismatch_IsQuiet()
+    {
+        var (_, b, m) = ColliderScene("MCInside");
+        var baseCol = Capsule(b, "BaseCol", 0.07f, 0.25f);
+        var mergeCol = Capsule(m, "MergeCol", 0.07f, 0.25f);
+        mergeCol.insideBounds = true;
         CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, mergeCol);
         StringAssert.Contains("mergeConflict=0", InspectLog());
     }
