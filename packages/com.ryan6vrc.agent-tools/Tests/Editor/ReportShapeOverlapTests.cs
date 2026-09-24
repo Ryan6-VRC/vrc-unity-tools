@@ -734,25 +734,52 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("`Shrink_Hip`", ReadLog(r));
     }
 
-    // A ShapeChanger whose write-target is a DIFFERENT mesh is ignored (the reaction to OtherBody must not be
-    // pulled into Body's analyzed set — even though Shrink_Hip exists on Body's mesh, so a mis-ingest would show).
+    // A ShapeChanger whose write-target is a DIFFERENT mesh is ignored (the reaction to Torso must not be pulled
+    // into Face's analyzed set — even though Shrink_Hip exists on Face's mesh, so a mis-ingest would show) — and
+    // the summary says where the rows went, because a census pointed at the wrong mesh otherwise prints the same
+    // `reacted=0` as an outfit that reacts to nothing. Names deliberately not substrings of each other, so the
+    // note naming the wrong mesh could not pass; a null-target row must not be listed.
     [Test]
-    public void Report_shapeChangerDifferentMesh_ignored()
+    public void Report_shapeChangerDifferentMesh_ignoredAndNamed()
     {
         var avatar = NewAvatarRoot("Avatar");
         var m = MakeMesh(20);
         AddSpan(m, "Stocking", 5, 14, 0.05f);
         AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
-        var body = NewChildBody(avatar, "Body", m);
+        var body = NewChildBody(avatar, "Face", m);
 
         var m2 = MakeMesh(20);
         AddSpan(m2, "Shrink_Hip", 0, 9, 0.05f);
-        var other = NewChildBody(avatar, "OtherBody", m2);
+        var other = NewChildBody(avatar, "Torso", m2);
 
-        AddShapeChanger(avatar, "Outfit", other, ("Shrink_Hip", ShapeChangeType.Set));
+        AddShapeChangerRows(avatar, "Outfit", ("Shrink_Hip", ShapeChangeType.Set, other), ("Shrink_Hip", ShapeChangeType.Set, null));
 
         var r = Report(Path(body), new[] { "Stocking" }, Path(avatar));
-        StringAssert.Contains("shapes=1/1", r); // only the passed Stocking; the OtherBody reaction is excluded
+        StringAssert.Contains("shapes=1/1", r); // only the passed Stocking; the Torso reaction is excluded
+        StringAssert.Contains("reacted=0", r);
+        StringAssert.Contains("rows under outfitRoot target " + Path(other), r);
+        StringAssert.DoesNotContain("Face,", r); StringAssert.DoesNotContain("target " + Path(body), r);
+    }
+
+    // The sibling note is gated on reacted=0: once any row lands on this mesh the census is on the right mesh,
+    // so a sibling row is the ordinary filtered case and nothing prints. Both rows present, so the gate is what
+    // is being tested — not the absence of sibling rows.
+    [Test]
+    public void Report_shapeChangerOnThisAndSibling_noSiblingNote()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Face", m);
+        var m2 = MakeMesh(20);
+        AddSpan(m2, "Shrink_Hip", 0, 9, 0.05f);
+        var other = NewChildBody(avatar, "Torso", m2);
+
+        AddShapeChangerRows(avatar, "Outfit", ("Shrink_Hip", ShapeChangeType.Set, body), ("Shrink_Hip", ShapeChangeType.Set, other));
+
+        var r = Report(Path(body), new string[0], Path(avatar));
+        StringAssert.Contains("reacted=1", r);
+        StringAssert.DoesNotContain("rows under outfitRoot target", r);
     }
 
     // The {worn} tier: a shape at nonzero weight on the resolved SMR is ingested off the SMR (not the Mesh),
