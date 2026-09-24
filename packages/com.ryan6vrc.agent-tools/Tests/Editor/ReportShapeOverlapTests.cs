@@ -734,25 +734,54 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("`Shrink_Hip`", ReadLog(r));
     }
 
-    // A ShapeChanger whose write-target is a DIFFERENT mesh is ignored (the reaction to OtherBody must not be
-    // pulled into Body's analyzed set — even though Shrink_Hip exists on Body's mesh, so a mis-ingest would show).
+    // A ShapeChanger whose write-target is a DIFFERENT mesh is ignored (the reaction to Torso must not be pulled
+    // into Face's analyzed set — even though Shrink_Hip exists on Face's mesh, so a mis-ingest would show) — and
+    // the summary says where the rows went, because a census pointed at the wrong mesh otherwise prints the same
+    // `reacted=0` as an outfit that reacts to nothing. Names deliberately not substrings of each other, so the
+    // note naming the wrong mesh could not pass; a null-target row must not be listed.
     [Test]
-    public void Report_shapeChangerDifferentMesh_ignored()
+    public void Report_shapeChangerDifferentMesh_ignoredAndNamed()
     {
         var avatar = NewAvatarRoot("Avatar");
         var m = MakeMesh(20);
         AddSpan(m, "Stocking", 5, 14, 0.05f);
         AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
-        var body = NewChildBody(avatar, "Body", m);
+        var body = NewChildBody(avatar, "Face", m);
 
         var m2 = MakeMesh(20);
         AddSpan(m2, "Shrink_Hip", 0, 9, 0.05f);
-        var other = NewChildBody(avatar, "OtherBody", m2);
+        var other = NewChildBody(avatar, "Torso", m2);
 
-        AddShapeChanger(avatar, "Outfit", other, ("Shrink_Hip", ShapeChangeType.Set));
+        AddShapeChangerRows(avatar, "Outfit", ("Shrink_Hip", ShapeChangeType.Set, other), ("Shrink_Hip", ShapeChangeType.Set, null));
 
         var r = Report(Path(body), new[] { "Stocking" }, Path(avatar));
-        StringAssert.Contains("shapes=1/1", r); // only the passed Stocking; the OtherBody reaction is excluded
+        StringAssert.Contains("shapes=1/1", r); // only the passed Stocking; the Torso reaction is excluded
+        StringAssert.Contains("reacted=0", r);
+        // The note is the summary's last field and the RunLog trailer follows it directly, so this pins that the
+        // Torso path is the WHOLE list: a null target rendered as `—` (PathOf(null)) or the Face path would break it.
+        StringAssert.Contains("rows under outfitRoot target " + Path(other) + " | log=", r);
+        StringAssert.DoesNotContain("target " + Path(body), r);
+    }
+
+    // The sibling note is gated on reacted=0: once any row lands on this mesh the census is on the right mesh,
+    // so a sibling row is the ordinary filtered case and nothing prints. Both rows present, so the gate is what
+    // is being tested — not the absence of sibling rows.
+    [Test]
+    public void Report_shapeChangerOnThisAndSibling_noSiblingNote()
+    {
+        var avatar = NewAvatarRoot("Avatar");
+        var m = MakeMesh(20);
+        AddSpan(m, "Shrink_Hip", 0, 9, 0.05f);
+        var body = NewChildBody(avatar, "Face", m);
+        var m2 = MakeMesh(20);
+        AddSpan(m2, "Shrink_Hip", 0, 9, 0.05f);
+        var other = NewChildBody(avatar, "Torso", m2);
+
+        AddShapeChangerRows(avatar, "Outfit", ("Shrink_Hip", ShapeChangeType.Set, body), ("Shrink_Hip", ShapeChangeType.Set, other));
+
+        var r = Report(Path(body), new string[0], Path(avatar));
+        StringAssert.Contains("reacted=1", r);
+        StringAssert.DoesNotContain("rows under outfitRoot target", r);
     }
 
     // The {worn} tier: a shape at nonzero weight on the resolved SMR is ingested off the SMR (not the Mesh),
@@ -854,7 +883,7 @@ public class ReportShapeOverlapTests
     // ── Task 2: resolution table + weight audit + disposition + summary ─────────────────────────────────
 
     // A ShapeChanger row carrying a custom Set value (the base fixture hardcodes 100) — needed to distinguish a
-    // Set's resolved-target (its own value) from a Delete's (always 100).
+    // Set's resolved-target (its own value) from a Delete's (always `deleted`, whatever its Value field holds).
     private ModularAvatarShapeChanger AddShapeChangerValued(GameObject avatar, string name, GameObject target,
         params (string shape, ShapeChangeType type, float value)[] rows)
     {
@@ -923,9 +952,10 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("none", row); // no reaction owns it
     }
 
-    // (c) A Delete reaction bakes to fully-applied ⇒ resolved-target 100 (regardless of its Value field).
+    // (c) A Delete reaction removes (or NaN-hides) the shape's vertices and writes no weight ⇒ resolved-target
+    // `deleted`, regardless of its Value field. Value=30 here so a leaked value could never read as the token.
     [Test]
-    public void Report_deleteReaction_resolvedTargetIs100()
+    public void Report_deleteReaction_resolvedTargetIsDeleted()
     {
         var avatar = NewAvatarRoot("Avatar");
         var m = MakeMesh(20);
@@ -935,10 +965,10 @@ public class ReportShapeOverlapTests
 
         var row = ResolutionRow(ReadLog(Report(Path(body), new string[0], Path(avatar))), "Del_Shape");
         StringAssert.Contains("Delete", row);
-        StringAssert.Contains("| 100 |", row); // resolved-target column = 100 for a Delete, not the Value
+        StringAssert.Contains("| deleted |", row); // resolved-target column = deleted for a Delete, never its Value
     }
 
-    // (d) A Set reaction's resolved-target = its declared Value (here 42, distinct from a Delete's 100).
+    // (d) A Set reaction's resolved-target = its declared Value (here 42, distinct from a Delete's `deleted`).
     [Test]
     public void Report_setReaction_resolvedTargetIsValue()
     {
@@ -1019,9 +1049,9 @@ public class ReportShapeOverlapTests
         Assert.IsFalse(r.Contains("PASS") || r.Contains("=> FAIL"), "a Report emits no verdict token");
     }
 
-    // Two Delete rows on one shape with differing STORED Value fields are NOT a conflict: MA discards a Delete's
-    // Value (forces the shape to 100), so conflict detection must compare Delete on type only. (Regression: raw
-    // (type,value) comparison spuriously flagged 100 vs 30 as a conflict.)
+    // Two Delete rows on one shape with differing STORED Value fields are NOT a conflict: MA ignores a Delete's
+    // Value (the shape is a vertex selector), so conflict detection must compare Delete on type only. (Regression:
+    // raw (type,value) comparison spuriously flagged 100 vs 30 as a conflict.)
     [Test]
     public void Report_twoDeleteRowsDifferingValues_noConflict()
     {
@@ -1038,7 +1068,7 @@ public class ReportShapeOverlapTests
 
         var row = ResolutionRow(ReadLog(Report(Path(body), new string[0], Path(avatar))), "DelClash");
         StringAssert.Contains("Delete", row);
-        StringAssert.Contains("| 100 |", row);       // resolved-target 100, not "conflict"
+        StringAssert.Contains("| deleted |", row);   // resolved-target deleted, not "conflict"
         StringAssert.DoesNotContain("CONFLICT", row);
     }
 

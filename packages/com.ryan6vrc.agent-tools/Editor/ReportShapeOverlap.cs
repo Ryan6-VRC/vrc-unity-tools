@@ -76,6 +76,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             public List<string> Names = new List<string>();
             public Dictionary<string, int> ReactionTypes = new Dictionary<string, int>();
             public Dictionary<string, ReactionInfo> Reactions = new Dictionary<string, ReactionInfo>();
+            // Scene paths of the OTHER GameObjects that ShapeChanger rows under outfitRoot resolved to. Printed only
+            // beside a reacted=0, where "the outfit reacts to nothing here" and "the outfit reacts, to a sibling — the
+            // census was pointed at the wrong mesh" otherwise read identically; a path chains straight into the next
+            // meshObject call. Descriptive, never a verdict: on a cutter-only outfit run from the avatar root the set
+            // legitimately names garment meshes, and this mesh is still the right one.
+            public SortedSet<string> ElsewhereTargets = new SortedSet<string>(StringComparer.Ordinal);
             // The caller's own root is inactive: reported once as a note, never charged to the rows. Turning a
             // piece off is the prescribed way to drive this tool (`map-outfit-shapes`), so treating the root
             // like an authored inactive ancestor would mark every declaration dead in one stroke.
@@ -312,7 +318,11 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                             // AvatarObjectReference.Get can throw (TargetInvocationException) on a stale/deleted ref.
                             var target = getMethod.Invoke(objRef, new object[] { comp }) as GameObject;
-                            if (target != bodyGO) continue; // only rows that write the resolved body mesh
+                            if (target != bodyGO) // only rows that write the resolved body mesh
+                            {
+                                if (target != null) result.ElsewhereTargets.Add(PathOf(target));
+                                continue;
+                            }
 
                             if (changeType != 0 && changeType != 1)
                                 Debug.LogWarning("[ReportShapeOverlap] MA ShapeChangeType drift on shape '" + shapeName +
@@ -342,9 +352,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                             bool live = (parked == null) ^ inverted;
                             if (live) { ri.AnyDeclarationLive = true; ri.InactiveAncestor = null; }
                             else if (!ri.AnyDeclarationLive && parked != null) ri.InactiveAncestor = PathOf(parked.gameObject);
-                            // Canonicalize: MA discards a Delete row's Value (it forces the shape to 100), so two
-                            // Deletes with differing stale Value fields must NOT read as a conflict — compare Delete
-                            // on type only. Set keeps its value, so Set=100 vs Set=50 still conflicts.
+                            // Canonicalize: MA ignores a Delete row's Value — the shape is a vertex selector, not a
+                            // weight it writes — so two Deletes with differing stale Value fields must NOT read as a
+                            // conflict; compare Delete on type only. Set keeps its value, so Set=100 vs Set=50 still conflicts.
                             ri.Declares.Add((changeType, changeType == 0 ? 0f : value));
                         }
                         catch (Exception e)
@@ -625,6 +635,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             // `meshCutters=present|absent` prints and is itself the tell — except on MeshCutter drift, where the
             // token withholds and its WITHHELD note carries the same "the scan ran" information instead.
             string emptyNote = outfitRootPassed ? "" : " | note: reactions NOT scanned — no outfitRoot passed";
+            // The scan ran and reached rows, none of them for this mesh: say where they went, so a mis-targeted
+            // census reads as one instead of as "nothing reacts". Silent once any row lands here.
+            if (reacted == 0 && ingested.ElsewhereTargets.Count > 0)
+                emptyNote += " | note: no ShapeChanger row targets this mesh; rows under outfitRoot target " +
+                             string.Join(", ", ingested.ElsewhereTargets);
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[ReportShapeOverlap] {0}: shapes={1}/{2} reacted={3}{11} inactiveDeclared={4} worn={5} mismatch={6} pairs={7} flagged={8} missing={9} => OK{10}{12}{13}",
                 mesh.name, resolved, requested, reacted, inactiveDeclared, worn, mismatchCount, a.Pairs.Count, pairFlagged, a.Missing.Count,
@@ -640,7 +655,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // ── Resolution — one row per union shape ────────────────────────────────────────────────────────
             sb.Append("\n## Resolution — reaction / current weight / resolved-target / overlap\n");
-            sb.Append("_resolved-target: Set→its value, Delete→100 (bakes fully-applied), no reaction→0 (declared-or-zero). " +
+            sb.Append("_resolved-target: Set→its value, Delete→deleted (MA removes the shape's selected vertices at build, or " +
+                "NaN-hides them when it finds the host animated — this tool cannot tell which; no weight is written), " +
+                "no reaction→0 (declared-or-zero). " +
                 "**MISMATCH** marks a row worn (weight≠0) that NOTHING declares — the double-subtraction hazard; " +
                 "disposition is not `current≠resolved-target`, and a declared row is not flagged however far its weight sits " +
                 "from its target. **`[inactive: <path>]` is an annotation, not a flag**: every declaration of that shape sits " +
@@ -753,7 +770,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             : changeType == 1 ? "Set=" + Num(value)
             : "UNKNOWN(" + changeType.ToString(CultureInfo.InvariantCulture) + ")";
         private static string ResolvedTarget(int changeType, float value) =>
-            changeType == 0 ? "100" : changeType == 1 ? Num(value) : "unknown";
+            changeType == 0 ? "deleted" : changeType == 1 ? Num(value) : "unknown";
 
         // Compact weight/value formatter: integral weights render clean (100, 0, 42), fractional keep up to 3 dp.
         // A NONZERO weight must never render as "0": worn/mismatch classification is strictly `!= 0`, so a tiny
