@@ -211,7 +211,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// pinned declares itself "Unstable API for now" upstream. One type pin replaces three.</para>
         ///
         /// <para>Scope of the word: this is a MeshCutter-FAMILY signal, not "geometry removal". A
-        /// <c>ShapeChanger</c> in Delete mode also removes geometry, but Delete rows are ShapeChanger rows and
+        /// <c>ShapeChanger</c> in Delete mode also removes or NaN-hides geometry, but Delete rows are ShapeChanger rows and
         /// already land in <c>reacted=</c>.</para></summary>
         private static CutterState CutterPresence(GameObject outfitRoot)
         {
@@ -655,8 +655,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // ── Resolution — one row per union shape ────────────────────────────────────────────────────────
             sb.Append("\n## Resolution — reaction / current weight / resolved-target / overlap\n");
-            sb.Append("_resolved-target: Set→its value, Delete→deleted (MA removes the shape's selected vertices at build, or " +
-                "NaN-hides them when it finds the host animated — this tool cannot tell which; no weight is written), " +
+            sb.Append("_resolved-target: Set→its value, Delete→deleted (no weight is written; MA removes the shape's selected " +
+                "vertices at build or NaNimates them, by the rule `outfits.md` states, and `ReportComposition` bake:true's " +
+                "triangle diff shows which), " +
                 "no reaction→0 (declared-or-zero). " +
                 "**MISMATCH** marks a row worn (weight≠0) that NOTHING declares — the double-subtraction hazard; " +
                 "disposition is not `current≠resolved-target`, and a declared row is not flagged however far its weight sits " +
