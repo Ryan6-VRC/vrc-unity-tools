@@ -33,14 +33,18 @@ namespace Ryan6Vrc.AgentTools.Editor
     ///     VRCFury. Merged CLIP bindings are not this class's: VRCFury resolves them against the hierarchy
     ///     as it stood before MA ran, so a relocated one survives.
     ///   - <b>merge-conflict</b> (NOT path-encoded — transform-identity, not a name): two+ dynamics
-    ///     components in one category (physbone/collider/constraint) that resolve to the SAME post-merge
-    ///     transform via the MA/VRCFury merge map, ≥1 of them mergeable-sourced — i.e. a mergeable's bone
-    ///     name-merges onto a base bone that already carries the same kind of component, so both bake onto
-    ///     one transform and fight → the agent de-conflicts. A base↔base duplicate (none mergeable) is not a
-    ///     merge artifact and is dropped. Each offender is marked <c>[live]</c>/<c>[not-live]</c> relative to
-    ///     the avatar root (per category: a constraint's <c>IsActive</c> counts alongside <c>enabled</c>), so
-    ///     a mixed-live physbone group reads as the per-range variant set it usually is (docs/outfits.md)
-    ///     rather than N components to reconcile.
+    ///     components in one category (physbone/collider) that resolve to the SAME post-merge transform via
+    ///     the MA/VRCFury merge map, ≥1 of them mergeable-sourced — i.e. a mergeable's bone name-merges onto
+    ///     a base bone that already carries the same kind of component → the agent de-conflicts. A
+    ///     base↔base duplicate (none mergeable) is not a merge artifact and is dropped. Colliders never
+    ///     fight — each physbone collides with the colliders it lists — so a collider group is flagged only
+    ///     among colliders of the SAME SHAPE (<see cref="SameColliderShape"/>): a stacked duplicate, where
+    ///     distinct shapes sharing a bone are an authored composite. Constraints are not a category: both
+    ///     frameworks keep a bone carrying a component as its own transform (MA's MergeArmature retains it,
+    ///     VRCFury's ArmatureLink moves it as "Original Object"), so a merge never lands a mergeable
+    ///     constraint on the base bone. Each offender is marked <c>[live]</c>/<c>[not-live]</c> relative to
+    ///     the avatar root, so a mixed-live physbone group reads as the per-range variant set it usually is
+    ///     (docs/outfits.md) rather than N components to reconcile.
     ///
     /// The first two resolve against the PLACED scene (the load-bearing model, spec D1): a to-be-merged bone
     /// is physically present pre-bake and resolves now; a base-rename break does not. So this predicts nothing
@@ -220,13 +224,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             return (pairs, note);
         }
 
-        // (category, typeName, getter, withShape) — single source of truth for the three dynamics categories,
+        // (category, typeName, getter, withShape) — single source of truth for the two dynamics categories,
         // iterated by both the collector and the drift canary so the canary pins the real production strings.
         internal static readonly (string category, string typeName, string getter, bool withShape)[] DynamicsCategories =
         {
-            ("physbone",   "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone",         "GetRootTransform",            false),
-            ("collider",   "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider", "GetRootTransform",            true),
-            ("constraint", "VRC.Dynamics.VRCConstraintBase",                            "GetEffectiveTargetTransform", false),
+            ("physbone", "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone",         "GetRootTransform", false),
+            ("collider", "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider", "GetRootTransform", true),
         };
 
         private static List<(Component, Transform, string, string)> DefaultCollectDynamicsTargets(GameObject avatarGO)
@@ -286,9 +289,76 @@ namespace Ryan6Vrc.AgentTools.Editor
             catch { return "shape=?"; }
         }
 
+        // Two colliders within this distance on every compared measure are one shape stacked twice. Vendor
+        // collider values are authored at 5 mm–1 cm grain and a copied component matches to float error, so
+        // the tolerance sits an order of magnitude under the smallest intended difference.
+        internal const float SameShapeToleranceMeters = 0.002f;
+
+        // A collider's placed shape in world metres. Measured from its OWN root, not the merge target: both
+        // frameworks keep a collider's referenced bone as its own transform at its placed world pose (MA
+        // reparents world-position-stays; VRCFury moves it as "Original Object"), so the placed scene is where
+        // the build leaves it. Capsule `height` is the core segment, so the ends sit at ±height/2 on the axis.
+        private struct ColliderShape { public string Type; public bool Inside; public float Radius; public Vector3 Center, Axis, EndA, EndB; }
+
+        // Null when any field cannot be read — the caller treats that as matching everything (fail toward
+        // flagging), never as distinct.
+        private static ColliderShape? ReadColliderShape(Component collider)
+        {
+            try
+            {
+                var t = collider.GetType();
+                object shape = t.GetField("shapeType")?.GetValue(collider);
+                object inside = t.GetField("insideBounds")?.GetValue(collider);
+                object radius = t.GetField("radius")?.GetValue(collider);
+                object height = t.GetField("height")?.GetValue(collider);
+                object pos = t.GetField("position")?.GetValue(collider);
+                object rot = t.GetField("rotation")?.GetValue(collider);
+                if (shape == null || !(inside is bool) || !(radius is float) || !(height is float)
+                    || !(pos is Vector3) || !(rot is Quaternion)) return null;
+                var root = t.GetField("rootTransform")?.GetValue(collider) as Transform;
+                if (root == null) root = collider.transform;
+                var ls = root.lossyScale;
+                float s = Mathf.Max(Mathf.Abs(ls.x), Mathf.Abs(ls.y), Mathf.Abs(ls.z));
+                var center = root.TransformPoint((Vector3)pos);
+                var axis = root.rotation * (Quaternion)rot * Vector3.up;
+                var half = axis * ((float)height * 0.5f * s);
+                return new ColliderShape {
+                    Type = shape.ToString(), Inside = (bool)inside, Radius = (float)radius * s,
+                    Center = center, Axis = axis, EndA = center - half, EndB = center + half,
+                };
+            }
+            catch { return null; }
+        }
+
+        // Same kind and side, then per kind: a sphere is its centre and radius; a capsule its radius and both
+        // segment ends in either order; a plane its normal and each origin's offset from the other plane.
+        // An unrecognized kind matches (fail toward flagging).
+        private static bool SameColliderShape(ColliderShape x, ColliderShape y)
+        {
+            const float tol = SameShapeToleranceMeters;
+            if (x.Type != y.Type || x.Inside != y.Inside) return false;
+            switch (x.Type)
+            {
+                case "Sphere":
+                    return Mathf.Abs(x.Radius - y.Radius) <= tol && (x.Center - y.Center).magnitude <= tol;
+                case "Capsule":
+                    if (Mathf.Abs(x.Radius - y.Radius) > tol) return false;
+                    bool straight = (x.EndA - y.EndA).magnitude <= tol && (x.EndB - y.EndB).magnitude <= tol;
+                    bool flipped = (x.EndA - y.EndB).magnitude <= tol && (x.EndB - y.EndA).magnitude <= tol;
+                    return straight || flipped;
+                case "Plane":
+                    return (x.Axis - y.Axis).magnitude <= tol
+                        && Mathf.Abs(Vector3.Dot(y.Center - x.Center, x.Axis)) <= tol
+                        && Mathf.Abs(Vector3.Dot(x.Center - y.Center, y.Axis)) <= tol;
+                default:
+                    return true;
+            }
+        }
+
         // Live is nullable: null means "no host to ask", which prints as neither marker — the same
-        // absent-vs-false distinction the shape cell spells `—`.
-        private struct ConflictHost { public string Path; public string Type; public string Bone; public bool Mergeable; public string Detail; public bool? Live; }
+        // absent-vs-false distinction the shape cell spells `—`. Component is the host itself, kept only so a
+        // collider group can be split by shape; it is never printed.
+        private struct ConflictHost { public string Path; public string Type; public string Bone; public bool Mergeable; public string Detail; public bool? Live; public Component Component; }
         private struct MergeConflict { public string Category; public string FinalPath; public List<ConflictHost> Hosts; }
 
         // Whether a dynamics component is running, measured RELATIVE TO THE AVATAR ROOT. Absolute
@@ -297,31 +367,43 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ancestor's state cannot discriminate between members of one group anyway — it would report every
         // host not-live at once, which is the opposite of the signal. Ancestors ABOVE the root are the
         // subject of the one caveat line instead.
-        //
-        // Each category has its own enable surface and they are not interchangeable: a VRC constraint is a
-        // Behaviour but carries a second flag, `IsActive` — measured by reflecting VRCConstraintBase on the
-        // loaded SDK (public bool field, alongside GlobalWeight), and set explicitly by our own
-        // avatar-tools ConstrainedDuplicate when it wants a constraint to run. Test `enabled` alone and an
-        // inert constraint reports as fighting.
-        private static bool? IsLive(Component host, string category, Transform root)
+        private static bool? IsLive(Component host, Transform root)
         {
             if (host == null) return null;
             var beh = host as Behaviour;
             if (beh != null && !beh.enabled) return false;
-            if (category == "constraint" && !ConstraintIsActive(host)) return false;
             for (var t = host.transform; t != null && t != root; t = t.parent)
                 if (!t.gameObject.activeSelf) return false;
             return true;
         }
 
-        // Reflected, not typed: this file reaches every dynamics type by name (DynamicsCategories) so an
-        // absent SDK degrades to skip rather than a compile break. A field we cannot read is treated as
-        // active — fail toward reporting the conflict, never toward silently excusing one.
-        private static bool ConstraintIsActive(Component host)
+        // A collider group's hosts partitioned into same-shape clusters (single-linkage, so a chain of near
+        // matches joins one cluster — toward flagging), each in the group's host order, clusters ordered by
+        // their first host. Any host whose shape cannot be read keeps the whole group together.
+        private static List<List<ConflictHost>> SplitByShape(List<ConflictHost> hosts)
         {
-            var f = host.GetType().GetField("IsActive", BindingFlags.Public | BindingFlags.Instance);
-            if (f == null || f.FieldType != typeof(bool)) return true;
-            try { return (bool)f.GetValue(host); } catch { return true; }
+            var shapes = new List<ColliderShape>();
+            foreach (var h in hosts)
+            {
+                var s = h.Component != null ? ReadColliderShape(h.Component) : null;
+                if (s == null) return new List<List<ConflictHost>> { hosts };
+                shapes.Add(s.Value);
+            }
+            var parent = new int[hosts.Count];
+            for (int i = 0; i < parent.Length; i++) parent[i] = i;
+            int Find(int i) { while (parent[i] != i) i = parent[i] = parent[parent[i]]; return i; }
+            for (int i = 0; i < hosts.Count; i++)
+                for (int j = i + 1; j < hosts.Count; j++)
+                    if (SameColliderShape(shapes[i], shapes[j])) parent[Find(j)] = Find(i);
+            var byRoot = new Dictionary<int, List<ConflictHost>>();
+            var clusters = new List<List<ConflictHost>>();
+            for (int i = 0; i < hosts.Count; i++)
+            {
+                int r = Find(i);
+                if (!byRoot.TryGetValue(r, out var c)) { byRoot[r] = c = new List<ConflictHost>(); clusters.Add(c); }
+                c.Add(hosts[i]);
+            }
+            return clusters;
         }
 
         // Scoped to what this change actually established: a PHYSBONE group carrying ≥2 hosts of mixed live
@@ -767,20 +849,26 @@ namespace Ryan6Vrc.AgentTools.Editor
                         Type = host != null ? host.GetType().Name : "—",
                         Bone = target.name,
                         Mergeable = mergeable, Detail = detail ?? "",
-                        Live = IsLive(host, category, avatarGO.transform),
+                        Live = IsLive(host, avatarGO.transform),
+                        Component = host,
                     });
                 }
 
                 foreach (var kv in groups)
                 {
                     if (kv.Value.Count < 2) continue;
-                    bool anyMergeable = false; foreach (var h in kv.Value) if (h.Mergeable) { anyMergeable = true; break; }
-                    if (!anyMergeable) continue;
-                    rep.MergeConflicts.Add(new MergeConflict {
-                        Category = kv.Key.cat,
-                        FinalPath = kv.Key.final != null ? PathOf(kv.Key.final.gameObject) : "—",
-                        Hosts = kv.Value,
-                    });
+                    var clusters = kv.Key.cat == "collider" ? SplitByShape(kv.Value) : new List<List<ConflictHost>> { kv.Value };
+                    foreach (var cluster in clusters)
+                    {
+                        if (cluster.Count < 2) continue;
+                        bool anyMergeable = false; foreach (var h in cluster) if (h.Mergeable) { anyMergeable = true; break; }
+                        if (!anyMergeable) continue;
+                        rep.MergeConflicts.Add(new MergeConflict {
+                            Category = kv.Key.cat,
+                            FinalPath = kv.Key.final != null ? PathOf(kv.Key.final.gameObject) : "—",
+                            Hosts = cluster,
+                        });
+                    }
                 }
                 // groups is a Dictionary (non-deterministic iteration) — sort for a byte-stable RunLog, unlike
                 // the List-ordered maSceneRef/clipBinding blocks. Host order within a group is already stable.
@@ -889,8 +977,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var n in rep.Notes) sb.Append("- ").Append(n).Append('\n');
             if (rep.MergeConflicts.Count > 0)
                 sb.Append("- MA prunes exact-duplicate physbones at build (PruneDuplicatePhysBones), so a flagged MA " +
-                    "physbone pair may already be resolved — verify against a build. VRCFury has no such pass; colliders, " +
-                    "constraints, and non-exact/non-zip-merged MA physbone pairs are the residue this check exists for.\n");
+                    "physbone pair may already be resolved — verify against a build. VRCFury has no such pass and neither " +
+                    "framework prunes colliders; same-shape colliders and non-exact/non-zip-merged MA physbone pairs are the " +
+                    "residue this check exists for.\n");
             // Scope before repair: an avatar carrying relocators gets the scope line whether or not anything
             // fired, so a zero count is never read as whole-avatar confirmation (the corpus-silence rule).
             if (rep.AnchorsPresent != null && rep.AnchorsPresent.Count > 0)

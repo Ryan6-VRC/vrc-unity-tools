@@ -879,10 +879,11 @@ public class CheckAvatarTests
     {
         foreach (var c in CheckAvatar.DynamicsCategories)
             AssertTypeGetter(c.typeName, c.getter);
-        // pin ColliderDetail's field names on the real collider type (a rename must go red, not silently blank the detail)
+        // pin the collider fields ColliderDetail and the same-shape read use on the real collider type (a rename
+        // must go red, not silently blank the detail or leave every collider group unsplit)
         var col = VendorReflect.FindType("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider");
         Assert.IsNotNull(col, "collider type unresolved (drift)");
-        foreach (var f in new[] { "shapeType", "radius", "height" })
+        foreach (var f in new[] { "shapeType", "radius", "height", "insideBounds", "position", "rotation", "rootTransform" })
             Assert.IsNotNull(col.GetField(f), "collider field unresolved (drift): " + f);
     }
 
@@ -1387,38 +1388,152 @@ public class CheckAvatarMergeConflictTests
         StringAssert.DoesNotContain(CheckAvatar.VariantSetNoteLine, log);
     }
 
-    // A VRC constraint is a Behaviour but carries a SECOND enable flag, `IsActive`. Testing `enabled` alone
-    // reports an inert constraint as fighting — the category's enable surface is not the Behaviour's.
-    [Test]
-    public void MergeConflict_ConstraintIsActiveFalse_IsNotLive()
+    // ── Same-shape colliders ──────────────────────────────────────────────────────────────────────────
+    // Real VRCPhysBoneCollider components, so the shape is read the way production reads it. Each collider
+    // sits on its own child of a bone (host ≠ root, as vendors ship them) and roots on that bone; the merge
+    // pair folds the merge bone onto the base bone. Bones are coincident unless a test moves one.
+
+    private static VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider Capsule(
+        Transform bone, string name, float radius, float height, Vector3 position = default, Quaternion? rotation = null)
     {
-        var root = NewAvatar("MCLiveCon");
-        var baseT = NewChild(root, "BaseT").transform;
-        var mergeGo = NewChild(root, "MergeT");
-        var con = mergeGo.AddComponent<VRC.SDK3.Dynamics.Constraint.Components.VRCParentConstraint>();
-        con.IsActive = false;   // Behaviour stays enabled, object stays active
-        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeGo.transform, baseT) });
-        CheckAvatar.CollectDynamicsTargets = Targets(
-            (con, mergeGo.transform, "constraint", ""), (baseT, baseT, "constraint", ""));
+        var host = NewChild(bone.gameObject, name);
+        var c = host.AddComponent<VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider>();
+        c.shapeType = VRC.Dynamics.VRCPhysBoneColliderBase.ShapeType.Capsule;
+        c.rootTransform = bone;
+        c.radius = radius;
+        c.height = height;
+        c.position = position;
+        c.rotation = rotation ?? Quaternion.identity;
+        return c;
+    }
+
+    // An avatar with a base bone and a merge bone the injected merge pair folds onto it.
+    private (GameObject root, Transform baseBone, Transform mergeBone) ColliderScene(string name)
+    {
+        var root = NewAvatar(name);
+        var baseBone = NewChild(root, "BaseBone").transform;
+        var mergeBone = NewChild(root, "MergeBone").transform;
+        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeBone, baseBone) });
+        return (root, baseBone, mergeBone);
+    }
+
+    private static Func<GameObject, List<(Component, Transform, string, string)>> Colliders(
+        params VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider[] cols)
+        => _ => cols.Select(c => ((Component)c, c.rootTransform, "collider", "")).ToList();
+
+    // The case that must never go quiet: one shape stacked twice on a bone.
+    [Test]
+    public void MergeConflict_IdenticalColliders_AreFlagged()
+    {
+        var (root, b, m) = ColliderScene("MCSame");
+        var baseCol = Capsule(b, "BaseCol", 0.07f, 0.25f, new Vector3(0f, 0.065f, 0.01f));
+        var mergeCol = Capsule(m, "MergeCol", 0.07f, 0.25f, new Vector3(0f, 0.065f, 0.01f));
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, mergeCol);
         var log = InspectLog();
         StringAssert.Contains("mergeConflict=1", log);
-        StringAssert.Contains("[not-live] " + root.name + "/MergeT", log);
+        StringAssert.Contains("category=`collider`", log);
+        StringAssert.Contains(root.name + "/BaseBone/BaseCol", log);
+        StringAssert.Contains(root.name + "/MergeBone/MergeCol", log);
+    }
+
+    // Distinct shapes sharing a bone are an authored composite, not a conflict (Shinano_Belliluna's legs).
+    [Test]
+    public void MergeConflict_DistinctColliderShapes_AreQuiet()
+    {
+        var (root, b, m) = ColliderScene("MCDistinct");
+        var baseCol = Capsule(b, "BaseCol", 0.07f, 0.25f);
+        var mergeCol = Capsule(m, "MergeCol", 0.08f, 0.25f);   // 10 mm wider
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, mergeCol);
+        var log = InspectLog();
+        StringAssert.Contains("mergeConflict=0", log);
+        StringAssert.Contains("=> PASS", log);
+    }
+
+    // The tolerance edge, from both sides, on placement alone.
+    [Test]
+    public void MergeConflict_ColliderOffsetWithinTolerance_IsFlagged()
+    {
+        var (_, b, m) = ColliderScene("MCNear");
+        var baseCol = Capsule(b, "BaseCol", 0.07f, 0.25f);
+        var mergeCol = Capsule(m, "MergeCol", 0.07f, 0.25f, new Vector3(0.001f, 0f, 0f));
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, mergeCol);
+        StringAssert.Contains("mergeConflict=1", InspectLog());
     }
 
     [Test]
-    public void MergeConflict_ConstraintIsActiveTrue_IsLive()
+    public void MergeConflict_ColliderOffsetPastTolerance_IsQuiet()
     {
-        var root = NewAvatar("MCLiveCon2");
-        var baseT = NewChild(root, "BaseT").transform;
-        var mergeGo = NewChild(root, "MergeT");
-        var con = mergeGo.AddComponent<VRC.SDK3.Dynamics.Constraint.Components.VRCParentConstraint>();
-        con.IsActive = true;
-        CheckAvatar.ResolveMergePairs = Pairs(new List<(Transform, Transform)> { (mergeGo.transform, baseT) });
-        CheckAvatar.CollectDynamicsTargets = Targets(
-            (con, mergeGo.transform, "constraint", ""), (baseT, baseT, "constraint", ""));
+        var (_, b, m) = ColliderScene("MCFar");
+        var baseCol = Capsule(b, "BaseCol", 0.07f, 0.25f);
+        var mergeCol = Capsule(m, "MergeCol", 0.07f, 0.25f, new Vector3(0.003f, 0f, 0f));
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, mergeCol);
+        StringAssert.Contains("mergeConflict=0", InspectLog());
+    }
+
+    // Placement is compared in world space from each collider's own root: identical local fields on a
+    // rotated merge bone are a different capsule.
+    [Test]
+    public void MergeConflict_SameLocalFieldsOnRotatedRoot_IsQuiet()
+    {
+        var (_, b, m) = ColliderScene("MCRotRoot");
+        m.localRotation = Quaternion.Euler(0f, 0f, 30f);
+        var baseCol = Capsule(b, "BaseCol", 0.07f, 0.25f);
+        var mergeCol = Capsule(m, "MergeCol", 0.07f, 0.25f);
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, mergeCol);
+        StringAssert.Contains("mergeConflict=0", InspectLog());
+    }
+
+    // A capsule is symmetric end for end, so a flipped axis is the same shape.
+    [Test]
+    public void MergeConflict_FlippedCapsuleAxis_IsFlagged()
+    {
+        var (_, b, m) = ColliderScene("MCFlip");
+        var baseCol = Capsule(b, "BaseCol", 0.07f, 0.25f);
+        var mergeCol = Capsule(m, "MergeCol", 0.07f, 0.25f, default, Quaternion.Euler(180f, 0f, 0f));
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, mergeCol);
+        StringAssert.Contains("mergeConflict=1", InspectLog());
+    }
+
+    // In a mixed group only the matching pair is an offender; the distinct member is not named.
+    [Test]
+    public void MergeConflict_MixedColliderGroup_FlagsOnlyTheMatchingPair()
+    {
+        var (root, b, m) = ColliderScene("MCMixed");
+        var baseCol = Capsule(b, "BaseCol", 0.07f, 0.25f);
+        var mergeCol = Capsule(m, "MergeCol", 0.07f, 0.25f);
+        var mergeFront = Capsule(m, "MergeFront", 0.07f, 0.30f, new Vector3(0f, 0.12f, 0f));
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseCol, mergeCol, mergeFront);
         var log = InspectLog();
-        StringAssert.Contains("[live] " + root.name + "/MergeT", log);
-        StringAssert.DoesNotContain("[not-live]", log);
+        StringAssert.Contains("mergeConflict=1", log);
+        StringAssert.Contains(root.name + "/MergeBone/MergeCol", log);
+        StringAssert.DoesNotContain("MergeFront", log);
+    }
+
+    // The mergeable test applies per cluster, not per group: two identical base colliders beside a distinct
+    // mergeable one are a base↔base duplicate and stay dropped.
+    [Test]
+    public void MergeConflict_IdenticalBasePairBesideDistinctMergeable_IsDropped()
+    {
+        var (_, b, m) = ColliderScene("MCBasePair");
+        var baseA = Capsule(b, "BaseA", 0.07f, 0.25f);
+        var baseB = Capsule(b, "BaseB", 0.07f, 0.25f);
+        var mergeCol = Capsule(m, "MergeCol", 0.09f, 0.25f);
+        CheckAvatar.CollectDynamicsTargets = Colliders(baseA, baseB, mergeCol);
+        StringAssert.Contains("mergeConflict=0", InspectLog());
+    }
+
+    // A shape that cannot be read fails toward flagging: a host with no collider fields keeps the group whole.
+    [Test]
+    public void MergeConflict_UnreadableColliderShape_KeepsGroupFlagged()
+    {
+        var (root, b, m) = ColliderScene("MCUnread");
+        var baseCol = Capsule(b, "BaseCol", 0.07f, 0.25f);
+        var bare = NewChild(m.gameObject, "Bare").transform;
+        CheckAvatar.CollectDynamicsTargets = _ => new List<(Component, Transform, string, string)> {
+            (baseCol, b, "collider", ""), (bare, m, "collider", "") };
+        var log = InspectLog();
+        StringAssert.Contains("mergeConflict=1", log);
+        StringAssert.Contains(root.name + "/MergeBone/Bare", log);
     }
 
     // Liveness is relative to the avatar root: parking the avatar inactive must not flip every host to
