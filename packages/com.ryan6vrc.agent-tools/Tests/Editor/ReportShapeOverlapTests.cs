@@ -757,8 +757,10 @@ public class ReportShapeOverlapTests
         var r = Report(Path(body), new[] { "Stocking" }, Path(avatar));
         StringAssert.Contains("shapes=1/1", r); // only the passed Stocking; the Torso reaction is excluded
         StringAssert.Contains("reacted=0", r);
-        StringAssert.Contains("rows under outfitRoot target " + Path(other), r);
-        StringAssert.DoesNotContain("Face,", r); StringAssert.DoesNotContain("target " + Path(body), r);
+        // The note is the summary's last field and the RunLog trailer follows it directly, so this pins that the
+        // Torso path is the WHOLE list: a null target rendered as `—` (PathOf(null)) or the Face path would break it.
+        StringAssert.Contains("rows under outfitRoot target " + Path(other) + " | log=", r);
+        StringAssert.DoesNotContain("target " + Path(body), r);
     }
 
     // The sibling note is gated on reacted=0: once any row lands on this mesh the census is on the right mesh,
