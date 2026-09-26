@@ -4,20 +4,12 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using UnityEditor;
-using UnityEditor.SceneManagement;
 using UnityEngine;
 using VRC.Dynamics;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
-    /// <summary>Writes a caller-authored VRC dynamics table onto a prefab asset or a scene root. The table (JSON text or
-    /// a path to it) holds four optional lists, applied in order: <c>nodes</c> (an empty child, optionally with a bare
-    /// physbone or a collider; an existing one is left alone), <c>moves</c> (a physbone's root moves from bone
-    /// <c>from</c> to each descendant in <c>to</c>, settings copied, original removed), <c>physbones</c> (serialized
-    /// field writes, <c>"field=value"</c>) and <c>constraints</c> (a VRC constraint's source table, written through
-    /// <c>SerializedObject</c> with <c>totalLength</c>, then Activated when locked). Paths are root-relative. The whole
-    /// table validates before the first write, so a refusal writes nothing. In play, nodes and moves refuse; field sets
-    /// apply and re-enable the physbone; a constraint row rewrites the weights of a live constraint whose sources match.</summary>
+    /// <summary>Writes a caller-authored VRC dynamics table onto a prefab or scene root. Contract: docs/unity-tools.md.</summary>
     [AgentTool]
     public static class WriteDynamics
     {
@@ -39,17 +31,22 @@ namespace Ryan6Vrc.AgentTools.Editor
             bool play = EditorApplication.isPlaying, isPrefab = root != null && root.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase);
             if (play && isPrefab) return Fail("a prefab asset is edit-mode only; in play pass the live scene root");
             if (play && t.moves.Length + t.nodes.Length > 0) return Fail("nodes and moves are edit-mode only (a physbone root cannot move under a running solver); exit play and re-run");
+            if (play && t.physbones.Length > 0 && DrivePhysBones.Running) return Fail("a DrivePhysBones drive is running and a live field set re-initialises its chains mid-sample; wait for DrivePhysBones.Status() to finish");
             GameObject go;
             if (isPrefab) { if (AssetDatabase.LoadAssetAtPath<GameObject>(root) == null) return Fail("no prefab asset at '" + root + "'"); go = PrefabUtility.LoadPrefabContents(root); }
             else { var h = SceneHandle.Resolve(root); if (!h.Ok) return Fail(h.Refusal); go = h.Object; }
+            Undo.IncrementCurrentGroup(); int group = Undo.GetCurrentGroup(); Undo.SetCurrentGroupName("WriteDynamics");
             try
             {
-                var log = new List<string>(); var writes = new List<Action>(); var made = new List<GameObject>();
-                err = MakeNodes(go.transform, t.nodes, log, made) ?? Plan(go.transform, t, play, log, writes); // later rows may name a new node
-                if (err != null || whatIf) for (int i = made.Count - 1; i >= 0; i--) UnityEngine.Object.DestroyImmediate(made[i]);
+                // Every mutation is undo-recorded into one group, so a refusal, a whatIf or a write-time throw reverts it whole.
+                var log = new List<string>(); Action writes = null;
+                err = MakeNodes(go.transform, t.nodes, log, out int made);
+                if (err == null) err = Plan(go.transform, t, play, log, out writes);
+                if (err == null && !whatIf) try { writes(); } catch (Exception e) { err = "a write threw and the whole table was rolled back: " + e.GetType().Name + ": " + e.Message; }
+                if (err != null || whatIf) Undo.RevertAllDownToGroup(group);
                 if (err != null) return Fail(err);
-                if (!whatIf) { foreach (var w in writes) w(); if (isPrefab) PrefabUtility.SaveAsPrefabAsset(go, root); else if (!play) EditorSceneManager.MarkSceneDirty(go.scene); }
-                string summary = Tag + (whatIf ? " Preview " : " Write ") + root + (play ? " (live)" : "") + " => OK | nodes=" + made.Count + " moves=" + t.moves.Sum(m => m.to.Length) + " physbones=" + t.physbones.Length
+                if (!whatIf && isPrefab) PrefabUtility.SaveAsPrefabAsset(go, root);
+                string summary = Tag + (whatIf ? " Preview " : " Write ") + root + (play ? " (live)" : "") + " => OK | nodes=" + made + " moves=" + t.moves.Sum(m => m.to.Length) + " physbones=" + t.physbones.Length
                     + " constraints=" + t.constraints.Length + (whatIf ? " | whatIf: nothing written" : isPrefab ? " | saved" : play ? " | reverts on play exit" : " | scene dirtied, not saved");
                 var line = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "write-dynamics_" + RunLogFormat.Leaf(root), summary, string.Join("\n", log) + "\n", ".md");
                 Debug.Log(line);
@@ -58,17 +55,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             finally { if (isPrefab) PrefabUtility.UnloadPrefabContents(go); }
         }
 
-        /// <summary>Resolves and validates every row, collecting the writes; returns the first refusal or null.</summary>
-        static string Plan(Transform root, Table t, bool play, List<string> log, List<Action> writes)
+        /// <summary>Resolves and validates every row and returns the writes as one action over objects resolved here,
+        /// so nothing is looked up again once writing starts. Returns the first refusal, or null.</summary>
+        static string Plan(Transform root, Table t, bool play, List<string> log, out Action writes)
         {
-            string err;
-            var moving = new Dictionary<VRCPhysBoneBase, Transform[]>(); var targets = new Dictionary<Transform, VRCPhysBoneBase>();
+            string err; writes = null; var steps = new List<Action>();
+            var targets = new Dictionary<Transform, VRCPhysBoneBase>();   // move destination -> the physbone moving there
+            var copies = new Dictionary<Transform, VRCPhysBoneBase>();    // filled at write time by the moves
             foreach (var m in t.moves)
             {
                 var pb = ResolvePhysBone(root, m.physbone, targets, out err); if (pb == null) return err;
                 var from = Find(root, m.from, out err); if (from == null) return err;
                 if (EffRoot(pb) != from) return "physbone '" + m.physbone + "' is rooted at '" + PathOf(root, EffRoot(pb)) + "', not '" + m.from + "'";
-                if (moving.ContainsKey(pb)) return "physbone '" + m.physbone + "' is moved by two rows; list every destination in one row's `to`";
+                if (targets.ContainsValue(pb)) return "physbone '" + m.physbone + "' is moved by two rows; list every destination in one row's `to`";
                 var tos = new Transform[m.to.Length];
                 for (int i = 0; i < tos.Length; i++)
                 {
@@ -77,29 +76,33 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var ign = pb.ignoreTransforms.FirstOrDefault(x => x != null && tos[i].IsChildOf(x));
                     if (ign != null) return "'" + m.to[i] + "' sits under '" + PathOf(root, ign) + "', which physbone '" + m.physbone + "' ignores: that chain belongs to another physbone";
                     if (targets.ContainsKey(tos[i]) || root.GetComponentsInChildren<VRCPhysBoneBase>(true).Any(p => EffRoot(p) == tos[i])) return "'" + m.to[i] + "' is already a physbone root";
-                    targets[tos[i]] = pb; log.Add("move `" + PathOf(root, pb.transform) + "` root `" + m.from + "` -> `" + m.to[i] + "`");
+                    targets[tos[i]] = pb;
+                    log.Add("move `" + PathOf(root, pb.transform) + "` root `" + m.from + "` -> `" + m.to[i] + "`" + (tos.Length > 1 && !string.IsNullOrEmpty(pb.parameter) ? " (parameter '" + pb.parameter + "' dropped: one name cannot serve " + tos.Length + " chains)" : ""));
                 }
-                moving[pb] = tos;
+                steps.Add(() => MovePhysBone(pb, tos, copies));
             }
-            writes.Add(() => { foreach (var kv in moving) MovePhysBone(kv.Key, kv.Value); });
             foreach (var s in t.physbones)
             {
+                var at = Find(root, s.physbone, out err); if (at == null) return err;
                 var pb = ResolvePhysBone(root, s.physbone, targets, out err); if (pb == null) return err;
-                if (moving.ContainsKey(pb) && !targets.ContainsKey(Find(root, s.physbone, out _))) return "physbone '" + s.physbone + "' is moved by this table; set fields on its new roots";
+                bool moved = targets.ContainsKey(at);
+                if (!moved && targets.ContainsValue(pb)) return "physbone '" + s.physbone + "' is moved by this table; set fields on its new roots";
                 var so = new SerializedObject(pb);
                 foreach (var kv in s.set) if ((err = SetProp(root, so, kv)) != null) return "physbones '" + s.physbone + "': " + err;
                 log.Add("set `" + s.physbone + "` " + string.Join(" ", s.set));
-                writes.Add(() =>
+                steps.Add(() =>
                 {
-                    var live = ResolvePhysBone(root, s.physbone, null, out _); var lso = new SerializedObject(live);
+                    var live = moved ? copies[at] : pb; var lso = new SerializedObject(live);
                     foreach (var kv in s.set) SetProp(root, lso, kv);
-                    lso.ApplyModifiedPropertiesWithoutUndo();
+                    lso.ApplyModifiedProperties();
                     if (play) { live.enabled = false; live.enabled = true; } // a live field change reaches the solver only through re-initialisation
                 });
             }
+            var seen = new HashSet<Transform>();
             foreach (var c in t.constraints)
             {
                 var target = Find(root, c.target, out err); if (target == null) return err;
+                if (!seen.Add(target)) return "constraints '" + c.target + "' appears in two rows; one row per target";
                 var type = TypeCache.GetTypesDerivedFrom<VRCConstraintBase>().FirstOrDefault(x => !x.IsAbstract && x.Name == c.type);
                 if (type == null) return "constraints '" + c.target + "': no VRC constraint type '" + c.type + "' (VRCRotationConstraint, VRCParentConstraint, VRCPositionConstraint, VRCScaleConstraint, VRCAimConstraint, VRCLookAtConstraint)";
                 if (c.sources.Length > KeyableSlots) return "constraints '" + c.target + "': " + c.sources.Length + " sources; past " + KeyableSlots + " they land in overflowList, which no animator can key — split the table";
@@ -113,20 +116,22 @@ namespace Ryan6Vrc.AgentTools.Editor
                     if (existing.Sources.Count != src.Length || Enumerable.Range(0, src.Length).Any(i => existing.Sources[i].SourceTransform != src[i]))
                         return "constraints '" + c.target + "': the live source list differs from the row; play rewrites weights only, in the live source order";
                     log.Add("weights " + row);
-                    writes.Add(() => { for (int i = 0; i < src.Length; i++) { var x = existing.Sources[i]; x.Weight = c.sources[i].weight; existing.Sources[i] = x; } existing.GlobalWeight = c.globalWeight; });
+                    steps.Add(() => { Undo.RecordObject(existing, "WriteDynamics"); for (int i = 0; i < src.Length; i++) { var x = existing.Sources[i]; x.Weight = c.sources[i].weight; existing.Sources[i] = x; } existing.GlobalWeight = c.globalWeight; });
                     continue;
                 }
                 log.Add((existing ? "rewrite " : "add ") + row + (c.locked ? " locked" : " unlocked"));
-                writes.Add(() => WriteConstraint((VRCConstraintBase)(target.GetComponent(type) ?? target.gameObject.AddComponent(type)), src, c));
+                steps.Add(() => WriteConstraint(existing ?? (VRCConstraintBase)Undo.AddComponent(target.gameObject, type), src, c));
             }
+            writes = () => { foreach (var step in steps) step(); };
             return null;
         }
 
         /// <summary>Creates each absent node (an existing one is left alone): an empty child at the parent's origin,
-        /// world <c>rotation</c> as <c>x,y,z</c> Euler (blank keeps the parent's), with an optional bare physbone
-        /// and an optional collider on itself. Created nodes are the caller's to roll back.</summary>
-        static string MakeNodes(Transform root, Node[] nodes, List<string> log, List<GameObject> made)
+        /// world <c>rotation</c> as <c>x,y,z</c> Euler (blank keeps the parent's), with an optional bare physbone and an
+        /// optional collider on itself. Undo-registered, so the caller's group revert removes them.</summary>
+        static string MakeNodes(Transform root, Node[] nodes, List<string> log, out int made)
         {
+            made = 0;
             var colType = TypeCache.GetTypesDerivedFrom<VRCPhysBoneColliderBase>().First(x => !x.IsAbstract);
             var pbType = TypeCache.GetTypesDerivedFrom<VRCPhysBoneBase>().First(x => !x.IsAbstract);
             foreach (var n in nodes)
@@ -135,10 +140,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (parent.Cast<Transform>().Any(c => c.name == n.name)) { log.Add("node `" + n.parent + "/" + n.name + "` exists, left alone"); continue; }
                 var rot = n.rotation.Length == 0 ? parent.eulerAngles : ParseVector(n.rotation);
                 var c = n.collider; var cp = ParseVector(c.position); var cr = ParseVector(c.rotation);
-                bool hasCol = c.shape.Length > 0;
                 if (rot == null || cp == null || cr == null) return "nodes '" + n.name + "': rotation, collider.position and collider.rotation are x,y,z";
-                if (hasCol && !Enum.TryParse(c.shape, true, out VRCPhysBoneColliderBase.ShapeType shape)) return "nodes '" + n.name + "': collider.shape '" + c.shape + "' is not one of " + string.Join(", ", Enum.GetNames(typeof(VRCPhysBoneColliderBase.ShapeType)));
-                var go = new GameObject(n.name); made.Add(go);
+                bool hasCol = c.shape.Length > 0;
+                if (hasCol && !Enum.GetNames(typeof(VRCPhysBoneColliderBase.ShapeType)).Any(x => string.Equals(x, c.shape, StringComparison.OrdinalIgnoreCase)))
+                    return "nodes '" + n.name + "': collider.shape '" + c.shape + "' is not one of " + string.Join(", ", Enum.GetNames(typeof(VRCPhysBoneColliderBase.ShapeType)));
+                var go = new GameObject(n.name); Undo.RegisterCreatedObjectUndo(go, "WriteDynamics"); made++;
                 go.transform.SetParent(parent, false); go.transform.rotation = Quaternion.Euler(rot.Value);
                 if (n.physbone) go.AddComponent(pbType);
                 if (hasCol)
@@ -152,17 +158,20 @@ namespace Ryan6Vrc.AgentTools.Editor
             return null;
         }
 
-        static void MovePhysBone(VRCPhysBoneBase pb, Transform[] tos)
+        /// <summary>One copy per destination, on the original's holder when it used one (the vendor's idiom), else on
+        /// the bone. A fan-out drops <c>parameter</c>: one animator name cannot serve several chains.</summary>
+        static void MovePhysBone(VRCPhysBoneBase pb, Transform[] tos, Dictionary<Transform, VRCPhysBoneBase> copies)
         {
-            bool onHolder = pb.rootTransform != null && pb.rootTransform != pb.transform; // keep the vendor's holder idiom
+            bool onHolder = pb.rootTransform != null && pb.rootTransform != pb.transform;
             foreach (var to in tos)
             {
-                var host = onHolder ? pb.gameObject : to.gameObject;
-                var copy = (VRCPhysBoneBase)host.AddComponent(pb.GetType());
+                var copy = (VRCPhysBoneBase)Undo.AddComponent(onHolder ? pb.gameObject : to.gameObject, pb.GetType());
                 EditorUtility.CopySerialized(pb, copy);
                 copy.rootTransform = onHolder ? to : null;
+                if (tos.Length > 1) copy.parameter = "";
+                copies[to] = copy;
             }
-            UnityEngine.Object.DestroyImmediate(pb);
+            Undo.DestroyObjectImmediate(pb);
         }
 
         /// <summary>The one reliable write path for constraint sources (runtime.md §Constraints): slots and
@@ -183,9 +192,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             so.FindProperty("GlobalWeight").floatValue = row.globalWeight;
             so.FindProperty("IsActive").boolValue = true;
             so.FindProperty("Locked").boolValue = row.locked;
-            so.ApplyModifiedPropertiesWithoutUndo();
-            if (row.locked) con.ActivateConstraint();
-            EditorUtility.SetDirty(con);
+            so.ApplyModifiedProperties();
+            if (row.locked) { Undo.RecordObject(con, "WriteDynamics"); con.ActivateConstraint(); }
         }
 
         /// <summary>Writes one <c>field=value</c> onto a SerializedObject (unapplied). Floats, ints, bools, enums by
@@ -238,18 +246,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (!text.StartsWith("{") && File.Exists(text)) text = File.ReadAllText(text).Trim();
             if (!text.StartsWith("{")) return "the table is a JSON object ({\"nodes\":[…],\"moves\":[…],\"physbones\":[…],\"constraints\":[…]}) or a path to a file holding one";
             try { t = JsonUtility.FromJson<Table>(text); } catch (ArgumentException e) { return "table JSON does not parse: " + e.Message; }
-            t.nodes = t.nodes ?? new Node[0]; t.moves = t.moves ?? new Move[0]; t.physbones = t.physbones ?? new PhysBoneSet[0]; t.constraints = t.constraints ?? new ConstraintRow[0];
             for (int i = 0; i < t.nodes.Length; i++)
                 if (string.IsNullOrEmpty(t.nodes[i].parent) || string.IsNullOrEmpty(t.nodes[i].name) || t.nodes[i].name.Contains("/")) return "nodes[" + i + "] needs parent and a bare name";
             for (int i = 0; i < t.moves.Length; i++)
-                if (string.IsNullOrEmpty(t.moves[i].physbone) || string.IsNullOrEmpty(t.moves[i].from) || t.moves[i].to == null || t.moves[i].to.Length == 0) return "moves[" + i + "] needs physbone, from, and a non-empty to";
+                if (string.IsNullOrEmpty(t.moves[i].physbone) || string.IsNullOrEmpty(t.moves[i].from) || t.moves[i].to.Length == 0) return "moves[" + i + "] needs physbone, from, and a non-empty to";
             for (int i = 0; i < t.physbones.Length; i++)
-                if (string.IsNullOrEmpty(t.physbones[i].physbone) || t.physbones[i].set == null || t.physbones[i].set.Any(s => s == null || s.IndexOf('=') < 1)) return "physbones[" + i + "] needs physbone and a set of \"field=value\" strings";
+                if (string.IsNullOrEmpty(t.physbones[i].physbone) || t.physbones[i].set.Any(s => s.IndexOf('=') < 1)) return "physbones[" + i + "] needs physbone and a set of \"field=value\" strings";
             for (int i = 0; i < t.constraints.Length; i++)
-            {
-                var c = t.constraints[i]; c.sources = c.sources ?? new Source[0];
-                if (string.IsNullOrEmpty(c.target) || c.sources.Any(s => string.IsNullOrEmpty(s.path))) return "constraints[" + i + "] needs a target and every source a path";
-            }
+                if (string.IsNullOrEmpty(t.constraints[i].target) || t.constraints[i].sources.Any(s => string.IsNullOrEmpty(s.path))) return "constraints[" + i + "] needs a target and every source a path";
             return null;
         }
 
@@ -270,7 +274,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         static VRCPhysBoneBase ResolvePhysBone(Transform root, string path, Dictionary<Transform, VRCPhysBoneBase> pending, out string err)
         {
             var t = Find(root, path, out err); if (t == null) return null;
-            if (pending != null && pending.TryGetValue(t, out var moved)) return moved;
+            if (pending.TryGetValue(t, out var moved)) return moved;
             var hits = root.GetComponentsInChildren<VRCPhysBoneBase>(true).Where(p => p.transform == t || EffRoot(p) == t).ToList();
             if (hits.Count == 1) return hits[0];
             err = hits.Count == 0 ? "no physbone hosted on or rooted at '" + path + "'"
@@ -280,12 +284,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         internal static Transform EffRoot(VRCPhysBoneBase pb) => pb.rootTransform != null ? pb.rootTransform : pb.transform;
 
-        internal static string PathOf(Transform root, Transform t)
-        {
-            var parts = new List<string>();
-            for (var x = t; x != null && x != root; x = x.parent) parts.Add(x.name);
-            parts.Reverse(); return string.Join("/", parts);
-        }
+        static string PathOf(Transform root, Transform t) => AnimationUtility.CalculateTransformPath(t, root);
 
         static string Fail(string m) { var s = Tag + " FAIL: " + m; Debug.LogWarning(s); return s; }
     }

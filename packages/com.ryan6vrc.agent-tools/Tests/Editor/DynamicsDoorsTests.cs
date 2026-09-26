@@ -1,11 +1,13 @@
+using System.Collections.Generic;
 using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 using UnityEngine;
 
-// The pure parts of WriteDynamics and DrivePhysBones: table and pose parsing (including the defaults a caller relies on
-// by omission, which JsonUtility only honours through field initialisers) and the closest-point primitive under the
-// penetration count. The writes and the drive mutate live objects, so they are proven by execute_code on a real
-// avatar (docs/verify.md §Test venue), not here.
+// The pure parts of WriteDynamics, DrivePhysBones and ReportPenetration: table and pose parsing (including the defaults a
+// caller relies on by omission, which JsonUtility only honours through field initialisers), the closest-point primitive
+// under the penetration count, and the drive's restore record, whose writer and reader sit a domain reload apart. The
+// writes and the drive mutate live objects, so they are proven by execute_code on a real avatar (docs/verify.md §Test
+// venue), not here.
 public class DynamicsDoorsTests
 {
     [Test]
@@ -71,10 +73,23 @@ public class DynamicsDoorsTests
     public void ClosestOnTriangle_coversFaceEdgeAndVertexRegions()
     {
         Vector3 a = Vector3.zero, b = Vector3.right, c = Vector3.up;
-        Assert.AreEqual(new Vector3(0.25f, 0.25f, 0), DrivePhysBones.ClosestOnTriangle(new Vector3(0.25f, 0.25f, 2), a, b, c));
-        Assert.AreEqual(a, DrivePhysBones.ClosestOnTriangle(new Vector3(-1, -1, 0), a, b, c));
-        Assert.AreEqual(new Vector3(0.5f, 0, 0), DrivePhysBones.ClosestOnTriangle(new Vector3(0.5f, -3, 1), a, b, c));
-        var h = DrivePhysBones.ClosestOnTriangle(new Vector3(1, 1, 0), a, b, c);
+        Assert.AreEqual(new Vector3(0.25f, 0.25f, 0), ReportPenetration.ClosestOnTriangle(new Vector3(0.25f, 0.25f, 2), a, b, c));
+        Assert.AreEqual(a, ReportPenetration.ClosestOnTriangle(new Vector3(-1, -1, 0), a, b, c));
+        Assert.AreEqual(new Vector3(0.5f, 0, 0), ReportPenetration.ClosestOnTriangle(new Vector3(0.5f, -3, 1), a, b, c));
+        var h = ReportPenetration.ClosestOnTriangle(new Vector3(1, 1, 0), a, b, c);
         Assert.AreEqual(0.5f, h.x, 1e-5f); Assert.AreEqual(0.5f, h.y, 1e-5f);
+    }
+
+    [Test]
+    public void RestoreRecord_roundTrips_andRejectsMalformed()
+    {
+        var bones = new List<(string, Vector3, Quaternion)> { ("Armature/Hips/UpperLeg_L", new Vector3(0.1f, -0.2f, 3e-7f), new Quaternion(0.1f, 0.2f, 0.3f, 0.9273618f)) };
+        var raw = DrivePhysBones.FormatRecord("MANUKA_lilToon", true, bones);
+        Assert.IsTrue(DrivePhysBones.TryParseRecord(raw, out var root, out var enable, out var back));
+        Assert.AreEqual("MANUKA_lilToon", root);
+        Assert.IsTrue(enable);
+        Assert.AreEqual(bones, back);
+        Assert.IsFalse(DrivePhysBones.TryParseRecord(raw.Replace("\t0.1,", "\tx,"), out _, out _, out _));
+        Assert.IsFalse(DrivePhysBones.TryParseRecord("v0\nA\n1", out _, out _, out _));
     }
 }
