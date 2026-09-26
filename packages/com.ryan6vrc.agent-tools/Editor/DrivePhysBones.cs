@@ -31,6 +31,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (!EditorApplication.isPlaying) return Fail("play mode only: enter play (isCompiling and isUpdating both false), then call again");
             if (_pump != null) return Fail("a drive is already running: poll DrivePhysBones.Status()");
             if (SessionState.GetString(RecordKey, "").Length > 0) return Fail("a torn-down drive's restore record is unresolved; it resolves on the next editor tick — poll DrivePhysBones.Status(), then call again");
+            if (WriteDynamics.Pending) return Fail("a WriteDynamics field set is still cycling its physbone hosts inactive; poll WriteDynamics.Status(), then call again");
             if (EditorApplication.isPaused) return Fail("the editor is paused (a held GrabPhysBone freezes it): GrabPhysBone.Release(resume: true) first");
             var err = ParsePoses(poses, out var pl); if (err != null) return Fail(err);
             var h = SceneHandle.Resolve(avatarRoot); if (!h.Ok) return Fail(h.Refusal);
