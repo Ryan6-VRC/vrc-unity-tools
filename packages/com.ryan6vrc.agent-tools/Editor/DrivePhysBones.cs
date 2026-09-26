@@ -161,8 +161,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     string name = row == 0 ? "rest" : pl.poses[row - 1].name;
                     if (row == 0) { restAv = av; restIn = inF; }
                     var mv = av.Select((c, i) => (c - restAv[i]).magnitude * 100).ToArray(); var mf = inF.Select((c, i) => (c - restIn[i]).magnitude * 100).ToArray();
-                    float Mm(List<float> j) => j.Count > 0 ? j.Average() * 1000 : 0;
-                    log.Append(stage + " | " + name + " | " + approach + " | " + N(mv.Max()) + "/" + N(mv.Average()) + " | " + N(mf.Max()) + "/" + N(mf.Average()) + " | " + N(Mm(jitMid), "F2") + "/" + N(Mm(jitEnd), "F2") + " | ");
+                    string Mm(List<float> j) => j.Count > 0 ? N(j.Average() * 1000, "F2") : "-";   // an empty window is unmeasured, never still
+                    log.Append(stage + " | " + name + " | " + approach + " | " + N(mv.Max()) + "/" + N(mv.Average()) + " | " + N(mf.Max()) + "/" + N(mf.Average()) + " | " + Mm(jitMid) + "/" + Mm(jitEnd) + " | ");
                     if (body) { var r = ReportPenetration.Measure(body, gar); log.Append(r.behind + "/" + r.signed + " " + r.edgeNearest + " | " + N(r.maxDepthCm) + "\n"); } else log.Append("- | -\n");
                     if (views.Length > 0)
                     {

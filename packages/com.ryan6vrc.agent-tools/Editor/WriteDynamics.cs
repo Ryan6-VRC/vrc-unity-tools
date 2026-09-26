@@ -183,7 +183,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     continue;
                 }
                 log.Add((existing ? "rewrite " : "add ") + row + (c.locked ? " locked" : " unlocked"));
-                steps.Add(() => baked.Add((c.target, WriteConstraint(existing ?? (VRCConstraintBase)Undo.AddComponent(target.gameObject, type), src, c))));
+                steps.Add(() => { var con = WriteConstraint(existing ?? (VRCConstraintBase)Undo.AddComponent(target.gameObject, type), src, c); if (c.locked) baked.Add((c.target, con)); });   // only a locked row's Activate bakes an offset
             }
             writes = () => { foreach (var step in steps) step(); };
             return null;
@@ -320,7 +320,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return con;
         }
 
-        /// <summary>The rotation offset each written constraint holds after its write, as an angle: a locked row's Activate
+        /// <summary>The rotation offset each locked row's constraint holds after its write, as an angle: a locked row's Activate
         /// bakes the gap between target and sources into it, so a large one says the sources sit in a far-off frame.
         /// <c>RotationOffset</c> where the type has one (rotation, aim, look-at), else the largest per-source
         /// <c>ParentRotationOffset</c> (parent); a position or scale constraint has none and is skipped.</summary>
