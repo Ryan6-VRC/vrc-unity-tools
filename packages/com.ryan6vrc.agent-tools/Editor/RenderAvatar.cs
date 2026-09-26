@@ -508,18 +508,23 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <param name="margin">fraction of the frame left as border; avatar fills ~(1-margin). Raise to zoom out.</param>
         /// <param name="showGizmos">draw component gizmos (physbone/contact/collider) into the capture.</param>
         /// <param name="resolution">per-tile square edge in px; the sheet is auto-downscaled to a ~2048 edge cap.</param>
+        /// <param name="framePrefix">when set, each angle's tile is also written as <c>&lt;framePrefix&gt;_&lt;angle&gt;.png</c>
+        /// (an absolute path prefix, e.g. <c>&lt;dir&gt;/&lt;stage&gt;_&lt;pose&gt;</c>), the per-view layout frame tilers read.</param>
         public static string Run(
             string target,
             string[] angles = null,
             string[] hide = null,
             float margin = 0.15f,
             bool showGizmos = false,
-            int resolution = 1024)
+            int resolution = 1024,
+            string framePrefix = null)
         {
             var r = CaptureCore(target, angles, hide, margin, showGizmos, resolution, default);
             if (!r.ok) return r.fail;
             string png = WriteSheetAndManifest(r);
             if (png == null) return Fail(r.label, "failed to write the grab PNG/manifest to temp (disk full or locked path?)");
+            if (framePrefix != null && !WriteFrames(r, framePrefix))
+                return Fail(r.label, "failed to write the per-angle frames at '" + framePrefix + "_<angle>.png' (missing directory or locked path?)");
             string proxyInfo = (r.proxiesKept + r.proxiesHidden) > 0
                 ? " proxies=kept:" + r.proxiesKept + ",hidden:" + r.proxiesHidden : "";
             // cam=ok signals a diffable camera manifest was written beside the png — CaptureDiff's `against`.
@@ -1361,6 +1366,24 @@ namespace Ryan6Vrc.AgentTools.Editor
                 + identical + "/" + r.manifest.views.Length + originNote + r.hideNote + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + " | png=" + pngB;
             Debug.Log(summary);
             return summary;
+        }
+
+        // One PNG per angle, cut back out of the composed sheet in Compose's row-major layout.
+        private static bool WriteFrames(CoreResult r, string prefix)
+        {
+            var m = r.manifest;
+            var tex = new Texture2D(m.tileRes, m.tileRes, TextureFormat.RGBA32, false, false);
+            try
+            {
+                for (int i = 0; i < m.angles.Length; i++)
+                {
+                    tex.SetPixels32(ExtractTile(r.sheet, r.sheetW, i % m.cols * m.tileRes, (m.rows - 1 - i / m.cols) * m.tileRes, m.tileRes)); tex.Apply();
+                    File.WriteAllBytes(prefix + "_" + m.angles[i] + ".png", tex.EncodeToPNG());
+                }
+                return true;
+            }
+            catch (Exception e) { Debug.LogWarning("[RenderAvatar] frame write failed: " + e.Message); return false; }
+            finally { UnityEngine.Object.DestroyImmediate(tex); }
         }
 
         // Extract a tileRes×tileRes tile at (x0,y0) from a bottom-origin composed sheet into its own buffer.
