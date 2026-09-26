@@ -64,20 +64,26 @@ public class DynamicsDoorsTests
     [TestCase("[{\"name\":\"rest\"}]", "rest")]
     [TestCase("[{\"name\":\"a\",\"ops\":[{\"pitch\":1}]}]", "bone")]
     [TestCase("[{\"name\":\"a\",\"ops\":[{\"bone\":\"B\",\"move\":\"1,2\"}]}]", "move")]
+    [TestCase("[{\"name\":\"Sit\"},{\"name\":\"sit\"}]", "same frame file name")]
+    [TestCase("[{\"name\":\"leg L\"},{\"name\":\"leg_L\"}]", "same frame file name")]
+    [TestCase("[{\"name\":\"REST\"}]", "'rest'")]
     public void Poses_malformed_refuse(string json, string named)
     {
         StringAssert.Contains(named, DrivePhysBones.ParsePoses(json, out _));
     }
 
     [Test]
-    public void ClosestOnTriangle_coversFaceEdgeAndVertexRegions()
+    public void ClosestOnTriangle_signsOnlyAFaceInterior()
     {
         Vector3 a = Vector3.zero, b = Vector3.right, c = Vector3.up;
-        Assert.AreEqual(new Vector3(0.25f, 0.25f, 0), ReportPenetration.ClosestOnTriangle(new Vector3(0.25f, 0.25f, 2), a, b, c));
-        Assert.AreEqual(a, ReportPenetration.ClosestOnTriangle(new Vector3(-1, -1, 0), a, b, c));
-        Assert.AreEqual(new Vector3(0.5f, 0, 0), ReportPenetration.ClosestOnTriangle(new Vector3(0.5f, -3, 1), a, b, c));
-        var h = ReportPenetration.ClosestOnTriangle(new Vector3(1, 1, 0), a, b, c);
-        Assert.AreEqual(0.5f, h.x, 1e-5f); Assert.AreEqual(0.5f, h.y, 1e-5f);
+        Assert.AreEqual(new Vector3(0.25f, 0.25f, 0), ReportPenetration.ClosestOnTriangle(new Vector3(0.25f, 0.25f, 2), a, b, c, out bool face));
+        Assert.IsTrue(face);
+        Assert.AreEqual(a, ReportPenetration.ClosestOnTriangle(new Vector3(-1, -1, 0), a, b, c, out face));
+        Assert.IsFalse(face);
+        Assert.AreEqual(new Vector3(0.5f, 0, 0), ReportPenetration.ClosestOnTriangle(new Vector3(0.5f, -3, 1), a, b, c, out face));
+        Assert.IsFalse(face);
+        var h = ReportPenetration.ClosestOnTriangle(new Vector3(1, 1, 0), a, b, c, out face);
+        Assert.AreEqual(0.5f, h.x, 1e-5f); Assert.AreEqual(0.5f, h.y, 1e-5f); Assert.IsFalse(face);
     }
 
     [Test]

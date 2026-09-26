@@ -30,6 +30,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (err != null) return Fail(err);
             bool play = EditorApplication.isPlaying, isPrefab = root != null && root.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase);
             if (play && isPrefab) return Fail("a prefab asset is edit-mode only; in play pass the live scene root");
+            if (isPrefab && !whatIf && (root.Replace('\\', '/').StartsWith("Assets/Vendor/") || root.Replace('\\', '/').StartsWith("Packages/")))
+                return Fail("'" + root + "' is vendor or package content, which this door never saves; write a scene instance or an owned prefab (whatIf may still preview it)");
             if (play && t.moves.Length + t.nodes.Length > 0) return Fail("nodes and moves are edit-mode only (a physbone root cannot move under a running solver); exit play and re-run");
             if (play && t.physbones.Length > 0 && DrivePhysBones.Running) return Fail("a DrivePhysBones drive is running and a live field set re-initialises its chains mid-sample; wait for DrivePhysBones.Status() to finish");
             GameObject go;
@@ -153,7 +155,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     col.shapeType = (VRCPhysBoneColliderBase.ShapeType)Enum.Parse(typeof(VRCPhysBoneColliderBase.ShapeType), c.shape, true);
                     col.radius = c.radius; col.height = c.height; col.position = cp.Value; col.rotation = Quaternion.Euler(cr.Value);
                 }
-                log.Add("node `" + n.parent + "/" + n.name + "` rot=" + rot.Value.ToString("F1") + (n.physbone ? " +physbone" : "") + (hasCol ? " +collider " + c.shape + " r=" + c.radius + " h=" + c.height : ""));
+                log.Add("node `" + n.parent + "/" + n.name + "` rot=" + rot.Value.ToString("F1") + (n.physbone ? " +physbone" : "") + (hasCol ? " +collider " + c.shape + " r=" + c.radius.ToString("0.###", CultureInfo.InvariantCulture) + " h=" + c.height.ToString("0.###", CultureInfo.InvariantCulture) : ""));
             }
             return null;
         }
