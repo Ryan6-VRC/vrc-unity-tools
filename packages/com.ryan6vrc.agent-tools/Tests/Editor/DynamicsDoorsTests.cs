@@ -5,7 +5,7 @@ using UnityEngine;
 
 // The pure parts of WriteDynamics, DrivePhysBones and ReportPenetration: table and pose parsing (including the defaults a
 // caller relies on by omission, which JsonUtility only honours through field initialisers), the closest-point primitive
-// under the penetration count, and the drive's restore record, whose writer and reader sit a domain reload apart. The
+// under the penetration count, the frame gate on a live field set's host cycle, and the drive's restore record, whose writer and reader sit a domain reload apart. The
 // writes and the drive mutate live objects, so they are proven by execute_code on a real avatar (docs/verify.md §Test
 // venue), not here.
 public class DynamicsDoorsTests
@@ -48,6 +48,15 @@ public class DynamicsDoorsTests
         Assert.AreEqual(new Vector3(1, 2, 3), WriteDynamics.ParseVector("(1,2,3)"));
         Assert.IsNull(WriteDynamics.ParseVector("1,2"));
         Assert.IsNull(WriteDynamics.ParseVector("a,b,c"));
+    }
+
+    // A live field set reaches the solver only once its host has been inactive across a frame boundary: re-activating
+    // on the arming frame is the same-frame toggle that leaves the chain on its old fields.
+    [Test]
+    public void HostCycle_reactivatesOnlyOnALaterFrame()
+    {
+        Assert.IsFalse(WriteDynamics.CycleDue(120, 120));
+        Assert.IsTrue(WriteDynamics.CycleDue(120, 121));
     }
 
     [Test]

@@ -21,8 +21,21 @@ namespace Ryan6Vrc.AgentTools.Editor
         [Serializable] public class ConstraintRow { public string target; public string type = "VRCRotationConstraint"; public Source[] sources = new Source[0]; public float globalWeight = 1f; public bool locked = true; }
         [Serializable] public class Source { public string path; public float weight = 1f; }
 
-        const string Tag = "[WriteDynamics]";
+        const string Tag = "[WriteDynamics]", Key = "Ryan6Vrc.WriteDynamics.status";
         const int KeyableSlots = 16;
+        static EditorApplication.CallbackFunction _pump;
+        internal static bool Pending => _pump != null;
+
+        /// <summary>The last live write's result: PENDING until its physbone hosts have re-activated, then its OK line and rows.</summary>
+        public static string Status()
+        {
+            var s = SessionState.GetString(Key, Tag + " idle: no live physbone write has run this editor session");
+            return _pump == null && s.Contains("=> PENDING") ? s.Replace("=> PENDING", "=> FAIL") + " | torn down before the hosts re-activated (play exit or domain reload); re-check the hosts named above" : s;
+        }
+
+        /// <summary>A host deactivated on frame <paramref name="armed"/> re-activates once a later frame has run: a physbone
+        /// takes a live field set only after its host GameObject has been inactive across a frame boundary.</summary>
+        internal static bool CycleDue(int armed, int now) => now > armed;
 
         public static string Run(string root, string table, bool whatIf = false)
         {
@@ -34,6 +47,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return Fail("'" + root + "' is vendor or package content, which this door never saves; write a scene instance or an owned prefab (whatIf may still preview it)");
             if (play && t.moves.Length + t.nodes.Length > 0) return Fail("nodes and moves are edit-mode only (a physbone root cannot move under a running solver); exit play and re-run");
             if (play && t.physbones.Length > 0 && DrivePhysBones.Running) return Fail("a DrivePhysBones drive is running and a live field set re-initialises its chains mid-sample; wait for DrivePhysBones.Status() to finish");
+            if (play && t.physbones.Length > 0 && _pump != null) return Fail("a live field set is still cycling its physbone hosts; poll WriteDynamics.Status(), then call again");
+            if (play && t.physbones.Length > 0 && EditorApplication.isPaused) return Fail("the editor is paused (a held GrabPhysBone freezes it), so no frame can pass for a field set to reach the solver: GrabPhysBone.Release(resume: true) first");
             GameObject go;
             if (isPrefab) { if (AssetDatabase.LoadAssetAtPath<GameObject>(root) == null) return Fail("no prefab asset at '" + root + "'"); go = PrefabUtility.LoadPrefabContents(root); }
             else { var h = SceneHandle.Resolve(root); if (!h.Ok) return Fail(h.Refusal); go = h.Object; }
@@ -41,15 +56,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             try
             {
                 // Every mutation is undo-recorded into one group, so a refusal, a whatIf or a write-time throw reverts it whole.
-                var log = new List<string>(); Action writes = null;
+                var log = new List<string>(); Action writes = null; var hosts = new List<GameObject>();
                 err = MakeNodes(go.transform, t.nodes, log, out int made);
-                if (err == null) err = Plan(go.transform, t, play, log, out writes);
+                if (err == null) err = Plan(go.transform, t, play, log, hosts, out writes);
                 if (err == null && !whatIf) try { writes(); } catch (Exception e) { err = "a write threw and the whole table was rolled back: " + e.GetType().Name + ": " + e.Message; }
                 if (err != null || whatIf) Undo.RevertAllDownToGroup(group);
                 if (err != null) return Fail(err);
                 if (!whatIf && isPrefab) PrefabUtility.SaveAsPrefabAsset(go, root);
                 string summary = Tag + (whatIf ? " Preview " : " Write ") + root + (play ? " (live)" : "") + " => OK | nodes=" + made + " moves=" + t.moves.Sum(m => m.to.Length) + " physbones=" + t.physbones.Length
                     + " constraints=" + t.constraints.Length + (whatIf ? " | whatIf: nothing written" : isPrefab ? " | saved" : play ? " | reverts on play exit" : " | scene dirtied, not saved");
+                if (play && !whatIf && hosts.Count > 0) return CycleHosts(go.transform, root, summary, hosts, log);
                 var line = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "write-dynamics_" + RunLogFormat.Leaf(root), summary, string.Join("\n", log) + "\n", ".md");
                 Debug.Log(line);
                 return line + "\n" + string.Join("\n", log.Take(12)) + (log.Count > 12 ? "\n… " + (log.Count - 12) + " more rows in the log" : "");
@@ -59,7 +75,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Resolves and validates every row and returns the writes as one action over objects resolved here,
         /// so nothing is looked up again once writing starts. Returns the first refusal, or null.</summary>
-        static string Plan(Transform root, Table t, bool play, List<string> log, out Action writes)
+        static string Plan(Transform root, Table t, bool play, List<string> log, List<GameObject> hosts, out Action writes)
         {
             string err; writes = null; var steps = new List<Action>();
             var targets = new Dictionary<Transform, VRCPhysBoneBase>();   // move destination -> the physbone moving there
@@ -91,13 +107,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (!moved && targets.ContainsValue(pb)) return "physbone '" + s.physbone + "' is moved by this table; set fields on its new roots";
                 var so = new SerializedObject(pb);
                 foreach (var kv in s.set) if ((err = SetProp(root, so, kv)) != null) return "physbones '" + s.physbone + "': " + err;
+                if (play && pb.transform == root) return "physbones '" + s.physbone + "' is hosted on '" + root.name + "' itself, and a live field set applies only by cycling its host inactive, which would restart the whole avatar; move it to a holder in edit mode";
                 log.Add("set `" + s.physbone + "` " + string.Join(" ", s.set));
+                if (play && !hosts.Contains(pb.gameObject)) hosts.Add(pb.gameObject); // play has no moves, so the live physbone is pb
                 steps.Add(() =>
                 {
                     var live = moved ? copies[at] : pb; var lso = new SerializedObject(live);
                     foreach (var kv in s.set) SetProp(root, lso, kv);
                     lso.ApplyModifiedProperties();
-                    if (play) { live.enabled = false; live.enabled = true; } // a live field change reaches the solver only through re-initialisation
                 });
             }
             var seen = new HashSet<Transform>();
@@ -126,6 +143,37 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             writes = () => { foreach (var step in steps) step(); };
             return null;
+        }
+
+        /// <summary>A live field set lands on the component but reaches the solver only after its host GameObject has been
+        /// inactive across a frame boundary; toggling the component or the GameObject within one frame, or the chain's root
+        /// GameObject when the host is a separate holder, leaves the chain on its old fields. A component toggle split across
+        /// frames applied on a bare rig but not on a composed avatar, so it is not the route. Every active host goes inactive
+        /// now and back on the first later frame, off <c>update</c> (never <c>delayCall</c>, which an unfocused editor does not
+        /// pump), and the result lands in <see cref="Status"/>. Everything under a host cycles with it, so a physbone the table
+        /// never named re-initialises too and is counted as collateral.</summary>
+        static string CycleHosts(Transform root, string handle, string summary, List<GameObject> hosts, List<string> log)
+        {
+            var cycled = hosts.Where(h => h.activeInHierarchy).ToArray();
+            foreach (var h in hosts.Except(cycled)) log.Add("host `" + PathOf(root, h.transform) + "` is inactive: its chain takes the written fields when it activates");
+            int collateral = cycled.SelectMany(h => h.GetComponentsInChildren<VRCPhysBoneBase>()).Distinct().Count(p => !hosts.Contains(p.gameObject));
+            int armed = Time.frameCount;
+            foreach (var h in cycled) h.SetActive(false);
+            string names = string.Join(", ", cycled.Select(h => "`" + PathOf(root, h.transform) + "`"));
+            string pending = Tag + " Write " + handle + " (live) => PENDING | " + cycled.Length + " physbone hosts inactive since frame " + armed + " (" + names + "); poll Ryan6Vrc.AgentTools.Editor.WriteDynamics.Status()";
+            SessionState.SetString(Key, pending + "\n" + string.Join("\n", log));
+            _pump = () =>
+            {
+                if (EditorApplication.isPlaying && !CycleDue(armed, Time.frameCount)) return;
+                EditorApplication.update -= _pump; _pump = null;
+                if (!EditorApplication.isPlaying) { SessionState.SetString(Key, Tag + " Write " + handle + " (live) => FAIL | play exited before the hosts re-activated; the write reverted with play"); return; }
+                foreach (var h in cycled) if (h != null) h.SetActive(true);
+                var line = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "write-dynamics_" + RunLogFormat.Leaf(handle), summary + " | reinit: " + cycled.Length
+                    + " hosts cycled inactive frames " + armed + "->" + Time.frameCount + " (collateral: " + collateral + " other physbones beneath them); each chain restarted from its current pose, which is now its rest, and any grab on it dropped", string.Join("\n", log) + "\n", ".md");
+                SessionState.SetString(Key, line + "\n" + string.Join("\n", log)); Debug.Log(line);
+            };
+            EditorApplication.update += _pump;
+            return pending + "\n" + string.Join("\n", log.Take(12)) + (log.Count > 12 ? "\n… " + (log.Count - 12) + " more rows in the log" : "");
         }
 
         /// <summary>Creates each absent node (an existing one is left alone): an empty child at the parent's origin,
