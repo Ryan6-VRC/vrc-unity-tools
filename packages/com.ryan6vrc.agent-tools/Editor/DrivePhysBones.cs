@@ -65,6 +65,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             SkinnedMeshRenderer body = null; SkinnedMeshRenderer[] gar = null;
             if (bodyMesh != null && (err = ReportPenetration.Resolve(rt, bodyMesh, garments, out body, out gar)) != null) return Fail(err);
+            if (body == null && groups != null && groups.Length > 0) return Fail("groups splits the penetration count, so it needs bodyMesh and garments");
             if ((err = ReportPenetration.ResolveGroups(rt, groups, out var groupT)) != null) return Fail(err);
             var ops = new List<(Transform bone, BoneOp op)>[pl.poses.Length];
             for (int i = 0; i < ops.Length; i++)
@@ -138,10 +139,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                         for (int i = 0; i < moved.Length; i++) { restP[i] = poseP[i] = moved[i].localPosition; restR[i] = poseR[i] = moved[i].localRotation; }
                         SessionState.SetString(RecordKey, FormatRecord(rootPath, animEnable, moved.Select((b, i) => (AnimationUtility.CalculateTransformPath(b, rt), restP[i], restR[i])).ToList()));
                         frame0 = Frames(); t0 = Time.time;
+                        // A target a pose op writes, or one a chain anywhere on the avatar simulates, moves off its source legitimately.
+                        var simRoots = rt.GetComponentsInChildren<VRCPhysBoneBase>(true).Where(p => p.isActiveAndEnabled).Select(WriteDynamics.EffRoot).ToArray();
                         foreach (var c in rt.GetComponentsInChildren<VRCConstraintBase>(true))
                         {
                             var src = Followed(c); var tgt = c.GetEffectiveTargetTransform();
-                            if (src == null || tgt == null || moved.Contains(tgt) || pbs.Any(p => tgt != WriteDynamics.EffRoot(p) && tgt.IsChildOf(WriteDynamics.EffRoot(p)))) continue;
+                            if (src == null || tgt == null || moved.Contains(tgt) || simRoots.Any(r => tgt != r && tgt.IsChildOf(r))) continue;
                             var (fp, fq) = InSource(tgt, src); follow.Add((tgt, src, fp, fq, 0f, 0f));
                         }
                         SessionState.SetString(Key, Tag + " running '" + stage + "' 0/" + pl.poses.Length + " (rest frozen at frame " + Time.frameCount + ") | log=" + logPath + "\n");
@@ -244,13 +247,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>The one source a constraint follows rigidly, or null: an active, locked parent constraint on all six
-        /// axes, at full weight, in world space, with exactly one weighted source.</summary>
+        /// axes, in world space, with exactly one weighted source, it and the constraint both at full weight.</summary>
         static Transform Followed(VRCConstraintBase c)
         {
             if (!(c is VRCParentConstraintBase p) || !c.isActiveAndEnabled || !c.IsActive || !c.Locked || c.GlobalWeight < 0.999f || c.SolveInLocalSpace || c.FreezeToWorld) return null;
             if (!(p.AffectsPositionX && p.AffectsPositionY && p.AffectsPositionZ && p.AffectsRotationX && p.AffectsRotationY && p.AffectsRotationZ)) return null;
             var w = Enumerable.Range(0, c.Sources.Count).Select(i => c.Sources[i]).Where(s => s.Weight > 0).ToArray();
-            return w.Length == 1 ? w[0].SourceTransform : null;
+            return w.Length == 1 && w[0].Weight >= 0.999f ? w[0].SourceTransform : null;
         }
 
         /// <summary>A transform's place in another's unscaled frame.</summary>

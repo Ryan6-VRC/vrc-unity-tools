@@ -150,7 +150,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 r.signed++; k.signed++;
                 float s = Vector3.Dot(p - bq, Vector3.Cross(bv[bt[bi + 1]] - bv[bt[bi]], bv[bt[bi + 2]] - bv[bt[bi]]).normalized);
                 if (s < -Behind) { r.behind++; k.behind++; depth = Mathf.Max(depth, -s); k.maxDepthCm = Mathf.Max(k.maxDepthCm, -s * 100f); }
-                else k.gapSumCm += s * 100f;
+                else k.gapSumCm += Mathf.Max(0f, s) * 100f;   // a vertex within the 2 mm tolerance sits on the face, not off it
             }
             r.maxDepthCm = depth * 100f;
             return r;
@@ -211,7 +211,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             int Max(System.Func<Bucket, int> f, (string, string) k) => rows.Max(r => r.buckets.TryGetValue(k, out var b) ? f(b) : 0);
             var keys = rows.SelectMany(r => r.buckets.Keys).Distinct().Select(k => (k, behind: Max(b => b.behind, k), signed: Max(b => b.signed, k)))
                 .OrderByDescending(x => x.behind).ThenByDescending(x => x.signed).ThenBy(x => x.k.Item1, System.StringComparer.Ordinal).ThenBy(x => x.k.Item2, System.StringComparer.Ordinal).ToList();
-            var sb = new System.Text.StringBuilder("penetration by region and group (cell: behind/signed, d max depth cm, g mean gap cm; - no vertex in the bucket; worst bucket first)\nregion | group | "
+            var sb = new System.Text.StringBuilder("penetration by region and group (cell: behind/signed, e edgeNearest, d max depth cm, g mean gap cm; - no vertex in the bucket; worst bucket first)\nregion | group | "
                 + string.Join(" | ", rows.Select(r => r.row)));
             foreach (var x in keys.Take(cap))
                 sb.Append("\n" + x.k.Item1 + " | " + x.k.Item2 + " | " + string.Join(" | ", rows.Select(r => r.buckets.TryGetValue(x.k, out var b) ? Cell(b) : "-")));
@@ -219,7 +219,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return sb.ToString();
         }
 
-        static string Cell(Bucket b) => b.behind + "/" + b.signed + (b.behind > 0 ? " d" + N(b.maxDepthCm) : "") + (b.signed > b.behind ? " g" + Gap(b) : "");
+        static string Cell(Bucket b) => b.behind + "/" + b.signed + " e" + b.edge + (b.behind > 0 ? " d" + N(b.maxDepthCm) : "") + (b.signed > b.behind ? " g" + Gap(b) : "");
 
         static string N(float f) => f.ToString("F1", CultureInfo.InvariantCulture);
 

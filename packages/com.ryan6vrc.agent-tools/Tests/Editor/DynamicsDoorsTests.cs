@@ -262,9 +262,10 @@ public class DynamicsDoorsTests
     {
         var rest = Buckets(("Hips>Butt_L", "Back", 0, 10, 0f, 8f));
         var down = Buckets(("Hips>Butt_L", "Back", 4, 10, 1.5f, 3f), ("Chest", "Front", 2, 2, 0.5f, 0f));
+        down[("Chest", "Front")].edge = 3;
         var p = ReportPenetration.Pivot(new List<(string, Dictionary<(string, string), ReportPenetration.Bucket>)> { ("rest", rest), ("faceDown", down) }).Split('\n');
         Assert.AreEqual("region | group | rest | faceDown", p[1]);
-        Assert.AreEqual("Hips>Butt_L | Back | 0/10 g0.8 | 4/10 d1.5 g0.5", p[2]);
-        Assert.AreEqual("Chest | Front | - | 2/2 d0.5", p[3]);
+        Assert.AreEqual("Hips>Butt_L | Back | 0/10 e0 g0.8 | 4/10 e0 d1.5 g0.5", p[2]);
+        Assert.AreEqual("Chest | Front | - | 2/2 e3 d0.5", p[3]);
     }
 }
