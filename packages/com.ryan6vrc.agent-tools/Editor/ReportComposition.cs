@@ -89,6 +89,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// result is read back here — a timed-out call loses nothing and must not be re-run.</summary>
         public static string Verify(string avatarRoot)
         {
+            // In play the handle resolves to the play build, a different object from the one the bake was keyed on.
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+                return Refuse("Verify is edit-mode only — in play the root resolves to the play build, not the object the bake ran on; exit play, then call again");
             var handle = SceneHandle.Resolve(avatarRoot);
             if (!handle.Ok) return Refuse("avatarRoot: " + handle.Refusal);
             return CompositionBake.Verify(handle.Object);

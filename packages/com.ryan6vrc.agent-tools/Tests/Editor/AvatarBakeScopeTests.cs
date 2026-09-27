@@ -45,6 +45,29 @@ namespace Ryan6Vrc.AgentTools.Tests
         }
 
         [Test]
+        public void ASourceOutsideTheActiveScene_isClonedIntoTheActiveScene()
+        {
+            // A source in the active scene cannot tell "lands in the active scene" from "lands in the source's
+            // scene"; a source in a second, non-active scene can.
+            var active = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            var other = UnityEditor.SceneManagement.EditorSceneManager.NewPreviewScene();
+            try
+            {
+                UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(_source, other);
+                using (var bake = Scope(_source, go => true, () => { }))
+                {
+                    Assert.AreEqual(active, bake.Clone.scene);
+                    Assert.AreNotEqual(other, bake.Clone.scene);
+                }
+            }
+            finally
+            {
+                // Closing the scene destroys _source with it; TearDown's null check then skips it.
+                UnityEditor.SceneManagement.EditorSceneManager.ClosePreviewScene(other);
+            }
+        }
+
+        [Test]
         public void Dispose_destroysTheCloneAndFiresThePairing()
         {
             int post = 0;

@@ -112,6 +112,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 WriteArtifact(path, Refusal(path, "the avatar root was destroyed before the bake ran", "(destroyed)"));
                 return;
             }
+            // Rechecked here as well as at Run: play can be entered between scheduling and this tick, and a bake
+            // then would measure the play build.
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+            {
+                WriteArtifact(path, Refusal(path, "play mode was entered before the bake ran; exit play and re-issue the bake", root.name));
+                return;
+            }
 
             // `using`, so the SDK's paired post-callback fires on EVERY exit — including the refusal return
             // below, which sits inside the scope precisely because that early return used to skip the pairing.
@@ -825,6 +832,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             public int Bones;
             public int Colliders;
             public bool Active;
+            /// <summary>The SDK scan skips this component (an <c>EditorOnly</c> ancestor, or the SDK's public
+            /// ignore hook), so it is listed but left out of the sum.</summary>
+            public bool Ignored;
             public string Caveat;
         }
 
@@ -873,12 +883,25 @@ namespace Ryan6Vrc.AgentTools.Editor
                     Path = RelPath(clone, pb.transform),
                     Active = pb.isActiveAndEnabled,
                     Colliders = pb.colliders == null ? 0 : pb.colliders.Count(c => c != null),
+                    Ignored = ScanIgnores(pb),
                 };
                 try { pb.InitTransforms(true); row.Bones = pb.bones == null ? -1 : pb.bones.Count; }
                 catch (Exception e) { row.Bones = -1; row.Caveat = "InitTransforms threw " + e.GetType().Name; }
                 read.PhysBones.Add(row);
             }
             return read;
+        }
+
+        /// <summary>Whether the SDK's scan leaves <paramref name="c"/> out, judged by the two rules it exposes:
+        /// an <c>EditorOnly</c>-tagged ancestor, and <c>AvatarPerformance.ShouldIgnoreComponent</c>, the hook a
+        /// package can set.</summary>
+        private static bool ScanIgnores(Component c)
+        {
+            for (var t = c.transform; t != null; t = t.parent)
+                if (t.CompareTag("EditorOnly")) return true;
+            var hook = VRC.SDKBase.Validation.Performance.AvatarPerformance.ShouldIgnoreComponent;
+            try { return hook != null && hook(c); }
+            catch (Exception) { return false; }
         }
 
         private static readonly VRC.SDKBase.Validation.Performance.AvatarPerformanceCategory[] NotACategory =
@@ -956,17 +979,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             int sum = 0;
             foreach (var r in read.PhysBones.OrderBy(r => r.Path, StringComparer.Ordinal))
             {
-                if (r.Bones >= 0) sum += r.Bones;
+                if (r.Bones >= 0 && !r.Ignored) sum += r.Bones;
+                string caveat = r.Ignored ? "skipped by the SDK scan; not in the sum" + (r.Caveat != null ? "; " + r.Caveat : "") : r.Caveat ?? "";
                 lines.Add("| `" + RunLogFormat.Cell(r.Path) + "` | " + (r.Active ? "yes" : "no") + " | "
                         + (r.Bones >= 0 ? r.Bones.ToString(CultureInfo.InvariantCulture) : "unreadable") + " | "
-                        + r.Colliders + " | " + RunLogFormat.Cell(r.Caveat ?? "") + " |");
+                        + r.Colliders + " | " + RunLogFormat.Cell(caveat) + " |");
             }
             string sdkTransforms = stats.physBone.HasValue
                 ? stats.physBone.Value.transformCount.ToString(CultureInfo.InvariantCulture) : "—";
             lines.Add("| total bones | | " + sum + " | | SDK `physBone.transformCount` = " + sdkTransforms + " |");
             lines.Add("");
-            lines.Add("A chain's `bones` is the list the SDK counts, so the column sums to `physBone.transformCount` and "
-                    + "locates where that budget goes; a residual means an unreadable row. `colliders` is the chain's "
+            lines.Add("A chain's `bones` is the list the SDK counts, so the column locates where `physBone.transformCount` "
+                    + "goes and should sum to it; a residual means an unreadable row, or a chain the scan skips by a rule "
+                    + "this census does not see. `colliders` is the chain's "
                     + "reference count, not the SDK's `collisionCheckCount` rule. Inactive chains count at full weight.");
 
             summaryKeys = "rank=" + overall + (setBy.Count > 0 ? " rankSetBy=" + string.Join(",", setBy) : "");
