@@ -25,7 +25,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         const string SessionKey = "Ryan6Vrc.DrivePhysBones.playSession", LogKey = "Ryan6Vrc.DrivePhysBones.log";
         const int StableFrames = 60;        // the Animator instance must survive this many evaluated frames before rest is frozen
         const float Still = 1e-5f;          // world metres: a per-frame tip displacement below this is no motion
-        const float DriftCm = 2f, DriftDeg = 10f;   // a followed target this far off its rest place in its source's frame is not being driven
+        // A followed target this far off its rest place in its source's frame is not being driven. A running constraint holds it
+        // exactly, even behind a physbone source mid-swing; an idle one in a strand shows up as a few degrees of one joint's bend.
+        const float DriftCm = 0.5f, DriftDeg = 2f;
         static EditorApplication.CallbackFunction _pump;
         internal static bool Running => _pump != null;
 
@@ -90,8 +92,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             string rootHandle = h.Object.GetInstanceID().ToString(CultureInfo.InvariantCulture), rootPath = FullPath(rt);
             var pen = new List<(string row, Dictionary<(string region, string group), ReportPenetration.Bucket> buckets)>(); string penMaps = null;
-            // A single-source parent constraint holds its target fixed in its source's frame while it executes.
-            var follow = new List<(Transform tgt, Transform src, Vector3 p, Quaternion q, float cm, float deg)>();
+            // A single-source parent constraint holds its target fixed in its source's frame, world or local as it solves, while it executes.
+            var follow = new List<(Transform tgt, Transform src, bool local, Vector3 p, Quaternion q, float cm, float deg)>();
             var log = new StringBuilder(); var tipMoved = new bool[tips.Count]; var frameMoved = new bool[chains.Count]; var jitMid = new List<float>(); var jitEnd = new List<float>();
             Vector3[] restAv = null, restIn = null, prevAv = null, prevIn = null; (Vector3, Quaternion)[] frame0 = null;
             bool frozen = false, animEnable = true; int row = 0, lastFrame = -1, stable = 0, lastAnim = int.MinValue, shotFails = 0; string firstShotFail = null;
@@ -145,7 +147,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         {
                             var src = Followed(c); var tgt = c.GetEffectiveTargetTransform();
                             if (src == null || tgt == null || moved.Contains(tgt) || simRoots.Any(r => tgt != r && tgt.IsChildOf(r))) continue;
-                            var (fp, fq) = InSource(tgt, src); follow.Add((tgt, src, fp, fq, 0f, 0f));
+                            var (fp, fq) = InSource(tgt, src, c.SolveInLocalSpace); follow.Add((tgt, src, c.SolveInLocalSpace, fp, fq, 0f, 0f));
                         }
                         SessionState.SetString(Key, Tag + " running '" + stage + "' 0/" + pl.poses.Length + " (rest frozen at frame " + Time.frameCount + ") | log=" + logPath + "\n");
                         log.Append("root=" + rootPath + " stage=" + stage + " started=" + started + " playSession=" + session + " chains=" + chains.Count + " tips=" + tips.Count + " hold=" + N(hold, "0.##") + "s freezeFrame=" + Time.frameCount
@@ -188,8 +190,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     for (int i = 0; i < follow.Count; i++)
                     {
                         var f = follow[i]; if (f.tgt == null || f.src == null) continue;
-                        var (fp, fq) = InSource(f.tgt, f.src);
-                        follow[i] = (f.tgt, f.src, f.p, f.q, Mathf.Max(f.cm, (fp - f.p).magnitude * 100), Mathf.Max(f.deg, Quaternion.Angle(fq, f.q)));
+                        var (fp, fq) = InSource(f.tgt, f.src, f.local);
+                        follow[i] = (f.tgt, f.src, f.local, f.p, f.q,Mathf.Max(f.cm, (fp - f.p).magnitude * 100), Mathf.Max(f.deg, Quaternion.Angle(fq, f.q)));
                     }
                     if (views.Length > 0)
                     {
@@ -209,6 +211,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                                 + " stop play, refresh with a script reload, wait for the editor to be ready, re-enter play and drive again | " : "")
                             + (dead.Length > 0 ? "no solve: frame moved, no tip moved in it: " + string.Join(", ", dead) + " | " : "")
                             + "stillChains=" + still.Length + "/" + chains.Count + (still.Length > 0 ? " (" + string.Join(", ", still) + ")" : "")
+                            + " | followedConstraints=" + follow.Count + (follow.Count > 0 ? " maxDrift=" + N(follow.Max(f => f.cm), "F2") + "cm/" + N(follow.Max(f => f.deg), "F2") + "deg" : "")
                             + (shotFails > 0 ? " | frames: " + shotFails + " grab(s) failed, first: " + firstShotFail : views.Length > 0 ? " | frames=" + outDir : "");
                         Finish(dead.Length > 0 || idle.Length > 0 ? "FAIL" : "OK", detail);
                         return;
@@ -247,17 +250,20 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>The one source a constraint follows rigidly, or null: an active, locked parent constraint on all six
-        /// axes, in world space, with exactly one weighted source, it and the constraint both at full weight.</summary>
+        /// axes, not frozen to world, with exactly one weighted source, it and the constraint both at full weight.</summary>
         static Transform Followed(VRCConstraintBase c)
         {
-            if (!(c is VRCParentConstraintBase p) || !c.isActiveAndEnabled || !c.IsActive || !c.Locked || c.GlobalWeight < 0.999f || c.SolveInLocalSpace || c.FreezeToWorld) return null;
+            if (!(c is VRCParentConstraintBase p) || !c.isActiveAndEnabled || !c.IsActive || !c.Locked || c.GlobalWeight < 0.999f || c.FreezeToWorld) return null;
             if (!(p.AffectsPositionX && p.AffectsPositionY && p.AffectsPositionZ && p.AffectsRotationX && p.AffectsRotationY && p.AffectsRotationZ)) return null;
             var w = Enumerable.Range(0, c.Sources.Count).Select(i => c.Sources[i]).Where(s => s.Weight > 0).ToArray();
             return w.Length == 1 && w[0].Weight >= 0.999f ? w[0].SourceTransform : null;
         }
 
-        /// <summary>A transform's place in another's unscaled frame.</summary>
-        static (Vector3, Quaternion) InSource(Transform t, Transform s) => (Quaternion.Inverse(s.rotation) * (t.position - s.position), Quaternion.Inverse(s.rotation) * t.rotation);
+        /// <summary>A transform's place in another's unscaled frame: world poses, or for a constraint solving in local space
+        /// the two local poses, which is the relation such a constraint holds fixed while it runs.</summary>
+        static (Vector3, Quaternion) InSource(Transform t, Transform s, bool local) => local
+            ? (Quaternion.Inverse(s.localRotation) * (t.localPosition - s.localPosition), Quaternion.Inverse(s.localRotation) * t.localRotation)
+            : (Quaternion.Inverse(s.rotation) * (t.position - s.position), Quaternion.Inverse(s.rotation) * t.rotation);
 
         static IEnumerable<Transform> Leaves(Transform t, HashSet<Transform> ignore)
         {
