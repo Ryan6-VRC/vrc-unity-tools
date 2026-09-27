@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using UnityEditor;
@@ -138,6 +139,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var diff = Diff(census, built, paramFilter, incomplete == null);
                 string geometryKeys;
                 var geometry = GeometrySection(ReadGeometry(root), ReadGeometry(clone), paramFilter, out geometryKeys);
+                // The SDK scan runs once, on the clone, and feeds both the Performance section and the texture
+                // total — inside the scope for the same reason as every read here.
+                var perfRead = ReadPerformance(clone);
+                string perfKeys;
+                var performance = PerformanceSection(perfRead, paramFilter, out perfKeys);
                 // Both texture reads sit INSIDE the scope for ReadGeometry's reason: the optimizers' output
                 // textures are NDMF `__Generated` assets the post-callback deletes, so after the scope closes
                 // the built side has nothing left to measure.
@@ -146,7 +152,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var texBuilt = ReadTextures(clone, out swapBuilt);
                 string textureKeys;
                 var textures = TextureSection(texAuthored, texBuilt,
-                    SdkTextureMegabytes(root), SdkTextureMegabytes(clone),
+                    SdkTextureMegabytes(root), perfRead.Stats != null ? perfRead.Stats.textureMegabytes : null,
                     swapAuthored, swapBuilt, paramFilter, out textureKeys);
                 string summary = string.Format(CultureInfo.InvariantCulture,
                     // `unattributed=` is deliberately GONE rather than kept with a narrower meaning: it used to
@@ -155,7 +161,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // signal that the denominator changed. Renaming both halves makes the change visible.
                     // unlintableSurfaces rides here too, not only EmitPlain: bake is the EXACTNESS mode, so a
                     // surface this run could not walk is where the omission costs most.
-                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} {15} mode=bake => OK | log={12}",
+                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} {15} {16} mode=bake => OK | log={12}",
                     root.name, census.Surfaces.Count, census.Params.Count,
                     diff.Count(d => d.Category == "kept"), diff.Count(d => d.Category == "renamed"),
                     diff.Count(d => d.Category == "dropped"), diff.Count(d => d.Category == "merged"),
@@ -164,7 +170,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     diff.Count(d => d.Category == "not-in-scope"),
                     diff.Count(d => d.Category == "built-side-unread"), path,
                     census.UnlintableSurfaces > 0 ? " unlintableSurfaces=" + census.UnlintableSurfaces : "",
-                    geometryKeys, textureKeys);
+                    geometryKeys, textureKeys, perfKeys);
 
                 var section = new List<string>
                 {
@@ -226,7 +232,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                           + "pre-optimizer view.");
 
                 string body = "summary: " + summary + "\n\n"
-                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry, textures);
+                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry, textures, performance);
                 WriteArtifact(path, body);
                 Debug.Log(summary);
             }   // scope closes: the clone is destroyed and OnPostprocessAvatar fires, in that order
@@ -805,6 +811,165 @@ namespace Ryan6Vrc.AgentTools.Editor
                     + "settings rather than textures and does not move this figure.");
 
             summaryKeys = "textureMB=" + SdkCell(sdkBuilt);
+            return lines;
+        }
+
+        // ── Performance: the SDK's own scan of the clone ─────────────────────────────────────────────
+
+        /// <summary>One physbone component on the clone: its bone list as the SDK builds it
+        /// (<c>InitTransforms(force: true)</c>) and its collider references. <c>Bones</c> is -1 when the list
+        /// could not be built, which is a named row, never a zero.</summary>
+        internal struct PhysBoneRow
+        {
+            public string Path;
+            public int Bones;
+            public int Colliders;
+            public bool Active;
+            public string Caveat;
+        }
+
+        internal sealed class PerformanceRead
+        {
+            /// <summary>Null when the scan threw; <see cref="Error"/> then says how.</summary>
+            public VRC.SDKBase.Validation.Performance.Stats.AvatarPerformanceStats Stats;
+            public string Error;
+            /// <summary>How the constraint-group refresh went: <c>ok</c>, <c>unavailable</c> or <c>failed: …</c>.</summary>
+            public string ConstraintRefresh;
+            public readonly List<PhysBoneRow> PhysBones = new List<PhysBoneRow>();
+        }
+
+        private static readonly MethodInfo MiRefreshConstraintGroups =
+            VendorReflect.FindType("VRC.Dynamics.VRCConstraintManager")?.GetMethod("Sdk_ManuallyRefreshGroups",
+                BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
+        /// <summary>Scan the baked clone the way the upload panel does, PC thresholds. The clone's VRC constraints
+        /// are regrouped first: on a fresh clone the manager has not grouped them, and <c>constraintDepth</c>
+        /// then reads a different wrong figure bake to bake (measured 48, then 62, against 14 refreshed, on one
+        /// row). The census runs AFTER the scan because <c>InitTransforms</c> rebuilds each chain's bone list.</summary>
+        internal static PerformanceRead ReadPerformance(GameObject clone)
+        {
+            var read = new PerformanceRead();
+            var constraints = clone.GetComponentsInChildren<VRC.Dynamics.VRCConstraintBase>(true);
+            if (MiRefreshConstraintGroups == null) read.ConstraintRefresh = "unavailable";
+            else
+            {
+                try { MiRefreshConstraintGroups.Invoke(null, new object[] { constraints }); read.ConstraintRefresh = "ok"; }
+                catch (Exception e) { read.ConstraintRefresh = "failed: " + VendorReflect.DescribeInvokeError(e); }
+            }
+
+            try
+            {
+                var stats = new VRC.SDKBase.Validation.Performance.Stats.AvatarPerformanceStats(false);
+                VRC.SDKBase.Validation.Performance.AvatarPerformance.CalculatePerformanceStats(clone.name, clone, stats, false);
+                stats.CalculateAllPerformanceRatings(false);
+                read.Stats = stats;
+            }
+            catch (Exception e) { read.Error = e.GetType().Name + ": " + e.Message; }
+
+            foreach (var pb in clone.GetComponentsInChildren<VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone>(true))
+            {
+                var row = new PhysBoneRow
+                {
+                    Path = RelPath(clone, pb.transform),
+                    Active = pb.isActiveAndEnabled,
+                    Colliders = pb.colliders == null ? 0 : pb.colliders.Count(c => c != null),
+                };
+                try { pb.InitTransforms(true); row.Bones = pb.bones == null ? -1 : pb.bones.Count; }
+                catch (Exception e) { row.Bones = -1; row.Caveat = "InitTransforms threw " + e.GetType().Name; }
+                read.PhysBones.Add(row);
+            }
+            return read;
+        }
+
+        private static readonly VRC.SDKBase.Validation.Performance.AvatarPerformanceCategory[] NotACategory =
+        {
+            VRC.SDKBase.Validation.Performance.AvatarPerformanceCategory.None,
+            VRC.SDKBase.Validation.Performance.AvatarPerformanceCategory.Overall,
+            VRC.SDKBase.Validation.Performance.AvatarPerformanceCategory.AvatarPerformanceCategoryCount,
+        };
+
+        /// <summary>The <c>## Performance</c> section and (out) its summary keys. Pure over the read, so it is
+        /// testable without a bake. Every rating is the SDK's own; nothing here knows a threshold.</summary>
+        internal static List<string> PerformanceSection(PerformanceRead read, string paramFilter, out string summaryKeys)
+        {
+            var lines = new List<string>
+            {
+                "the SDK's performance scan of the clone (PC); paramFilter does not narrow this section"
+                    + (string.IsNullOrEmpty(paramFilter) ? ""
+                       : " (`" + RunLogFormat.Cell(paramFilter) + "` is active and narrows the parameter tables ONLY)"),
+                "",
+            };
+            if (read.Stats == null)
+            {
+                lines.Add("**The scan threw, so no figure is published:** " + RunLogFormat.Cell(read.Error ?? "(no error recorded)"));
+                summaryKeys = "rank=unread";
+                return lines;
+            }
+
+            var stats = read.Stats;
+            var overall = stats.GetPerformanceRatingForCategory(VRC.SDKBase.Validation.Performance.AvatarPerformanceCategory.Overall);
+            var setBy = new List<string>();
+            lines.Add("overall: **" + overall + "**");
+            lines.Add("");
+            lines.Add("| category | rating |");
+            lines.Add("| --- | --- |");
+            foreach (VRC.SDKBase.Validation.Performance.AvatarPerformanceCategory cat in
+                     Enum.GetValues(typeof(VRC.SDKBase.Validation.Performance.AvatarPerformanceCategory)))
+            {
+                if (Array.IndexOf(NotACategory, cat) >= 0) continue;
+                string cell;
+                try
+                {
+                    var r = stats.GetPerformanceRatingForCategory(cat);
+                    cell = r.ToString();
+                    if (r == overall && overall != VRC.SDKBase.Validation.Performance.PerformanceRating.None) setBy.Add(cat.ToString());
+                }
+                catch (Exception e) { cell = "unread (" + e.GetType().Name + ")"; }
+                lines.Add("| " + cat + " | " + cell + " |");
+            }
+
+            lines.Add("");
+            lines.Add("| stat | value |");
+            lines.Add("| --- | --- |");
+            foreach (var f in stats.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public))
+            {
+                if (f.Name == "avatarName") continue;
+                var v = f.GetValue(stats);
+                if (v == null) { lines.Add("| " + f.Name + " | — |"); continue; }
+                var vt = v.GetType();
+                // The SDK's own nested stat structs (physBone) are expanded; anything else prints whole.
+                if (!vt.IsPrimitive && !vt.IsEnum && (vt.Namespace ?? "").StartsWith("VRC", StringComparison.Ordinal))
+                    foreach (var g in vt.GetFields(BindingFlags.Instance | BindingFlags.Public))
+                        lines.Add("| " + f.Name + "." + g.Name + " | " + Convert.ToString(g.GetValue(v), CultureInfo.InvariantCulture) + " |");
+                else
+                    lines.Add("| " + f.Name + " | " + RunLogFormat.Cell(Convert.ToString(v, CultureInfo.InvariantCulture)) + " |");
+            }
+            lines.Add("");
+            lines.Add("Constraint-group refresh before the scan: " + read.ConstraintRefresh
+                    + (read.ConstraintRefresh == "ok" ? "." : " — `constraintDepth` above may not be the figure an upload rates."));
+
+            lines.Add("");
+            lines.Add("### PhysBone chains");
+            lines.Add("");
+            lines.Add("| physbone (path) | active | bones | colliders | caveat |");
+            lines.Add("| --- | --- | --- | --- | --- |");
+            int sum = 0;
+            foreach (var r in read.PhysBones.OrderBy(r => r.Path, StringComparer.Ordinal))
+            {
+                if (r.Bones >= 0) sum += r.Bones;
+                lines.Add("| `" + RunLogFormat.Cell(r.Path) + "` | " + (r.Active ? "yes" : "no") + " | "
+                        + (r.Bones >= 0 ? r.Bones.ToString(CultureInfo.InvariantCulture) : "unreadable") + " | "
+                        + r.Colliders + " | " + RunLogFormat.Cell(r.Caveat ?? "") + " |");
+            }
+            string sdkTransforms = stats.physBone.HasValue
+                ? stats.physBone.Value.transformCount.ToString(CultureInfo.InvariantCulture) : "—";
+            lines.Add("| total bones | | " + sum + " | | SDK `physBone.transformCount` = " + sdkTransforms + " |");
+            lines.Add("");
+            lines.Add("A chain's `bones` is the list the SDK counts, so the column sums to `physBone.transformCount` and "
+                    + "locates where that budget goes; a residual means an unreadable row. `colliders` is the chain's "
+                    + "reference count, not the SDK's `collisionCheckCount` rule. Inactive chains count at full weight.");
+
+            summaryKeys = "rank=" + overall + (setBy.Count > 0 ? " rankSetBy=" + string.Join(",", setBy) : "");
             return lines;
         }
 

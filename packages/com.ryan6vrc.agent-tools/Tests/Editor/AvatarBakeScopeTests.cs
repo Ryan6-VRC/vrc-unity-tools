@@ -28,7 +28,7 @@ namespace Ryan6Vrc.AgentTools.Tests
         }
 
         [Test]
-        public void SuccessfulBake_handsBackTheCloneInTheSourcesScene()
+        public void SuccessfulBake_handsBackTheCloneInTheActiveScene()
         {
             using (var bake = Scope(_source, go => true, () => { }))
             {
@@ -38,8 +38,9 @@ namespace Ryan6Vrc.AgentTools.Tests
                 Assert.IsNotNull(bake.Clone);
                 Assert.AreEqual("__test_clone", bake.Clone.name);
                 // The orphan sweep in RenderThumbnail's teardown depends on this: a clone stranded before the
-                // caller moves it is only reachable if it was created into the source's scene.
-                Assert.AreEqual(_source.scene, bake.Clone.scene);
+                // caller moves it is reachable there only because it lands in the active scene, where the
+                // target sits.
+                Assert.AreEqual(UnityEngine.SceneManagement.SceneManager.GetActiveScene(), bake.Clone.scene);
             }
         }
 

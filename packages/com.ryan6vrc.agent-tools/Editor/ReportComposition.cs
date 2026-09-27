@@ -60,6 +60,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// two-phase for that reason (see <see cref="Verify"/>). It also publishes a <c>## Geometry</c> section —
         /// triangles per renderer, authored against built — which is free at this scale: one index-count read
         /// per submesh, measured at 0.04 ms per side on a 23-renderer composed avatar whose bake took ~16 s.
+        /// It also publishes a <c>## Performance</c> section, the SDK's own scan of the clone — every rated stat,
+        /// the SDK's rating per category, and each physbone chain's share of the transform budget. Edit mode only.
         /// Default off: cheap and safe is the default,
         /// exactness is opt-in. <paramref name="paramFilter"/> narrows every parameter table to names
         /// containing it, for chasing one parameter without paying for the whole avatar.</summary>
@@ -71,6 +73,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             var descriptor = root.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             if (descriptor == null)
                 return Refuse("'" + avatarRoot + "' has no VRCAvatarDescriptor — Run expects the avatar (descriptor) root");
+
+            // In play the scene root IS the play build, with its own animation running: re-baking it measures
+            // neither the authored avatar nor the upload.
+            if (bake && EditorApplication.isPlayingOrWillChangePlaymode)
+                return Refuse("bake:true is edit-mode only — the avatar in play is already the play build; exit play, then call again");
 
             var census = Census(root, descriptor, paramFilter);
             if (!bake) return EmitPlain(root, census, paramFilter);
@@ -459,7 +466,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         internal static string RenderBody(GameObject root, CensusResult c, string paramFilter, string mode,
-            List<string> bakeSection, List<string> geometrySection = null, List<string> textureSection = null)
+            List<string> bakeSection, List<string> geometrySection = null, List<string> textureSection = null,
+            List<string> performanceSection = null)
         {
             var sb = new StringBuilder();
             sb.Append("# ReportComposition: ").Append(root.name).Append('\n');
@@ -512,6 +520,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append("\n## Textures\n\n");
                 foreach (var l in textureSection) sb.Append(l).Append('\n');
             }
+            if (performanceSection != null)
+            {
+                sb.Append("\n## Performance\n\n");
+                foreach (var l in performanceSection) sb.Append(l).Append('\n');
+            }
             // Scope is emitted in BOTH modes. It used to be the `else` arm of the bake section, so a bake
             // artifact — the one whose heading promises composed truth — lost every scope rule while still
             // rendering the whole Parameters table above, including its authored-only `synced` column.
@@ -519,8 +532,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (bakeSection == null)
                 sb.Append("Plain mode reports what is AUTHORED. It makes no namespace-resolution claim: ").Append(ScopeAuthoredNames).Append(".\n");
             else
-                sb.Append("The **Bake diff**, **Geometry** and **Textures** sections are measured against a fresh build — names in ")
-                  .Append("the first, triangles in the second, texture memory in the third. Everything ABOVE them — the ")
+                sb.Append("The **Bake diff**, **Geometry**, **Textures** and **Performance** sections are measured against a fresh build — names in ")
+                  .Append("the first, triangles in the second, texture memory in the third, the SDK's own performance scan in the fourth. Everything ABOVE them — the ")
                   .Append("merge-surface, parameter and menu tables — is still the authored census, and the bake ")
                   .Append("resolves only the names: read a row's build-time identity from the diff, not from the tables.\n");
             sb.Append("An empty writers cell reads `").Append(ScopeWriters).Append("` because the writer set for a parameter is open — an empty cell is not a finding.\n");

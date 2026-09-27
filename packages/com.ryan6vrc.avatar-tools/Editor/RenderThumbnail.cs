@@ -436,8 +436,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // clone is already destroyed by the scope and `baked` by ClosePreviewScene — this is the
                 // backstop for a stray NDMF intermediate, or a `baked` stranded by a bake that threw after
                 // instantiating the clone into the live scene but before we could move it to the preview.
-                // It reaches that stranded clone because AvatarBake creates it in the SOURCE's scene and
-                // leaves it there until we move it — contract, not incident (see AvatarBakeScope).
+                // It reaches that stranded clone only while the target sits in the active scene: AvatarBake
+                // creates the clone in the ACTIVE scene and leaves it there until we move it (see AvatarBakeScope).
                 if (targetScene.IsValid())
                 {
                     foreach (var go in targetScene.GetRootGameObjects())
