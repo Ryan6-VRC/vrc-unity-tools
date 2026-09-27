@@ -28,7 +28,7 @@ namespace Ryan6Vrc.AgentTools.Tests
         }
 
         [Test]
-        public void SuccessfulBake_handsBackTheCloneInTheSourcesScene()
+        public void SuccessfulBake_handsBackTheCloneInTheActiveScene()
         {
             using (var bake = Scope(_source, go => true, () => { }))
             {
@@ -38,8 +38,32 @@ namespace Ryan6Vrc.AgentTools.Tests
                 Assert.IsNotNull(bake.Clone);
                 Assert.AreEqual("__test_clone", bake.Clone.name);
                 // The orphan sweep in RenderThumbnail's teardown depends on this: a clone stranded before the
-                // caller moves it is only reachable if it was created into the source's scene.
-                Assert.AreEqual(_source.scene, bake.Clone.scene);
+                // caller moves it is reachable there only because it lands in the active scene, where the
+                // target sits.
+                Assert.AreEqual(UnityEngine.SceneManagement.SceneManager.GetActiveScene(), bake.Clone.scene);
+            }
+        }
+
+        [Test]
+        public void ASourceOutsideTheActiveScene_isClonedIntoTheActiveScene()
+        {
+            // A source in the active scene cannot tell "lands in the active scene" from "lands in the source's
+            // scene"; a source in a second, non-active scene can.
+            var active = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            var other = UnityEditor.SceneManagement.EditorSceneManager.NewPreviewScene();
+            try
+            {
+                UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(_source, other);
+                using (var bake = Scope(_source, go => true, () => { }))
+                {
+                    Assert.AreEqual(active, bake.Clone.scene);
+                    Assert.AreNotEqual(other, bake.Clone.scene);
+                }
+            }
+            finally
+            {
+                // Closing the scene destroys _source with it; TearDown's null check then skips it.
+                UnityEditor.SceneManagement.EditorSceneManager.ClosePreviewScene(other);
             }
         }
 

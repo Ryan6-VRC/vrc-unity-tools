@@ -143,9 +143,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             try
             {
                 _clone = UnityEngine.Object.Instantiate(source);
-                // Instantiate places the clone in the SOURCE's scene, and it stays there until a caller moves
-                // it. RenderThumbnail's orphan sweep relies on exactly that to catch a clone stranded by a
-                // throw before it reaches the preview scene, so this is contract, not incidental.
+                // Instantiate places the clone in the ACTIVE scene, not the source's: a source in a preview
+                // scene was measured cloning into the active one. It stays there until a caller moves it.
+                // RenderThumbnail's orphan sweep, which walks the target's scene, catches a clone stranded by a
+                // throw only because its target sits in the active scene.
                 _clone.name = cloneName ?? source.name + " (composition bake)";
                 _clone.SetActive(true); // an inactive avatar is not a valid preprocess target
 
