@@ -5,7 +5,7 @@ using UnityEngine;
 
 // The pure parts of WriteDynamics, DrivePhysBones and ReportPenetration: table, curve and pose parsing, the ramp and jitter windows, the stale-status line (including the defaults a
 // caller relies on by omission, which JsonUtility only honours through field initialisers), the closest-point primitive
-// under the penetration count, the frame gate on a live field set's host cycle, and the drive's restore record, whose writer and reader sit a domain reload apart. The
+// under the penetration count, its region and group bucketing and their tables, the frame gate on a live field set's host cycle, and the drive's restore record, whose writer and reader sit a domain reload apart. The
 // writes and the drive mutate live objects, so they are proven by execute_code on a real avatar (docs/verify.md §Test
 // venue), not here.
 public class DynamicsDoorsTests
@@ -195,5 +195,76 @@ public class DynamicsDoorsTests
         StringAssert.Contains("was OK", s);
         StringAssert.Contains("log=Assets/Agent/RunLogs/x.md", s);
         StringAssert.Contains("earlier play session", s);
+    }
+
+    static Transform Node(string name, Transform parent) { var t = new GameObject(name).transform; t.SetParent(parent, false); return t; }
+
+    // A costume armature's bones are not the avatar's, so a region is found by name, and the non-humanoid branch a
+    // body bone hangs from (a butt or breast bone) is what separates it from the rest of its humanoid bone.
+    [Test]
+    public void Region_mapsByNameUpTheAncestors_andNamesTheBranch()
+    {
+        var root = new GameObject("Costume").transform;
+        try
+        {
+            var hips = Node("Hips", Node("Armature", root)); var butt = Node("Butt_L", hips); var end = Node("Butt_L_end", butt);
+            var merged = Node("Chest$a1b2", hips); var breast = Node("Breast_R", merged);
+            var human = new Dictionary<string, string> { { "Hips", "Hips" }, { "Chest", "Chest" } };
+            Assert.AreEqual("Hips", ReportPenetration.Region(hips, human));
+            Assert.AreEqual("Hips>Butt_L", ReportPenetration.Region(end, human));
+            Assert.AreEqual("Chest>Breast_R", ReportPenetration.Region(breast, human));
+            Assert.AreEqual(ReportPenetration.Unmapped, ReportPenetration.Region(root, human));
+            Assert.AreEqual(ReportPenetration.Unmapped, ReportPenetration.Region(null, human));
+        }
+        finally { Object.DestroyImmediate(root.gameObject); }
+    }
+
+    // Merged ears and tail skin to their own bones, so an innermost-group walk keeps them out of a hair chain's bucket.
+    [Test]
+    public void GroupOf_takesTheInnermostGroup_andOtherwiseOther()
+    {
+        var root = new GameObject("Avatar").transform;
+        try
+        {
+            var head = Node("Head", root); var back = Node("Phys", Node("Back", head)); var strand = Node("Strand_2", Node("Strand_1", back));
+            var front = Node("Phys", Node("Front", head)); var tail = Node("Tail", root);
+            var label = ReportPenetration.GroupLabels(root, new[] { back, front, strand.parent });
+            Assert.AreEqual("Head/Back/Phys", label[back]);
+            Assert.AreEqual("Strand_1", ReportPenetration.GroupOf(strand, root, label));
+            Assert.AreEqual("Head/Front/Phys", ReportPenetration.GroupOf(front, root, label));
+            Assert.AreEqual(ReportPenetration.Other, ReportPenetration.GroupOf(tail, root, label));
+            Assert.AreEqual(ReportPenetration.Other, ReportPenetration.GroupOf(head, root, label));
+        }
+        finally { Object.DestroyImmediate(root.gameObject); }
+    }
+
+    static Dictionary<(string, string), ReportPenetration.Bucket> Buckets(params (string region, string group, int behind, int signed, float depth, float gapSum)[] b)
+    {
+        var d = new Dictionary<(string, string), ReportPenetration.Bucket>();
+        foreach (var x in b) d[(x.region, x.group)] = new ReportPenetration.Bucket { behind = x.behind, signed = x.signed, maxDepthCm = x.depth, gapSumCm = x.gapSum };
+        return d;
+    }
+
+    // The standoff is the mean over the signed vertices not behind; a bucket with none has no gap, not a zero one.
+    [Test]
+    public void Table_ordersByBehind_capsWithASum_andMeansTheGapOverVerticesInFront()
+    {
+        var t = ReportPenetration.Table(Buckets(("Hips>Butt_L", "Back", 3, 7, 1.3f, 6f), ("Chest", "Front", 9, 9, 2f, 0f), ("Spine", "Back", 0, 4, 0f, 12f), ("Neck", "Back", 0, 1, 0f, 0.5f)), 3).Split('\n');
+        Assert.AreEqual("Chest | Front | 9/9 | 0 | 2.0 | -", t[1]);
+        Assert.AreEqual("Hips>Butt_L | Back | 3/7 | 0 | 1.3 | 1.5", t[2]);
+        Assert.AreEqual("Spine | Back | 0/4 | 0 | - | 3.0", t[3]);
+        StringAssert.Contains("1 more buckets: behind 0, signed 1", t[4]);
+    }
+
+    // Old-versus-new per region needs every row's reading of one bucket on one line, and an absent bucket told apart from an empty one.
+    [Test]
+    public void Pivot_putsEachBucketOnOneLine_acrossRows()
+    {
+        var rest = Buckets(("Hips>Butt_L", "Back", 0, 10, 0f, 8f));
+        var down = Buckets(("Hips>Butt_L", "Back", 4, 10, 1.5f, 3f), ("Chest", "Front", 2, 2, 0.5f, 0f));
+        var p = ReportPenetration.Pivot(new List<(string, Dictionary<(string, string), ReportPenetration.Bucket>)> { ("rest", rest), ("faceDown", down) }).Split('\n');
+        Assert.AreEqual("region | group | rest | faceDown", p[1]);
+        Assert.AreEqual("Hips>Butt_L | Back | 0/10 g0.8 | 4/10 d1.5 g0.5", p[2]);
+        Assert.AreEqual("Chest | Front | - | 2/2 d0.5", p[3]);
     }
 }

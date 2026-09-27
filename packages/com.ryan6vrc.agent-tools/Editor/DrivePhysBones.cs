@@ -7,6 +7,7 @@ using System.Text;
 using UnityEditor;
 using UnityEngine;
 using VRC.Dynamics;
+using VRC.Dynamics.ManagedTypes;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
@@ -24,6 +25,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         const string SessionKey = "Ryan6Vrc.DrivePhysBones.playSession", LogKey = "Ryan6Vrc.DrivePhysBones.log";
         const int StableFrames = 60;        // the Animator instance must survive this many evaluated frames before rest is frozen
         const float Still = 1e-5f;          // world metres: a per-frame tip displacement below this is no motion
+        const float DriftCm = 2f, DriftDeg = 10f;   // a followed target this far off its rest place in its source's frame is not being driven
         static EditorApplication.CallbackFunction _pump;
         internal static bool Running => _pump != null;
 
@@ -36,7 +38,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return PlaySession.IsCurrent(SessionState.GetInt(SessionKey, 0)) ? s : PlaySession.Stale(Tag, "drive", s.Split('\n')[0]);
         }
 
-        public static string Run(string avatarRoot, string poses, string chainPrefix = "", string stage = "drive", string bodyMesh = null, string[] garments = null, float hold = 2.5f, string outDir = null, string[] views = null)
+        public static string Run(string avatarRoot, string poses, string chainPrefix = "", string stage = "drive", string bodyMesh = null, string[] garments = null, float hold = 2.5f, string outDir = null, string[] views = null, string[] groups = null)
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode && !EditorApplication.isPlaying) return Fail("play entry is still in progress (the build runs first); call again once EditorApplication.isPlaying reads true — a drive armed now would be dropped by the play-entry domain reload");
             if (!EditorApplication.isPlaying) return Fail("play mode only: enter play (isCompiling and isUpdating both false), then call again");
@@ -63,6 +65,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             SkinnedMeshRenderer body = null; SkinnedMeshRenderer[] gar = null;
             if (bodyMesh != null && (err = ReportPenetration.Resolve(rt, bodyMesh, garments, out body, out gar)) != null) return Fail(err);
+            if ((err = ReportPenetration.ResolveGroups(rt, groups, out var groupT)) != null) return Fail(err);
             var ops = new List<(Transform bone, BoneOp op)>[pl.poses.Length];
             for (int i = 0; i < ops.Length; i++)
             {
@@ -85,6 +88,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             (Vector3, Quaternion)[] Frames() => chains.Select(c => (In(rt, c.frame.position), Quaternion.Inverse(rt.rotation) * c.frame.rotation)).ToArray();
 
             string rootHandle = h.Object.GetInstanceID().ToString(CultureInfo.InvariantCulture), rootPath = FullPath(rt);
+            var pen = new List<(string row, Dictionary<(string region, string group), ReportPenetration.Bucket> buckets)>(); string penMaps = null;
+            // A single-source parent constraint holds its target fixed in its source's frame while it executes.
+            var follow = new List<(Transform tgt, Transform src, Vector3 p, Quaternion q, float cm, float deg)>();
             var log = new StringBuilder(); var tipMoved = new bool[tips.Count]; var frameMoved = new bool[chains.Count]; var jitMid = new List<float>(); var jitEnd = new List<float>();
             Vector3[] restAv = null, restIn = null, prevAv = null, prevIn = null; (Vector3, Quaternion)[] frame0 = null;
             bool frozen = false, animEnable = true; int row = 0, lastFrame = -1, stable = 0, lastAnim = int.MinValue, shotFails = 0; string firstShotFail = null;
@@ -96,6 +102,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             void Finish(string verdict, string detail)
             {
                 EditorApplication.update -= _pump; _pump = null;
+                if (pen.Count > 0) log.Append("\n" + penMaps + "\n" + ReportPenetration.Pivot(pen) + "\n");
                 if (frozen) { try { Put(restP, restR); var a = rt.GetComponent<Animator>(); if (a) a.enabled = animEnable; } catch (Exception) { } } // gone after a play exit
                 SessionState.EraseString(RecordKey);
                 string summary = Tag + " Drive " + rootPath + " => " + verdict + " | stage=" + stage + (detail.Length > 0 ? " | " + detail : ""), line;
@@ -126,14 +133,20 @@ namespace Ryan6Vrc.AgentTools.Editor
                         // A Run issued before the play build or the emulator finished resolved objects they may since have replaced.
                         int live = under == null ? -1 : rt.GetComponentsInChildren<VRCPhysBoneBase>(true).Count(p => p.isActiveAndEnabled && WriteDynamics.EffRoot(p).IsChildOf(under));
                         if (pbs.Any(p => p == null || !p.isActiveAndEnabled) || moved.Any(b => b == null) || tips.Any(t => t.leaf == null) || live != pbs.Length)
-                        { Finish("FAIL", "aborted: the avatar was rebuilt after Run resolved it (" + pbs.Length + " chains at the call, " + live + " live now); nothing was posed — call Run again"); return; }
+                        { Finish("FAIL", "aborted: the avatar was rebuilt after Run resolved it (" + pbs.Length + " chains at the call, " + live + " live now), as it can be in the first seconds of play; nothing was posed — call Run again"); return; }
                         frozen = true; animEnable = anim == null || anim.enabled;
                         for (int i = 0; i < moved.Length; i++) { restP[i] = poseP[i] = moved[i].localPosition; restR[i] = poseR[i] = moved[i].localRotation; }
                         SessionState.SetString(RecordKey, FormatRecord(rootPath, animEnable, moved.Select((b, i) => (AnimationUtility.CalculateTransformPath(b, rt), restP[i], restR[i])).ToList()));
                         frame0 = Frames(); t0 = Time.time;
+                        foreach (var c in rt.GetComponentsInChildren<VRCConstraintBase>(true))
+                        {
+                            var src = Followed(c); var tgt = c.GetEffectiveTargetTransform();
+                            if (src == null || tgt == null || moved.Contains(tgt) || pbs.Any(p => tgt != WriteDynamics.EffRoot(p) && tgt.IsChildOf(WriteDynamics.EffRoot(p)))) continue;
+                            var (fp, fq) = InSource(tgt, src); follow.Add((tgt, src, fp, fq, 0f, 0f));
+                        }
                         SessionState.SetString(Key, Tag + " running '" + stage + "' 0/" + pl.poses.Length + " (rest frozen at frame " + Time.frameCount + ") | log=" + logPath + "\n");
                         log.Append("root=" + rootPath + " stage=" + stage + " started=" + started + " playSession=" + session + " chains=" + chains.Count + " tips=" + tips.Count + " hold=" + N(hold, "0.##") + "s freezeFrame=" + Time.frameCount
-                            + " animator=" + id + (anim && !anim.enabled ? "(found disabled)" : "") + " body=" + (body ? body.name : "-") + " frames=" + (views.Length > 0 ? outDir : "-")
+                            + " animator=" + id + (anim && !anim.enabled ? "(found disabled)" : "") + " body=" + (body ? body.name : "-") + " followedConstraints=" + follow.Count + " frames=" + (views.Length > 0 ? outDir : "-")
                             + "\napproach: snap (one frame) or ramp <s>/<frames> (smoothstep from the previous row's pose; the hold starts on arrival). jitter: mean per-frame max tip step over the last "
                             + N(Mathf.Min(0.5f, hold / 2), "0.##") + " s of each half of the hold, mid/end\n"
                             + "stage | pose | approach | tipTravelCm root max/mean | tipTravelCm inFrame max/mean | jitterMmPerFrame mid/end | vertsBehindBody/signed edgeNearest | maxDepthCm\n");
@@ -163,7 +176,18 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var mv = av.Select((c, i) => (c - restAv[i]).magnitude * 100).ToArray(); var mf = inF.Select((c, i) => (c - restIn[i]).magnitude * 100).ToArray();
                     string Mm(List<float> j) => j.Count > 0 ? N(j.Average() * 1000, "F2") : "-";   // an empty window is unmeasured, never still
                     log.Append(stage + " | " + name + " | " + approach + " | " + N(mv.Max()) + "/" + N(mv.Average()) + " | " + N(mf.Max()) + "/" + N(mf.Average()) + " | " + Mm(jitMid) + "/" + Mm(jitEnd) + " | ");
-                    if (body) { var r = ReportPenetration.Measure(body, gar); log.Append(r.behind + "/" + r.signed + " " + r.edgeNearest + " | " + N(r.maxDepthCm) + "\n"); } else log.Append("- | -\n");
+                    if (body)
+                    {
+                        var r = ReportPenetration.Measure(rt, body, gar, groupT); pen.Add((name, r.buckets)); penMaps = penMaps ?? ReportPenetration.Maps(r, rt);
+                        log.Append(r.behind + "/" + r.signed + " " + r.edgeNearest + " | " + N(r.maxDepthCm) + "\n");
+                    }
+                    else log.Append("- | -\n");
+                    for (int i = 0; i < follow.Count; i++)
+                    {
+                        var f = follow[i]; if (f.tgt == null || f.src == null) continue;
+                        var (fp, fq) = InSource(f.tgt, f.src);
+                        follow[i] = (f.tgt, f.src, f.p, f.q, Mathf.Max(f.cm, (fp - f.p).magnitude * 100), Mathf.Max(f.deg, Quaternion.Angle(fq, f.q)));
+                    }
                     if (views.Length > 0)
                     {
                         var shot = RenderAvatar.Run(rootHandle, views, null, 0.15f, false, 512, Path.Combine(outDir, stage + "_" + RunLogFormat.Sanitize(name)));
@@ -172,13 +196,18 @@ namespace Ryan6Vrc.AgentTools.Editor
                     jitMid.Clear(); jitEnd.Clear(); prevAv = null; prevIn = null; row++;
                     if (row > pl.poses.Length)
                     {
+                        var idle = follow.Where(f => f.cm > DriftCm || f.deg > DriftDeg).ToArray();
                         bool NoTip(int c) => chains[c].tips.All(i => !tipMoved[i]);
                         var dead = Enumerable.Range(0, chains.Count).Where(c => frameMoved[c] && NoTip(c)).Select(c => chains[c].path).ToArray();
                         var still = Enumerable.Range(0, chains.Count).Where(c => !frameMoved[c] && NoTip(c)).Select(c => chains[c].path).ToArray();
-                        string detail = (dead.Length > 0 ? "no solve: frame moved, no tip moved in it: " + string.Join(", ", dead) + " | " : "")
+                        string detail = (idle.Length > 0 ? "idle constraints: " + idle.Length + " of " + follow.Count + " single-source parent constraints drifted in their source's frame ("
+                                + string.Join(", ", idle.Take(5).Select(f => AnimationUtility.CalculateTransformPath(f.tgt, rt) + " " + N(f.cm) + "cm/" + N(f.deg, "0") + "deg")) + (idle.Length > 5 ? ", …" : "")
+                                + "), so they are not executing and every row read off their targets is void. A play entry that registers constraints without running them does this;"
+                                + " stop play, refresh with a script reload, wait for the editor to be ready, re-enter play and drive again | " : "")
+                            + (dead.Length > 0 ? "no solve: frame moved, no tip moved in it: " + string.Join(", ", dead) + " | " : "")
                             + "stillChains=" + still.Length + "/" + chains.Count + (still.Length > 0 ? " (" + string.Join(", ", still) + ")" : "")
                             + (shotFails > 0 ? " | frames: " + shotFails + " grab(s) failed, first: " + firstShotFail : views.Length > 0 ? " | frames=" + outDir : "");
-                        Finish(dead.Length > 0 ? "FAIL" : "OK", detail);
+                        Finish(dead.Length > 0 || idle.Length > 0 ? "FAIL" : "OK", detail);
                         return;
                     }
                     var held = (P: (Vector3[])poseP.Clone(), R: (Quaternion[])poseR.Clone());
@@ -213,6 +242,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             var m = string.IsNullOrEmpty(op.move) ? null : WriteDynamics.ParseVector(op.move);
             if (m != null) bone.position += rt.rotation * m.Value;
         }
+
+        /// <summary>The one source a constraint follows rigidly, or null: an active, locked parent constraint on all six
+        /// axes, at full weight, in world space, with exactly one weighted source.</summary>
+        static Transform Followed(VRCConstraintBase c)
+        {
+            if (!(c is VRCParentConstraintBase p) || !c.isActiveAndEnabled || !c.IsActive || !c.Locked || c.GlobalWeight < 0.999f || c.SolveInLocalSpace || c.FreezeToWorld) return null;
+            if (!(p.AffectsPositionX && p.AffectsPositionY && p.AffectsPositionZ && p.AffectsRotationX && p.AffectsRotationY && p.AffectsRotationZ)) return null;
+            var w = Enumerable.Range(0, c.Sources.Count).Select(i => c.Sources[i]).Where(s => s.Weight > 0).ToArray();
+            return w.Length == 1 ? w[0].SourceTransform : null;
+        }
+
+        /// <summary>A transform's place in another's unscaled frame.</summary>
+        static (Vector3, Quaternion) InSource(Transform t, Transform s) => (Quaternion.Inverse(s.rotation) * (t.position - s.position), Quaternion.Inverse(s.rotation) * t.rotation);
 
         static IEnumerable<Transform> Leaves(Transform t, HashSet<Transform> ignore)
         {
