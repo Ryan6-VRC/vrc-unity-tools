@@ -14,7 +14,7 @@ using VRC.SDK3.Dynamics.PhysBone.Components;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Read-only rest-pose clearance digest between a body mesh and the physbone chains hung around it: the
+    /// Read-only rest-pose clearance digest between body surfaces and the physbone chains hung around them: the
     /// classifier the fix-clipping skill runs before choosing a branch, and the rest-contact gate it re-runs
     /// after a collider write. Per chain joint it measures the gap to the nearest baked body vertex against
     /// the chain's own collision radius there, the gap to every collider the chain references, and prints the
@@ -29,8 +29,8 @@ namespace Ryan6Vrc.AgentTools.Editor
     ///
     /// Surface: the NDMF preview proxy where one exists (a composed body with its shrink/shape reactions
     /// applied), else the scene instance (reactions sit at weight 0 there — the header says which was read).
-    /// Edit mode only, so this is the rest-pose approximation of what a play-mode probe measures exactly:
-    /// no physbone solve, no pose. Chain roots under a VRC constraint are pumped once so a cold editor does
+    /// Edit mode only, refusing in play, so this is the rest-pose approximation of what a play-mode drive
+    /// measures exactly: no physbone solve, no pose. Chain roots under a VRC constraint are pumped once so a cold editor does
     /// not report a stale pose as rest (`emulator.md` §Edit-mode VRC constraints); a pump that cannot land is
     /// reported, never hidden.
     ///
@@ -72,64 +72,57 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Door ────────────────────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Digest rest clearance under scene object <paramref name="avatarRoot"/> between the body
-        /// SkinnedMeshRenderer at <paramref name="bodyMesh"/> (a path relative to the root, or a descendant name)
-        /// and every active physbone chain under the root whose effective root's relative path starts with
-        /// <paramref name="chainPrefix"/> (null = every chain). Returns a one-line summary ending
-        /// <c>=&gt; OK | log=&lt;path&gt;</c>; a handle that does not resolve, a body with no mesh, or a prefix
-        /// matching no chain is a bare <c>[ReportClearance] FAIL: …</c> with no trailer.</summary>
-        public static string Run(string avatarRoot, string bodyMesh, string chainPrefix = null)
+        /// <summary>Digest rest clearance under scene object <paramref name="avatarRoot"/> between the body surfaces
+        /// <paramref name="bodies"/> (<c>ReportClipping</c>'s handles: a path or unique renderer name, optionally
+        /// <c>#material</c>) and every active physbone chain rooted at or under a transform <paramref name="chains"/>
+        /// names (null = every chain). Returns a one-line summary ending <c>=&gt; OK | log=&lt;path&gt;</c>; a play-mode
+        /// call, a handle that does not resolve, or a scope holding no chain is a bare <c>[ReportClearance] FAIL: …</c>
+        /// with no trailer.</summary>
+        public static string Run(string avatarRoot, string[] bodies, string[] chains = null)
         {
+            if (EditorApplication.isPlaying) return Fail("edit mode only: in play every joint stands where the solver pushed it, so rest contact would read near zero; exit play, or read the motion with DrivePhysBones");
             var handle = SceneHandle.Resolve(avatarRoot);
             if (!handle.Ok) return Fail("avatarRoot: " + handle.Refusal);
             var root = handle.Object;
-            if (string.IsNullOrWhiteSpace(bodyMesh)) return Fail("bodyMesh: pass the body renderer's path under the root or its name");
-            var bodyGo = ResolveDescendant(root, bodyMesh, out string ambiguous);
-            if (ambiguous != null) return Fail("bodyMesh: `" + bodyMesh + "` names more than one object under " + root.name + " — pass a path: " + ambiguous);
-            if (bodyGo == null) return Fail("bodyMesh: nothing named or at `" + bodyMesh + "` under " + root.name);
-            var bodySmr = bodyGo.GetComponent<SkinnedMeshRenderer>();
-            if (bodySmr == null || bodySmr.sharedMesh == null) return Fail("bodyMesh: `" + bodyMesh + "` carries no SkinnedMeshRenderer with a mesh");
+            var err = ReportClipping.ResolveSurfaces(root.transform, bodies, "bodies", out var body); if (err != null) return Fail(err);
+            if ((err = ReportClipping.ResolveTransforms(root.transform, chains, "chains", out var scope)) != null) return Fail(err);
 
-            var chains = root.GetComponentsInChildren<VRCPhysBone>(true)
+            var pbs = root.GetComponentsInChildren<VRCPhysBone>(true)
                 .Where(b => b.enabled && b.gameObject.activeInHierarchy)
-                .Where(b => chainPrefix == null || UnderPrefix(root.transform, EffectiveRoot(b), chainPrefix))
+                .Where(b => scope == null || scope.Any(s => EffectiveRoot(b).IsChildOf(s)))
                 .ToList();
-            if (chains.Count == 0) return Fail(chainPrefix == null ? "no active VRCPhysBone under " + root.name
-                                                                   : "chainPrefix: no active chain root at or named `" + chainPrefix + "` under " + root.name);
+            if (pbs.Count == 0) return Fail(scope == null ? "no active VRCPhysBone under " + root.name
+                                                          : "chains: no active chain is rooted at or under " + string.Join(", ", chains) + " in " + root.name);
 
-            string pumpNote = PumpConstraints(root, chains);
+            string pumpNote = PumpConstraints(root, pbs);
 
             var proxies = ProxyMap();
-            var bodyPts = Bake(bodySmr, proxies, out string bodySurface);
-            var rows = chains.Select(b => Measure(b, root.transform, bodyPts)).ToList();
+            var bodyPts = new List<Vector3>(); var bodySurfaces = new HashSet<string>();
+            foreach (var s in body) { bodyPts.AddRange(Bake(s.r, proxies, Kept(s), out string bs)); bodySurfaces.Add(bs); }
+            string bodySurface = string.Join("+", bodySurfaces);
+            var rows = pbs.Select(b => Measure(b, root.transform, bodyPts)).ToList();
             DedupeKeys(rows);
             // The garment a chain moves is the set of renderers skinned to any of its joints — not "every other
             // renderer", which would fold hair, eyes and underwear into one bucket and mask which bones the
             // skirt actually rides.
             var jointSet = new HashSet<Transform>(rows.SelectMany(r => r.Joints).Select(j => j.T));
+            var bodySmrs = new HashSet<SkinnedMeshRenderer>(body.Select(s => s.r));
             var garmentSmrs = root.GetComponentsInChildren<SkinnedMeshRenderer>(true)
-                .Where(s => s != bodySmr && s.gameObject.activeInHierarchy && s.sharedMesh != null && s.bones.Any(b => b != null && jointSet.Contains(b))).ToList();
+                .Where(s => !bodySmrs.Contains(s) && s.gameObject.activeInHierarchy && s.sharedMesh != null && s.bones.Any(b => b != null && jointSet.Contains(b))).ToList();
             var colliders = ColliderRows(root, rows);
-            foreach (var r in rows) FinishChain(r, colliders, bodySmr, garmentSmrs, proxies);
-            var surfaces = new HashSet<string> { bodySurface }; foreach (var r in rows) surfaces.UnionWith(r.GarmentSurfaces);
+            foreach (var r in rows) FinishChain(r, colliders, body, garmentSmrs, proxies);
+            var surfaces = new HashSet<string>(bodySurfaces); foreach (var r in rows) surfaces.UnionWith(r.GarmentSurfaces);
             string surface = surfaces.Count == 1 ? bodySurface : "mixed(body=" + bodySurface + ")";
 
-            return Emit(root, bodySmr, surface, rows, colliders, pumpNote, chainPrefix);
+            return Emit(root, body, surface, rows, colliders, pumpNote, chains);
         }
+
+        // The vertices a material-narrowed body keeps; null keeps every vertex.
+        static HashSet<int> Kept(ReportClipping.Surface s) => s.label.Contains("#") ? new HashSet<int>(s.tris) : null;
 
         // ── Chains ──────────────────────────────────────────────────────────────────────────────────────────
 
         internal static Transform EffectiveRoot(VRCPhysBone b) => b.rootTransform != null ? b.rootTransform : b.transform;
-
-        // A prefix scopes by relative path, or by the bare name of the chain root or any ancestor under the
-        // avatar root (`Skirt_Root` reaches every chain hung under it without the caller spelling the path).
-        internal static bool UnderPrefix(Transform avatar, Transform chainRoot, string prefix)
-        {
-            prefix = prefix.Trim('/');
-            if (RelPath(avatar, chainRoot).StartsWith(prefix, StringComparison.Ordinal)) return true;
-            for (var t = chainRoot; t != null && t != avatar; t = t.parent) if (Key(t.name) == prefix) return true;
-            return false;
-        }
 
         // Joints: the effective root and every descendant not pruned by ignoreTransforms (a listed transform
         // prunes itself and its children — the field's own tooltip). A root with several children under
@@ -268,7 +261,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return list;
         }
 
-        private static void FinishChain(ChainRow r, List<ColliderRow> colliders, SkinnedMeshRenderer body, List<SkinnedMeshRenderer> garments,
+        private static void FinishChain(ChainRow r, List<ColliderRow> colliders, ReportClipping.Surface[] bodies, List<SkinnedMeshRenderer> garments,
                                         Dictionary<GameObject, SkinnedMeshRenderer> proxies)
         {
             var all = colliders.Where(c => r.Bone.colliders.Contains(c.Col)).ToList();
@@ -301,8 +294,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             // Weight readout over the vertices near this chain's joints: the body's bones vs the garment's.
             // Relative motion between those two bone sets is what walks the body into the garment.
-            r.BodyNear = WeightsNear(body, proxies, r, r.BodyWeights, out _);
-            foreach (var g in garments) { r.GarmentNear += WeightsNear(g, proxies, r, r.GarmentWeights, out string gs); if (gs != null) r.GarmentSurfaces.Add(gs); }
+            foreach (var b in bodies) r.BodyNear += WeightsNear(b.r, proxies, Kept(b), r, r.BodyWeights, out _);
+            foreach (var g in garments) { r.GarmentNear += WeightsNear(g, proxies, null, r, r.GarmentWeights, out string gs); if (gs != null) r.GarmentSurfaces.Add(gs); }
         }
 
         // ── Geometry ────────────────────────────────────────────────────────────────────────────────────────
@@ -310,7 +303,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Bakes the renderer the preview shows when NDMF has a proxy for this GameObject, else the scene
         // instance; the proxy carries the composed reactions (shrink shapes at their worn weight) the scene
         // instance holds at 0. World-space points either way.
-        private static List<Vector3> Bake(SkinnedMeshRenderer smr, Dictionary<GameObject, SkinnedMeshRenderer> proxies, out string surface)
+        // A kept-vertex set narrows the points to a material's submeshes, read off the scene mesh's indices, so a proxy
+        // whose vertex count differs from the scene mesh keeps every vertex.
+        private static List<Vector3> Bake(SkinnedMeshRenderer smr, Dictionary<GameObject, SkinnedMeshRenderer> proxies, HashSet<int> kept, out string surface)
         {
             SkinnedMeshRenderer src = smr;
             surface = "scene";
@@ -323,8 +318,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // ring skinned under a root scaled x2: baked 0.100, world 0.200). useScale:false bakes them
                 // already world-scaled, so the matrix would double the scale.
                 src.BakeMesh(m, true);
-                var l2w = src.transform.localToWorldMatrix;
-                foreach (var v in m.vertices) pts.Add(l2w.MultiplyPoint3x4(v));
+                var l2w = src.transform.localToWorldMatrix; var vs = m.vertices;
+                bool all = kept == null || vs.Length != smr.sharedMesh.vertexCount;
+                for (int i = 0; i < vs.Length; i++) if (all || kept.Contains(i)) pts.Add(l2w.MultiplyPoint3x4(vs[i]));
             }
             finally { UnityEngine.Object.DestroyImmediate(m); }
             return pts;
@@ -409,11 +405,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Top skin-weight bones over the vertices of `smr` within (joint radius + WeightBandMeters) of any joint
         // of the chain, read off the flat GetAllBoneWeights walk (the top-4 struct truncates). Returns the
         // vertex count that fed the readout; weights are accumulated into `acc` by bone name.
-        private static int WeightsNear(SkinnedMeshRenderer smr, Dictionary<GameObject, SkinnedMeshRenderer> proxies, ChainRow r, Dictionary<string, float> acc, out string surface)
+        private static int WeightsNear(SkinnedMeshRenderer smr, Dictionary<GameObject, SkinnedMeshRenderer> proxies, HashSet<int> kept, ChainRow r, Dictionary<string, float> acc, out string surface)
         {
             surface = null;
             var mesh = smr.sharedMesh; if (mesh == null) return 0;
-            var pts = Bake(smr, proxies, out surface);
+            var pts = Bake(smr, proxies, null, out surface);
             if (pts.Count != mesh.vertexCount) return 0; // a proxy with a different topology cannot index this mesh's weights
             var bones = smr.bones;
             var per = mesh.GetBonesPerVertex(); var w = mesh.GetAllBoneWeights();
@@ -422,7 +418,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 int count = per[v];
                 bool near = false;
-                foreach (var j in r.Joints) { float lim = j.Radius + WeightBandMeters; if ((pts[v] - j.Pos).sqrMagnitude <= lim * lim) { near = true; break; } }
+                if (kept == null || kept.Contains(v))
+                    foreach (var j in r.Joints) { float lim = j.Radius + WeightBandMeters; if ((pts[v] - j.Pos).sqrMagnitude <= lim * lim) { near = true; break; } }
                 if (near)
                 {
                     n++;
@@ -472,29 +469,30 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Output ──────────────────────────────────────────────────────────────────────────────────────────
 
-        private static string Emit(GameObject root, SkinnedMeshRenderer body, string surface, List<ChainRow> rows, List<ColliderRow> colliders,
-                                   string pumpNote, string chainPrefix)
+        private static string Emit(GameObject root, ReportClipping.Surface[] body, string surface, List<ChainRow> rows, List<ColliderRow> colliders,
+                                   string pumpNote, string[] chains)
         {
             int contact = rows.Count(r => r.MinColliderSlack < 0f);
             int inside = rows.Count(r => r.MinBodySlack < 0f);
             int locked = rows.Count(r => r.LateralLocked);
-            var summary = "[ReportClearance] " + root.name + " body=" + body.name + " surface=" + surface + " chains=" + rows.Count
+            string bodies = string.Join(",", body.Select(b => b.label));
+            var summary = "[ReportClearance] " + DrivePhysBones.FullPath(root.transform) + " bodies=" + bodies + " surface=" + surface + " chains=" + rows.Count
                 + " colliders=" + colliders.Count + " restContact=" + contact + " insideBodyAtRest=" + inside + " lateralLocked=" + locked
                 + " " + pumpNote + " => OK";
 
             var sb = new StringBuilder();
-            sb.Append("# Clearance: ").Append(root.name).Append(" / ").Append(body.name).Append("\n\n");
+            sb.Append("# Clearance: ").Append(root.name).Append(" / ").Append(bodies).Append("\n\n");
             sb.Append("`").Append(summary).Append("`\n\n");
             sb.Append("_Rest pose, edit mode: no physbone solve, no motion. `bodyGap` is joint centre to the nearest baked body vertex (the body is a vertex sample, so a joint over the middle of a large triangle reads farther than the surface is); `bodySlack` = bodyGap − joint radius, negative = the joint's collision sphere overlaps a body vertex standing still, which no collider fixes; the root joint is printed but not counted, since it is the anchor, not a simulated bone. `colliderSlack` = surface-to-surface gap between each bone segment (joint to child, plus the endpoint bone) and the nearest active collider this chain references, negative = a rest contact the solver pushes out on play entry, tolerated as a touch but not as a major deflection; `—` = no measurable collider referenced, which is not a clean pass. Surface `ndmf-proxy` = the composed preview with reactions applied; `scene` = raw instance, reactions at 0; `mixed` = body and garment read from different surfaces. `restContactCm=` and `insideBodyCm=` are the tokens a rule reads._\n\n");
-            if (chainPrefix != null) sb.Append("chainPrefix=`").Append(chainPrefix).Append("`\n\n");
+            if (chains != null && chains.Length > 0) sb.Append("chains=`").Append(string.Join("`, `", chains)).Append("`\n\n");
 
             sb.Append("## Chains\n\n| chain | joints | restContactCm | insideBodyCm | nearest collider | limits | colliders | root constraint |\n|---|---|---|---|---|---|---|---|\n");
             foreach (var r in rows)
             {
                 var worst = r.Joints.OrderBy(j => j.ColliderSlack).FirstOrDefault();
                 sb.Append("| `").Append(Cell(r.Key)).Append("` | ").Append(r.Joints.Count)
-                  .Append(" | ").Append(float.IsPositiveInfinity(r.MinColliderSlack) ? "—" : "restContactCm=" + Cm(Mathf.Max(0f, -r.MinColliderSlack)))
-                  .Append(" | insideBodyCm=").Append(Cm(float.IsPositiveInfinity(r.MinBodySlack) || float.IsNaN(r.MinBodySlack) ? 0f : Mathf.Max(0f, -r.MinBodySlack)))
+                  .Append(" | ").Append(float.IsPositiveInfinity(r.MinColliderSlack) ? "—" : "restContactCm=" + CmNum(Mathf.Max(0f, -r.MinColliderSlack)))
+                  .Append(" | insideBodyCm=").Append(CmNum(float.IsPositiveInfinity(r.MinBodySlack) || float.IsNaN(r.MinBodySlack) ? 0f : Mathf.Max(0f, -r.MinBodySlack)))
                   .Append(" | ").Append(r.Joints.Count > 0 ? Cell(worst.NearestCollider) : "—")
                   .Append(" | ").Append(Cell(r.Limits)).Append(r.LateralLocked ? " **lateralLocked" + (r.LockedJoint == "all" ? "" : "@" + Cell(r.LockedJoint)) + "**" : "")
                   .Append(" | ").Append(Cell(r.Colliders)).Append(" | ").Append(Cell(r.Constraint)).Append(" |\n");
@@ -522,7 +520,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                   .Append(" | ").Append(r.GarmentNear).Append(" | ").Append(Cell(TopWeights(r.GarmentWeights, r.GarmentNear)))
                   .Append(" | ").Append(r.GarmentSurfaces.Count == 0 ? "—" : Cell(string.Join(",", r.GarmentSurfaces))).Append(" |\n");
 
-            var res = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "clearance_" + body.name, summary, sb.ToString(), ".md");
+            var res = RunLogFormat.WriteRunLog(RunLogFormat.SnapshotDir, "clearance_" + string.Join("+", body.Select(b => b.r.name)), summary, sb.ToString(), ".md");
             Debug.Log(res);
             return res;
         }
@@ -538,24 +536,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static string Fail(string why)
         {
             var msg = "[ReportClearance] FAIL: " + why;
-            Debug.LogError(msg);
+            Debug.LogWarning(msg);
             return msg;
         }
 
         // Play-mode clones suffix bone names with `$…`; strip so a key printed here joins a key printed there.
         internal static string Key(string name) { int i = name.IndexOf('$'); return i < 0 ? name : name.Substring(0, i); }
-
-        // Relative path first, then a name match that refuses on duplicates (naming the candidates) rather than
-        // picking one and reporting authoritatively about an arbitrary object.
-        private static GameObject ResolveDescendant(GameObject root, string spec, out string ambiguous)
-        {
-            ambiguous = null;
-            var byPath = root.transform.Find(spec.Trim('/'));
-            if (byPath != null) return byPath.gameObject;
-            var hits = root.GetComponentsInChildren<Transform>(true).Where(t => t.name == spec && t != root.transform).ToList();
-            if (hits.Count > 1) { ambiguous = string.Join(" | ", hits.Select(h => RelPath(root.transform, h))); return null; }
-            return hits.Count == 1 ? hits[0].gameObject : null;
-        }
 
         internal static string RelPath(Transform root, Transform t)
         {
@@ -574,6 +560,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static string Cell(string s) => RunLogFormat.Cell(s);
         private static string F(float f) => f.ToString("F2", CultureInfo.InvariantCulture);
         private static string V(Vector3 v) => "(" + F(v.x) + "," + F(v.y) + "," + F(v.z) + ")";
-        internal static string Cm(float meters) => (meters * 100f).ToString("F1", CultureInfo.InvariantCulture) + "cm";
+        internal static string Cm(float meters) => CmNum(meters) + "cm";
+        // A rule token carries its unit in its key (`restContactCm=`), so its value is the bare number.
+        static string CmNum(float meters) => (meters * 100f).ToString("F1", CultureInfo.InvariantCulture);
     }
 }
