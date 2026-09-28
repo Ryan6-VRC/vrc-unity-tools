@@ -90,8 +90,8 @@ public class ReportClearanceTests
     [Test]
     public void UnresolvedRootIsBareFail()
     {
-        LogAssert.Expect(LogType.Error, FailRe);
-        var r = ReportClearance.Run("NoSuchObject", "Body");
+        LogAssert.Expect(LogType.Warning, FailRe);
+        var r = ReportClearance.Run("NoSuchObject", new[] { "Body" });
         StringAssert.StartsWith("[ReportClearance] FAIL:", r);
         StringAssert.DoesNotContain("| log=", r);
     }
@@ -99,22 +99,22 @@ public class ReportClearanceTests
     [Test]
     public void BodyWithoutRendererIsBareFail()
     {
-        LogAssert.Expect(LogType.Error, FailRe);
+        LogAssert.Expect(LogType.Warning, FailRe);
         Child(_root, "Body", Vector3.zero);
         Child(_root, "Chain", Vector3.zero).AddComponent<VRCPhysBone>();
-        var r = ReportClearance.Run(_root.name, "Body");
-        StringAssert.StartsWith("[ReportClearance] FAIL: bodyMesh", r);
+        var r = ReportClearance.Run(_root.name, new[] { "Body" });
+        StringAssert.StartsWith("[ReportClearance] FAIL: bodies", r);
     }
 
     [Test]
-    public void PrefixMatchingNoChainIsBareFail()
+    public void ChainsNamingNoTransformIsBareFail()
     {
-        LogAssert.Expect(LogType.Error, FailRe);
+        LogAssert.Expect(LogType.Warning, FailRe);
         var hips = Child(_root, "Hips", Vector3.zero);
         Body("Body", hips.transform, 0.1f, 0f);
         Child(_root, "Chain", Vector3.zero).AddComponent<VRCPhysBone>();
-        var r = ReportClearance.Run(_root.name, "Body", "Skirt");
-        StringAssert.StartsWith("[ReportClearance] FAIL: chainPrefix", r);
+        var r = ReportClearance.Run(_root.name, new[] { "Body" }, new[] { "Skirt" });
+        StringAssert.StartsWith("[ReportClearance] FAIL: chains", r);
     }
 
     // ── Measurement ────────────────────────────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ public class ReportClearanceTests
         var other = Child(hips, "Skirt_2", new Vector3(-0.15f, 0.05f, 0f));
         other.AddComponent<VRCPhysBone>().radius = 0.02f;
 
-        var r = ReportClearance.Run(_root.name, "Body");
+        var r = ReportClearance.Run(_root.name, new[] { "Body" });
         StringAssert.Contains("=> OK", r);
         StringAssert.Contains("chains=2", r);
         StringAssert.Contains("colliders=1", r);
@@ -154,7 +154,7 @@ public class ReportClearanceTests
         StringAssert.Contains("lateralLocked=1", r);
         StringAssert.Contains("surface=scene", r);
         var body = File.ReadAllText(LogPath(r));
-        StringAssert.Contains("restContactCm=4.0cm", body);
+        StringAssert.Contains("restContactCm=4.0 |", body);
         StringAssert.Contains("endToEnd=14.0cm", body);
         StringAssert.Contains("| 4.2cm | 2.2cm |", body);   // bodyGap | bodySlack on the root joint
         StringAssert.Contains("**lateralLocked**", body);
@@ -180,11 +180,11 @@ public class ReportClearanceTests
         col.radius = 0.02f; col.height = 0.10f; col.position = new Vector3(0.13f, 0f, 0f); col.rotation = Quaternion.identity;
         pb.colliders.Add(col);
 
-        var r = ReportClearance.Run(_root.name, "Body");
+        var r = ReportClearance.Run(_root.name, new[] { "Body" });
         var body = File.ReadAllText(LogPath(r));
         StringAssert.Contains("| 8.5cm | 4.5cm |", body);
         StringAssert.Contains("endToEnd=28.0cm", body);
-        StringAssert.Contains("restContactCm=8.0cm", body);   // 2 × the unscaled 4.0cm contact
+        StringAssert.Contains("restContactCm=8.0 |", body);   // 2 × the unscaled 4.0cm contact
     }
 
     // A disabled collider is out of the SDK's collision scene: listed with a marker, never measured.
@@ -202,7 +202,7 @@ public class ReportClearanceTests
         col.enabled = false;
         pb.colliders.Add(col);
 
-        var r = ReportClearance.Run(_root.name, "Body");
+        var r = ReportClearance.Run(_root.name, new[] { "Body" });
         StringAssert.Contains("restContact=0", r);
         var body = File.ReadAllText(LogPath(r));
         StringAssert.Contains("Col_Pelvis (inactive)", body);
@@ -218,7 +218,7 @@ public class ReportClearanceTests
     }
 
     // A simulated joint inside the ring: root at (0.09, 0.10, 0) with its child 0.10 below at (0.09, 0, 0),
-    // radius 0.03 → the child's gap is 0.01, slack −0.02 → insideBodyCm=2.0cm and the summary counts it, with
+    // radius 0.03 → the child's gap is 0.01, slack −0.02 → insideBodyCm=2.0 and the summary counts it, with
     // no collider at all. The root joint is never counted (the anchor is not simulated), and a chain with no
     // collider prints `—` for rest contact rather than a clean zero.
     [Test]
@@ -230,12 +230,12 @@ public class ReportClearanceTests
         Child(chainRoot, "Skirt_1.001", new Vector3(0f, -0.10f, 0f));
         chainRoot.AddComponent<VRCPhysBone>().radius = 0.03f;
 
-        var r = ReportClearance.Run(_root.name, "Body", "Skirt_1");   // bare root name scopes too
+        var r = ReportClearance.Run(_root.name, new[] { "Body" }, new[] { "Skirt_1" });   // bare root name scopes too
         StringAssert.Contains("insideBodyAtRest=1", r);
         StringAssert.Contains("restContact=0", r);
         StringAssert.Contains("colliders=0", r);
         var body = File.ReadAllText(LogPath(r));
-        StringAssert.Contains("insideBodyCm=2.0cm", body);
+        StringAssert.Contains("insideBodyCm=2.0 |", body);
         StringAssert.Contains("| `Skirt_1` | 2 | — |", body);       // no measurable collider → dash, not 0.0cm
     }
 
