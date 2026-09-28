@@ -81,6 +81,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             string baseRaw = null;
             if (!string.IsNullOrEmpty(baseline) && (baseRaw = SessionState.GetString(RestKey + RunLogFormat.Sanitize(baseline), "")).Length == 0)
                 return Fail("baseline: no drive of stage '" + baseline + "' has recorded a rest row in this editor session; drive that stage first");
+            if (baseRaw != null && (!TryParseRest(baseRaw, out var baseRoot, out _, out _, out _) || baseRoot != FullPath(rt)))
+                return Fail("baseline: stage '" + baseline + "' was driven on '" + (baseRoot ?? "?") + "', not '" + FullPath(rt) + "'; a rest shift compares one avatar with itself, so drive this avatar's own stage first");
             var ops = new List<(Transform bone, BoneOp op)>[pl.poses.Length];
             for (int i = 0; i < ops.Length; i++)
             {
@@ -188,6 +190,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                             + "stage | pose | approach | tipTravelCm root max/mean | tipTravelCm inFrame max/mean | jitterMmPerFrame mid/end | sample | crossingCm | vertsBehindBody/signed edgeNearest | maxDepthCm | throughCm\n");
                     }
                     if (anim) anim.enabled = false;   // re-asserted every frame: an emulator re-enables it
+                    // Before this tick moves the pose: the chains last solved against the pose the bones hold now.
+                    if (Mode(row) == "every")
+                    {
+                        var m = ReportClipping.Measure(rt, body, gar, groupT); acc = ReportClipping.Peak(acc, m); accFrames++;
+                        perFrame.Append(pl.poses[row - 1].name + "\t" + N(Time.time - rowT0, "0.000") + "\t" + N(m.crossCm) + "\t" + m.behind + "\t" + N(m.maxDepthCm) + "\t" + N(m.throughCm) + "\n");
+                    }
                     if (fromP != null)
                     {
                         rampFrames++; float f = Ramp01(Time.time - rampT0, rampSec);
@@ -202,11 +210,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                         for (int c = 0; c < rigs.Count; c++) frameMoved[c] |= (fr[c].Item1 - frame0[c].Item1).magnitude > 1e-4f || Quaternion.Angle(fr[c].Item2, frame0[c].Item2) > 0.05f;
                         if (prevIn != null) for (int i = 0; i < inF.Length; i++) tipMoved[i] |= (inF[i] - prevIn[i]).magnitude > Still;
                     }
-                    if (Mode(row) == "every")
-                    {
-                        var m = ReportClipping.Measure(rt, body, gar, groupT); acc = ReportClipping.Peak(acc, m); accFrames++;
-                        perFrame.Append(pl.poses[row - 1].name + "\t" + N(Time.time - rowT0, "0.000") + "\t" + N(m.crossCm) + "\t" + m.behind + "\t" + N(m.maxDepthCm) + "\t" + N(m.throughCm) + "\n");
-                    }
                     if (fromP != null) { prevAv = av; prevIn = inF; return; }   // still ramping: the hold has not begun
                     float hd = HoldOf(row);
                     int win = prevAv == null ? 0 : JitterWindow(Time.time - t0, hd);
@@ -218,8 +221,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     {
                         restAv = av; restIn = inF;
                         var now = tips.Select((t, i) => (ReportClearance.RelPath(rt, t.leaf), av[i])).ToList();
-                        SessionState.SetString(RestKey + stage, FormatRest(session, started, now));
-                        if (baseRaw != null && TryParseRest(baseRaw, out int bs, out string bt, out var basePos))
+                        SessionState.SetString(RestKey + stage, FormatRest(rootPath, session, started, now));
+                        if (baseRaw != null && TryParseRest(baseRaw, out _, out int bs, out string bt, out var basePos))
                         {
                             var byChain = rigs.Select(c => (c.path, (IList<(string, Vector3)>)c.tips.Select(i => now[i]).ToList())).ToList();
                             shift = "rest shift against baseline '" + baseline + "' (its rest row at " + bt + ", play session " + bs + "): each chain's tips, avatar space\n" + RestShift(basePos, byChain, out float mx, out float mean);
@@ -371,15 +374,15 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         static string R(float f) => f.ToString("R", CultureInfo.InvariantCulture);
 
-        internal static string FormatRest(int session, string started, IList<(string tip, Vector3 p)> tips) =>
-            "v1\t" + session.ToString(CultureInfo.InvariantCulture) + "\t" + started + string.Concat(tips.Select(t => "\n" + t.tip + "\t" + R(t.p.x) + "," + R(t.p.y) + "," + R(t.p.z)));
+        internal static string FormatRest(string root, int session, string started, IList<(string tip, Vector3 p)> tips) =>
+            "v2\t" + root + "\t" + session.ToString(CultureInfo.InvariantCulture) + "\t" + started + string.Concat(tips.Select(t => "\n" + t.tip + "\t" + R(t.p.x) + "," + R(t.p.y) + "," + R(t.p.z)));
 
-        internal static bool TryParseRest(string raw, out int session, out string started, out Dictionary<string, Vector3> tips)
+        internal static bool TryParseRest(string raw, out string root, out int session, out string started, out Dictionary<string, Vector3> tips)
         {
-            session = 0; started = null; tips = new Dictionary<string, Vector3>();
+            root = null; session = 0; started = null; tips = new Dictionary<string, Vector3>();
             var lines = (raw ?? "").Split('\n'); var head = lines[0].Split('\t');
-            if (head.Length != 3 || head[0] != "v1" || !int.TryParse(head[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out session)) return false;
-            started = head[2];
+            if (head.Length != 4 || head[0] != "v2" || !int.TryParse(head[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out session)) return false;
+            root = head[1]; started = head[3];
             foreach (var l in lines.Skip(1))
             {
                 var f = l.Split('\t'); if (f.Length != 2) return false;

@@ -305,8 +305,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return v;
         }
 
-        /// <summary>Length of the segment where triangles abc and xyz cross, 0 where they do not or share a corner (two
-        /// faces of one merged mesh meet along an edge without crossing), and its midpoint. Pure.</summary>
+        /// <summary>Length of the segment where triangles abc and xyz cross, and its midpoint; 0 where they do not cross or
+        /// share a corner. Neighbouring faces of one merged mesh meet without crossing, so a pair sharing even one corner is
+        /// dropped, and a garment welded to the body loses only the crossings of the triangles at the weld. Pure.</summary>
         internal static float CrossLength(Vector3 a, Vector3 b, Vector3 c, Vector3 x, Vector3 y, Vector3 z, List<Vector3> hits, out Vector3 mid)
         {
             mid = default; hits.Clear();
@@ -398,7 +399,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var keys = rows.SelectMany(r => r.buckets.Keys).Distinct().Select(k => (k, cross: Max(b => b.crossCm, k), behind: Max(b => b.behind, k), signed: Max(b => b.signed, k)))
                 .OrderByDescending(x => x.cross).ThenByDescending(x => x.behind).ThenByDescending(x => x.signed)
                 .ThenBy(x => x.k.Item1, StringComparer.Ordinal).ThenBy(x => x.k.Item2, StringComparer.Ordinal).ThenBy(x => x.k.Item3, StringComparer.Ordinal).ToList();
-            var sb = new System.Text.StringBuilder("clipping by body, region and group (cell: x crossing cm, behind/signed, e edgeNearest, d max depth cm, t through cm, g mean gap cm; - no vertex in the bucket; worst bucket first)\nbody | region | group | "
+            var sb = new System.Text.StringBuilder("clipping by body, region and group (cell: x crossing cm, behind/signed, e edgeNearest, d max depth cm, t through cm, g mean gap cm; - no vertex in the bucket; worst bucket first; on a row sampled every frame each is its peak over the frames and g the bucket's latest)\nbody | region | group | "
                 + string.Join(" | ", rows.Select(r => r.row)));
             foreach (var x in keys.Take(cap))
                 sb.Append("\n" + x.k.Item1 + " | " + x.k.Item2 + " | " + x.k.Item3 + " | " + string.Join(" | ", rows.Select(r => r.buckets.TryGetValue(x.k, out var b) ? CellText(b) : "-")));

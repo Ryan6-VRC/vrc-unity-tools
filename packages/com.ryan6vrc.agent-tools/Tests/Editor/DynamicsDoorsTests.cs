@@ -273,8 +273,8 @@ public class DynamicsDoorsTests
     }
 
     // Two triangles crossing along a known segment: the vertical one's slice through z = 0 runs x 0.25 → 0.75 at y 0.5,
-    // all inside the flat one. Moved clear of the plane it reads nothing, and a pair sharing a corner (two faces of one
-    // merged mesh meeting along an edge) reads nothing either, rather than its shared edge as a crossing.
+    // all inside the flat one. Moved clear of the plane it reads nothing, and a pair sharing a corner reads nothing either,
+    // even crossing beyond it: faces of one merged mesh meet at shared corners without crossing.
     [Test]
     public void CrossLength_measuresTheSegmentTwoTrianglesShare()
     {
@@ -393,11 +393,11 @@ public class DynamicsDoorsTests
     [Test]
     public void RestRow_roundTrips_andRejectsMalformed()
     {
-        var raw = DrivePhysBones.FormatRest(3, "12:00:00", new List<(string, Vector3)> { ("Skirt/S1/tip", new Vector3(0.1f, -0.2f, 0.3f)) });
-        Assert.IsTrue(DrivePhysBones.TryParseRest(raw, out int session, out string started, out var tips));
-        Assert.AreEqual(3, session); Assert.AreEqual("12:00:00", started); Assert.AreEqual(new Vector3(0.1f, -0.2f, 0.3f), tips["Skirt/S1/tip"]);
-        Assert.IsFalse(DrivePhysBones.TryParseRest(raw.Replace("0.1,", "x,"), out _, out _, out _));
-        Assert.IsFalse(DrivePhysBones.TryParseRest("v0\t1\tx", out _, out _, out _));
+        var raw = DrivePhysBones.FormatRest("Root/Av", 3, "12:00:00", new List<(string, Vector3)> { ("Skirt/S1/tip", new Vector3(0.1f, -0.2f, 0.3f)) });
+        Assert.IsTrue(DrivePhysBones.TryParseRest(raw, out string root, out int session, out string started, out var tips));
+        Assert.AreEqual("Root/Av", root); Assert.AreEqual(3, session); Assert.AreEqual("12:00:00", started); Assert.AreEqual(new Vector3(0.1f, -0.2f, 0.3f), tips["Skirt/S1/tip"]);
+        Assert.IsFalse(DrivePhysBones.TryParseRest(raw.Replace("0.1,", "x,"), out _, out _, out _, out _));
+        Assert.IsFalse(DrivePhysBones.TryParseRest("v1\t1\tx", out _, out _, out _, out _));   // a record without its root
     }
 
     // What a fix costs at rest: each chain's tips against the baseline's, worst chain first, and a tip the baseline never
