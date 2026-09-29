@@ -356,8 +356,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>How far an operation had got. <c>ImageSent</c> is distinct from <c>UpdateSent</c>
         /// because the two need OPPOSITE advice: a lost metadata write must not be re-issued blindly, while
         /// a lost image attach is safe to re-run — the SDK refuses a byte-identical re-upload outright.
-        /// Collapsing them would tell the caller to reconcile with a read that cannot see an image.</summary>
-        internal enum Phase { Reading, UpdateSent, ImageSent }
+        /// Collapsing them would tell the caller to reconcile with a read that cannot see an image.
+        /// <c>EnqueueSent</c> is the impostor batch past its first request: no read shows a queued request,
+        /// so its advice can only be a scoped re-run.</summary>
+        internal enum Phase { Reading, UpdateSent, ImageSent, EnqueueSent }
 
         /// <summary>The verdict for an operation this editor can no longer observe — a domain reload during
         /// the call, or a frame budget that expired with the request still in flight.
@@ -367,6 +369,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// it is the only way the caller can find out what is actually true.</summary>
         internal static string InterruptedVerdict(string door, string handle, Phase phase, string cause)
         {
+            if (phase == Phase.EnqueueSent)
+                return "[avatar-record] " + door + " handles=" + Quote(handle) + " => UNKNOWN " + cause +
+                       " during the batch; any request already sent may be queued, and no read shows a " +
+                       "queued request. Re-run only the avatars you still need.";
             if (phase == Phase.ImageSent)
                 return "[avatar-record] " + door + " handle=" + Quote(handle) + " => UNKNOWN " + cause +
                        " while the thumbnail was uploading; any metadata in the same call had already " +
@@ -380,6 +386,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                        "is genuinely absent.";
             return "[avatar-record] " + door + " handle=" + Quote(handle) + " => FAIL " + cause +
                    " while still reading; nothing was written.";
+        }
+
+        // ── Impostor batch ──────────────────────────────────────────────────────────────────────
+
+        /// <summary>Whether a failed impostor request ends the batch. Only a rate limit does: the next
+        /// request would meet the same limit and spend nothing but another refusal, while any other failure
+        /// is particular to its avatar and says nothing about the rest.</summary>
+        internal static bool StopsImpostorBatch(int? statusCode) => statusCode == 429;
+
+        /// <summary>The impostor batch's terminal line. PASS means every avatar's request was ACCEPTED into
+        /// the queue — not that an impostor exists, which the server generates afterwards.</summary>
+        internal static string ImpostorSummary(string[] rows, int queued, int failed, int notAttempted)
+        {
+            var sb = new StringBuilder("[avatar-record] impostor all: queued=").Append(queued)
+                .Append(" failed=").Append(failed).Append(" not-attempted=").Append(notAttempted);
+            foreach (var r in rows) sb.Append(" | ").Append(r);
+            return sb.Append(failed == 0 && notAttempted == 0 ? " => PASS" : " => FAIL").ToString();
         }
     }
 }

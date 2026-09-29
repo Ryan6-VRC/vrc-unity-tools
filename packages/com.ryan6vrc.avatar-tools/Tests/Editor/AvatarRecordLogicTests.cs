@@ -345,4 +345,43 @@ public class AvatarRecordLogicTests
     [Test] public void Image_AllFourNullStillRefusesAndNamesTheImageArgument()
         => StringAssert.Contains("newImagePath",
                                  AvatarRecordLogic.CheckSomethingToDo(null, null, null, null));
+
+    // ── Impostor batch ──────────────────────────────────────────────────────────────────────────
+
+    // A rate limit is the one failure that ends the batch: the next request would meet the same limit.
+    // Any other status is particular to its avatar, so the batch moves on.
+    [Test] public void Impostor_429StopsTheBatch() => Assert.IsTrue(AvatarRecordLogic.StopsImpostorBatch(429));
+
+    [Test] public void Impostor_OtherFailuresDoNotStopIt()
+    {
+        Assert.IsFalse(AvatarRecordLogic.StopsImpostorBatch(404));
+        Assert.IsFalse(AvatarRecordLogic.StopsImpostorBatch(500));
+        Assert.IsFalse(AvatarRecordLogic.StopsImpostorBatch(null));
+    }
+
+    // PASS only when every avatar was accepted. A not-attempted tail is a FAIL even with nothing failed,
+    // or a batch cut short would read as done.
+    [Test] public void Impostor_AllQueuedPasses()
+        => StringAssert.EndsWith("=> PASS",
+                                 AvatarRecordLogic.ImpostorSummary(new[] { "handle=\"A\" state=\"QUEUED\"" }, 1, 0, 0));
+
+    [Test] public void Impostor_NotAttemptedTailFails()
+    {
+        var r = AvatarRecordLogic.ImpostorSummary(
+            new[] { "handle=\"A\" failed: rate-limited", "handle=\"B\" not-attempted" }, 0, 1, 1);
+        StringAssert.EndsWith("=> FAIL", r);
+        StringAssert.Contains("not-attempted=1", r);
+        StringAssert.Contains("handle=\"B\" not-attempted", r);
+    }
+
+    // A lost batch cannot be reconciled by a read, since a queued request is invisible, so the advice must
+    // be a scoped re-run and never "nothing was written".
+    [Test] public void Interrupted_EnqueueSentIsUnknownAndSaysNoReadShowsIt()
+    {
+        var r = AvatarRecordLogic.InterruptedVerdict("RequestImpostor", "A, B",
+                                                     AvatarRecordLogic.Phase.EnqueueSent, "editor reloaded");
+        StringAssert.Contains("=> UNKNOWN", r);
+        StringAssert.Contains("no read shows a queued request", r);
+        StringAssert.DoesNotContain("nothing was written", r);
+    }
 }
