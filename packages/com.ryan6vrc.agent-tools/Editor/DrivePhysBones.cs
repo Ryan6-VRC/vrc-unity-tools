@@ -46,7 +46,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         public static string Run(string avatarRoot, string poses, string[] chains = null, string stage = "drive", string[] bodies = null, string[] garments = null, string[] groups = null,
-            float hold = 2.5f, string[] views = null, string outDir = null, bool control = false, string baseline = null)
+            float hold = 2.5f, string[] views = null, string outDir = null, bool control = false, string baseline = null, float maxSeconds = MeasureCap.DefaultSeconds)
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode && !EditorApplication.isPlaying) return Fail("play entry is still in progress (the build runs first); call again once EditorApplication.isPlaying reads true — a drive armed now would be dropped by the play-entry domain reload");
             if (!EditorApplication.isPlaying) return Fail("play mode only: enter play (isCompiling and isUpdating both false), then call again");
@@ -55,7 +55,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (WriteDynamics.Pending) return Fail("a WriteDynamics field set is still cycling its physbone hosts inactive; poll WriteDynamics.Status(), then call again");
             if (EditorApplication.isPaused) return Fail("the editor is paused (a held GrabPhysBone freezes it): GrabPhysBone.Release(resume: true) first");
             if (!(hold >= 0)) return Fail("hold is seconds, 0 or more");
-            var err = ParsePoses(poses, out var pl); if (err != null) return Fail(err);
+            var err = MeasureCap.SecondsError(maxSeconds); if (err != null) return Fail("maxSeconds: " + err);
+            if ((err = ParsePoses(poses, out var pl)) != null) return Fail(err);
+            if ((err = ProgramRefusal(pl, hold, maxSeconds)) != null) return Fail(err);
             var h = SceneHandle.Resolve(avatarRoot); if (!h.Ok) return Fail(h.Refusal);
             var rt = h.Object.transform;
             if (!h.Object.activeInHierarchy) return Fail("'" + avatarRoot + "' is inactive: an inactive avatar is never built or simulated, so every number would read zero; activate it in edit mode and re-enter play");
@@ -92,6 +94,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             stage = RunLogFormat.Sanitize(string.IsNullOrEmpty(stage) ? "drive" : stage);
             views = views ?? new[] { "front", "back", "left", "right" };
             outDir = Path.GetFullPath(outDir ?? Path.Combine("Temp", "DrivePhysBones", RunLogFormat.Sanitize(rt.name) + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture)));
+            // Armed last among the refusals, so a refused call charges nothing to the budget.
+            var cap = MeasureCap.Arm(stage, out err, maxSeconds); if (cap == null) return Fail(err);
             if (views.Length > 0) Directory.CreateDirectory(outDir);
 
             var moved = ops.SelectMany(l => l.Select(o => o.bone)).Distinct().ToArray();
@@ -122,7 +126,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             int session = PlaySession.Current;
             void Finish(string verdict, string detail)
             {
-                EditorApplication.update -= _pump; _pump = null;
+                EditorApplication.update -= _pump; _pump = null; cap.Close();
                 RestoreClock();
                 if (held) { foreach (var p in pbs) if (p != null) p.enabled = true; }
                 SessionState.EraseString(ControlKey);
@@ -144,6 +148,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 try
                 {
                     if (!EditorApplication.isPlaying) { Finish("FAIL", "aborted: play exited"); return; }
+                    if (cap.Expired)
+                    {
+                        if (frozen) for (int r = row; r <= pl.poses.Length; r++) log.Append(stage + " | " + (r == 0 ? "rest" : pl.poses[r - 1].name) + " | not run: time cap | - | - | - | - | - | - | - | -\n");
+                        Finish("FAIL", cap.Reason + ", with " + (frozen ? row : 0) + " of " + (pl.poses.Length + 1) + " rows done (the rest are marked not run) and the bones, chains and clock restored."
+                            + " Split the poses into shorter drives, or drop `sample: every` rows, which cost the most wall clock per simulated second");
+                        return;
+                    }
                     if (Time.frameCount == lastFrame)
                     {
                         if (EditorApplication.timeSinceStartup - lastTick > 20) Finish("FAIL", "aborted: the player loop stalled for 20 s (a modal, a paused editor, or runInBackground off)");
@@ -182,7 +193,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         }
                         SessionState.SetString(Key, Tag + " running '" + stage + "' 0/" + pl.poses.Length + " (rest frozen at frame " + Time.frameCount + ") | log=" + logPath + "\n");
                         log.Append("root=" + rootPath + " stage=" + stage + " started=" + started + " playSession=" + session + " chains=" + rigs.Count + " tips=" + tips.Count + " hold=" + N(hold, "0.##") + "s dt=" + N(Step, "0.#####")
-                            + "s freezeFrame=" + Time.frameCount + " animator=" + id + (anim && !anim.enabled ? "(found disabled)" : "") + " bodies=" + (body != null ? string.Join(",", body.Select(b => b.label)) : "-")
+                            + "s " + CapNote(maxSeconds) + " freezeFrame=" + Time.frameCount + " animator=" + id + (anim && !anim.enabled ? "(found disabled)" : "") + " bodies=" + (body != null ? string.Join(",", body.Select(b => b.label)) : "-")
                             + " garments=" + (gar != null ? string.Join(",", gar.Select(g => g.label)) : "-") + " control=" + (control ? pbs.Length + " chains held disabled" : "no") + " baseline=" + (baseline ?? "-")
                             + " followedConstraints=" + follow.Count + " frames=" + (views.Length > 0 ? outDir : "-")
                             + "\nclock: every frame advances dt, so ramp and hold are simulated seconds. approach: snap (one frame) or ramp <s>/<frames> (smoothstep from the previous row's pose; the hold starts on arrival)."
@@ -288,7 +299,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             };
             string pending = Tag + " Drive " + rootPath + " => PENDING | stage=" + stage + " started " + started + " in play session " + session + " (entered " + PlaySession.EnteredAt + ") | "
                 + (pl.poses.Length + 1) + " rows (rest first), " + rigs.Count + " chains" + (control ? " held disabled" : "") + ", " + tips.Count + " tips, hold " + N(hold, "0.##") + "s, clock pinned to "
-                + N(Step, "0.#####") + "s a frame; poll Ryan6Vrc.AgentTools.Editor.DrivePhysBones.Status()";
+                + N(Step, "0.#####") + "s a frame, " + CapNote(maxSeconds) + "; poll Ryan6Vrc.AgentTools.Editor.DrivePhysBones.Status()";
             var armed = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, label, pending, pending + "\n(running: this file is rewritten with the rows when the drive finishes)\n", ".md");
             int at = armed.LastIndexOf(" | log=", StringComparison.Ordinal); if (at >= 0) logPath = armed.Substring(at + 7);
             SessionState.SetInt(SessionKey, session); SessionState.SetString(LogKey, logPath ?? "");
@@ -296,6 +307,22 @@ namespace Ryan6Vrc.AgentTools.Editor
             Time.captureDeltaTime = Step;
             SessionState.SetString(Key, Tag + " running '" + stage + "': waiting for a stable Animator | log=" + logPath + "\n"); EditorApplication.update += _pump;
             return logPath != null ? armed : pending;
+        }
+
+        /// <summary>The header's cap token, naming a cap raised above the default. Pure.</summary>
+        internal static string CapNote(float maxSeconds) => "timeCap=" + N(maxSeconds, "0.#") + "s" + (maxSeconds > MeasureCap.DefaultSeconds ? " (raised above the " + N(MeasureCap.DefaultSeconds, "0") + "s default)" : "");
+
+        /// <summary>A program's simulated seconds: the rest row's hold, then every row's ramp and hold. Pure.</summary>
+        internal static float ProgramSeconds(PoseList pl, float hold) => hold + pl.poses.Sum(p => p.ramp + (p.hold >= 0 ? p.hold : hold));
+
+        /// <summary>Null when the program's simulated seconds fit the cap; else the refusal, naming the total, the cap and
+        /// the longest rows. Wall clock runs slower than the pinned clock, so a program over the cap on it cannot finish. Pure.</summary>
+        internal static string ProgramRefusal(PoseList pl, float hold, float cap)
+        {
+            float total = ProgramSeconds(pl, hold); if (total <= cap) return null;
+            var longest = pl.poses.Select(p => (p.name, s: p.ramp + (p.hold >= 0 ? p.hold : hold))).OrderByDescending(x => x.s).Take(3);
+            return "poses run " + N(total, "0.#") + " simulated seconds over " + (pl.poses.Length + 1) + " rows (rest included), over the " + N(cap, "0.#") + " s time cap, and wall clock usually runs slower still;"
+                + " the longest rows are " + string.Join(", ", longest.Select(x => "'" + x.name + "' " + N(x.s, "0.#") + " s")) + ". Split the program into drives that each fit the cap, or drop rows, `sample: every` rows first";
         }
 
         static bool InScope(VRCPhysBoneBase p, Transform[] scope) => scope == null || scope.Any(s => WriteDynamics.EffRoot(p).IsChildOf(s));
