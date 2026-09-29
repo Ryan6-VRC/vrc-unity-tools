@@ -111,6 +111,44 @@ namespace Ryan6Vrc.AvatarTools.Editor
                           out task, out failReason);
         }
 
+        /// <summary>Kick <c>POST avatars/{id}/impostor/enqueue</c> through the SDK's generic <c>Post</c>,
+        /// which rides the signed-in editor session; the SDK ships no impostor method of its own. The body
+        /// is null, so the request goes out with no content. The response is the queued job, deserialized
+        /// to a dictionary so this assembly needs no JSON reference; only its <c>state</c> is ever read,
+        /// because the job also carries the avatar and requester ids.</summary>
+        internal static bool TryEnqueueImpostor(string id, out object task, out string failReason)
+        {
+            task = null;
+            if (!TryMethod("Post", out var open, out failReason)) return false;
+            MethodInfo m;
+            try { m = open.MakeGenericMethod(typeof(object), typeof(System.Collections.Generic.Dictionary<string, object>)); }
+            catch (Exception e) { failReason = "VRCApi.Post is not the generic <T, TResponse> it was (SDK drift): " + e.Message; return false; }
+            var ps = m.GetParameters();
+            if (ps.Length < 2 || ps[0].ParameterType != typeof(string))
+            { failReason = "VRCApi.Post's signature changed (SDK drift)"; return false; }
+            // Everything after (url, body) is optional; pass each declared default so a new trailing
+            // optional parameter does not break the call. A null for a struct default is its default value.
+            var args = new object[ps.Length];
+            args[0] = "avatars/" + id + "/impostor/enqueue";
+            for (int i = 2; i < ps.Length; i++) args[i] = ps[i].HasDefaultValue ? ps[i].DefaultValue : null;
+            return Invoke(m, args, out task, out failReason);
+        }
+
+        /// <summary>The queued job's <c>state</c>, the one field of it that is safe to emit.</summary>
+        internal static string JobState(object job)
+        {
+            var d = job as System.Collections.Generic.IDictionary<string, object>;
+            return d != null && d.TryGetValue("state", out var s) ? s as string : null;
+        }
+
+        /// <summary>The HTTP status of a faulted task, when anything in its chain carries one.</summary>
+        internal static int? FaultStatus(object task)
+        {
+            var ex = (Exception)task.GetType().GetProperty("Exception").GetValue(task);
+            FindClassifiable(ex, out var code, out _);
+            return code;
+        }
+
         internal static string GetImageUrl(object record) => GetString(record, "ImageUrl");
 
         /// <summary>The innermost message of a faulted task, for the one case the status classifier cannot
@@ -306,9 +344,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
             plain("Featured"); plain("PendingUpload"); plain("UpdatedAt");
 
             var pkgs = t.GetProperty("UnityPackages")?.GetValue(record) as System.Collections.IEnumerable;
-            int pkgCount = 0;
-            if (pkgs != null) foreach (var x in pkgs) pkgCount++;
+            int pkgCount = 0, impostors = 0;
+            if (pkgs != null)
+                foreach (var x in pkgs)
+                {
+                    pkgCount++;
+                    var variant = x?.GetType().GetProperty("Variant")?.GetValue(x) as string;
+                    if (string.Equals(variant, "impostor", StringComparison.OrdinalIgnoreCase)) impostors++;
+                }
             sb.Append(" unityPackages=").Append(pkgCount);
+            // Counted within unityPackages: the SDK models an impostor as a package of its own, marked by
+            // Variant (VRCAvatar.AvatarVariant.Impostor).
+            sb.Append(" impostorPackages=").Append(impostors);
 
             var img = GetString(record, "ThumbnailImageUrl");
             sb.Append(" hasThumbnail=").Append(!string.IsNullOrEmpty(img));
@@ -368,6 +415,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 case "r": phase = AvatarRecordLogic.Phase.Reading; break;
                 case "i": phase = AvatarRecordLogic.Phase.ImageSent; break;
+                case "q": phase = AvatarRecordLogic.Phase.EnqueueSent; break;
                 default:  phase = AvatarRecordLogic.Phase.UpdateSent; break;
             }
             _summaryOwner = parts[0];
@@ -379,6 +427,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             if (p == AvatarRecordLogic.Phase.UpdateSent) return "w";
             if (p == AvatarRecordLogic.Phase.ImageSent) return "i";
+            if (p == AvatarRecordLogic.Phase.EnqueueSent) return "q";
             return "r";
         }
 
@@ -398,6 +447,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal static void MarkImageSent()
         {
             _phase = AvatarRecordLogic.Phase.ImageSent;
+            WriteBreadcrumb();
+        }
+
+        /// <summary>Called by the impostor batch before its first request leaves.</summary>
+        internal static void MarkEnqueueSent()
+        {
+            _phase = AvatarRecordLogic.Phase.EnqueueSent;
             WriteBreadcrumb();
         }
 
@@ -519,7 +575,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal static string Refuse(string door, string reason)
             => "[avatar-record] " + door + " => REFUSE error=" + UploadAvatarLogic.RedactIds(reason);
 
-        /// <summary>Guard shared by both doors: the SDK present, and no other record op in flight.</summary>
+        /// <summary>Guard shared by the record doors: the SDK present, and no other record op in flight.</summary>
         internal static string PreflightRefusal()
         {
             if (!VrcApiReflect.IsAvailable)
@@ -815,6 +871,106 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             return "[avatar-record]" + marker + " updating " + AvatarRecordLogic.Quote(handle) +
                    "; poll UpdateAvatarRecord.Status()";
+        }
+
+        public static string Status() => AvatarRecordDriver.Status(Door);
+    }
+
+    /// <summary>Ask VRChat to generate an impostor for each of a batch of uploaded avatars, sent through the
+    /// SDK's signed-in session. Takes the same GameObjects <see cref="UploadAvatar"/> does; nothing is
+    /// built or uploaded locally.
+    ///
+    /// A request is QUEUED, not built: the verdict says every request was accepted, and the impostor
+    /// itself is the server's to generate afterwards. Requests go one at a time; a rate limit stops the
+    /// batch and names every avatar left unsent, while any other failure is that avatar's alone and the
+    /// batch moves on. The server accepts a repeat request for an avatar whose earlier one is still
+    /// pending, so a re-run spends a request whether or not one is already queued.
+    ///
+    /// <c>whatIf</c> resolves every handle to a live blueprint and sends nothing; it answers synchronously.
+    /// Otherwise async: <c>Run</c> kicks and returns; poll <c>Status()</c>. No id enters output — the queued
+    /// job carries the avatar and requester ids, so only its <c>state</c> is read.</summary>
+    [AgentTool]
+    public static class RequestImpostor
+    {
+        internal const string Door = "RequestImpostor";
+
+        public static string Run(GameObject[] avatars, bool whatIf = false)
+        {
+            AvatarRecordDriver.ClearIfOwnedBy(Door);
+            var refuse = AvatarRecordDriver.PreflightRefusal();
+            if (refuse != null) return AvatarRecordDriver.Refuse(Door, refuse);
+            if (avatars == null || avatars.Length == 0)
+                return AvatarRecordDriver.Refuse(Door, "no avatars given — pass the GameObjects that were uploaded");
+
+            int n = avatars.Length;
+            var ids = new string[n];
+            var handles = new string[n];
+            var unresolved = new System.Collections.Generic.List<string>();
+            for (int k = 0; k < n; k++)
+            {
+                handles[k] = avatars[k] != null ? avatars[k].name : "<null>";
+                if (!AvatarRecordDriver.TryResolveId(avatars[k], out ids[k], out var why)) unresolved.Add(why);
+            }
+            // All or nothing before anything is sent: a partial batch here would be a caller error spending
+            // requests the caller did not mean to spend.
+            if (unresolved.Count > 0)
+                return AvatarRecordDriver.Refuse(Door, string.Join("; ", unresolved));
+
+            if (whatIf)
+            {
+                var plan = new StringBuilder("[avatar-record] (whatIf) impostor all: would request=").Append(n);
+                foreach (var h in handles) plan.Append(" | handle=").Append(AvatarRecordLogic.Quote(h));
+                return plan.Append(" (nothing sent; whether the server accepts a request is only knowable " +
+                                   "from a real run) => PASS").ToString();
+            }
+
+            var rows = new System.Collections.Generic.List<string>();
+            int queued = 0, failed = 0, i = 0;
+            object task = null;
+
+            Action finish = () =>
+            {
+                for (int k = i; k < n; k++)
+                    rows.Add("handle=" + AvatarRecordLogic.Quote(handles[k]) + " not-attempted");
+                AvatarRecordDriver.Finish(UploadAvatarLogic.RedactIds(
+                    AvatarRecordLogic.ImpostorSummary(rows.ToArray(), queued, failed, n - queued - failed)));
+            };
+
+            AvatarRecordDriver.Start(Door, string.Join(", ", handles), () =>
+            {
+                if (task == null)
+                {
+                    if (i == 0) AvatarRecordDriver.MarkEnqueueSent();
+                    if (!VrcApiReflect.TryEnqueueImpostor(ids[i], out task, out var kickWhy))
+                    {
+                        // A kick failure is SDK drift, identical for every avatar — so it ends the batch.
+                        rows.Add("handle=" + AvatarRecordLogic.Quote(handles[i]) + " failed: " + kickWhy);
+                        failed++; i++;
+                        finish();
+                    }
+                    return;
+                }
+                if (!VrcApiReflect.IsCompleted(task)) return;
+                AvatarRecordDriver.NoteProgress(Door);
+
+                bool stop = false;
+                if (VrcApiReflect.IsFaulted(task))
+                {
+                    failed++;
+                    stop = AvatarRecordLogic.StopsImpostorBatch(VrcApiReflect.FaultStatus(task));
+                    rows.Add("handle=" + AvatarRecordLogic.Quote(handles[i]) + " failed: " +
+                             VrcApiReflect.DescribeFault(task) + (stop ? " (batch stopped)" : ""));
+                }
+                else
+                {
+                    queued++;
+                    rows.Add("handle=" + AvatarRecordLogic.Quote(handles[i]) + " state=" +
+                             AvatarRecordLogic.Quote(VrcApiReflect.JobState(VrcApiReflect.Result(task))));
+                }
+                task = null; i++;
+                if (stop || i == n) finish();
+            });
+            return "[avatar-record] requesting impostors for " + n + " avatar(s); poll RequestImpostor.Status()";
         }
 
         public static string Status() => AvatarRecordDriver.Status(Door);
