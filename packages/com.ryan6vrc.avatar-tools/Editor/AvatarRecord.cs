@@ -344,18 +344,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             plain("Featured"); plain("PendingUpload"); plain("UpdatedAt");
 
             var pkgs = t.GetProperty("UnityPackages")?.GetValue(record) as System.Collections.IEnumerable;
-            int pkgCount = 0, impostors = 0;
-            if (pkgs != null)
-                foreach (var x in pkgs)
-                {
-                    pkgCount++;
-                    var variant = x?.GetType().GetProperty("Variant")?.GetValue(x) as string;
-                    if (string.Equals(variant, "impostor", StringComparison.OrdinalIgnoreCase)) impostors++;
-                }
+            int pkgCount = 0;
+            if (pkgs != null) foreach (var x in pkgs) pkgCount++;
             sb.Append(" unityPackages=").Append(pkgCount);
-            // Counted within unityPackages: the SDK models an impostor as a package of its own, marked by
-            // Variant (VRCAvatar.AvatarVariant.Impostor).
-            sb.Append(" impostorPackages=").Append(impostors);
+            // No impostor field, deliberately. The SDK models an impostor as a package with Variant
+            // "impostor", but this record lists none even for an avatar that has one, so a count here
+            // would read 0 whether or not an impostor exists.
 
             var img = GetString(record, "ThumbnailImageUrl");
             sb.Append(" hasThumbnail=").Append(!string.IsNullOrEmpty(img));
