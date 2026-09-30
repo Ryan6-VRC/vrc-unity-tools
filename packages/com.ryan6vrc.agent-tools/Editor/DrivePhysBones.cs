@@ -19,8 +19,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary><c>ramp</c> is seconds: 0 snaps to the pose in one frame; above 0 the bones ease (smoothstep) from the
         /// previous row's pose to this one over that long, and the hold is timed from arrival. <c>hold</c> is seconds,
         /// below 0 taking the drive's. <c>sample</c> is when the clipping measure runs: <c>end</c> of the hold,
-        /// <c>every</c> frame of the ramp and hold, <c>every:N</c> for every Nth of those frames and the row's last, or
-        /// <c>none</c>.</summary>
+        /// <c>every</c> frame of the ramp and hold, <c>every:N</c> for every Nth of those from the first and always the last, or <c>none</c>.</summary>
         [Serializable] public class Pose { public string name; public BoneOp[] ops = new BoneOp[0]; public float ramp; public float hold = -1; public string sample = "end"; }
         [Serializable] public class BoneOp { public string bone, move = ""; public float pitch, yaw, roll; }
 
@@ -46,12 +45,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return PlaySession.IsCurrent(SessionState.GetInt(SessionKey, 0)) ? s : PlaySession.Stale(Tag, "drive", s.Split('\n')[0]);
         }
 
-        /// <param name="maxSeconds">The run's wall-clock cap. Leave it at the default: it is the operator's limit on how much
-        /// measuring one call does, not a timeout to size to the program. A program that does not fit is made cheaper, never
-        /// given a higher cap: stride its slow ramps with <c>sample: every:N</c>, drop rows that repeat what another row
-        /// reads, or report what the rows that fit show.</param>
+        /// <param name="maxSeconds">The operator's cap on one run, in simulated and in wall-clock seconds; leave it at the default.</param>
         public static string Run(string avatarRoot, string poses, string[] chains = null, string stage = "drive", string[] bodies = null, string[] garments = null, string[] groups = null,
-            float hold = 2.5f, string[] views = null, string outDir = null, bool control = false, string baseline = null, float maxSeconds = MeasureCap.DefaultSeconds)
+            float hold = 2.5f, string[] views = null, string outDir = null, bool control = false, string baseline = null, float maxSeconds = 180f)
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode && !EditorApplication.isPlaying) return Fail("play entry is still in progress (the build runs first); call again once EditorApplication.isPlaying reads true — a drive armed now would be dropped by the play-entry domain reload");
             if (!EditorApplication.isPlaying) return Fail("play mode only: enter play (isCompiling and isUpdating both false), then call again");
@@ -60,9 +56,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (WriteDynamics.Pending) return Fail("a WriteDynamics field set is still cycling its physbone hosts inactive; poll WriteDynamics.Status(), then call again");
             if (EditorApplication.isPaused) return Fail("the editor is paused (a held GrabPhysBone freezes it): GrabPhysBone.Release(resume: true) first");
             if (!(hold >= 0)) return Fail("hold is seconds, 0 or more");
-            var err = MeasureCap.SecondsError(maxSeconds); if (err != null) return Fail("maxSeconds: " + err);
-            if ((err = ParsePoses(poses, out var pl)) != null) return Fail(err);
-            if ((err = ProgramRefusal(pl, hold, maxSeconds)) != null) return Fail(err);
+            var err = ParsePoses(poses, out var pl); if (err != null) return Fail(err);
+            float sim = ProgramSeconds(pl, hold);
+            if (!(sim <= maxSeconds)) return Fail("poses run " + N(sim, "0.#") + " simulated seconds, over the " + N(maxSeconds, "0.#") + " s maxSeconds cap; " + Cheaper);
             var h = SceneHandle.Resolve(avatarRoot); if (!h.Ok) return Fail(h.Refusal);
             var rt = h.Object.transform;
             if (!h.Object.activeInHierarchy) return Fail("'" + avatarRoot + "' is inactive: an inactive avatar is never built or simulated, so every number would read zero; activate it in edit mode and re-enter play");
@@ -83,7 +79,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (bodies != null && bodies.Length > 0) { if ((err = ReportClipping.Resolve(rt, bodies, garments, out body, out gar)) != null) return Fail(err); }
             else if (garments != null && garments.Length > 0) return Fail("garments are measured against bodies: pass bodies too");
             if (body == null && groups != null && groups.Length > 0) return Fail("groups splits the clipping measure, so it needs bodies and garments");
-            if (body == null && pl.poses.FirstOrDefault(p => EveryStride(p.sample) > 0) is Pose ev) return Fail("poses '" + ev.name + "': sample '" + ev.sample + "' times the clipping measure, which needs bodies and garments");
+            if (body == null && pl.poses.FirstOrDefault(p => EveryStride(p.sample) > 0) is Pose ev)
+                return Fail("poses '" + ev.name + "': sample '" + ev.sample + "' times the clipping measure, which needs bodies and garments");
             if ((err = ReportClipping.ResolveGroups(rt, groups, out var groupT)) != null) return Fail(err);
             string baseRaw = null;
             if (!string.IsNullOrEmpty(baseline) && (baseRaw = SessionState.GetString(RestKey + RunLogFormat.Sanitize(baseline), "")).Length == 0)
@@ -99,8 +96,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             stage = RunLogFormat.Sanitize(string.IsNullOrEmpty(stage) ? "drive" : stage);
             views = views ?? new[] { "front", "back", "left", "right" };
             outDir = Path.GetFullPath(outDir ?? Path.Combine("Temp", "DrivePhysBones", RunLogFormat.Sanitize(rt.name) + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture)));
-            // Armed last among the refusals, so a refused call charges nothing to the budget.
-            var cap = MeasureCap.Arm(stage, out err, maxSeconds); if (cap == null) return Fail(err);
             if (views.Length > 0) Directory.CreateDirectory(outDir);
 
             var moved = ops.SelectMany(l => l.Select(o => o.bone)).Distinct().ToArray();
@@ -131,7 +126,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             int session = PlaySession.Current;
             void Finish(string verdict, string detail)
             {
-                EditorApplication.update -= _pump; _pump = null; cap.Close();
+                EditorApplication.update -= _pump; _pump = null;
                 RestoreClock();
                 if (held) { foreach (var p in pbs) if (p != null) p.enabled = true; }
                 SessionState.EraseString(ControlKey);
@@ -153,11 +148,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 try
                 {
                     if (!EditorApplication.isPlaying) { Finish("FAIL", "aborted: play exited"); return; }
-                    if (cap.Expired)
+                    if (EditorApplication.timeSinceStartup - armedAt > maxSeconds)
                     {
-                        if (frozen) for (int r = row; r <= pl.poses.Length; r++) log.Append(stage + " | " + (r == 0 ? "rest" : pl.poses[r - 1].name) + " | not run: time cap | - | - | - | - | - | - | - | -\n");
-                        Finish("FAIL", cap.Reason + ", with " + (frozen ? row : 0) + " of " + (pl.poses.Length + 1) + " rows done (the rest are marked not run) and the bones, chains and clock restored."
-                            + " " + Cheaper);
+                        if (frozen) for (int r = row; r <= pl.poses.Length; r++) log.Append(stage + " | " + (r == 0 ? "rest" : pl.poses[r - 1].name) + " | not run | - | - | - | - | - | - | - | -\n");
+                        Finish("FAIL", "aborted: the run passed its " + N(maxSeconds, "0.#") + " s wall-clock cap with " + (frozen ? row : 0)
+                            + " of " + (pl.poses.Length + 1) + " rows done; " + Cheaper);
                         return;
                     }
                     if (Time.frameCount == lastFrame)
@@ -198,20 +193,20 @@ namespace Ryan6Vrc.AgentTools.Editor
                         }
                         SessionState.SetString(Key, Tag + " running '" + stage + "' 0/" + pl.poses.Length + " (rest frozen at frame " + Time.frameCount + ") | log=" + logPath + "\n");
                         log.Append("root=" + rootPath + " stage=" + stage + " started=" + started + " playSession=" + session + " chains=" + rigs.Count + " tips=" + tips.Count + " hold=" + N(hold, "0.##") + "s dt=" + N(Step, "0.#####")
-                            + "s " + CapNote(maxSeconds) + " freezeFrame=" + Time.frameCount + " animator=" + id + (anim && !anim.enabled ? "(found disabled)" : "") + " bodies=" + (body != null ? string.Join(",", body.Select(b => b.label)) : "-")
+                            + "s freezeFrame=" + Time.frameCount + " animator=" + id + (anim && !anim.enabled ? "(found disabled)" : "") + " bodies=" + (body != null ? string.Join(",", body.Select(b => b.label)) : "-")
                             + " garments=" + (gar != null ? string.Join(",", gar.Select(g => g.label)) : "-") + " control=" + (control ? pbs.Length + " chains held disabled" : "no") + " baseline=" + (baseline ?? "-")
                             + " followedConstraints=" + follow.Count + " frames=" + (views.Length > 0 ? outDir : "-")
                             + "\nclock: every frame advances dt, so ramp and hold are simulated seconds. approach: snap (one frame) or ramp <s>/<frames> (smoothstep from the previous row's pose; the hold starts on arrival)."
-                            + " jitter: mean per-frame max tip step over the last min(0.5 s, hold/2) of each half of the hold, mid/end. sample: when the clipping measure ran; on 'every <n>f' or 'every:<N> <n>f' each clipping column is its peak over the <n> frames measured\n"
+                            + " jitter: mean per-frame max tip step over the last min(0.5 s, hold/2) of each half of the hold, mid/end."
+                            + " sample: when the clipping measure ran; on 'every <n>f' or 'every:<N> <n>f' each clipping column is its peak over the <n> frames measured\n"
                             + "stage | pose | approach | tipTravelCm root max/mean | tipTravelCm inFrame max/mean | jitterMmPerFrame mid/end | sample | crossingCm | vertsBehindBody/signed edgeNearest | maxDepthCm | throughCm\n");
                     }
                     if (anim) anim.enabled = false;   // re-asserted every frame: an emulator re-enables it
                     // Before this tick moves the pose: the chains last solved against the pose the bones hold now.
-                    // Whether this frame ends the row, decided before the pose moves so a stride can measure the last frame; the
-                    // ramp's arrival times the hold from this frame, so a ramp arriving now ends the row only on a zero hold.
+                    // Decided before the pose moves, so a stride measures the row's last frame; a ramp arriving now ends the row only on a zero hold.
                     bool ends = fromP != null ? Ramp01(Time.time - rampT0, rampSec) >= 1f && !(0 < HoldOf(row)) : !(Time.time - t0 < HoldOf(row));
                     int stride = EveryStride(Mode(row));
-                    if (stride > 0 && MeasuresFrame(rowFrame++, stride, ends))
+                    if (stride > 0 && (rowFrame++ % stride == 0 || ends))
                     {
                         var m = ReportClipping.Measure(rt, body, gar, groupT); acc = ReportClipping.Peak(acc, m); accFrames++;
                         perFrame.Append(pl.poses[row - 1].name + "\t" + N(Time.time - rowT0, "0.000") + "\t" + N(m.crossCm) + "\t" + m.behind + "\t" + N(m.maxDepthCm) + "\t" + N(m.throughCm) + "\n");
@@ -256,7 +251,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     if (body != null && mode != "none")
                     {
                         var r = EveryStride(mode) > 0 ? acc : ReportClipping.Measure(rt, body, gar, groupT); pen.Add((name, r.buckets)); penMaps = penMaps ?? ReportClipping.Maps(r, rt);
-                        log.Append((EveryStride(mode) > 0 ? mode + " " + accFrames + "f" : "end") + " | " + N(r.crossCm) + " | " + r.behind + "/" + r.signed + " " + r.edgeNearest + " | " + N(r.maxDepthCm) + " | " + N(r.throughCm) + "\n");
+                        log.Append((EveryStride(mode) > 0 ? mode + " " + accFrames + "f" : "end")
+                            + " | " + N(r.crossCm) + " | " + r.behind + "/" + r.signed + " " + r.edgeNearest + " | " + N(r.maxDepthCm) + " | " + N(r.throughCm) + "\n");
                     }
                     else log.Append((body == null ? "-" : "none") + " | - | - | - | -\n");
                     acc = default; accFrames = 0; rowFrame = 0;
@@ -308,7 +304,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             };
             string pending = Tag + " Drive " + rootPath + " => PENDING | stage=" + stage + " started " + started + " in play session " + session + " (entered " + PlaySession.EnteredAt + ") | "
                 + (pl.poses.Length + 1) + " rows (rest first), " + rigs.Count + " chains" + (control ? " held disabled" : "") + ", " + tips.Count + " tips, hold " + N(hold, "0.##") + "s, clock pinned to "
-                + N(Step, "0.#####") + "s a frame, " + CapNote(maxSeconds) + "; poll Ryan6Vrc.AgentTools.Editor.DrivePhysBones.Status()";
+                + N(Step, "0.#####") + "s a frame; poll Ryan6Vrc.AgentTools.Editor.DrivePhysBones.Status()";
             var armed = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, label, pending, pending + "\n(running: this file is rewritten with the rows when the drive finishes)\n", ".md");
             int at = armed.LastIndexOf(" | log=", StringComparison.Ordinal); if (at >= 0) logPath = armed.Substring(at + 7);
             SessionState.SetInt(SessionKey, session); SessionState.SetString(LogKey, logPath ?? "");
@@ -318,38 +314,18 @@ namespace Ryan6Vrc.AgentTools.Editor
             return logPath != null ? armed : pending;
         }
 
-        /// <summary>The header's cap token, naming a cap raised above the default. Pure.</summary>
-        internal static string CapNote(float maxSeconds) => "timeCap=" + N(maxSeconds, "0.#") + "s" + (maxSeconds > MeasureCap.DefaultSeconds ? " (raised above the " + N(MeasureCap.DefaultSeconds, "0") + "s default)" : "");
+        const string Cheaper = "the cap is the operator's limit, so make the program cheaper (sample \"every:N\" on slow ramps, fewer rows) and do not raise it";
 
         /// <summary>A program's simulated seconds: the rest row's hold, then every row's ramp and hold. Pure.</summary>
         internal static float ProgramSeconds(PoseList pl, float hold) => hold + pl.poses.Sum(p => p.ramp + (p.hold >= 0 ? p.hold : hold));
 
-        /// <summary>Null when the program's simulated seconds fit the cap; else the refusal, naming the total, the cap and
-        /// the longest rows. Wall clock runs slower than the pinned clock, so a program over the cap on it cannot finish. Pure.</summary>
-        internal static string ProgramRefusal(PoseList pl, float hold, float cap)
-        {
-            float total = ProgramSeconds(pl, hold); if (total <= cap) return null;
-            var longest = pl.poses.Select(p => (p.name, s: p.ramp + (p.hold >= 0 ? p.hold : hold))).OrderByDescending(x => x.s).Take(3);
-            return "poses run " + N(total, "0.#") + " simulated seconds over " + (pl.poses.Length + 1) + " rows (rest included), over the " + N(cap, "0.#") + " s time cap, the operator's limit on one run's measuring, and wall clock usually runs slower still;"
-                + " the longest rows are " + string.Join(", ", longest.Select(x => "'" + x.name + "' " + N(x.s, "0.#") + " s")) + ". " + Cheaper;
-        }
-
-        /// <summary>What the cap's refusal and FAIL tell a caller to do, so neither can read as an invitation to raise it.</summary>
-        internal const string Cheaper = "Make the program cheaper rather than raising maxSeconds: stride ramps of 2 s or more with `sample: \"every:3\"` (a fast ramp or whip keeps `every`: its crossing peaks on one frame), drop rows that repeat what another row reads, or report what the rows that fit show";
-
-        /// <summary>A sample mode's stride: 1 for <c>every</c>, N for <c>every:N</c> with N a whole number of 1 or more, 0 for
-        /// a mode that does not measure per frame, -1 for a malformed <c>every:</c>. Pure.</summary>
+        /// <summary>A sample's stride: 1 for <c>every</c>, N for <c>every:N</c> (N 1 or more), 0 for no per-frame measure, -1 for a malformed one. Pure.</summary>
         internal static int EveryStride(string sample)
         {
             if (sample == "every") return 1;
             if (sample == null || !sample.StartsWith("every:", StringComparison.Ordinal)) return 0;
-            var n = sample.Substring(6);
-            return n.All(char.IsDigit) && int.TryParse(n, NumberStyles.None, CultureInfo.InvariantCulture, out int s) && s >= 1 ? s : -1;
+            return int.TryParse(sample.Substring(6), NumberStyles.None, CultureInfo.InvariantCulture, out int n) && n >= 1 ? n : -1;
         }
-
-        /// <summary>Whether a strided row measures its <paramref name="rowFrame"/>th frame (0 its first): every Nth from the
-        /// first, and always the row's last, so a ramp ends on the pose it arrived at. Pure.</summary>
-        internal static bool MeasuresFrame(int rowFrame, int stride, bool rowEnds) => rowEnds || rowFrame % stride == 0;
 
         static bool InScope(VRCPhysBoneBase p, Transform[] scope) => scope == null || scope.Any(s => WriteDynamics.EffRoot(p).IsChildOf(s));
 
@@ -561,7 +537,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (p.ops.Any(o => !string.IsNullOrEmpty(o.move) && WriteDynamics.ParseVector(o.move) == null)) return "poses '" + p.name + "': move is x,y,z metres";
                 if (!(p.ramp >= 0)) return "poses '" + p.name + "': ramp is seconds, 0 (snap) or more";
                 if (float.IsNaN(p.hold)) return "poses '" + p.name + "': hold is seconds, 0 or more, or below 0 for the drive's";
-                if (!Samples.Contains(p.sample) && EveryStride(p.sample) < 1) return "poses '" + p.name + "': sample is end, every, every:N (N a whole number of frames, 1 or more) or none";
+                if (!Samples.Contains(p.sample) && EveryStride(p.sample) < 1) return "poses '" + p.name + "': sample is end, every, every:N (N 1 or more) or none";
             }
             return null;
         }

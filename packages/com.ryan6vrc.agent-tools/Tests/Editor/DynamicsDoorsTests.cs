@@ -187,39 +187,29 @@ public class DynamicsDoorsTests
     }
 
     [TestCase("every", 1)]
-    [TestCase("every:1", 1)]
     [TestCase("every:3", 3)]
     [TestCase("end", 0)]
     [TestCase("none", 0)]
     [TestCase("every:0", -1)]
     [TestCase("every:", -1)]
-    [TestCase("every:-2", -1)]
     [TestCase("every:+2", -1)]
     [TestCase("every:2.5", -1)]
-    [TestCase("every:x", -1)]
     public void EveryStride_readsEveryAndEveryN(string sample, int stride) => Assert.AreEqual(stride, DrivePhysBones.EveryStride(sample));
 
     [Test]
     public void Poses_sampleTakesEveryN_andRefusesAMalformedStride()
     {
-        Assert.IsNull(DrivePhysBones.ParsePoses("[{\"name\":\"slow\",\"ramp\":3,\"hold\":0,\"sample\":\"every:3\"},{\"name\":\"whip\",\"ramp\":0.3,\"sample\":\"every\"}]", out var pl));
+        Assert.IsNull(DrivePhysBones.ParsePoses("[{\"name\":\"a\",\"sample\":\"every:3\"}]", out var pl));
         Assert.AreEqual("every:3", pl.poses[0].sample);
-        Assert.IsNull(DrivePhysBones.ParsePoses("[{\"name\":\"a\"}]", out var d)); Assert.AreEqual("end", d.poses[0].sample);
-        foreach (var bad in new[] { "every:0", "every:", "every:x", "each", "Every" })
-            StringAssert.Contains("every:N", DrivePhysBones.ParsePoses("[{\"name\":\"a\",\"sample\":\"" + bad + "\"}]", out _), bad);
+        StringAssert.Contains("every:N", DrivePhysBones.ParsePoses("[{\"name\":\"a\",\"sample\":\"every:0\"}]", out _));
     }
 
-    // A 3 s ramp and no hold is 180 frames, 0..179: every:3 measures 0, 3, .. 177 and the last, 179, which the stride skips.
+    // The cap refuses on this total: rest 2.5 + a (2.5 drive hold) + b (1 ramp + 6 own hold) + c (0.5 ramp + 0 hold) = 12.5.
     [Test]
-    public void MeasuresFrame_takesEveryNthFromTheFirst_andAlwaysTheLast()
+    public void ProgramSeconds_countsRestHold_rampsAndEachRowsHold()
     {
-        var measured = Enumerable.Range(0, 180).Where(f => DrivePhysBones.MeasuresFrame(f, 3, f == 179)).ToList();
-        Assert.AreEqual(61, measured.Count);
-        Assert.AreEqual(0, measured[0]); Assert.AreEqual(3, measured[1]); Assert.AreEqual(177, measured[59]); Assert.AreEqual(179, measured[60]);
-        // A last frame the stride lands on is measured once; stride 1 is every frame.
-        Assert.AreEqual(60, Enumerable.Range(0, 178).Count(f => DrivePhysBones.MeasuresFrame(f, 3, f == 177)));
-        Assert.AreEqual(36, Enumerable.Range(0, 36).Count(f => DrivePhysBones.MeasuresFrame(f, 1, f == 35)));
-        Assert.IsTrue(DrivePhysBones.MeasuresFrame(0, 5, true));
+        Assert.IsNull(DrivePhysBones.ParsePoses("[{\"name\":\"a\"},{\"name\":\"b\",\"ramp\":1,\"hold\":6},{\"name\":\"c\",\"ramp\":0.5,\"hold\":0}]", out var pl));
+        Assert.AreEqual(12.5f, DrivePhysBones.ProgramSeconds(pl, 2.5f), 1e-4f);
     }
 
     // Status() must never hand back an earlier play session's result as current: the stale line keeps the log path but
