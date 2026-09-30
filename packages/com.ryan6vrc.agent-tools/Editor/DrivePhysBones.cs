@@ -19,7 +19,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary><c>ramp</c> is seconds: 0 snaps to the pose in one frame; above 0 the bones ease (smoothstep) from the
         /// previous row's pose to this one over that long, and the hold is timed from arrival. <c>hold</c> is seconds,
         /// below 0 taking the drive's. <c>sample</c> is when the clipping measure runs: <c>end</c> of the hold,
-        /// <c>every</c> frame of the ramp and hold, or <c>none</c>.</summary>
+        /// <c>every</c> frame of the ramp and hold, <c>every:N</c> for every Nth of those from the first and always the last, or <c>none</c>.</summary>
         [Serializable] public class Pose { public string name; public BoneOp[] ops = new BoneOp[0]; public float ramp; public float hold = -1; public string sample = "end"; }
         [Serializable] public class BoneOp { public string bone, move = ""; public float pitch, yaw, roll; }
 
@@ -45,8 +45,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return PlaySession.IsCurrent(SessionState.GetInt(SessionKey, 0)) ? s : PlaySession.Stale(Tag, "drive", s.Split('\n')[0]);
         }
 
+        /// <param name="maxSeconds">The operator's cap on one run, in simulated and in wall-clock seconds; leave it at the default.</param>
         public static string Run(string avatarRoot, string poses, string[] chains = null, string stage = "drive", string[] bodies = null, string[] garments = null, string[] groups = null,
-            float hold = 2.5f, string[] views = null, string outDir = null, bool control = false, string baseline = null)
+            float hold = 2.5f, string[] views = null, string outDir = null, bool control = false, string baseline = null, float maxSeconds = 180f)
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode && !EditorApplication.isPlaying) return Fail("play entry is still in progress (the build runs first); call again once EditorApplication.isPlaying reads true — a drive armed now would be dropped by the play-entry domain reload");
             if (!EditorApplication.isPlaying) return Fail("play mode only: enter play (isCompiling and isUpdating both false), then call again");
@@ -56,6 +57,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (EditorApplication.isPaused) return Fail("the editor is paused (a held GrabPhysBone freezes it): GrabPhysBone.Release(resume: true) first");
             if (!(hold >= 0)) return Fail("hold is seconds, 0 or more");
             var err = ParsePoses(poses, out var pl); if (err != null) return Fail(err);
+            float sim = ProgramSeconds(pl, hold);
+            if (!(sim <= maxSeconds)) return Fail("poses run " + N(sim, "0.#") + " simulated seconds, over the " + N(maxSeconds, "0.#") + " s maxSeconds cap; " + Cheaper);
             var h = SceneHandle.Resolve(avatarRoot); if (!h.Ok) return Fail(h.Refusal);
             var rt = h.Object.transform;
             if (!h.Object.activeInHierarchy) return Fail("'" + avatarRoot + "' is inactive: an inactive avatar is never built or simulated, so every number would read zero; activate it in edit mode and re-enter play");
@@ -76,7 +79,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (bodies != null && bodies.Length > 0) { if ((err = ReportClipping.Resolve(rt, bodies, garments, out body, out gar)) != null) return Fail(err); }
             else if (garments != null && garments.Length > 0) return Fail("garments are measured against bodies: pass bodies too");
             if (body == null && groups != null && groups.Length > 0) return Fail("groups splits the clipping measure, so it needs bodies and garments");
-            if (body == null && pl.poses.FirstOrDefault(p => p.sample == "every") is Pose ev) return Fail("poses '" + ev.name + "': sample 'every' times the clipping measure, which needs bodies and garments");
+            if (body == null && pl.poses.FirstOrDefault(p => EveryStride(p.sample) > 0) is Pose ev)
+                return Fail("poses '" + ev.name + "': sample '" + ev.sample + "' times the clipping measure, which needs bodies and garments");
             if ((err = ReportClipping.ResolveGroups(rt, groups, out var groupT)) != null) return Fail(err);
             string baseRaw = null;
             if (!string.IsNullOrEmpty(baseline) && (baseRaw = SessionState.GetString(RestKey + RunLogFormat.Sanitize(baseline), "")).Length == 0)
@@ -108,7 +112,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             string rootHandle = h.Object.GetInstanceID().ToString(CultureInfo.InvariantCulture), rootPath = FullPath(rt);
             var pen = new List<(string row, Dictionary<(string body, string region, string group), ReportClipping.Bucket> buckets)>(); string penMaps = null;
-            ReportClipping.Result acc = default; int accFrames = 0; var perFrame = new StringBuilder();
+            ReportClipping.Result acc = default; int accFrames = 0, rowFrame = 0; var perFrame = new StringBuilder();
             string shift = null, shiftToken = null;
             // A single-source parent constraint holds its target fixed in its source's frame, world or local as it solves, while it executes.
             var follow = new List<(Transform tgt, Transform src, bool local, Vector3 p, Quaternion q, float cm, float deg)>();
@@ -144,6 +148,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 try
                 {
                     if (!EditorApplication.isPlaying) { Finish("FAIL", "aborted: play exited"); return; }
+                    if (EditorApplication.timeSinceStartup - armedAt > maxSeconds)
+                    {
+                        if (frozen) for (int r = row; r <= pl.poses.Length; r++) log.Append(stage + " | " + (r == 0 ? "rest" : pl.poses[r - 1].name) + " | not run | - | - | - | - | - | - | - | -\n");
+                        Finish("FAIL", "aborted: the run passed its " + N(maxSeconds, "0.#") + " s wall-clock cap with " + (frozen ? row : 0)
+                            + " of " + (pl.poses.Length + 1) + " rows done; " + Cheaper);
+                        return;
+                    }
                     if (Time.frameCount == lastFrame)
                     {
                         if (EditorApplication.timeSinceStartup - lastTick > 20) Finish("FAIL", "aborted: the player loop stalled for 20 s (a modal, a paused editor, or runInBackground off)");
@@ -186,12 +197,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                             + " garments=" + (gar != null ? string.Join(",", gar.Select(g => g.label)) : "-") + " control=" + (control ? pbs.Length + " chains held disabled" : "no") + " baseline=" + (baseline ?? "-")
                             + " followedConstraints=" + follow.Count + " frames=" + (views.Length > 0 ? outDir : "-")
                             + "\nclock: every frame advances dt, so ramp and hold are simulated seconds. approach: snap (one frame) or ramp <s>/<frames> (smoothstep from the previous row's pose; the hold starts on arrival)."
-                            + " jitter: mean per-frame max tip step over the last min(0.5 s, hold/2) of each half of the hold, mid/end. sample: when the clipping measure ran; on 'every <n>f' each clipping column is its peak over the row's frames\n"
+                            + " jitter: mean per-frame max tip step over the last min(0.5 s, hold/2) of each half of the hold, mid/end."
+                            + " sample: when the clipping measure ran; on 'every <n>f' or 'every:<N> <n>f' each clipping column is its peak over the <n> frames measured\n"
                             + "stage | pose | approach | tipTravelCm root max/mean | tipTravelCm inFrame max/mean | jitterMmPerFrame mid/end | sample | crossingCm | vertsBehindBody/signed edgeNearest | maxDepthCm | throughCm\n");
                     }
                     if (anim) anim.enabled = false;   // re-asserted every frame: an emulator re-enables it
                     // Before this tick moves the pose: the chains last solved against the pose the bones hold now.
-                    if (Mode(row) == "every")
+                    // Decided before the pose moves, so a stride measures the row's last frame; a ramp arriving now ends the row only on a zero hold.
+                    bool ends = fromP != null ? Ramp01(Time.time - rampT0, rampSec) >= 1f && !(0 < HoldOf(row)) : !(Time.time - t0 < HoldOf(row));
+                    int stride = EveryStride(Mode(row));
+                    if (stride > 0 && (rowFrame++ % stride == 0 || ends))
                     {
                         var m = ReportClipping.Measure(rt, body, gar, groupT); acc = ReportClipping.Peak(acc, m); accFrames++;
                         perFrame.Append(pl.poses[row - 1].name + "\t" + N(Time.time - rowT0, "0.000") + "\t" + N(m.crossCm) + "\t" + m.behind + "\t" + N(m.maxDepthCm) + "\t" + N(m.throughCm) + "\n");
@@ -215,7 +230,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     int win = prevAv == null ? 0 : JitterWindow(Time.time - t0, hd);
                     if (win > 0) (win == 1 ? jitMid : jitEnd).Add(av.Select((c, i) => (c - prevAv[i]).magnitude).Max());
                     prevAv = av; prevIn = inF;
-                    if (Time.time - t0 < hd) return;
+                    if (!ends) return;
                     string name = row == 0 ? "rest" : pl.poses[row - 1].name;
                     if (row == 0)
                     {
@@ -235,11 +250,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                     string mode = Mode(row);
                     if (body != null && mode != "none")
                     {
-                        var r = mode == "every" ? acc : ReportClipping.Measure(rt, body, gar, groupT); pen.Add((name, r.buckets)); penMaps = penMaps ?? ReportClipping.Maps(r, rt);
-                        log.Append((mode == "every" ? "every " + accFrames + "f" : "end") + " | " + N(r.crossCm) + " | " + r.behind + "/" + r.signed + " " + r.edgeNearest + " | " + N(r.maxDepthCm) + " | " + N(r.throughCm) + "\n");
+                        var r = EveryStride(mode) > 0 ? acc : ReportClipping.Measure(rt, body, gar, groupT); pen.Add((name, r.buckets)); penMaps = penMaps ?? ReportClipping.Maps(r, rt);
+                        log.Append((EveryStride(mode) > 0 ? mode + " " + accFrames + "f" : "end")
+                            + " | " + N(r.crossCm) + " | " + r.behind + "/" + r.signed + " " + r.edgeNearest + " | " + N(r.maxDepthCm) + " | " + N(r.throughCm) + "\n");
                     }
                     else log.Append((body == null ? "-" : "none") + " | - | - | - | -\n");
-                    acc = default; accFrames = 0;
+                    acc = default; accFrames = 0; rowFrame = 0;
                     for (int i = 0; i < follow.Count; i++)
                     {
                         var f = follow[i]; if (f.tgt == null || f.src == null) continue;
@@ -296,6 +312,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             Time.captureDeltaTime = Step;
             SessionState.SetString(Key, Tag + " running '" + stage + "': waiting for a stable Animator | log=" + logPath + "\n"); EditorApplication.update += _pump;
             return logPath != null ? armed : pending;
+        }
+
+        const string Cheaper = "the cap is the operator's limit, so make the program cheaper (sample \"every:N\" on slow ramps, fewer rows) and do not raise it";
+
+        /// <summary>A program's simulated seconds: the rest row's hold, then every row's ramp and hold. Pure.</summary>
+        internal static float ProgramSeconds(PoseList pl, float hold) => hold + pl.poses.Sum(p => p.ramp + (p.hold >= 0 ? p.hold : hold));
+
+        /// <summary>A sample's stride: 1 for <c>every</c>, N for <c>every:N</c> (N 1 or more), 0 for no per-frame measure, -1 for a malformed one. Pure.</summary>
+        internal static int EveryStride(string sample)
+        {
+            if (sample == "every") return 1;
+            if (sample == null || !sample.StartsWith("every:", StringComparison.Ordinal)) return 0;
+            return int.TryParse(sample.Substring(6), NumberStyles.None, CultureInfo.InvariantCulture, out int n) && n >= 1 ? n : -1;
         }
 
         static bool InScope(VRCPhysBoneBase p, Transform[] scope) => scope == null || scope.Any(s => WriteDynamics.EffRoot(p).IsChildOf(s));
@@ -508,7 +537,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (p.ops.Any(o => !string.IsNullOrEmpty(o.move) && WriteDynamics.ParseVector(o.move) == null)) return "poses '" + p.name + "': move is x,y,z metres";
                 if (!(p.ramp >= 0)) return "poses '" + p.name + "': ramp is seconds, 0 (snap) or more";
                 if (float.IsNaN(p.hold)) return "poses '" + p.name + "': hold is seconds, 0 or more, or below 0 for the drive's";
-                if (!Samples.Contains(p.sample)) return "poses '" + p.name + "': sample is one of " + string.Join(", ", Samples);
+                if (!Samples.Contains(p.sample) && EveryStride(p.sample) < 1) return "poses '" + p.name + "': sample is end, every, every:N (N 1 or more) or none";
             }
             return null;
         }

@@ -186,6 +186,32 @@ public class DynamicsDoorsTests
         StringAssert.Contains("ramp", DrivePhysBones.ParsePoses("[{\"name\":\"a\",\"ramp\":-1}]", out _));
     }
 
+    [TestCase("every", 1)]
+    [TestCase("every:3", 3)]
+    [TestCase("end", 0)]
+    [TestCase("none", 0)]
+    [TestCase("every:0", -1)]
+    [TestCase("every:", -1)]
+    [TestCase("every:+2", -1)]
+    [TestCase("every:2.5", -1)]
+    public void EveryStride_readsEveryAndEveryN(string sample, int stride) => Assert.AreEqual(stride, DrivePhysBones.EveryStride(sample));
+
+    [Test]
+    public void Poses_sampleTakesEveryN_andRefusesAMalformedStride()
+    {
+        Assert.IsNull(DrivePhysBones.ParsePoses("[{\"name\":\"a\",\"sample\":\"every:3\"}]", out var pl));
+        Assert.AreEqual("every:3", pl.poses[0].sample);
+        StringAssert.Contains("every:N", DrivePhysBones.ParsePoses("[{\"name\":\"a\",\"sample\":\"every:0\"}]", out _));
+    }
+
+    // The cap refuses on this total: rest 2.5 + a (2.5 drive hold) + b (1 ramp + 6 own hold) + c (0.5 ramp + 0 hold) = 12.5.
+    [Test]
+    public void ProgramSeconds_countsRestHold_rampsAndEachRowsHold()
+    {
+        Assert.IsNull(DrivePhysBones.ParsePoses("[{\"name\":\"a\"},{\"name\":\"b\",\"ramp\":1,\"hold\":6},{\"name\":\"c\",\"ramp\":0.5,\"hold\":0}]", out var pl));
+        Assert.AreEqual(12.5f, DrivePhysBones.ProgramSeconds(pl, 2.5f), 1e-4f);
+    }
+
     // Status() must never hand back an earlier play session's result as current: the stale line keeps the log path but
     // loses the verdict token a reader would match on.
     [Test]
@@ -386,7 +412,7 @@ public class DynamicsDoorsTests
         Assert.IsNull(DrivePhysBones.ParsePoses("[{\"name\":\"a\"},{\"name\":\"b\",\"hold\":0,\"sample\":\"every\"}]", out var pl));
         Assert.Less(pl.poses[0].hold, 0f); Assert.AreEqual("end", pl.poses[0].sample);
         Assert.AreEqual(0f, pl.poses[1].hold); Assert.AreEqual("every", pl.poses[1].sample);
-        StringAssert.Contains("sample is one of end, every, none", DrivePhysBones.ParsePoses("[{\"name\":\"a\",\"sample\":\"often\"}]", out _));
+        StringAssert.Contains("sample is end, every, every:N", DrivePhysBones.ParsePoses("[{\"name\":\"a\",\"sample\":\"often\"}]", out _));
     }
 
     // A baseline is another drive's rest row, possibly from an earlier play session, so it round-trips through text.
