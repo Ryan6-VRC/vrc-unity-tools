@@ -29,7 +29,9 @@ public class MeasureCapTests
         StringAssert.Contains("180 simulated seconds over 5 rows", r);
         StringAssert.Contains("150 s time cap", r);
         StringAssert.Contains("'kick' 100 s, 'slow' 75 s, 'mid' 2 s", r);
-        StringAssert.Contains("Split the program", r);
+        StringAssert.Contains("the operator's limit", r);
+        StringAssert.Contains("rather than raising maxSeconds", r);
+        StringAssert.DoesNotContain("Split", r);
     }
 
     [Test]

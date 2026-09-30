@@ -10,7 +10,10 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// rolling window. A pump that measures across frames arms one at its start, checks <see cref="Expired"/> every tick,
     /// tears down through its own restore path when it reads true, and calls <see cref="Close"/> in that teardown.
     /// <c>DrivePhysBones</c> does; a hand-written <c>execute_code</c> pump does the same, so a drive it arms from inside
-    /// its own run is charged to the one budget. Contract: docs/unity-tools.md.</summary>
+    /// its own run is charged to the one budget. The limits are the operator's on how much measuring an agent queues, not
+    /// timeouts to size to the work: measuring from a pump that never arms one, or arming one above
+    /// <see cref="DefaultSeconds"/> to fit a longer program, runs the measurement they exist to stop. Make the program
+    /// cheaper instead, or report what the runs that fit show. Contract: docs/unity-tools.md.</summary>
     public sealed class MeasureCap
     {
         public const float DefaultSeconds = 180f;   // one run's wall clock
@@ -35,7 +38,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>The line a pump writes as its FAIL detail when <see cref="Expired"/> reads true.</summary>
         public string Reason => "time cap: " + Math.Round(Elapsed).ToString(CultureInfo.InvariantCulture) + " s of wall clock since arming, over the "
-            + S(Seconds) + " s cap";
+            + S(Seconds) + " s cap, the operator's limit on one run's measuring; measure less rather than arm a higher cap";
 
         /// <summary>Opens a run in the ledger, or returns null with <paramref name="refusal"/> set when the window's budget is
         /// spent or <paramref name="seconds"/> is not a positive number.</summary>
