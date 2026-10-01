@@ -383,23 +383,54 @@ namespace Ryan6Vrc.AgentTools.Editor
             return "'" + path + "' carries nothing assignable to '" + p.propertyPath + "'";
         }
 
-        /// <summary>A curve value is <c>time:value</c> keys, comma-separated, times strictly increasing, joined by straight
-        /// lines (linear tangents both sides): <c>0:0.47,0.5:0.47,1:1</c>. Empty clears the curve (no keys). Pure.</summary>
+        /// <summary>A curve value is keys, comma-separated, times strictly increasing. A <c>time:value</c> key is joined
+        /// to its neighbours by straight lines (linear tangents both sides): <c>0:0.47,0.5:0.47,1:1</c>. A
+        /// <c>time:value:inTangent:outTangent</c> key carries its own tangents (<c>0:0:0:0,1:1:2:0</c>), the form
+        /// <see cref="FormatCurve"/> prints for a key whose tangents are not linear. Empty clears the curve (no keys).
+        /// Pure.</summary>
         internal static string ParseCurve(string s, out AnimationCurve curve)
         {
             curve = new AnimationCurve(); var inv = CultureInfo.InvariantCulture;
             if (s.Trim().Length == 0) return null;
-            var keys = new List<Keyframe>();
+            var keys = new List<Keyframe>(); var explicitTangents = new List<bool>();
             foreach (var k in s.Split(','))
             {
-                var tv = k.Split(':');
-                if (tv.Length != 2 || !float.TryParse(tv[0], NumberStyles.Float, inv, out var t) || !float.TryParse(tv[1], NumberStyles.Float, inv, out var v)) return "expected time:value keys, comma-separated (0:0.47,0.5:0.47,1:1)";
-                if (keys.Count > 0 && t <= keys[keys.Count - 1].time) return "key times must strictly increase";
-                keys.Add(new Keyframe(t, v));
+                var f = k.Split(':'); var n = new float[f.Length];
+                if ((f.Length != 2 && f.Length != 4) || Enumerable.Range(0, f.Length).Any(i => !float.TryParse(f[i], NumberStyles.Float, inv, out n[i])))
+                    return "expected time:value keys, or time:value:inTangent:outTangent, comma-separated (0:0.47,0.5:0.47,1:1)";
+                if (keys.Count > 0 && n[0] <= keys[keys.Count - 1].time) return "key times must strictly increase";
+                keys.Add(f.Length == 4 ? new Keyframe(n[0], n[1], n[2], n[3]) : new Keyframe(n[0], n[1]));
+                explicitTangents.Add(f.Length == 4);
             }
             curve = new AnimationCurve(keys.ToArray());
-            for (int i = 0; i < curve.length; i++) { AnimationUtility.SetKeyLeftTangentMode(curve, i, AnimationUtility.TangentMode.Linear); AnimationUtility.SetKeyRightTangentMode(curve, i, AnimationUtility.TangentMode.Linear); }
+            for (int i = 0; i < curve.length; i++)
+            {
+                var mode = explicitTangents[i] ? AnimationUtility.TangentMode.Free : AnimationUtility.TangentMode.Linear;
+                AnimationUtility.SetKeyLeftTangentMode(curve, i, mode); AnimationUtility.SetKeyRightTangentMode(curve, i, mode);
+            }
+            for (int i = 0; i < curve.length; i++) if (explicitTangents[i]) curve.MoveKey(i, keys[i]);
             return null;
+        }
+
+        /// <summary>A curve in <see cref="ParseCurve"/>'s form, so a read hands a write its exact value: <c>time:value</c>
+        /// where a key's tangents are the ones ParseCurve would give it, <c>time:value:inTangent:outTangent</c> where
+        /// they are not. Weighted tangents are the one thing the form cannot carry, so a curve holding any ends in a
+        /// bracketed note ParseCurve refuses, rather than reading back as a different curve. Pure.</summary>
+        internal static string FormatCurve(AnimationCurve c)
+        {
+            if (c == null || c.length == 0) return "";
+            var inv = CultureInfo.InvariantCulture; var keys = c.keys;
+            ParseCurve(string.Join(",", keys.Select(k => k.time.ToString("R", inv) + ":" + k.value.ToString("R", inv))), out var linear);
+            bool Same(float a, float b) => a == b || Mathf.Abs(a - b) <= 1e-5f * Mathf.Max(1f, Mathf.Abs(a), Mathf.Abs(b));
+            var parts = keys.Select((k, i) =>
+            {
+                var tv = k.time.ToString("R", inv) + ":" + k.value.ToString("R", inv);
+                var l = linear.keys[i];
+                return Same(k.inTangent, l.inTangent) && Same(k.outTangent, l.outTangent) ? tv
+                    : tv + ":" + k.inTangent.ToString("R", inv) + ":" + k.outTangent.ToString("R", inv);
+            });
+            var s = string.Join(",", parts);
+            return keys.Any(k => k.weightedMode != WeightedMode.None) ? s + " [weighted tangents: not writable through WriteDynamics]" : s;
         }
 
         internal static Vector3? ParseVector(string s)

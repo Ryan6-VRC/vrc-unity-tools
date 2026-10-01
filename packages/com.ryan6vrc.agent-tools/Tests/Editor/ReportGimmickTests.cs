@@ -276,6 +276,27 @@ public class ReportGimmickTests
             "exclusions are applied now — an upper-bound caveat would be one the code no longer earns");
     }
 
+    // A rebuilt chain matched on every scalar and had lost its radius curve; no door flagged it. The row must
+    // say a curve is there — on a printed field by `~`, on any field by the `curved` cell — and carry the legend
+    // saying why that matters, while an uncurved row says plainly that nothing is curved.
+    [Test]
+    public void PhysBoneRow_MarksEveryCurvedField_AndCarriesTheCurveLegend()
+    {
+        var root = new GameObject("Rig");
+        var curved = Child(root, "Curved").AddComponent<VRCPhysBone>();
+        curved.radius = 0.03f;
+        curved.radiusCurve = AnimationCurve.Linear(0f, 0f, 1f, 1f);
+        curved.gravityCurve = AnimationCurve.Linear(0f, 1f, 1f, 0.5f);
+        Child(root, "Plain").AddComponent<VRCPhysBone>();
+
+        string report = ReadReport("Rig");
+        StringAssert.Contains("| 0.03~ |", report);
+        StringAssert.Contains("| gravity radius |", report, "an unprinted field's curve (gravity) must still be named");
+        StringAssert.Contains("| — |", report, "an uncurved row says so rather than leaving the cell blank");
+        Assert.AreEqual(ReportGimmick.CurveLegend.TrimEnd('\n'), LegendLine(report, "_`~`"));
+        StringAssert.Contains("the scalar times the curve", ReportGimmick.CurveLegend);
+    }
+
     // The exclusions the old hierarchy walk could not see, now applied because the set comes from the
     // component itself. `ignoreTransforms` prunes the listed transform AND its descendants (the field's own
     // Inspector tooltip says so), which is exactly why a hand-rolled subtraction was rejected: the descendant

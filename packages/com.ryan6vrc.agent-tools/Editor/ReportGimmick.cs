@@ -60,6 +60,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal const string ChainSubtreeLegend = "_`chain subtree` = the bones the row's physbone itself reports as its chain (the SDK's own set, so the exclusions the component declares — `ignoreTransforms`, `ignoreOtherPhysBones` — are already applied; a virtual endpoint bone has no transform and is not counted): `bones` counts them, `skinned` how many some SkinnedMeshRenderer skins at nonzero weight (swept over the avatar enclosing THAT ROW's physbone, so a mesh outside the reported chain still counts while a co-hosted neighbour avatar's does not; a row with no enclosing avatar descriptor falls back to its outermost ancestor), `hosting` how many carry a component besides Transform and this row's own physbone — counted over the bones the chain KEPT, so a nested chain excluded by `ignoreOtherPhysBones` is not among them and appears as its own row instead. Reported, not judged. All-zero is NOT a dead chain: a pre-bake bone that will name-merge onto a base bone reads `skinned=0` because the base mesh skins the BASE transform, and a chain whose consumer sits outside it (a constraint reading it as a source) reads all-zero while load-bearing. Chain MEMBERSHIP is not a claim about which bones move — `multiChildType` and `endpointPosition` decide what is actually simulated._\n";
 
         /// <summary>
+        /// The physbone curve legend, quoted once at the canon like the census legend above. The scalar-times-curve
+        /// clause is the load-bearing one: without it `~` reads as decoration, and two rows matching on every
+        /// scalar read as matched while one has lost a curve.
+        /// </summary>
+        internal const string CurveLegend = "_`~` marks a field whose curve has keys: its value at a joint is the scalar times the curve at that joint's depth along the chain, so rows matching on every scalar can still differ. `curved` names every field carrying a curve, printed in this table or not. The keys are `AgentInspector`'s to read, on the physbone's host._\n";
+
+        /// <summary>
         /// The raycast-table legend, quoted once at the canon so a test can pin whole sentences rather than
         /// carve phrases out of them (`docs/tool-design.md`: verbatim strings are quoted once). The layer
         /// clause is the load-bearing one and may not be dropped by a prose pass: the mask is the whole
@@ -263,8 +270,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // every row falls back to the container — the scope WeightScope's own comment calls too wide —
                 // and a neighbour avatar's stale renderer inflates `skinned`.
                 var scopeCache = new Dictionary<Transform, HashSet<Transform>>();
-                sb.Append("| transform | rootTransform | parameter prefix | grab/pose | forces | immobile | flags | chain subtree |\n");
-                sb.Append("|---|---|---|---|---|---|---|---|\n");
+                sb.Append("| transform | rootTransform | parameter prefix | grab/pose | forces | radius | immobile | curved | flags | chain subtree |\n");
+                sb.Append("|---|---|---|---|---|---|---|---|---|---|\n");
                 // The walk is includeInactive, so the table lists components that are not running. `enabled`
                 // (component) and `active` (gameObject.activeInHierarchy) are both required to run, and they
                 // are the whole discriminator when several physbones share one target bone — without them a
@@ -274,14 +281,18 @@ namespace Ryan6Vrc.AgentTools.Editor
                       .Append(RootIndirection(b.rootTransform, b.transform)).Append(" | ")
                       .Append(string.IsNullOrEmpty(b.parameter) ? "—" : "`" + Cell(b.parameter) + "`").Append(" | ")
                       .Append("grab=").Append(b.allowGrabbing).Append(" pose=").Append(b.allowPosing).Append(" grabMove=").Append(F(b.grabMovement)).Append(" | ")
-                      .Append("pull=").Append(F(b.pull)).Append(" spring=").Append(F(b.spring)).Append(" stiffness=").Append(F(b.stiffness)).Append(" | ")
-                      .Append(F(b.immobile)).Append(" (").Append(b.immobileType).Append(") | ")
+                      .Append("pull=").Append(F(b.pull)).Append(Tilde(b.pullCurve)).Append(" spring=").Append(F(b.spring)).Append(Tilde(b.springCurve))
+                      .Append(" stiffness=").Append(F(b.stiffness)).Append(Tilde(b.stiffnessCurve)).Append(" | ")
+                      .Append(F(b.radius)).Append(Tilde(b.radiusCurve)).Append(" | ")
+                      .Append(F(b.immobile)).Append(Tilde(b.immobileCurve)).Append(" (").Append(b.immobileType).Append(") | ")
+                      .Append(CurvedCell(b)).Append(" | ")
                       .Append("enabled=").Append(b.enabled ? "1" : "0")
                       .Append(" active=").Append(b.gameObject.activeInHierarchy ? "1" : "0")
                       .Append(" isAnimated=").Append(b.isAnimated ? "1" : "0").Append(" resetWhenDisabled=").Append(b.resetWhenDisabled ? "1" : "0").Append(" | ")
                       .Append(ChainSubtreeCell(b, SkinnedBonesFor(b, reportRoot, scopeCache))).Append(" |\n");
 
                 sb.Append('\n').Append(ChainSubtreeLegend);
+                sb.Append('\n').Append(CurveLegend);
             }
 
             // Colliders are ingredients, not behaviour — a minimal companion table.
@@ -1196,6 +1207,26 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         private static string F(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
+
+        private static bool HasKeys(AnimationCurve c) => c != null && c.length > 0;
+        private static string Tilde(AnimationCurve c) => HasKeys(c) ? "~" : "";
+
+        // Every curve the component multiplies a field by, named by its field. Listed whole rather than only the
+        // printed fields' curves, so a curve on an unprinted field (gravity, a limit) still shows as present or absent.
+        private static string CurvedCell(VRCPhysBoneBase b)
+        {
+            var all = new (string name, AnimationCurve curve)[]
+            {
+                ("pull", b.pullCurve), ("spring", b.springCurve), ("stiffness", b.stiffnessCurve),
+                ("gravity", b.gravityCurve), ("gravityFalloff", b.gravityFalloffCurve), ("immobile", b.immobileCurve),
+                ("radius", b.radiusCurve), ("maxAngleX", b.maxAngleXCurve), ("maxAngleZ", b.maxAngleZCurve),
+                ("limitRotationX", b.limitRotationXCurve), ("limitRotationY", b.limitRotationYCurve), ("limitRotationZ", b.limitRotationZCurve),
+                ("maxStretch", b.maxStretchCurve), ("stretchMotion", b.stretchMotionCurve), ("maxSquish", b.maxSquishCurve),
+            };
+            var curved = new List<string>();
+            foreach (var c in all) if (HasKeys(c.curve)) curved.Add(c.name);
+            return curved.Count == 0 ? "—" : string.Join(" ", curved);
+        }
 
         private static string Cell(string s) => RunLogFormat.Cell(s);
     }
