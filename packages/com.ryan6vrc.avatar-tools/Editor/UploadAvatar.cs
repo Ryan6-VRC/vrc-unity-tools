@@ -500,7 +500,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>Map a thrown upload exception to a classified <see cref="UploadOutcome.Failed"/>: unwrap
         /// one layer of wrapping, pull the HTTP status, flag validation (by type name) / timeout. This is the
         /// path that keeps 429/validation from being mislabeled transient — kept internal so it is unit-tested
-        /// against a fake exception without the live SDK.</summary>
+        /// against a fake exception without the live SDK.
+        ///
+        /// The status and the server's text are read from the SDK exception's <c>StatusCode</c> /
+        /// <c>ErrorMessage</c> FIELDS through <see cref="VrcApiReflect.TryReadApiFields"/>, the reader the
+        /// record doors share. Its <c>Message</c> is the content-free default string, so a status-bearing
+        /// link reports <see cref="UploadRefusal"/>'s text instead.</summary>
         internal static UploadOutcome FailedFromException(Exception e)
         {
             // e is already normalized by CauReflect.UploadOne (no TargetInvocationException / AggregateException
@@ -508,12 +513,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // chain and classify from the first link that exposes a signal — do NOT blindly take one inner layer.
             for (var cur = e; cur != null; cur = cur.InnerException)
             {
-                int? status = ExtractHttpStatus(cur);
+                bool hasStatus = VrcApiReflect.TryReadApiFields(cur, out var status, out var serverMessage);
                 bool isValidation = cur.GetType().Name.IndexOf("Validation", StringComparison.OrdinalIgnoreCase) >= 0;
                 bool isTimeout = cur is TimeoutException;
-                if (status.HasValue || isValidation || isTimeout)
-                    return UploadOutcome.Failed(httpStatus: status, isValidation: isValidation,
-                                                isTimeout: isTimeout, message: e.Message);
+                if (hasStatus || isValidation || isTimeout)
+                    return UploadOutcome.Failed(httpStatus: status, isValidation: isValidation, isTimeout: isTimeout,
+                                                message: hasStatus ? UploadRefusal(status, serverMessage) : e.Message);
             }
             // No classifiable signal anywhere in the chain → fail-safe: non-retryable. Never auto-retry an
             // unknown failure against a real account (covers CAU-drift InvalidOperationException, status-less
@@ -521,24 +526,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return UploadOutcome.Failed(message: e.Message, forcedClass: "real");
         }
 
-        /// <summary>Best-effort HTTP status off an SDK exception: an int / HttpStatusCode property named
-        /// <c>StatusCode</c> or <c>Status</c>, else null. The exact SDK exception shape is a Task-8
-        /// live-validation item — this is a reflective placeholder, not a proven mapping.</summary>
-        internal static int? ExtractHttpStatus(Exception e)
-        {
-            foreach (var name in new[] { "StatusCode", "Status", "HttpStatusCode" })
-            {
-                var p = e.GetType().GetProperty(name);
-                if (p == null) continue;
-                var v = p.GetValue(e);
-                if (v is int i) return i;
-                if (v != null && v.GetType().IsEnum)
-                {
-                    try { return Convert.ToInt32(v); } catch { }
-                }
-            }
-            return null;
-        }
+        // The record doors' text, except 422: theirs tells the caller to change a name, description or tag, and an
+        // upload's 422 can be a rejection of the avatar itself, where no text is at fault.
+        static string UploadRefusal(int? status, string serverMessage)
+            => status == 422
+                ? "VRChat rejected the upload as unprocessable (422)"
+                  + (string.IsNullOrEmpty(serverMessage) ? "" : " — server said: " + AvatarRecordLogic.Escape(serverMessage))
+                : AvatarRecordLogic.RefuseForStatus(status, serverMessage);
 
         // Scrub at the choke point: TryGetBuilder/TryBuildSetting embed SDK exception .Message into reason.
         static string Refuse(string reason)

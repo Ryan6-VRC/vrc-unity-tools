@@ -148,6 +148,57 @@ public class DynamicsDoorsTests
         Assert.AreEqual(0, c.length);
         StringAssert.Contains("time:value", WriteDynamics.ParseCurve("0,0.5", out _));
         StringAssert.Contains("strictly increase", WriteDynamics.ParseCurve("0:1,0:2", out _));
+        StringAssert.Contains("time:value", WriteDynamics.ParseCurve("0:1:2", out _));
+    }
+
+    // A read must hand a write the curve it read. A hand-keyed curve with smooth tangents (Unity's default for a
+    // key added in the inspector) printed as bare time:value would write back piecewise-linear, matching on every
+    // key and differing everywhere between them — the loss no scalar comparison shows.
+    [Test]
+    public void Curve_formatThenParse_roundTripsLinearAndAuthoredTangents()
+    {
+        Assert.IsNull(WriteDynamics.ParseCurve("0:0,0.4:0,1:1", out var linear));
+        Assert.AreEqual("0:0,0.4:0,1:1", WriteDynamics.FormatCurve(linear), "a linear curve prints in the short form");
+
+        var smooth = new AnimationCurve(new Keyframe(0f, 0f, 0f, 0f), new Keyframe(0.4f, 0f, 0f, 0f), new Keyframe(1f, 1f, 2.5f, 0f));
+        var text = WriteDynamics.FormatCurve(smooth);
+        StringAssert.Contains("1:1:2.5:0", text);
+        Assert.IsNull(WriteDynamics.ParseCurve(text, out var back), text);
+        foreach (var t in new[] { 0.1f, 0.3f, 0.55f, 0.7f, 0.9f })
+            Assert.AreEqual(smooth.Evaluate(t), back.Evaluate(t), 1e-5f, "t=" + t + " via " + text);
+
+        Assert.AreEqual("", WriteDynamics.FormatCurve(new AnimationCurve()));
+        Assert.AreEqual("", WriteDynamics.FormatCurve(null));
+    }
+
+    [Test]
+    public void Curve_weightedTangents_printAFormParseCurveRefuses()
+    {
+        var k = new Keyframe(1f, 1f, 0f, 0f, 0.5f, 0.5f) { weightedMode = WeightedMode.Both };
+        var text = WriteDynamics.FormatCurve(new AnimationCurve(new Keyframe(0f, 0f), k));
+        StringAssert.Contains("weighted tangents", text);
+        Assert.IsNotNull(WriteDynamics.ParseCurve(text, out _), "a curve the form cannot carry must not read back as a different one");
+    }
+
+    // A stepped key's tangent is infinite, which passes any scaled tolerance against a finite linear one, so the
+    // short form would print and parse back as a ramp.
+    [Test]
+    public void Curve_steppedTangent_roundTripsAsAStep()
+    {
+        var stepped = new AnimationCurve(new Keyframe(0f, 0f, 0f, float.PositiveInfinity), new Keyframe(1f, 1f, float.PositiveInfinity, 0f));
+        var text = WriteDynamics.FormatCurve(stepped);
+        Assert.IsNull(WriteDynamics.ParseCurve(text, out var back), text);
+        Assert.AreEqual(stepped.Evaluate(0.5f), back.Evaluate(0.5f), 1e-5f, "via " + text);
+    }
+
+    [Test]
+    public void Curve_nonDefaultWrapMode_printsAFormParseCurveRefuses()
+    {
+        var c = AnimationCurve.Linear(0.2f, 0f, 0.8f, 1f);
+        c.postWrapMode = WrapMode.PingPong;
+        var text = WriteDynamics.FormatCurve(c);
+        StringAssert.Contains("wrap mode", text);
+        Assert.IsNotNull(WriteDynamics.ParseCurve(text, out _), "a curve the form cannot carry must not read back as a different one");
     }
 
     // A ramp must land exactly on the pose (the hold is timed from arrival) and start exactly at the held pose.

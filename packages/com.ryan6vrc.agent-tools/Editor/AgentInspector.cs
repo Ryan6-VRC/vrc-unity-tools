@@ -311,7 +311,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 case SerializedPropertyType.ObjectReference: WriteObjectRef(w, p.objectReferenceValue, st, assetDepth); break;
                 case SerializedPropertyType.ExposedReference: WriteObjectRef(w, p.exposedReferenceValue, st, assetDepth); break;
                 case SerializedPropertyType.AnimationCurve:
-                    w.Value(p.animationCurveValue != null ? p.animationCurveValue.length + " keys" : "null"); break;
+                    // WriteDynamics' field-set form, so a curve read here is the value a write takes back.
+                    w.Value(p.animationCurveValue != null ? WriteDynamics.FormatCurve(p.animationCurveValue) : "null"); break;
                 case SerializedPropertyType.Bounds:       w.Value(p.boundsValue.ToString()); break;
                 default:
                     if (p.isArray && p.propertyType != SerializedPropertyType.String)

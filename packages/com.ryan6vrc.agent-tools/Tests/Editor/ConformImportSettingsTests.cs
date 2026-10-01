@@ -44,7 +44,7 @@ public class ConformImportSettingsTests
         if (AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.DeleteAsset(TmpDir);
         AssetDatabase.Refresh();
         if (!Directory.Exists(RunLogFormat.RunLogDir)) return;
-        foreach (var f in Directory.GetFiles(RunLogFormat.RunLogDir, "conformimportsettings_" + TmpName + "_*"))
+        foreach (var f in Directory.GetFiles(RunLogFormat.RunLogDir, "conformimportsettings_" + TmpName + "*"))
             File.Delete(f);
     }
 
@@ -260,6 +260,64 @@ public class ConformImportSettingsTests
         var s = ConformImportSettings.Run(TmpDir);
         Assert.That(s, Does.Contain("conformed: none"),
             "the door is re-runnable by design — a second pass on a clean folder must be a no-op");
+    }
+
+    // ── Asset scope: one asset, leaving its unsettled siblings alone ───────────────────────────────────
+
+    [Test]
+    public void AssetScope_ConformsThatAssetOnly_AndLeavesItsSiblingsUnwritten()
+    {
+        var target = WriteObj(TmpName + "Target.obj");
+        var sibling = WriteObj(TmpName + "Sibling.obj");
+        var siblingPng = WritePng(TmpName + "Sibling.png");
+
+        var s = ConformImportSettings.Run(target);
+        Assert.That(s, Does.Contain("1 scanned"));
+        Assert.That(s, Does.Contain("conformed: mesh-readable=1"));
+        Assert.That(s, Does.Contain("scope=this one asset only"), "a count is meaningless without the scope it covers");
+        Assert.That(s, Does.Contain("=> PASS"));
+        Assert.That(((ModelImporter)AssetImporter.GetAtPath(target)).isReadable, Is.True);
+        Assert.That(((ModelImporter)AssetImporter.GetAtPath(sibling)).isReadable, Is.False,
+            "an asset run must not touch a sibling another agent may be importing");
+        Assert.That(((TextureImporter)AssetImporter.GetAtPath(siblingPng)).streamingMipmaps, Is.False);
+    }
+
+    [Test]
+    public void AssetScope_WhatIf_ReportsTheRow_AndWritesNothing()
+    {
+        var path = WritePng(TmpName + "Preview.png");
+        var s = ConformImportSettings.Run(path, whatIf: true);
+        Assert.That(s, Does.Contain("would conform: mip-streaming=1"));
+        Assert.That(((TextureImporter)AssetImporter.GetAtPath(path)).streamingMipmaps, Is.False);
+    }
+
+    [Test]
+    public void AssetScope_ReachesAudioClips()
+    {
+        var path = WriteWav(TmpName + "Clip.wav");
+        Assert.That(ConformImportSettings.Run(path), Does.Contain("conformed: audio-background-load=1"));
+    }
+
+    [Test]
+    public void AssetScope_UnderPackages_IsRefusedByName_AndWritesNoRunLog()
+    {
+        var s = ConformImportSettings.Run("Packages/com.ryan6vrc.agent-tools/package.json");
+        Assert.That(s, Does.StartWith("[ConformImportSettings] FAIL:"));
+        Assert.That(s, Does.Contain("under Packages/"));
+        Assert.That(s, Does.Not.Contain("| log="));
+    }
+
+    [Test]
+    public void AssetScope_AssetNoRowReads_IsRefusedByName()
+    {
+        var path = TmpDir + "/" + TmpName + "Note.txt";
+        File.WriteAllText(path, "not an importer row");
+        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport);
+
+        var s = ConformImportSettings.Run(path);
+        Assert.That(s, Does.StartWith("[ConformImportSettings] FAIL:"));
+        Assert.That(s, Does.Contain("which no row reads"), "an unread asset must not pass as scanned-nothing");
+        Assert.That(s, Does.Not.Contain("| log="));
     }
 
     // ── Avatar scope: the SDK panel's own asset set, and the one class it names but never writes ────────

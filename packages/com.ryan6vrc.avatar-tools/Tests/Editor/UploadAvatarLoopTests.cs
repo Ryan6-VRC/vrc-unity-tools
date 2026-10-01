@@ -262,12 +262,35 @@ public class UploadAvatarLoopTests
         });
     }
 
-    // A fake SDK exception exposing an int StatusCode — proves the now-reachable classification path
-    // (CauReflect.UploadOne no longer swallows, so RealUploadOne's catch actually runs).
+    // A fake in the SDK's ApiErrorException shape — status and server text are public FIELDS and Message is
+    // the content-free default — proving the classification path RealUploadOne's catch runs. A property-shaped
+    // fake once let a property-only reader pass here while it missed every live status.
     class FakeApiException : System.Exception
     {
-        public int StatusCode { get; set; }
-        public FakeApiException(int s, string m, System.Exception inner = null) : base(m, inner) { StatusCode = s; }
+        public System.Net.HttpStatusCode StatusCode;
+        public string ErrorMessage;
+        public FakeApiException(int s, string m, System.Exception inner = null)
+            : base("Exception of type 'FakeApiException' was thrown.", inner) { StatusCode = (System.Net.HttpStatusCode)s; ErrorMessage = m; }
+    }
+
+    [Test]
+    public void FailedFromException_404_NamesStatusAndServerText()
+    {
+        var o = UploadAvatar.FailedFromException(new FakeApiException(404, "Avatar not found"));
+        Assert.AreEqual(404, o.httpStatus);
+        Assert.AreEqual("real", UploadAvatarLogic.Classify(o.httpStatus, o.isValidation, o.isTimeout));
+        StringAssert.Contains("not visible to this account", o.message);
+        StringAssert.Contains("Avatar not found", o.message);
+        StringAssert.DoesNotContain("was thrown", o.message);
+    }
+
+    [Test]
+    public void FailedFromException_422_DoesNotBlameMetadataText()
+    {
+        var o = UploadAvatar.FailedFromException(new FakeApiException(422, "Avatar failed validation"));
+        StringAssert.Contains("(422)", o.message);
+        StringAssert.Contains("Avatar failed validation", o.message);
+        StringAssert.DoesNotContain("change the text", o.message);
     }
 
     [Test]

@@ -201,7 +201,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// name-equality test would drop both — including the 422 that a refused name produces, which is
         /// the single most likely failure this door will ever see. Anything exposing a readable StatusCode
         /// field is classifiable, whatever it is called.</summary>
-        static bool TryReadApiFields(Exception e, out int? statusCode, out string serverMessage)
+        internal static bool TryReadApiFields(Exception e, out int? statusCode, out string serverMessage)
         {
             statusCode = null; serverMessage = null;
             var t = e.GetType();

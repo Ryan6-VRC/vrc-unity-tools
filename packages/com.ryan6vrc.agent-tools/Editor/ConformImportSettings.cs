@@ -11,7 +11,7 @@ using UnityEngine.SceneManagement;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Corrects the import settings that hard-fail a driven VRChat upload — over an asset folder, or over
+    /// Corrects the import settings that hard-fail a driven VRChat upload — over an asset folder, one asset, or over
     /// everything a placed avatar root references (the set the SDK panel's own validations walk, so
     /// <c>whatIf</c> on a root is the pre-build preview of the panel's verdict).
     ///
@@ -47,14 +47,16 @@ namespace Ryan6Vrc.AgentTools.Editor
         };
 
         private const string ScopeNote = "scope=t:Texture,t:Model,t:AudioClip under this folder only, 5 rows (menu-icon + mip-filter validations excluded — still the operator's)";
+        private const string AssetScopeNote = "scope=this one asset only, 5 rows (menu-icon + mip-filter validations excluded — still the operator's)";
         private const string AvatarScopeNote = "scope=meshes on SkinnedMeshRenderer/MeshFilter/ParticleSystemRenderer, textures on every Renderer's materials, clips on every AudioSource under this root (inactive included, EditorOnly subtrees excluded — the SDK panel's own walk; clips an animator Play Audio behaviour names are NOT collected — still the panel's), 5 rows (menu-icon + mip-filter validations excluded — still the operator's)";
 
         // ----- Public API (callable from execute_code / the import skill) ---------------------
 
         /// <summary>Conform every offending import setting in a scope. <paramref name="scope"/> is an asset
-        /// folder (recursive) or a placed scene root — hierarchy path, instance id, or unique name — whose
-        /// referenced meshes, textures and clips are the set (see <see cref="Run(GameObject, bool)"/>). A folder
-        /// wins when the string is both. <paramref name="whatIf"/> previews: identical traversal, nothing written.
+        /// folder (recursive), one texture / model / audio-clip asset path, or a placed scene root — hierarchy
+        /// path, instance id, or unique name — whose referenced meshes, textures and clips are the set (see
+        /// <see cref="Run(GameObject, bool)"/>). An asset path wins when the string is both.
+        /// <paramref name="whatIf"/> previews: identical traversal, nothing written.
         /// Returns a one-line summary ending with the RunLog path (<c>… =&gt; RESULT | log=&lt;path&gt;</c>); a
         /// bad-input early return is a bare <c>[ConformImportSettings] FAIL: …</c> with no trailer.</summary>
         public static string Run(string scope, bool whatIf = false)
@@ -62,12 +64,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (string.IsNullOrEmpty(scope))
                 return "[ConformImportSettings] FAIL: empty scope: pass an asset folder (e.g. Assets/Vendor/Outfits/<Name>) or a placed avatar root.";
             if (AssetDatabase.IsValidFolder(scope)) return RunFolder(scope, whatIf);
+            if (!string.IsNullOrEmpty(AssetDatabase.AssetPathToGUID(scope, AssetPathToGUIDOptions.OnlyExistingAssets)))
+                return RunAsset(scope, whatIf);
             var handle = SceneHandle.Resolve(scope);
             if (handle.Ok) return Run(handle.Object, whatIf);
             if (handle.Outcome != SceneHandleOutcome.NotFound)
                 return "[ConformImportSettings] FAIL: " + handle.Refusal;
-            return "[ConformImportSettings] FAIL: neither a valid asset folder nor a scene object: " + scope
-                 + " (an asset folder such as Assets/Vendor/Outfits/<Name>, or a placed avatar root's hierarchy path).";
+            return "[ConformImportSettings] FAIL: neither a valid asset folder, an asset, nor a scene object: " + scope
+                 + " (an asset folder such as Assets/Vendor/Outfits/<Name>, one asset's path, or a placed avatar root's hierarchy path).";
         }
 
         /// <summary>Conform every offending import setting behind a placed avatar root: the meshes on every
@@ -89,7 +93,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return "[ConformImportSettings] FAIL: " + HierarchyPath(avatarRoot)
                      + " is tagged EditorOnly, so the panel never validates it and this scope would scan nothing; pass the avatar root itself.";
 
-            var r = new Report { Target = HierarchyPath(avatarRoot), WhatIf = whatIf, AvatarScope = true };
+            var r = new Report { Target = HierarchyPath(avatarRoot), WhatIf = whatIf, Kind = "avatar" };
             var set = CollectAvatarAssets(avatarRoot);
             Scan(set.Textures, set.Models, set.Clips, r);
             foreach (var f in r.Findings) f.Conformable = IsConformable(f.Path);
@@ -116,6 +120,32 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var f in r.Findings) f.Conformable = true; // the root refusal above already bounded the scope
             if (!whatIf && r.Findings.Count > 0) Apply(r);
             return Finish(r, RunLogFormat.Leaf(assetFolderPath));
+        }
+
+        /// <summary>One asset, for a folder whose siblings are not settled: another agent's in-flight import there
+        /// would be reimported by a folder run. The scope is still the whole sanction, so it is bounded the way the
+        /// folder root is — a <c>Packages/</c> path is refused, and an asset no row reads is refused by name rather
+        /// than passed as scanned-nothing.</summary>
+        private static string RunAsset(string assetPath, bool whatIf)
+        {
+            if (!DefaultIsConformable(assetPath))
+                return "[ConformImportSettings] FAIL: refusing an asset under Packages/ (" + assetPath
+                     + "): a VPM resolve reverts the write; copy the asset under Assets/ and repoint the reference.";
+
+            var importer = AssetImporter.GetAtPath(assetPath);
+            var one = new[] { assetPath };
+            var none = new string[0];
+            var r = new Report { Target = assetPath, WhatIf = whatIf, Kind = "asset" };
+            if (importer is TextureImporter) Scan(one, none, none, r);
+            else if (importer is ModelImporter) Scan(none, one, none, r);
+            else if (importer is AudioImporter) Scan(none, none, one, r);
+            else
+                return "[ConformImportSettings] FAIL: " + assetPath + " is imported by "
+                     + (importer == null ? "no importer" : importer.GetType().Name)
+                     + ", which no row reads: pass a texture, model or audio clip, or the folder that holds it.";
+            foreach (var f in r.Findings) f.Conformable = true; // the Packages/ refusal above already bounded the scope
+            if (!whatIf && r.Findings.Count > 0) Apply(r);
+            return Finish(r, RunLogFormat.Leaf(assetPath));
         }
 
         /// <summary>Whether this door may write an offender found through an avatar scope. The one class it
@@ -526,7 +556,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             public string Target;
             public bool WhatIf;
-            public bool AvatarScope;
+            public string Kind = "folder";   // folder | asset | avatar — the RunLog's scopeKind
             public int Scanned;
             public int Skipped;
             public readonly List<Finding> Findings = new List<Finding>();
@@ -607,7 +637,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append(" | ROWS SKIPPED: ").Append(string.Join("; ", r.SkippedRows));
             if (r.Notes.Count > 0)
                 sb.Append(" | NOTE: ").Append(string.Join("; ", r.Notes));
-            sb.Append(" | ").Append(r.AvatarScope ? AvatarScopeNote : ScopeNote);
+            sb.Append(" | ").Append(ScopeNoteFor(r));
             sb.Append(" => ").Append(result);
 
             string summary = RunLogFormat.WriteRunLog(RunLogDir, "conformimportsettings_" + label, sb.ToString(), BuildLog(r, label, result), ".json");
@@ -616,6 +646,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             else Debug.LogError(summary);
             return summary;
         }
+
+        private static string ScopeNoteFor(Report r)
+            => r.Kind == "avatar" ? AvatarScopeNote : r.Kind == "asset" ? AssetScopeNote : ScopeNote;
 
         private static string BuildLog(Report r, string label, string result)
         {
@@ -635,8 +668,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("  \"clipLoadFailures\": ").Append(r.ClipLoadFailures).Append(",\n");
             sb.Append("  \"writeErrors\": [").Append(string.Join(", ", r.WriteErrors.Select(RunLogFormat.Q))).Append("],\n");
             sb.Append("  \"notes\": [").Append(string.Join(", ", r.Notes.Select(RunLogFormat.Q))).Append("],\n");
-            sb.Append("  \"scope\": ").Append(RunLogFormat.Q(r.AvatarScope ? AvatarScopeNote : ScopeNote)).Append(",\n");
-            sb.Append("  \"scopeKind\": ").Append(RunLogFormat.Q(r.AvatarScope ? "avatar" : "folder")).Append(",\n");
+            sb.Append("  \"scope\": ").Append(RunLogFormat.Q(ScopeNoteFor(r))).Append(",\n");
+            sb.Append("  \"scopeKind\": ").Append(RunLogFormat.Q(r.Kind)).Append(",\n");
             sb.Append("  \"rowsSkipped\": [");
             sb.Append(string.Join(", ", r.SkippedRows.Select(RunLogFormat.Q)));
             sb.Append("],\n");
