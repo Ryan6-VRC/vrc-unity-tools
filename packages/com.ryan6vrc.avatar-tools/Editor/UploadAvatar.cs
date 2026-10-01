@@ -505,7 +505,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// The status and the server's text are read from the SDK exception's <c>StatusCode</c> /
         /// <c>ErrorMessage</c> FIELDS through <see cref="VrcApiReflect.TryReadApiFields"/>, the reader the
         /// record doors share. Its <c>Message</c> is the content-free default string, so a status-bearing
-        /// link reports <see cref="AvatarRecordLogic.RefuseForStatus(int?, string)"/>'s text instead.</summary>
+        /// link reports <see cref="UploadRefusal"/>'s text instead.</summary>
         internal static UploadOutcome FailedFromException(Exception e)
         {
             // e is already normalized by CauReflect.UploadOne (no TargetInvocationException / AggregateException
@@ -518,13 +518,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 bool isTimeout = cur is TimeoutException;
                 if (hasStatus || isValidation || isTimeout)
                     return UploadOutcome.Failed(httpStatus: status, isValidation: isValidation, isTimeout: isTimeout,
-                                                message: hasStatus ? AvatarRecordLogic.RefuseForStatus(status, serverMessage) : e.Message);
+                                                message: hasStatus ? UploadRefusal(status, serverMessage) : e.Message);
             }
             // No classifiable signal anywhere in the chain → fail-safe: non-retryable. Never auto-retry an
             // unknown failure against a real account (covers CAU-drift InvalidOperationException, status-less
             // transport faults, a null/unexpected return). Requires an operator decision, not a silent retry.
             return UploadOutcome.Failed(message: e.Message, forcedClass: "real");
         }
+
+        // The record doors' text, except 422: theirs tells the caller to change a name, description or tag, and an
+        // upload's 422 can be a rejection of the avatar itself, where no text is at fault.
+        static string UploadRefusal(int? status, string serverMessage)
+            => status == 422
+                ? "VRChat rejected the upload as unprocessable (422)"
+                  + (string.IsNullOrEmpty(serverMessage) ? "" : " — server said: " + AvatarRecordLogic.Escape(serverMessage))
+                : AvatarRecordLogic.RefuseForStatus(status, serverMessage);
 
         // Scrub at the choke point: TryGetBuilder/TryBuildSetting embed SDK exception .Message into reason.
         static string Refuse(string reason)

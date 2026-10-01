@@ -180,6 +180,27 @@ public class DynamicsDoorsTests
         Assert.IsNotNull(WriteDynamics.ParseCurve(text, out _), "a curve the form cannot carry must not read back as a different one");
     }
 
+    // A stepped key's tangent is infinite, which passes any scaled tolerance against a finite linear one, so the
+    // short form would print and parse back as a ramp.
+    [Test]
+    public void Curve_steppedTangent_roundTripsAsAStep()
+    {
+        var stepped = new AnimationCurve(new Keyframe(0f, 0f, 0f, float.PositiveInfinity), new Keyframe(1f, 1f, float.PositiveInfinity, 0f));
+        var text = WriteDynamics.FormatCurve(stepped);
+        Assert.IsNull(WriteDynamics.ParseCurve(text, out var back), text);
+        Assert.AreEqual(stepped.Evaluate(0.5f), back.Evaluate(0.5f), 1e-5f, "via " + text);
+    }
+
+    [Test]
+    public void Curve_nonDefaultWrapMode_printsAFormParseCurveRefuses()
+    {
+        var c = AnimationCurve.Linear(0.2f, 0f, 0.8f, 1f);
+        c.postWrapMode = WrapMode.PingPong;
+        var text = WriteDynamics.FormatCurve(c);
+        StringAssert.Contains("wrap mode", text);
+        Assert.IsNotNull(WriteDynamics.ParseCurve(text, out _), "a curve the form cannot carry must not read back as a different one");
+    }
+
     // A ramp must land exactly on the pose (the hold is timed from arrival) and start exactly at the held pose.
     [Test]
     public void Ramp_easesFromZeroAndArrivesExactly()

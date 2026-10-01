@@ -414,14 +414,17 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>A curve in <see cref="ParseCurve"/>'s form, so a read hands a write its exact value: <c>time:value</c>
         /// where a key's tangents are the ones ParseCurve would give it, <c>time:value:inTangent:outTangent</c> where
-        /// they are not. Weighted tangents are the one thing the form cannot carry, so a curve holding any ends in a
-        /// bracketed note ParseCurve refuses, rather than reading back as a different curve. Pure.</summary>
+        /// they are not. Weighted tangents and a non-default wrap mode are what the form cannot carry, so a curve
+        /// holding either ends in a bracketed note ParseCurve refuses, rather than reading back as a different curve.
+        /// Pure.</summary>
         internal static string FormatCurve(AnimationCurve c)
         {
             if (c == null || c.length == 0) return "";
             var inv = CultureInfo.InvariantCulture; var keys = c.keys;
             ParseCurve(string.Join(",", keys.Select(k => k.time.ToString("R", inv) + ":" + k.value.ToString("R", inv))), out var linear);
-            bool Same(float a, float b) => a == b || Mathf.Abs(a - b) <= 1e-5f * Mathf.Max(1f, Mathf.Abs(a), Mathf.Abs(b));
+            // A stepped tangent is infinite, and an infinite difference passes any scaled tolerance — compare exactly.
+            bool Same(float a, float b) => a == b || (!float.IsInfinity(a) && !float.IsInfinity(b)
+                                                      && Mathf.Abs(a - b) <= 1e-5f * Mathf.Max(1f, Mathf.Abs(a), Mathf.Abs(b)));
             var parts = keys.Select((k, i) =>
             {
                 var tv = k.time.ToString("R", inv) + ":" + k.value.ToString("R", inv);
@@ -430,7 +433,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                     : tv + ":" + k.inTangent.ToString("R", inv) + ":" + k.outTangent.ToString("R", inv);
             });
             var s = string.Join(",", parts);
-            return keys.Any(k => k.weightedMode != WeightedMode.None) ? s + " [weighted tangents: not writable through WriteDynamics]" : s;
+            if (keys.Any(k => k.weightedMode != WeightedMode.None)) s += " [weighted tangents: not writable through WriteDynamics]";
+            if (c.preWrapMode != linear.preWrapMode || c.postWrapMode != linear.postWrapMode)
+                s += " [wrap mode " + c.preWrapMode + "/" + c.postWrapMode + ": not writable through WriteDynamics]";
+            return s;
         }
 
         internal static Vector3? ParseVector(string s)

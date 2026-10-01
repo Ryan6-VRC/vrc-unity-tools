@@ -285,6 +285,15 @@ public class UploadAvatarLoopTests
     }
 
     [Test]
+    public void FailedFromException_422_DoesNotBlameMetadataText()
+    {
+        var o = UploadAvatar.FailedFromException(new FakeApiException(422, "Avatar failed validation"));
+        StringAssert.Contains("(422)", o.message);
+        StringAssert.Contains("Avatar failed validation", o.message);
+        StringAssert.DoesNotContain("change the text", o.message);
+    }
+
+    [Test]
     public void FailedFromException_MapsStatus()
     {
         var o429 = UploadAvatar.FailedFromException(new FakeApiException(429, "rate limited avtr_x"));
