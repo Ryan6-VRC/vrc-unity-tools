@@ -286,6 +286,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     {
         public string Name;
         public float? Seconds;                  // declared length (duration-only or curve length override)
+        public bool Loop;                       // AnimationClipSettings.loopTime: the state replays the clip seamlessly
         public Dictionary<string, float> Sets = new Dictionary<string, float>();   // binding -> constant
         public List<CurveSpec> Curves = new List<CurveSpec>();
     }

@@ -258,6 +258,25 @@ public class ControllerDecompileTests
     }
 
     [Test]
+    public void Loop_Survives_Parse_Emit_Walk_And_Serialize()
+    {
+        // `loop: true` is the clip's own loopTime: a state holding it replays with no gap. It must survive every
+        // leg, or a looping vendor clip decompiles and recompiles as a one-shot with both directions reporting OK.
+        string yaml = AnimatorSchemaYamlTests.DebounceDoc.Replace("hold_on: { set: { Level: 1.0 } }", "hold_on: { loop: true, set: { Level: 1.0 } }");
+        Assert.AreNotEqual(AnimatorSchemaYamlTests.DebounceDoc, yaml, "the fixture still carries the clip this test edits");
+        var doc = AnimatorSchemaYaml.Parse(yaml, "mem://loop");
+        Assert.IsTrue(doc.Clips.First(c => c.Name == "hold_on").Loop, "parsed");
+        ControllerEmit.Build(doc, out var emitted);
+        Assert.IsTrue(AnimationUtility.GetAnimationClipSettings(emitted.Clips["hold_on"]).loopTime, "emitted loopTime");
+        Assert.IsFalse(AnimationUtility.GetAnimationClipSettings(emitted.Clips["timer"]).loopTime, "an unmarked clip stays one-shot");
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.IsTrue(w.Doc.Clips.First(c => c.Name == "hold_on").Loop, "recovered by the walk");
+        Assert.IsFalse(w.Doc.Clips.First(c => c.Name == "timer").Loop);
+        StringAssert.Contains("loop: true", AnimatorSchemaEmit.Serialize(w.Doc), "serialized back to the document");
+    }
+
+    [Test]
     public void Walk_Plain_Set_Clip_Leaves_Seconds_Null()
     {
         // A Set clip with NO authored seconds sits at MinClipLength — the recovery must NOT invent a seconds.

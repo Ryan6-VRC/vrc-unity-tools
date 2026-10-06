@@ -1184,6 +1184,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         case "seconds": clip.Seconds = ToClipLength(ck.Value, name, "seconds"); break;
                         case "length": clip.Seconds = ToClipLength(ck.Value, name, "length"); break;
+                        case "loop": clip.Loop = ToBool(ck.Value, $"clip '{name}' loop"); break;
                         case "set":
                             foreach (var sv in ToMap(ck.Value, $"clip '{name}' set"))
                                 clip.Sets[sv.Key] = ToNumber(sv.Value, $"clip '{name}' set.{sv.Key}");

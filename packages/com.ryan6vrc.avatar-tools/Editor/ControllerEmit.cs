@@ -194,6 +194,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var carrier = EditorCurveBinding.FloatCurve("", typeof(Animator), ReservedNames.CarrierParam);
                 var flat = new AnimationCurve(new Keyframe(0f, 0f), new Keyframe(spec.Seconds.Value, 0f));
                 AnimationUtility.SetEditorCurve(clip, carrier, flat);
+                ApplyLoop(clip, spec);
                 return clip;
             }
 
@@ -205,7 +206,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             foreach (var cs in spec.Curves)
                 SetKeyedCurve(clip, spec, cs, paramNames);
+            ApplyLoop(clip, spec);
             return clip;
+        }
+
+        // `loop: true` sets the clip's own loopTime, so a state holding it replays it with no gap. A
+        // self-transition at exitTime 1 is not a substitute: it fires on the first frame past the end and the
+        // re-entered state starts at 0, so every period runs up to one frame long.
+        private static void ApplyLoop(AnimationClip clip, ClipSpec spec)
+        {
+            if (!spec.Loop) return;
+            var settings = AnimationUtility.GetAnimationClipSettings(clip);
+            settings.loopTime = true;
+            AnimationUtility.SetAnimationClipSettings(clip, settings);
         }
 
         // Author one keyframed curve onto `clip`.
