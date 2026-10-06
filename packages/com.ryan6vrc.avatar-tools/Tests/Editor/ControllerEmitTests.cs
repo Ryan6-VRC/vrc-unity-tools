@@ -67,6 +67,38 @@ public class ControllerEmitTests
         Assert.AreEqual("RawInput", toPending.conditions[0].parameter);
     }
 
+    // canTransitionToSelf on a state rung is the compiler's, never Unity's default: AddTransition on an
+    // asset-backed state defaults it false in a GUI Editor and true in batchmode. This suite runs in batchmode,
+    // where an unset flag reads true, so the off assertions are the ones that catch a rung left to the default.
+    [Test]
+    public void State_Rung_CanTransitionToSelf_Is_On_Exactly_For_Its_Own_State()
+    {
+        const string yaml =
+            "schema: 1\ncontroller: SelfRung_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: bool\n" +
+            "layers:\n  - name: L\n    states:\n" +
+            "      A:\n        motion: ~\n        transitions:\n" +
+            "          - { to: A, when: [ P is true ] }\n" +
+            "          - { to: B, when: [ P is false ] }\n" +
+            "          - { to: M, when: [ P is false ] }\n" +
+            "          - { to: Exit, when: [ P is false ] }\n" +
+            "      B: { motion: ~ }\n" +
+            "    machines:\n      M:\n        states:\n          C: { motion: ~ }\n        default: C\n" +
+            "    default: A\n";
+        var doc = AnimatorSchemaYaml.Parse(yaml, "mem://selfrung");
+        ControllerEmit.Build(doc, out var r);
+        var a = State(RootSm(r), "A");
+        var ts = a.transitions;
+
+        Assert.IsTrue(ts[0].canTransitionToSelf, "A->A is a rung to its own state: on");
+        Assert.IsFalse(ts[1].canTransitionToSelf, "A->B: off");
+        Assert.IsFalse(ts[2].canTransitionToSelf, "A->sub-machine M: off");
+        Assert.IsTrue(ts[3].isExit, "the fourth rung is the exit");
+        Assert.IsFalse(ts[3].canTransitionToSelf, "A->Exit: off");
+        foreach (var t in ts)
+            Assert.AreEqual(0f, t.exitTime, "an unauthored exitTime is written, not left to Unity's default");
+    }
+
     [Test]
     public void Timer_Clip_Is_A_CompilerNull_Carrier()
     {

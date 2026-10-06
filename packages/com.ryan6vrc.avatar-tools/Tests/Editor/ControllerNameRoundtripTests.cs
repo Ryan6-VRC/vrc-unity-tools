@@ -114,8 +114,9 @@ clips:
         //      every state/AnyState transition through ControllerEmit.ConfigureStateTransition and decode
         //      through ControllerDecompile.DecodeStateTransition, so an AnyState case re-walks the same two
         //      methods. The ONE field each ladder handles outside those two is `canTransitionToSelf` (assigned
-        //      and read beside the shared calls, AnyState only) — and it is not a name; its own round-trip is
-        //      covered by the addressing.yaml fixture at RoundtripStressTests.Fixpoint_AuthoredYaml ─────────
+        //      and read beside the shared calls: authored on AnyState, derived from the target on a state
+        //      rung) — and it is not a name; its round-trips are covered by the addressing.yaml fixture at
+        //      RoundtripStressTests.Fixpoint_AuthoredYaml and by ControllerDecompileTests.Walk_SelfRung_* ─────
         [Test]
         public void NamedStateTransition_Roundtrips()
         {

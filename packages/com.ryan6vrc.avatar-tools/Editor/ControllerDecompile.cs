@@ -604,8 +604,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     foreach (var b in ast.behaviours)
                         DecodeBehaviourInto(st.Behaviours, b, StateLabel(ast));
 
+                // A state rung's canTransitionToSelf decides only a rung whose target is its own state, and the
+                // compiler derives it from the target (on exactly there), so a rung to itself at flag 1 decodes
+                // as plain `to: <self>`. One at flag 0 never fires, and a later sibling whose condition holds
+                // at the same time still fires past it (bare Animator), so dropping it is the faithful decode —
+                // the recompile would bring it alive. Solo is the exception: a soloed rung silences its non-solo
+                // siblings whether or not it can fire, so dropping that one would wake them.
                 foreach (var t in ast.transitions)
+                {
+                    if (t != null && !t.isExit && t.destinationState == ast && !t.canTransitionToSelf)
+                    {
+                        if (t.solo)
+                            Refuse($"transition from {StateLabel(ast)} to itself: canTransitionToSelf is off, so "
+                                + "it never fires, but it is soloed, which silences the state's other rungs; the "
+                                + "schema cannot hold a dead rung, and dropping it would wake them");
+                        else
+                            _result.Notes.Add($"transition from {StateLabel(ast)} to itself: canTransitionToSelf "
+                                + "is off, so it never fires (measured on a bare Animator and in av3emu); dropped, "
+                                + "since a recompile would emit it with the flag on");
+                        continue;
+                    }
                     st.Transitions.Add(DecodeStateTransition(t, owner, StateLabel(ast)));
+                }
 
                 CompletenessSweep(ast, StateAware, "", StateLabel(ast));
                 return st;

@@ -109,6 +109,39 @@ public class ControllerRulesTests
     }
 
     [Test]
+    public void Run_Advises_A_Rung_To_Its_Own_State_With_CanTransitionToSelf_Off()
+    {
+        _controller = new AnimatorController();
+        _controller.AddParameter("P", AnimatorControllerParameterType.Bool);
+        _controller.AddLayer("Base");
+        var sm = _controller.layers[0].stateMachine;
+        var a = sm.AddState("A");
+        var b = sm.AddState("B");
+
+        var dead = a.AddTransition(a);
+        dead.canTransitionToSelf = false;
+        dead.AddCondition(AnimatorConditionMode.If, 0, "P");
+        var live = b.AddTransition(b);
+        live.canTransitionToSelf = true;
+        live.AddCondition(AnimatorConditionMode.If, 0, "P");
+        var other = a.AddTransition(b);      // the flag decides nothing on a rung to another state
+        other.canTransitionToSelf = false;
+        other.AddCondition(AnimatorConditionMode.IfNot, 0, "P");
+        var c = sm.AddState("C");
+        var muted = c.AddTransition(c);      // muted: dead whatever the flag, so the flag is not the cause
+        muted.canTransitionToSelf = false;
+        muted.mute = true;
+        muted.AddCondition(AnimatorConditionMode.If, 0, "P");
+
+        var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: true, pathRewrite: null);
+
+        var hits = r.Advisories.Where(o => o.Kind == "deadSelfRung").ToList();
+        Assert.AreEqual(1, hits.Count, "only A's rung to itself, at flag off, is advised");
+        StringAssert.Contains("'A'", hits[0].Where);
+        Assert.IsEmpty(r.Errors, "advisory tier: a dead rung to itself does not flip the verdict");
+    }
+
+    [Test]
     public void Run_Does_Not_Flag_ExitTime_From_Motionless_State()
     {
         // A motionless state with an exit-time transition is a VALID timer idiom, not a dead transition:

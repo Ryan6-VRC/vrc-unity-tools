@@ -99,6 +99,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // ---- Advisory-tier rules ------------------------------------------------------------------
             RuleWdInconsistency(states, rep);
+            RuleDeadSelfRung(states, rep);
             RuleOrphanSubAsset(controller, rep);
             RuleDeadLayer(controller, rep);
             RuleCrossPackageAndArchive(controller, rep);
@@ -605,6 +606,36 @@ namespace Ryan6Vrc.AgentTools.Editor
                         Kind = "wdInconsistency", Where = "layer '" + layerName[kv.Key] + "'",
                         Detail = "states disagree on Write Defaults (on=" + kv.Value[0] + " off=" + kv.Value[1] + ")"
                     });
+            }
+        }
+
+        // ----- Rule 5b: deadSelfRung (advisory) — a state's rung to itself with canTransitionToSelf off ----
+        // The flag decides only a rung whose destination is its own state (a return through Exit or a
+        // sub-machine re-enters either way); off, that rung never fires, and a later sibling whose condition
+        // holds still fires past it. Advisory, not error: a vendor rung like this is inert unless soloed (the
+        // Detail says so then), and CompileController never emits one (it sets the flag from the target).
+        // Its usual source is a hand edit or a build from before that, made in a GUI Editor, where
+        // AddTransition on an asset-backed state defaults the flag off. A muted rung is skipped: it never
+        // fires whatever the flag, so blaming the flag would be wrong.
+        private static void RuleDeadSelfRung(List<StateCtx> states, LintResult rep)
+        {
+            foreach (var s in states)
+            {
+                var st = s.State;
+                if (st == null) continue;
+                foreach (var t in st.transitions)
+                {
+                    if (t == null || t.isExit || t.mute || t.destinationState != st || t.canTransitionToSelf) continue;
+                    rep.Advisories.Add(new LintOffender
+                    {
+                        Kind = "deadSelfRung",
+                        Where = "layer '" + s.LayerName + "' state '" + st.name + "' -> itself",
+                        Detail = "canTransitionToSelf is off, so this rung never fires (measured on a bare Animator "
+                               + "and in av3emu) and the state's drivers never re-run through it"
+                               + (t.solo ? "; it is soloed, so it also silences every non-solo rung out of this state" : "")
+                               + "; if it was meant to re-enter, recompile from source or set the flag"
+                    });
+                }
             }
         }
 

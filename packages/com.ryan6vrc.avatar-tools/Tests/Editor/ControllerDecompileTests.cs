@@ -296,6 +296,60 @@ public class ControllerDecompileTests
         Assert.IsFalse(c2.Seconds.HasValue, "a plain Set clip (MinClipLength) does not gain a spurious seconds");
     }
 
+    // ---- a state's rung to itself: canTransitionToSelf on decodes as `to: <self>`; off is dead --------
+
+    private static AnimatorState SelfRungState(out ControllerEmit.EmitResult emitted)
+    {
+        const string yaml =
+            "schema: 1\ncontroller: SelfRung_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: bool\n" +
+            "layers:\n  - name: L\n    states:\n" +
+            "      A:\n        motion: ~\n        transitions:\n" +
+            "          - { to: A, when: [ P is true ] }\n" +
+            "          - { to: B, when: [ P is false ] }\n" +
+            "      B: { motion: ~ }\n" +
+            "    default: A\n";
+        ControllerEmit.Build(AnimatorSchemaYaml.Parse(yaml, "test"), out emitted);
+        return FirstState(emitted, "A");
+    }
+
+    [Test]
+    public void Walk_SelfRung_At_Flag_On_Roundtrips_As_Plain_To_Self()
+    {
+        SelfRungState(out var emitted);
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.AreEqual(0, w.Refusals.Count);
+        var a = w.Doc.Layers[0].Root.States.First(s => s.Name == "A");
+        Assert.AreEqual(new[] { "A", "B" }, a.Transitions.Select(t => t.To).ToArray(), "both rungs, in order");
+
+        ControllerEmit.Build(w.Doc, out var r2);
+        Assert.IsTrue(FirstState(r2, "A").transitions[0].canTransitionToSelf, "the recompile keeps the rung live");
+    }
+
+    [Test]
+    public void Walk_SelfRung_At_Flag_Off_Is_Dropped_With_A_Note()
+    {
+        var aState = SelfRungState(out var emitted);
+        aState.transitions[0].canTransitionToSelf = false;   // what a GUI-Editor build used to emit
+        var w = ControllerDecompile.Walk(emitted.Controller);
+
+        Assert.AreEqual(0, w.Refusals.Count, "a dead rung to itself is dropped, not refused");
+        var a = w.Doc.Layers[0].Root.States.First(s => s.Name == "A");
+        Assert.AreEqual(new[] { "B" }, a.Transitions.Select(t => t.To).ToArray(),
+            "the dead rung is gone, so a recompile cannot bring it alive");
+        Assert.IsTrue(w.Notes.Any(n => n.Contains("to itself") && n.Contains("'A'")), "a Note names the dropped rung");
+    }
+
+    [Test]
+    public void Walk_Soloed_SelfRung_At_Flag_Off_Refuses()
+    {
+        var aState = SelfRungState(out var emitted);
+        aState.transitions[0].canTransitionToSelf = false;
+        aState.transitions[0].solo = true;   // silences A->B whether or not it can fire; dropping it would wake A->B
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.IsTrue(w.Refusals.Any(m => m.Contains("to itself") && m.Contains("soloed")));
+    }
+
     // ---- mixed WD hoists to a modal layer policy + minority overrides, re-emits the same mix --
 
     [Test]

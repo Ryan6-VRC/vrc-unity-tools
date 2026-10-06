@@ -231,7 +231,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public string To;                       // bare == local; "Sub/State" == from layer root; "/Top" == absolute from root; null == "to Exit"
         public bool ToExit;
         public List<Condition> When = new List<Condition>();
-        public bool CanTransitionToSelf;        // AnyState ladder only
+        public bool CanTransitionToSelf;        // authored on the AnyState ladder only; a state rung's is derived from `To`
         public string Name;                     // null ⇒ Unity's empty default; state/AnyState only (refused on entry)
         public bool Mute; public bool Solo;     // AnimatorStateTransition editor flags (state + AnyState ladders)
         // Normalized time in the DESTINATION state's motion where playback begins (Unity m_TransitionOffset).
