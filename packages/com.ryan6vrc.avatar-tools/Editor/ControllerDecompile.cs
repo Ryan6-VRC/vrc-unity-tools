@@ -606,8 +606,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 // A state rung's canTransitionToSelf decides only a rung whose target is its own state, and the
                 // compiler derives it from the target (on exactly there), so a rung to itself at flag 1 decodes
-                // as plain `to: <self>`. One at flag 0 never fires, so dropping it is the faithful decode — the
-                // recompile would bring it alive. Solo is the exception: a soloed rung silences its non-solo
+                // as plain `to: <self>`. One at flag 0 never fires, and a later sibling whose condition holds
+                // at the same time still fires past it (bare Animator), so dropping it is the faithful decode —
+                // the recompile would bring it alive. Solo is the exception: a soloed rung silences its non-solo
                 // siblings whether or not it can fire, so dropping that one would wake them.
                 foreach (var t in ast.transitions)
                 {

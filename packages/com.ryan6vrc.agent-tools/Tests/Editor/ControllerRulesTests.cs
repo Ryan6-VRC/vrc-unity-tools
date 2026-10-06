@@ -127,6 +127,11 @@ public class ControllerRulesTests
         var other = a.AddTransition(b);      // the flag decides nothing on a rung to another state
         other.canTransitionToSelf = false;
         other.AddCondition(AnimatorConditionMode.IfNot, 0, "P");
+        var c = sm.AddState("C");
+        var muted = c.AddTransition(c);      // muted: dead whatever the flag, so the flag is not the cause
+        muted.canTransitionToSelf = false;
+        muted.mute = true;
+        muted.AddCondition(AnimatorConditionMode.If, 0, "P");
 
         var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: true, pathRewrite: null);
 

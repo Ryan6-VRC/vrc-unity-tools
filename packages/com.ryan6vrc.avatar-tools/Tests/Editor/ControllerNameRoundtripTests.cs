@@ -116,7 +116,7 @@ clips:
         //      methods. The ONE field each ladder handles outside those two is `canTransitionToSelf` (assigned
         //      and read beside the shared calls: authored on AnyState, derived from the target on a state
         //      rung) — and it is not a name; its round-trips are covered by the addressing.yaml fixture at
-        //      RoundtripStressTests.Fixpoint_AuthoredYaml and by ControllerEmitTests' self-rung cases ───────
+        //      RoundtripStressTests.Fixpoint_AuthoredYaml and by ControllerDecompileTests.Walk_SelfRung_* ─────
         [Test]
         public void NamedStateTransition_Roundtrips()
         {
