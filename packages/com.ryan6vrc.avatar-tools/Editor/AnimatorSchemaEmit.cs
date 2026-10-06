@@ -125,6 +125,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     // Keyframed clips render in block form: one binding per line.
                     L(sb, "  " + Key(c.Name) + ":");
                     if (c.Seconds.HasValue) L(sb, "    seconds: " + Num(c.Seconds.Value));
+                    if (c.Loop) L(sb, "    loop: true");
                     if (c.Sets.Count > 0) L(sb, "    set: " + FlowSets(c.Sets));
                     L(sb, "    curves:");
                     foreach (var cs in c.Curves) L(sb, "      " + Key(cs.Binding) + ": " + FlowCurve(cs));
@@ -140,6 +141,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             var parts = new List<string>();
             if (c.Seconds.HasValue) parts.Add("seconds: " + Num(c.Seconds.Value));
+            if (c.Loop) parts.Add("loop: true");
             if (c.Sets.Count > 0) parts.Add("set: " + FlowSets(c.Sets));
             return parts.Count == 0 ? "{}" : "{ " + string.Join(", ", parts) + " }";
         }

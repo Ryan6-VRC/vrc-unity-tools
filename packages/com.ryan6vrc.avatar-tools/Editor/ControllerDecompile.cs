@@ -1148,7 +1148,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private ClipSpec DecodeClip(AnimationClip clip)
             {
-                var spec = new ClipSpec { Name = clip.name };
+                var spec = new ClipSpec { Name = clip.name, Loop = AnimationUtility.GetAnimationClipSettings(clip).loopTime };
                 var bindings = AnimationUtility.GetCurveBindings(clip);
 
                 // Seconds-only carrier: a single flat curve on the reserved _CompilerNull animator param. Its
