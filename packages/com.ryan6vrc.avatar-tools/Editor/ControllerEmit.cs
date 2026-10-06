@@ -211,8 +211,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // `loop: true` sets the clip's own loopTime, so a state holding it replays it with no gap. A
-        // self-transition at exitTime 1 is not a substitute: it fires on the first frame past the end and the
-        // re-entered state starts at 0, so every period runs up to one frame long.
+        // self-transition at exitTime 1 is not a substitute: a state's rung to itself never fires.
         private static void ApplyLoop(AnimationClip clip, ClipSpec spec)
         {
             if (!spec.Loop) return;
