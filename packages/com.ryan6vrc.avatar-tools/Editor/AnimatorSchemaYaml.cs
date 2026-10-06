@@ -871,7 +871,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // allowSelf defaults FALSE so a state-transition list (which calls this without the flag) refuses
-        // canTransitionToSelf — a field only the AnyState ladder honors. The AnyState caller passes true.
+        // canTransitionToSelf: only the AnyState ladder authors it. A state rung's flag is derived from its
+        // target — on exactly when `to:` is the rung's own state — so authoring it there could only contradict
+        // the target. The AnyState caller passes true.
         //
         // stateTransitionFields defaults TRUE and names the real distinction: a state or AnyState rung is backed
         // by an AnimatorStateTransition, which carries the editor flags AND the whole timing surface; an entry
@@ -910,7 +912,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             t.Solo = ToBool(kv.Value, "transition.solo");
                             break;
                         case "canTransitionToSelf":
-                            if (!allowSelf) throw new SchemaException("transition: 'canTransitionToSelf' is only valid on an AnyState ladder");
+                            if (!allowSelf) throw new SchemaException("transition: 'canTransitionToSelf' is only valid on an AnyState ladder; a state rung's is set by the compiler, on exactly when `to:` names the rung's own state");
                             t.CanTransitionToSelf = ToBool(kv.Value, "transition.canTransitionToSelf");
                             break;
                         case "name":

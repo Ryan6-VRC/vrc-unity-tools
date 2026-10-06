@@ -295,8 +295,9 @@ parameters:
     [Test]
     public void CanTransitionToSelf_On_State_Transition_Throws()
     {
-        // A state transition ignores canTransitionToSelf (only the AnyState ladder honors it). Accepting it
-        // silently would drop the field — fail loud instead (allowSelf now defaults false for state lists).
+        // A state rung's canTransitionToSelf is derived from its target (on exactly when `to:` is its own
+        // state), so an authored value could only contradict the target — fail loud instead (allowSelf
+        // defaults false for state lists).
         const string doc =
             "schema: 1\ncontroller: Bad_Fx\nbasis: avatar-root\nrole: fx\n" +
             "layers:\n" +

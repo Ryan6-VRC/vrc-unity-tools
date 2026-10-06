@@ -211,7 +211,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // `loop: true` sets the clip's own loopTime, so a state holding it replays it with no gap. A
-        // self-transition at exitTime 1 is not a substitute: a state's rung to itself never fires.
+        // self-transition at exitTime 1 is not a substitute: it fires on the first frame past the end and the
+        // re-entered state starts at 0, so every period runs up to one frame long.
         private static void ApplyLoop(AnimationClip clip, ClipSpec spec)
         {
             if (!spec.Loop) return;
@@ -752,17 +753,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // State transition ladders (ordered per source state = first-match order). `from` is THIS
                 // machine's own emitted state, never a global lookup (a same-named state in another machine
                 // would attach the transition to the wrong node).
+                // canTransitionToSelf is set on every rung, never left to Unity: AddTransition on a state that
+                // already lives in an asset defaults it to false in a GUI Editor and true in batchmode, so the
+                // same document would build a rung to its own state live in one Editor and dead in the other.
+                // It decides only a rung whose target is its own state — one through Exit or a sub-machine
+                // re-enters either way — so `to: <own state>` means re-enter, and every other rung is off.
                 foreach (var s in model.States)
                 {
                     var from = scope.States[s.Name];
                     foreach (var t in s.Transitions)
                     {
                         AnimatorStateTransition tr;
+                        AnimatorState toState = null;
                         if (t.ToExit) tr = from.AddExitTransition();
                         else if (string.IsNullOrEmpty(t.To))
                             throw new EmitException($"transition from '{from.name}' has neither a target nor ToExit");
-                        else tr = ResolveName(t.To, scope, root, target.name, out var toState, out var toSm)
+                        else tr = ResolveName(t.To, scope, root, target.name, out toState, out var toSm)
                             ? from.AddTransition(toState) : from.AddTransition(toSm);
+                        tr.canTransitionToSelf = toState == from;
                         ConfigureStateTransition(tr, t);
                     }
                 }
@@ -889,8 +897,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private void ConfigureStateTransition(AnimatorStateTransition tr, Transition t)
             {
+                // exitTime is written even when unused: Unity's default for it differs between a GUI Editor and
+                // batchmode (see the state-ladder loop), and an emit must not depend on which one ran it.
                 if (t.ExitTime.HasValue) { tr.hasExitTime = true; tr.exitTime = t.ExitTime.Value; }
-                else tr.hasExitTime = _doc.Defaults.TransitionHasExitTime;
+                else { tr.hasExitTime = _doc.Defaults.TransitionHasExitTime; tr.exitTime = 0f; }
                 tr.duration = t.Duration ?? _doc.Defaults.TransitionDuration;
                 tr.offset = t.Offset ?? 0f;   // Unity's default; no doc-level default (a pose picker is per-edge)
                 tr.hasFixedDuration = t.FixedDuration ?? true;
