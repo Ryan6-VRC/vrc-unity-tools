@@ -128,4 +128,15 @@ public class CompositionSyncTests
         StringAssert.Contains("paramFilter does not narrow this section", lines[0]);
         StringAssert.Contains("Hair/", lines[0]);
     }
+
+    [Test]
+    public void TheLayerMatch_acceptsVRCFurysFeaturePrefix_andNothingLooser()
+    {
+        Assert.IsTrue(CompositionBake.IsCompressorLayerName("[VF12] Parameter Compressor"), "VRCFury prefixes every layer it creates");
+        Assert.IsTrue(CompositionBake.IsCompressorLayerName("[VF3] Legacy Parameter Compressor"));
+        Assert.IsTrue(CompositionBake.IsCompressorLayerName("[VF3] Legacy Parameter Compressor (Math)"));
+        Assert.IsTrue(CompositionBake.IsCompressorLayerName("Parameter Compressor"));
+        Assert.IsFalse(CompositionBake.IsCompressorLayerName("[VF12] My Parameter Compressor Toggle"));
+        Assert.IsFalse(CompositionBake.IsCompressorLayerName(null));
+    }
 }

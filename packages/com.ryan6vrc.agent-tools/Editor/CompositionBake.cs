@@ -850,6 +850,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const string CompressorTitle = "Parameter Compressor";
         private const string CompressorDebugType = "VF.Model.VRCFuryDebugInfo";
 
+        /// <summary>VRCFury's <c>ControllerManager.NewLayerName</c> prefixes every layer it creates with
+        /// <c>[VF&lt;n&gt;] </c>, so the built layer is <c>[VF12] Parameter Compressor</c>, never the bare title.
+        /// The legacy method's two layers carry the same prefix.</summary>
+        private static readonly Regex CompressorLayer =
+            new Regex(@"^(\[VF\d+\] )?(Parameter Compressor|Legacy Parameter Compressor( \(Math\))?)$");
+
+        internal static bool IsCompressorLayerName(string name) =>
+            name != null && CompressorLayer.IsMatch(name);
+
         internal static SyncRead ReadSync(GameObject clone)
         {
             var read = new SyncRead();
@@ -871,8 +880,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     {
                         var ac = l.animatorController as AnimatorController;
                         if (ac == null || ac.layers == null) continue;
-                        if (ac.layers.Any(x => x != null && x.name != null
-                                && (x.name == CompressorTitle || x.name.StartsWith("Legacy " + CompressorTitle, StringComparison.Ordinal))))
+                        if (ac.layers.Any(x => x != null && IsCompressorLayerName(x.name)))
                             read.Layer = true;
                     }
                 }
