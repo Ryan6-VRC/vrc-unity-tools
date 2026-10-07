@@ -151,6 +151,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var perfRead = ReadPerformance(clone);
                 string perfKeys;
                 var performance = PerformanceSection(perfRead, paramFilter, out perfKeys);
+                // Inside the scope too: the built parameters asset is a generated asset the post-callback sweeps.
+                var syncRead = ReadSync(clone);
+                string syncKeys;
+                var sync = SyncSection(syncRead, paramFilter, out syncKeys);
                 // Both texture reads sit INSIDE the scope for ReadGeometry's reason: the optimizers' output
                 // textures are NDMF `__Generated` assets the post-callback deletes, so after the scope closes
                 // the built side has nothing left to measure.
@@ -168,7 +172,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // signal that the denominator changed. Renaming both halves makes the change visible.
                     // unlintableSurfaces rides here too, not only EmitPlain: bake is the EXACTNESS mode, so a
                     // surface this run could not walk is where the omission costs most.
-                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} {15} {16} mode=bake => OK | log={12}",
+                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} {15} {16} {17} mode=bake => OK | log={12}",
                     root.name, census.Surfaces.Count, census.Params.Count,
                     diff.Count(d => d.Category == "kept"), diff.Count(d => d.Category == "renamed"),
                     diff.Count(d => d.Category == "dropped"), diff.Count(d => d.Category == "merged"),
@@ -177,7 +181,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     diff.Count(d => d.Category == "not-in-scope"),
                     diff.Count(d => d.Category == "built-side-unread"), path,
                     census.UnlintableSurfaces > 0 ? " unlintableSurfaces=" + census.UnlintableSurfaces : "",
-                    geometryKeys, textureKeys, perfKeys);
+                    geometryKeys, textureKeys, perfKeys, syncKeys);
 
                 var section = new List<string>
                 {
@@ -239,7 +243,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                           + "pre-optimizer view.");
 
                 string body = "summary: " + summary + "\n\n"
-                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry, textures, performance);
+                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry, textures, performance, sync);
                 WriteArtifact(path, body);
                 Debug.Log(summary);
             }   // scope closes: the clone is destroyed and OnPostprocessAvatar fires, in that order
@@ -818,6 +822,143 @@ namespace Ryan6Vrc.AgentTools.Editor
                     + "settings rather than textures and does not move this figure.");
 
             summaryKeys = "textureMB=" + SdkCell(sdkBuilt);
+            return lines;
+        }
+
+        // ── Sync: the clone's built synced-bit total and whether VRCFury's Parameter Compressor compressed ──
+
+        /// <summary>What the clone says about sync after every build pass. <see cref="Bits"/> is the SDK's own
+        /// cost of the built parameters asset (null with <see cref="BitsError"/> when it could not be read).
+        /// The compressor leaves two marks, read independently because they fail differently: a layer on a
+        /// playable-layer controller (needs nothing), and a <c>VF.Model.VRCFuryDebugInfo</c> on the root that
+        /// is <c>IEditorOnly</c> and outlives the SDK's final strip only through VRCFury's Harmony prefix.
+        /// <see cref="SyncSection"/> treats their disagreement as unread, never as either answer.</summary>
+        internal sealed class SyncRead
+        {
+            public int? Bits;
+            public string BitsError;
+            public bool Layer;
+            public bool Component;
+            /// <summary>The component's <c>debugInfo</c>, VRCFury's own text, quoted verbatim by the section.</summary>
+            public string ComponentText;
+            /// <summary>Parsed from the component text's <c>Old Total: N bits</c>; null when absent or unparsed.</summary>
+            public int? OldTotal;
+            /// <summary><c>VRCExpressionParameters.MAX_PARAMETER_COST</c>, read from the SDK so the text never carries a literal.</summary>
+            public int Max = VRCExpressionParameters.MAX_PARAMETER_COST;
+        }
+
+        private const string CompressorTitle = "Parameter Compressor";
+        private const string CompressorDebugType = "VF.Model.VRCFuryDebugInfo";
+
+        internal static SyncRead ReadSync(GameObject clone)
+        {
+            var read = new SyncRead();
+            var d = clone.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
+            var ep = d != null ? d.expressionParameters : null;
+            if (d == null) read.BitsError = "the clone has no VRCAvatarDescriptor";
+            else if (ep == null) read.BitsError = "the clone descriptor's expressionParameters is null";
+            else
+            {
+                try { read.Bits = ep.CalcTotalCost(); }
+                catch (Exception e) { read.BitsError = "CalcTotalCost threw " + e.GetType().Name + ": " + e.Message; }
+            }
+
+            if (d != null)
+                foreach (var set in new[] { d.baseAnimationLayers, d.specialAnimationLayers })
+                {
+                    if (set == null) continue;
+                    foreach (var l in set)
+                    {
+                        var ac = l.animatorController as AnimatorController;
+                        if (ac == null || ac.layers == null) continue;
+                        if (ac.layers.Any(x => x != null && x.name != null
+                                && (x.name == CompressorTitle || x.name.StartsWith("Legacy " + CompressorTitle, StringComparison.Ordinal))))
+                            read.Layer = true;
+                    }
+                }
+
+            // No type lookup: a workspace without VRCFury simply has no such component, and that is the
+            // `no` answer the layer read also gives. The class is internal, its fields public.
+            foreach (var c in clone.GetComponents<Component>())
+            {
+                if (c == null) continue;
+                var ct = c.GetType();
+                if (ct.FullName != CompressorDebugType) continue;
+                var titleField = ct.GetField("title", BindingFlags.Instance | BindingFlags.Public);
+                var title = titleField != null ? titleField.GetValue(c) as string : null;
+                if (title != CompressorTitle) continue;
+                read.Component = true;
+                var textField = ct.GetField("debugInfo", BindingFlags.Instance | BindingFlags.Public);
+                read.ComponentText = (textField != null ? textField.GetValue(c) as string : null) ?? "";
+                var m = Regex.Match(read.ComponentText, @"Old Total:\s*(\d+)\s*bit");
+                int old;
+                if (m.Success && int.TryParse(m.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out old))
+                    read.OldTotal = old;
+                break;
+            }
+            return read;
+        }
+
+        /// <summary>The <c>## Sync</c> section and (out) its summary keys. Pure over the read, so it is testable
+        /// without a bake. The ceiling is named as the point past which the compressor engages and never as
+        /// <c>N/MAX</c>: VRCFury absorbs an overflow and the build still ships, so a near-ceiling figure is not
+        /// a fault, and a reader shown <c>254/256</c> treats it as one. No verdict is emitted.</summary>
+        internal static List<string> SyncSection(SyncRead read, string paramFilter, out string summaryKeys)
+        {
+            string max = read.Max.ToString(CultureInfo.InvariantCulture);
+            var lines = new List<string>
+            {
+                "the clone's built sync state; paramFilter does not narrow this section"
+                    + (string.IsNullOrEmpty(paramFilter) ? ""
+                       : " (`" + RunLogFormat.Cell(paramFilter) + "` is active and narrows the parameter tables ONLY)"),
+                "",
+            };
+            if (read.Bits == null)
+            {
+                lines.Add("**The sync read did not complete, so no figure is published:** " + RunLogFormat.Cell(read.BitsError ?? "(no error recorded)"));
+                summaryKeys = "syncedBits=unread compressor=unread";
+                return lines;
+            }
+            string bits = read.Bits.Value.ToString(CultureInfo.InvariantCulture);
+            string ceiling = "the SDK's MAX_PARAMETER_COST is " + max;
+
+            if (read.Layer && read.Component)
+            {
+                string before = read.OldTotal.HasValue ? read.OldTotal.Value.ToString(CultureInfo.InvariantCulture) : null;
+                lines.Add("synced bits: " + bits + " (" + ceiling + "), after the Parameter Compressor reduced "
+                        + (before ?? "a total its text below did not state in the expected form")
+                        + ". The figure includes the compressor's own channel; compressed parameters are no longer "
+                        + "networkSynced in the built asset and replicate through that channel at the sync delay below.");
+                lines.Add("");
+                lines.Add("```");
+                foreach (var l in (read.ComponentText ?? "").Replace("\r", "").Split('\n')) lines.Add(l);
+                lines.Add("```");
+                summaryKeys = "syncedBits=" + bits + " compressor=yes syncedBitsBefore=" + (before ?? "unread");
+                return lines;
+            }
+            if (read.Layer != read.Component)
+            {
+                lines.Add("synced bits: " + bits + " (" + ceiling + ")");
+                lines.Add("");
+                lines.Add("**Whether the Parameter Compressor ran could not be settled:** "
+                        + (read.Layer
+                            ? "a playable-layer controller carries its layer but the clone root has no \"" + CompressorTitle
+                              + "\" debug component (that component survives the SDK's EditorOnly strip only through VRCFury's Harmony patch)."
+                            : "the clone root carries its \"" + CompressorTitle + "\" debug component but no playable-layer controller carries its layer.")
+                        + " Read the two marks on a fresh clone rather than trusting either.");
+                summaryKeys = "syncedBits=" + bits + " compressor=unread";
+                return lines;
+            }
+            if (read.Bits.Value > read.Max)
+            {
+                lines.Add("synced bits: " + bits + ", above the SDK's MAX_PARAMETER_COST of " + max
+                        + ", and the Parameter Compressor did not compress: it declined (no fit, or VRCFury's setting is Fail). "
+                        + "An upload of this build would be refused by the SDK.");
+                summaryKeys = "syncedBits=" + bits + " compressor=declined";
+                return lines;
+            }
+            lines.Add("synced bits: " + bits + "; the Parameter Compressor did not run (it engages above the SDK's MAX_PARAMETER_COST of " + max + ").");
+            summaryKeys = "syncedBits=" + bits + " compressor=no";
             return lines;
         }
 
