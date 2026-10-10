@@ -90,9 +90,24 @@ public class EmulatorBindingCanaryTests
     public void PinnedRuntimeFields_Resolve()
     {
         var t = RequireType(EmulatorBinding.RuntimeFullName);
-        AssertFields(t, EmulatorBinding.PinnedRuntimePublicFields, Public, "RenderThumbnailPlay reads it");
+        AssertFields(t, EmulatorBinding.PinnedRuntimePublicFields, Public, "a shipped tool reads it");
         AssertFields(t, EmulatorBinding.PinnedRuntimeNonPublicFields, NonPublic | Public,
             "RenderThumbnailPlay reads it with NonPublic binding");
+    }
+
+    [Test]
+    public void PinnedRuntimeIndexMaps_AreStringToIntDictionaries()
+    {
+        // The type and not only the name: RecordPlay casts each to Dictionary<string, int> and treats a
+        // failed cast as an empty mirror, so a changed type would resolve every parameter to "no such name".
+        var t = RequireType(EmulatorBinding.RuntimeFullName);
+        foreach (var n in EmulatorBinding.PinnedRuntimeIndexMaps)
+        {
+            var f = t.GetField(n, Public);
+            Assert.IsNotNull(f, t.Name + "." + n + " is gone (RecordPlay reads it) — the emulator moved under us");
+            Assert.AreEqual(typeof(System.Collections.Generic.Dictionary<string, int>), f.FieldType,
+                t.Name + "." + n + " changed type — RecordPlay's parameter mirror read casts it");
+        }
     }
 
     // ── The surface docs/emulator.md teaches by hand ───────────────────────────────────────────────────
@@ -153,6 +168,16 @@ public class EmulatorBindingCanaryTests
         Assert.IsNull(boolEntry.GetField(EmulatorBinding.ExpressionValue, Public),
             "the bool param entry GAINED `" + EmulatorBinding.ExpressionValue +
             "` — verify.md says bools have none and routes them to `.value`; re-measure the drive rule");
+    }
+
+    [Test]
+    public void ExportedValue_IsAFloatPropertyOnTheFloatEntry()
+    {
+        var floatEntry = RequireEntryType(RequireType(EmulatorBinding.RuntimeFullName), "Floats");
+        var p = floatEntry.GetProperty(EmulatorBinding.ExportedValue, Public);
+        Assert.IsTrue(p != null && p.PropertyType == typeof(float),
+            "the float param entry lost its float `" + EmulatorBinding.ExportedValue +
+            "` property — RecordPlay's mirror channel reads a float through it");
     }
 
     // Resolve one mirror list's entry type, failing with the reason rather than an NRE at the deref. The

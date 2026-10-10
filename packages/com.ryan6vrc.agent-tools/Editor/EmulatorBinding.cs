@@ -6,11 +6,11 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// The one place the Av3 Emulator's type and member names are spelled. Every shipped tool that reflects
     /// the emulator reads its names from here, and <c>EmulatorBindingCanary</c> asserts every name below
     /// against the installed package — so a rename reds the suite instead of surfacing as a null mid-task.
-    /// <para>Names only, deliberately. Each caller keeps its own resolution policy, because the two shipped
+    /// <para>Names only, deliberately. Each caller keeps its own resolution policy, because the shipped
     /// readers need opposite ones: <c>PlayGateCore</c> resolves lazily and public-only (an emulator-free
     /// scene is a legitimate bake-only check, so absence must stay a silent skip), while
-    /// <c>RenderThumbnailPlay.Run</c> resolves up-front including non-public members and refuses the whole
-    /// session on a miss (it must fail before it mutates the scene). Funnelling both through one resolver
+    /// <c>RenderThumbnailPlay.Run</c> and <c>RecordPlay.Run</c> resolve up-front including non-public
+    /// members and refuse the whole session on a miss (each must fail before it acts). Funnelling both through one resolver
     /// would impose one policy on two correct answers.</para>
     /// <para>Why the emulator is reflected rather than referenced: an asmdef reference would make
     /// <c>lyuma.av3emulator</c> a hard dependency of these packages, and <c>PlayGateCore</c> is required to
@@ -39,10 +39,24 @@ namespace Ryan6Vrc.AgentTools.Editor
         public const string Playables = "playables";
         public const string FxIndex = "fxIndex";
 
+        /// <summary>`LyumaAv3Runtime` members RecordPlay reads, all public: clone selection and pickup, then
+        /// the parameter mirror's three lists and their name-to-index maps. docs/emulator.md teaches the
+        /// first six by hand as well.</summary>
+        public const string IsMirrorClone = "IsMirrorClone";
+        public const string IsShadowClone = "IsShadowClone";
+        public const string NonLocalClones = "NonLocalClones";
+        public const string Floats = "Floats", Ints = "Ints", Bools = "Bools";
+        public const string FloatToIndex = "FloatToIndex", IntToIndex = "IntToIndex", BoolToIndex = "BoolToIndex";
+
         public static readonly string[] PinnedEmulatorFields =
             { RunPreprocessAvatarHook, EnablePlayerContactPermissions };
 
-        public static readonly string[] PinnedRuntimePublicFields = { IsLocal };
+        public static readonly string[] PinnedRuntimePublicFields =
+            { IsLocal, IsMirrorClone, IsShadowClone, NonLocalClones, Floats, Ints, Bools };
+
+        /// <summary>Each a <c>Dictionary&lt;string, int&gt;</c>, and the canary asserts the type as well as the
+        /// name: RecordPlay reads them through that cast, so a changed type would read as an empty mirror.</summary>
+        public static readonly string[] PinnedRuntimeIndexMaps = { FloatToIndex, IntToIndex, BoolToIndex };
 
         public static readonly string[] PinnedRuntimeNonPublicFields = { PlayableMixer, Playables, FxIndex };
 
@@ -53,8 +67,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         public static readonly string[] DocumentedRuntimePublicFields =
         {
-            "IsMirrorClone", "IsShadowClone",   // clone selection (§Remote clone, §Verify mirror-detection)
-            "Floats", "Ints", "Bools",          // the parameter mirror (§Drive / observe)
             "GestureLeftIdx", "Viseme", "TrackingType", // built-in inputs
             "CreateNonLocalClone",              // §Remote clone
             "DebugDuplicateAnimator",           // §Observation channels — the AAP read route
@@ -73,8 +85,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Members on the mirror's per-parameter entries. `expressionValue` is the float drive route; the
         // canary asserts it is ABSENT on the bool entry, because verify.md tells agents a bool has none and
         // routes them to `.value` instead — an emulator that added one would make that instruction stale.
-        public static readonly string[] ParamEntryCommonFields = { "name", "value", "synced" };
+        // `exportedValue` is a property, on the float entry only: the float RecordPlay's mirror channel reads.
+        public const string ParamEntryValue = "value";
+        public static readonly string[] ParamEntryCommonFields = { "name", ParamEntryValue, "synced" };
         public const string ExpressionValue = "expressionValue";
+        public const string ExportedValue = "exportedValue";
 
         /// <summary>Resolve a type by full name across the loaded domain; null when genuinely absent.
         /// The public door verify.md's snippets call; the resolver itself is VendorReflect's.</summary>
