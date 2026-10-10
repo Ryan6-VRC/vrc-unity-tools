@@ -17,13 +17,9 @@ public class UploadAvatarLoopTests
         return go;
     }
 
-    // ClassifyAvatar only — NOT the whatIf door, despite being the closest thing to coverage of it.
-    // Run(whatIf: true) is unreachable here: it refuses at CauReflect.IsAvailable (CAU is absent in this
-    // venue — Run_RefusesWhenCauAbsent below is the proof) and would then have to clear CheckPreconditions
-    // (SDK login, an open Build Control Panel, a Windows build target). So the whatIf ROW FORMATTING —
-    // "handle=… state=… publishName=…" and the "(no PipelineManager — never uploaded)" annotation, which is
-    // what a caller actually reads before publishing to a live account — has no automated coverage at all.
-    // Closing that needs the row builder split out of Run, or a live-venue check.
+    // The local read only. Run(whatIf: true) itself is unreachable here — it refuses at
+    // CauReflect.IsAvailable (CAU is absent in this venue; Run_RefusesWhenCauAbsent below is the proof) —
+    // so what a caller reads before publishing is covered through WhatIfCore and Preflight further down.
     [Test]
     public void ClassifyAvatar_ReadsBlueprintStateAndPublishName()
     {
@@ -36,6 +32,132 @@ public class UploadAvatarLoopTests
             Assert.AreEqual("A",            UploadAvatar.ClassifyAvatar(a).publishName);
         }
         finally { Object.DestroyImmediate(a); Object.DestroyImmediate(b); }
+    }
+
+    // ── Live-record preflight (fake read — the real one is a GET against a live account) ─────
+
+    const string Me = "usr_me";
+
+    static System.Func<string, Task<UploadAvatarLogic.RecordRead>> Reads(
+        System.Collections.Generic.Dictionary<string, UploadAvatarLogic.RecordRead> byId,
+        System.Collections.Generic.List<string> asked = null)
+        => id =>
+        {
+            if (asked != null) asked.Add(id);
+            return Task.FromResult(byId.TryGetValue(id, out var r) ? r : UploadAvatarLogic.RecordRead.NotFound());
+        };
+
+    [Test]
+    public void Preflight_ClassifiesFromTheLiveRecord_AndNeverFetchesAnIdlessRow()
+    {
+        var fresh = MakeAvatar("Fresh", blueprint: "");
+        var live = MakeAvatar("SceneName", blueprint: "avtr_live");
+        var gone = MakeAvatar("Gone", blueprint: "avtr_gone");
+        var asked = new System.Collections.Generic.List<string>();
+        try
+        {
+            var sights = UploadAvatar.Preflight(new[] { fresh, live, gone, null },
+                Reads(new System.Collections.Generic.Dictionary<string, UploadAvatarLogic.RecordRead>
+                {
+                    ["avtr_live"] = UploadAvatarLogic.RecordRead.Found("Published Name", Me, false),
+                }, asked), Me).GetAwaiter().GetResult();
+
+            Assert.AreEqual("first-upload", sights[0].state);
+            Assert.AreEqual("Fresh", sights[0].publishName);
+            Assert.AreEqual("update", sights[1].state);
+            Assert.AreEqual("Published Name", sights[1].publishName, "an update publishes under the LIVE name");
+            Assert.AreEqual("not-visible", sights[2].state);
+            Assert.IsTrue(sights[2].Blocks);
+            Assert.IsTrue(sights[3].Blocks, "a null entry stops the batch");
+            CollectionAssert.AreEqual(new[] { "avtr_live", "avtr_gone" }, asked);
+        }
+        finally { Object.DestroyImmediate(fresh); Object.DestroyImmediate(live); Object.DestroyImmediate(gone); }
+    }
+
+    [Test]
+    public void RunBatch_UploadsNothingWhenARowIsNotVisible()
+    {
+        var ok = MakeAvatar("Ok", blueprint: "avtr_ok");
+        var gone = MakeAvatar("Gone", blueprint: "avtr_gone");
+        int uploads = 0;
+        try
+        {
+            var report = UploadAvatar.RunBatch(new[] { ok, gone },
+                Reads(new System.Collections.Generic.Dictionary<string, UploadAvatarLogic.RecordRead>
+                {
+                    ["avtr_ok"] = UploadAvatarLogic.RecordRead.Found("Ok", Me, false),
+                }), Me,
+                go => { uploads++; return Task.FromResult(UploadAvatar.UploadOutcome.Uploaded()); },
+                () => { }).GetAwaiter().GetResult();
+
+            Assert.AreEqual(0, uploads, "the row AHEAD of the offender must not upload either");
+            Assert.AreEqual("FAIL", report.result);
+            Assert.AreEqual("not-attempted", report.rows[0].result);
+            Assert.AreEqual("failed", report.rows[1].result);
+            Assert.AreEqual("real", report.rows[1].cls);
+            StringAssert.Contains("clear the id yourself", report.rows[1].error);
+            StringAssert.DoesNotContain("avtr_", report.rows[1].error);
+        }
+        finally { Object.DestroyImmediate(ok); Object.DestroyImmediate(gone); }
+    }
+
+    [Test]
+    public void RunBatch_AFailedReadTakesItsClassFromTheStatus()
+    {
+        var a = MakeAvatar("A", blueprint: "avtr_a");
+        try
+        {
+            var report = UploadAvatar.RunBatch(new[] { a },
+                Reads(new System.Collections.Generic.Dictionary<string, UploadAvatarLogic.RecordRead>
+                {
+                    ["avtr_a"] = UploadAvatarLogic.RecordRead.Failed(503, "service unavailable"),
+                }), Me,
+                go => Task.FromResult(UploadAvatar.UploadOutcome.Uploaded()),
+                () => { }).GetAwaiter().GetResult();
+
+            Assert.AreEqual("failed", report.rows[0].result);
+            Assert.AreEqual("transient", report.rows[0].cls);
+        }
+        finally { Object.DestroyImmediate(a); }
+    }
+
+    [Test]
+    public void RunBatch_RowsCarryThePreflightState()
+    {
+        var pending = MakeAvatar("Pending", blueprint: "avtr_p");
+        try
+        {
+            var report = UploadAvatar.RunBatch(new[] { pending },
+                Reads(new System.Collections.Generic.Dictionary<string, UploadAvatarLogic.RecordRead>
+                {
+                    ["avtr_p"] = UploadAvatarLogic.RecordRead.Found("Pending", Me, true),
+                }), Me,
+                go => Task.FromResult(UploadAvatar.UploadOutcome.Uploaded()),
+                () => { }).GetAwaiter().GetResult();
+
+            Assert.AreEqual("PASS", report.result);
+            Assert.AreEqual("pending-upload", report.rows[0].state);
+        }
+        finally { Object.DestroyImmediate(pending); }
+    }
+
+    [Test]
+    public void WhatIfCore_PrintsTheLiveNameAndTheImportCount()
+    {
+        var live = MakeAvatar("SceneName", blueprint: "avtr_live");
+        try
+        {
+            string line = UploadAvatar.WhatIfCore(new[] { live },
+                Reads(new System.Collections.Generic.Dictionary<string, UploadAvatarLogic.RecordRead>
+                {
+                    ["avtr_live"] = UploadAvatarLogic.RecordRead.Found("Published Name", Me, false),
+                }), Me, go => (2, 0)).GetAwaiter().GetResult();
+
+            StringAssert.Contains("handle=SceneName state=update publishName=\"Published Name\" importOffenders=2", line);
+            StringAssert.Contains("ConformImportSettings.Run", line);
+            StringAssert.EndsWith("=> PASS", line, "an import offender is reported, not failed");
+        }
+        finally { Object.DestroyImmediate(live); }
     }
 
     [Test]
