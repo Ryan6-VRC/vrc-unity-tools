@@ -53,12 +53,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// discarding the emulator control, deactivations, pose, and play-mode edits. This restore, and the
     /// cross-call session state surviving play entry, both require Enter-Play-Mode Options with domain AND
     /// scene reload disabled — <see cref="Run"/> SETS them (saving the operator's originals) and
-    /// <see cref="End"/> restores them, rather than demand a manual project change. <see cref="Run"/>
-    /// refuses when a loaded scene holds content its FILE does not, since the restore would discard it —
-    /// asked as a content comparison (<see cref="SceneDivergence"/>), not through <c>Scene.isDirty</c>, which
-    /// is wrong in both directions. <see cref="Run"/> also writes a pre-session copy of each loaded scene to
-    /// <c>Temp/</c>, named by <see cref="End"/>, so a difference the comparison did not recognize is still
-    /// recoverable.</para>
+    /// <see cref="End"/> restores them, rather than demand a manual project change. Because that restore
+    /// replaces each loaded scene with its file, <see cref="Run"/> first saves every loaded scene under
+    /// <c>Assets/</c>, so the file holds what the scene held and the restore discards only this session's
+    /// own edits.</para>
     /// </summary>
     [AgentTool]
     public static class RenderThumbnailPlay
@@ -119,12 +117,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static EditorApplication.CallbackFunction _shootUpdate; // non-null while a Shoot is in flight
         private static string _lastShootResult = "(no shot yet)";
 
-        // Pre-mutation scene copies written by Begin, named by End so a restore that turns out to have
-        // discarded something has somewhere to recover from. Plain statics, so a domain reload takes them with
-        // the rest of the session — the copies themselves survive on disk either way.
-        private static List<string> _rescuePaths = new List<string>();
-        private static List<string> _rescueFailed = new List<string>();
-
         // ===== Reflected LyumaAv3Runtime members — ONLY those the tool reads (asserted in Begin) =====
         private static Type _runtimeType, _emulatorType;
         private static FieldInfo _fIsLocal, _fPlayableMixer, _fPlayables, _fFxIndex;
@@ -145,36 +137,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             if (!ResolveEmulatorReflection(out string driftErr)) return Fail(driftErr);
 
-            // End restores the scene setup by reopening from disk, so anything a loaded scene holds that its
-            // FILE does not is discarded. Ask that question directly (SceneDivergence compares the live scene
-            // against its file) rather than through Scene.isDirty, which answers neither half: a scene reads
-            // dirty with content identical to disk, and — the reason this is not a cosmetic change — a scene
-            // reads CLEAN while a prefab instance sits moved in memory, which the old gate waved through into
-            // a silent discard. An empty path is still its own refusal: no file to compare, none to restore.
-            var divergent = new List<string>();
+            // End restores the scene setup by reopening from disk, which replaces each loaded scene with its
+            // file. Save every loaded Assets/ scene first, unconditionally — Scene.isDirty is wrong in both
+            // directions (measured: dirty with content identical to disk; clean with a prefab instance moved in
+            // memory) — so the file holds what the scene holds and the restore discards only this session's
+            // own edits. Only scenes under Assets/: a package scene is never the caller's work, and NDMF's and
+            // Modular Avatar's preview scenes DESTROY their own roots when saved. An untitled scene has no file
+            // to save to or restore from, so it is still a refusal.
             var untitled = new List<string>();
+            var saved = new List<string>();
+            var saveFailed = new List<string>();
             for (int i = 0; i < SceneManager.sceneCount; i++)
             {
                 var s = SceneManager.GetSceneAt(i);
                 if (string.IsNullOrEmpty(s.path)) { untitled.Add(string.IsNullOrEmpty(s.name) ? "<untitled>" : s.name); continue; }
-                // Only scenes under Assets/ are probed. A package scene is never the operator's work, and
-                // NDMF's and MA's preview scenes DESTROY their own roots when saved — and the probe saves.
-                if (!SceneDivergence.IsProbeable(s)) continue;
-                string detail;
-                if (SceneDivergence.WouldRestoreLoseWork(s, out detail)) divergent.Add(detail);
+                if (!s.path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)) continue;
+                string label = string.IsNullOrEmpty(s.name) ? s.path : s.name;
+                bool ok;
+                try { ok = EditorSceneManager.SaveScene(s); } catch (Exception) { ok = false; }
+                if (ok) saved.Add(label); else saveFailed.Add(label);
             }
             if (untitled.Count > 0)
                 return Fail("scene(s) with no disk path loaded: [" + string.Join(",", untitled) + "] — End() "
                     + "restores the setup from disk and has nothing to restore these from. Save them "
                     + "(manage_scene save) or close them");
-            if (divergent.Count > 0)
-                return Fail("loaded scene(s) hold content their file does not, and End() would discard it: "
-                    + string.Join(" | ", divergent) + " — save them (manage_scene save) or close them. Do NOT "
-                    + "clear this by reopening from disk; that IS the discard. A save is scene-wide, so it "
-                    + "commits everything else in that scene too — ask before saving a scene that is not "
-                    + "yours (unity.md §Sharp edges). Named framework churn is already discounted, so a "
-                    + "difference reported here is either real work or a churn class newer than the list in "
-                    + "PrefabChurn.SceneStampKeys");
+            if (saveFailed.Count > 0)
+                return Fail("could not save loaded scene(s) [" + string.Join(",", saveFailed) + "] — End() "
+                    + "restores the setup from disk and would discard what they hold. Save or close them");
 
             // BEFORE any session state exists. Creating the RunLog dir leaves the AssetDatabase blind to it, so
             // the first write pays a full Refresh — and a Refresh with a compile pending reloads the domain,
@@ -189,14 +178,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // must roll the operator's scenes back rather than escape raw and strand the un-restorable snapshot.
             try
             {
-                // Rescue copies FIRST, while the scenes are still exactly as the operator left them — the gate
-                // above is a classifier over named difference classes, and a class it has not met yet reads as
-                // "nothing to protect". These make that miss recoverable instead of terminal. Everything below
-                // this line edits the scenes, which is why the copies cannot wait for End().
-                List<string> rescueFailed;
-                _rescuePaths = SceneDivergence.WriteRescueCopies(out rescueFailed);
-                _rescueFailed = rescueFailed;
-
                 // This session REQUIRES both domain and scene reload disabled on play entry: the static
                 // session state must survive the Begin→play boundary (a domain reload would wipe it), and the
                 // edit-mode prep below must survive into the on-play SDK build (a scene reload would revert it).
@@ -258,13 +239,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     + (adoptedForced ? " playmode-reload=already-forced(no saved record — cannot tell your setting"
                                        + " from an interrupted session's residue; End will leave it as found)" : "")
                     + (deactivated.Count > 0 ? " deactivated=[" + string.Join(",", deactivated) + "]" : "")
+                    + " saved=[" + string.Join(",", saved) + "]"
                     + " — enter play (manage_editor play), then Shoot(...)";
                 return Ok(RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-begin", _targetName, beginSummary,
                     "# RenderThumbnailPlay Begin\n\n- target: `" + _targetName + "`\n"
                     + "- emulator: " + (emuMade ? "created/enabled" : "present") + "\n"
                     + "- playmode-reload: " + (optsChanged ? "disabled (restored on End)"
                         : adoptedForced ? "already forced; no saved record, End leaves it as found" : "unchanged") + "\n"
-                    + "- deactivated: " + (deactivated.Count > 0 ? string.Join(", ", deactivated) : "(none)") + "\n"));
+                    + "- deactivated: " + (deactivated.Count > 0 ? string.Join(", ", deactivated) : "(none)") + "\n"
+                    + "- scenes saved before the session: " + (saved.Count > 0 ? string.Join(", ", saved) : "(none)") + "\n"));
             }
             catch (Exception ex)
             {
@@ -281,10 +264,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             try { if (_sceneSetup != null && _sceneSetup.Length > 0) EditorSceneManager.RestoreSceneManagerSetup(_sceneSetup); }
             catch { /* best-effort restore on an already-broken failure path */ }
             _sceneSetup = null;
-            // This restore is the same discard End() performs, so the copies stay on disk — but they belong to
-            // a session that no longer exists, and carrying their paths forward would let a later End() present
-            // them as ITS pre-session state.
-            _rescuePaths = new List<string>(); _rescueFailed = new List<string>();
         }
 
         // The saved Enter-Play-Mode Options, mirrored where a domain reload cannot reach them.
@@ -695,32 +674,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // scene restore (a failed restore above returns early, keeping the session AND its options for retry).
             RestoreEnterPlayModeOptions();
             string endLabel = _targetName ?? "session";
-            // The restore just replaced every loaded scene with its file. Begin's pre-mutation copies are the
-            // only record of what those scenes held a moment ago, so name them HERE, where a reader who has
-            // just lost something is looking — not only in Begin's log, which by now has scrolled away.
-            string rescue = _rescuePaths.Count > 0
-                ? " rescue=[" + string.Join(",", _rescuePaths) + "] (pre-session copies; Unity will not open a"
-                  + " scene outside Assets/, so copy one in to use it — and Temp/ does not survive closing the"
-                  + " Editor)"
-                : " rescue=none";
-            if (_rescueFailed.Count > 0) rescue += " rescue-failed=[" + string.Join(",", _rescueFailed) + "]";
-            var rescuePathsForLog = new List<string>(_rescuePaths);
-            var rescueFailedForLog = new List<string>(_rescueFailed);
 
             _prepared = false; _attached = false; _root = null; _localRuntime = null; _origFxController = null;
             _sceneSetup = null; _targetName = null; _fxIndex = -1; _base = default; _fx = default;
-            _rescuePaths = new List<string>(); _rescueFailed = new List<string>();
             // The restore claim gets an artifact behind it — previously it was asserted by the return string alone.
-            string endSummary = "End => OK — scene setup" + (restored.Length > 0 ? restored : " had nothing to restore")
-                + rescue;
+            string endSummary = "End => OK — scene setup" + (restored.Length > 0 ? restored : " had nothing to restore");
             return Ok(RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-end", endLabel, endSummary,
                 "# RenderThumbnailPlay End\n\n- scene setup: "
                 + (restored.Length > 0 ? restored.Trim() : "nothing to restore") + "\n"
-                + "- Enter-Play-Mode Options: restored\n"
-                + "- pre-session rescue copies: "
-                + (rescuePathsForLog.Count > 0 ? string.Join(", ", rescuePathsForLog) : "(none)") + "\n"
-                + (rescueFailedForLog.Count > 0
-                    ? "- rescue copy FAILED for: " + string.Join(", ", rescueFailedForLog) + "\n" : "")));
+                + "- Enter-Play-Mode Options: restored\n"));
         }
 
         // ===== Attach: isolate to the built local avatar (first Shoot, in play) =====
