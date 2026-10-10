@@ -332,14 +332,6 @@ public class ReportPrefabTests
     }
 
     [Test]
-    public void PrefabChurn_sceneStampSetIsTheNarrowOne()
-    {
-        Assert.IsTrue(PrefabChurn.IsSceneStamp("MinimumVersion"));
-        Assert.IsFalse(PrefabChurn.IsSceneStamp("m_RootOrder"));   // a reorder is real work to the scene gate
-        Assert.IsTrue(PrefabChurn.OverrideTokens.IsSupersetOf(PrefabChurn.SceneStampKeys));
-    }
-
-    [Test]
     public void Rotation_signFlipAndPartialListing_readAsTheSameRotation()
     {
         var src = Quaternion.Euler(30f, 40f, 50f);

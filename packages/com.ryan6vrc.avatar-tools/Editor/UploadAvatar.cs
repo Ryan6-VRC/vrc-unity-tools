@@ -5,7 +5,6 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using UnityEditor;
-using UnityEditor.SceneManagement;
 using UnityEngine;
 using VRC.Core;
 using VRC.SDK3.Avatars.Components;
@@ -46,12 +45,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Bypasses Classify — for deterministic LOCAL failures (missing descriptor, setting-build
             // fail, ceiling) that are always "real", never transient/retryable.
             internal string forcedClass;
-            // Set only by the real adapter: this upload introduced a portraitCameraPositionOffset
-            // override and the adapter reverted it. RunCore turns it into a row note.
-            internal bool portraitOffsetReverted;
 
-            public static UploadOutcome Uploaded(bool portraitOffsetReverted = false)
-                => new UploadOutcome { kind = Kind.Uploaded, portraitOffsetReverted = portraitOffsetReverted };
+            public static UploadOutcome Uploaded()
+                => new UploadOutcome { kind = Kind.Uploaded };
             public static UploadOutcome ReservedNoBundle()
                 => new UploadOutcome { kind = Kind.ReservedNoBundle };
             public static UploadOutcome Failed(int? httpStatus = null, bool isValidation = false,
@@ -66,10 +62,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>One RunLog row. No <c>blueprintId</c> field by construction — the id never enters
-        /// output. <c>cls</c> is the failure class (transient|rate-limit|real); empty for a success row.
-        /// <c>notes</c> names a side effect the door performed on the avatar's behalf, so it is never
-        /// silent; today its one value is <see cref="PortraitOffsetRevertedNote"/>.</summary>
-        public struct Row { public string handle, state, result, cls, error, notes; }
+        /// output. <c>cls</c> is the failure class (transient|rate-limit|real); empty for a success row.</summary>
+        public struct Row { public string handle, state, result, cls, error; }
 
         public sealed class UploadReport
         {
@@ -162,9 +156,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     case UploadOutcome.Kind.Uploaded:
                         saveAssets();
-                        report.rows.Add(new Row { handle = go.name, state = state, result = "uploaded",
-                                                  notes = outcome.portraitOffsetReverted
-                                                          ? PortraitOffsetRevertedNote : null });
+                        report.rows.Add(new Row { handle = go.name, state = state, result = "uploaded" });
                         break;
 
                     case UploadOutcome.Kind.ReservedNoBundle:
@@ -414,9 +406,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         ///     first-upload whose id still didn't persist means the record was reserved but no bundle
         ///     landed → ReservedNoBundle.
         ///   • The <see cref="UploadAvatarLogic.AttemptLedger"/> caps re-attempts per handle at 3.
-        ///   • Portrait-offset residue — CAU's first-upload path writes a portraitCameraPositionOffset
-        ///     override on the scene instance; if this upload introduced it, revert it (see
-        ///     <see cref="ShouldRevertPortraitOffset"/>) and note it on the row.
         ///
         /// Async-driven (Task-8 confirmed the sync block deadlocked): the returned Task is fire-and-forget
         /// from <see cref="Run"/> and the editor update loop pumps CAU's continuations; poll <see cref="Status"/>.</summary>
@@ -439,8 +428,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             _ledger.Record(key);
             bool wasFirstUpload = ClassifyAvatar(go).state == UploadAvatarLogic.ClassifyBlueprint(null);
-            // Read BEFORE the upload: afterwards there is no way to tell CAU's write from the operator's.
-            bool portraitOverriddenBefore = IsPortraitOffsetOverridden(desc);
 
             try
             {
@@ -456,11 +443,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string stateAfter = wasFirstUpload ? ClassifyAvatar(go).state : null;
                 if (IsReservedNoBundle(wasFirstUpload, stateAfter))
                     return UploadOutcome.ReservedNoBundle();
-                bool portraitReverted =
-                    ShouldRevertPortraitOffset(portraitOverriddenBefore, IsPortraitOffsetOverridden(desc))
-                    && TryRevertPortraitOffset(desc);
                 _ledger.Clear(key); // success resets the ceiling — it counts only consecutive failures
-                return UploadOutcome.Uploaded(portraitReverted);
+                return UploadOutcome.Uploaded();
             }
             catch (Exception e)
             {
@@ -482,52 +466,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// the suite cannot run — so left inline this decision had no test that could fail on it.</para></summary>
         internal static bool IsReservedNoBundle(bool wasFirstUpload, string stateAfterUpload)
             => wasFirstUpload && stateAfterUpload == UploadAvatarLogic.ClassifyBlueprint(null);
-
-        internal const string PortraitOffsetProperty = "portraitCameraPositionOffset";
-        internal const string PortraitOffsetRevertedNote = "portrait-offset-reverted";
-
-        /// <summary>Whether this upload is the thing that introduced the portrait-camera offset override,
-        /// factored pure so the truth table is assertable without a real upload.
-        ///
-        /// <para>CAU mints its own camera shot on the first-upload path and persists the placement it used as
-        /// a <c>portraitCameraPositionOffset</c> override on the uploaded scene instance — then saves the
-        /// scene, so the override reaches disk beside the blueprintId. A library scene that states which
-        /// overrides an instance may carry gains a third kind it never asked for, on every first upload.</para>
-        ///
-        /// <para>The asymmetry is the whole point: an override that was ALREADY there is the operator's and is
-        /// left alone. Only the not-there-then-there cell is ours to undo.</para></summary>
-        internal static bool ShouldRevertPortraitOffset(bool wasOverriddenBefore, bool isOverriddenAfter)
-            => !wasOverriddenBefore && isOverriddenAfter;
-
-        /// <summary>Is the portrait-camera offset currently a prefab override on this instance? False for a
-        /// non-instance (nothing to revert to) and for a destroyed object, so both read as "no override" and
-        /// <see cref="ShouldRevertPortraitOffset"/> declines rather than throwing mid-batch.</summary>
-        static bool IsPortraitOffsetOverridden(VRCAvatarDescriptor desc)
-        {
-            if (desc == null || !PrefabUtility.IsPartOfPrefabInstance(desc.gameObject)) return false;
-            var prop = new SerializedObject(desc).FindProperty(PortraitOffsetProperty);
-            return prop != null && prop.prefabOverride;
-        }
-
-        /// <summary>Revert the override and persist it. The save is not a new class of side effect: CAU saved
-        /// this same scene moments earlier to persist the blueprintId, and leaving the revert unsaved would
-        /// be worse than not reverting — the residue would stay on disk while memory disagreed.
-        ///
-        /// <para>TRUE means reverted <em>and</em> on disk, because that is what the row goes on to claim. An
-        /// unsaved scene (no path — a prefab stage) and a save that failed both return false: the in-memory
-        /// revert stands, but the residue is still what a reload would read, so reporting success would be a
-        /// lie the next session pays for.</para></summary>
-        static bool TryRevertPortraitOffset(VRCAvatarDescriptor desc)
-        {
-            if (!IsPortraitOffsetOverridden(desc)) return false;
-            var prop = new SerializedObject(desc).FindProperty(PortraitOffsetProperty);
-            PrefabUtility.RevertPropertyOverride(prop, InteractionMode.AutomatedAction);
-
-            var scene = desc.gameObject.scene;
-            if (!scene.IsValid() || string.IsNullOrEmpty(scene.path)) return false;
-            EditorSceneManager.MarkSceneDirty(scene);
-            return EditorSceneManager.SaveScene(scene);
-        }
 
         /// <summary>Map a thrown upload exception to a classified <see cref="UploadOutcome.Failed"/>: unwrap
         /// one layer of wrapping, pull the HTTP status, flag validation (by type name) / timeout. This is the
@@ -745,15 +683,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             var c = Counts(report);
             string marker = whatIf ? " (whatIf)" : "";
-            // Present only when it happened, so a summary quoted in a doc or skill is otherwise unchanged —
-            // and BEFORE the "| log=" trailer, which callers read as "everything after log= is the path".
-            string cleaned = c[PortraitOffsetRevertedNote] > 0
-                ? " " + PortraitOffsetRevertedNote + "=" + c[PortraitOffsetRevertedNote]
-                : "";
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[upload-avatar]{0} all: uploaded={1} reserved={2} failed={3} not-attempted={4} (transient={5} rate-limit={6} real={7}){8} => {9} | log={10}",
+                "[upload-avatar]{0} all: uploaded={1} reserved={2} failed={3} not-attempted={4} (transient={5} rate-limit={6} real={7}) => {8} | log={9}",
                 marker, c["uploaded"], c["reserved"], c["failed"], c["not-attempted"],
-                c["transient"], c["rate-limit"], c["real"], cleaned, report.result, logPath);
+                c["transient"], c["rate-limit"], c["real"], report.result, logPath);
             if (report.result == "PASS") Debug.Log(summary); else Debug.LogError(summary);
             return summary;
         }
@@ -763,12 +696,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var c = new Dictionary<string, int>
             {
                 ["uploaded"] = 0, ["reserved"] = 0, ["failed"] = 0, ["not-attempted"] = 0,
-                [PortraitOffsetRevertedNote] = 0,
                 ["transient"] = 0, ["rate-limit"] = 0, ["real"] = 0,
             };
             foreach (var r in report.rows)
             {
-                if (r.notes == PortraitOffsetRevertedNote) c[PortraitOffsetRevertedNote]++;
                 if (r.result == "uploaded") c["uploaded"]++;
                 else if (r.result == "reserved-no-bundle") c["reserved"]++;
                 else if (r.result == "failed") c["failed"]++;
@@ -781,7 +712,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>Tool-local structured RunLog: shared envelope (kind="upload-avatar") + counts + a
-        /// bespoke <c>avatars[]</c> array of {handle, state, result, class, error, notes}. No row carries a
+        /// bespoke <c>avatars[]</c> array of {handle, state, result, class, error}. No row carries a
         /// blueprintId (the Row type has no such field). Modeled on ConformRenderers.WriteRunLog.</summary>
         static string WriteRunLog(UploadReport report, bool whatIf, string label)
         {
@@ -816,7 +747,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                   .Append(", \"result\": ").Append(TransplantCore.Q(r.result))
                   .Append(", \"class\": ").Append(TransplantCore.Q(r.cls))
                   .Append(", \"error\": ").Append(TransplantCore.Q(r.error))
-                  .Append(", \"notes\": ").Append(TransplantCore.Q(r.notes)).Append(" }");
+                  .Append(" }");
             }
 
             sb.Append(report.rows.Count > 0 ? "\n  ]\n}" : "]\n}");

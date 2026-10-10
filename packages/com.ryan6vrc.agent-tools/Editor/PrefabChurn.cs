@@ -4,15 +4,9 @@ using System.Collections.Generic;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// The one home of "this serialized field is framework or editor churn, not authoring". Two sets, one
-    /// file, so a new churn family is added in one place and the two readers cannot drift apart:
+    /// The one home of "this serialized field is framework or editor churn, not authoring".
     ///
-    /// <para><see cref="SceneStampKeys"/> — the CLOSED, narrow set <c>SceneDivergence</c> discounts when it
-    /// decides whether a scene may be reopened from disk. Matched on a YAML leaf key. Deliberately small:
-    /// there is no safe side of that diff, and a sibling reorder (<c>m_RootOrder</c>) or a bone re-point
-    /// (<c>m_Bones</c>) is ordinary work that gate must never swallow.</para>
-    ///
-    /// <para><see cref="OverrideTokens"/> ⊃ the above — the wider set <c>ReportPrefab</c> counts under
+    /// <para><see cref="OverrideTokens"/> — the set <c>ReportPrefab</c> counts under
     /// <c>churn</c> when it classifies a prefab instance's property overrides. Matched per dot-segment of a
     /// <c>propertyPath</c> with array indices stripped, so <c>_modularAvatarVersionTag.MinimumVersion</c>
     /// and <c>animationHashSet.Array.data[3]</c> both hit. Report-side only: counting a family here hides its
@@ -26,17 +20,14 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// </summary>
     internal static class PrefabChurn
     {
-        internal static readonly HashSet<string> SceneStampKeys = new HashSet<string>(StringComparer.Ordinal)
+        internal static readonly HashSet<string> OverrideTokens = new HashSet<string>(StringComparer.Ordinal)
         {
-            "_modularAvatarVersionTag",   // Modular Avatar stamps the resolving version on load
+            // Load-time stamps: Modular Avatar's resolving version, VRCFury's equivalent, editor selection residue
+            "_modularAvatarVersionTag",
             "UpdatedAtVersion",
             "MinimumVersion",
-            "vrcfuryVersion",             // VRCFury's equivalent
-            "m_selectionMode",            // editor selection residue
-        };
-
-        internal static readonly HashSet<string> OverrideTokens = new HashSet<string>(SceneStampKeys, StringComparer.Ordinal)
-        {
+            "vrcfuryVersion",
+            "m_selectionMode",
             // VRC SDK: build stamps on the descriptor / pipeline, and the constraint solver's bookkeeping
             "animationHashSet",
             "blueprintId",
@@ -48,12 +39,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             "m_AABB",
             "m_RootOrder",
         };
-
-        /// <summary>SceneDivergence's question: is this YAML leaf key a load-time stamp?</summary>
-        internal static bool IsSceneStamp(string yamlKey)
-        {
-            return yamlKey != null && SceneStampKeys.Contains(yamlKey);
-        }
 
         /// <summary>ReportPrefab's question: does any segment of this propertyPath name a churn family?</summary>
         internal static bool IsChurn(string propertyPath)
