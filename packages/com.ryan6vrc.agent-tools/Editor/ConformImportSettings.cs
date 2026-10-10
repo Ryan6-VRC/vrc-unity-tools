@@ -101,6 +101,23 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Finish(r, RunLogFormat.Leaf(r.Target));
         }
 
+        /// <summary>How many offending import settings sit behind a placed avatar root — the findings
+        /// <see cref="Run(GameObject, bool)"/>'s preview lists, as a number, for a caller that would otherwise
+        /// match on the summary. Writes nothing: no <c>.meta</c>, no RunLog, no console line.
+        /// <paramref name="rowsSkipped"/> is how many validation rows could not be evaluated against this SDK
+        /// or Unity, so a zero beside it is not a clean scan. Returns -1 for a root the avatar scope refuses
+        /// (null, or tagged <c>EditorOnly</c>).</summary>
+        internal static int CountOffenders(GameObject avatarRoot, out int rowsSkipped)
+        {
+            rowsSkipped = 0;
+            if (avatarRoot == null || avatarRoot.CompareTag("EditorOnly")) return -1;
+            var r = new Report { Target = HierarchyPath(avatarRoot), WhatIf = true, Kind = "avatar" };
+            var set = CollectAvatarAssets(avatarRoot);
+            Scan(set.Textures, set.Models, set.Clips, r);
+            rowsSkipped = r.SkippedRows.Count;
+            return r.Findings.Count;
+        }
+
         private static string RunFolder(string assetFolderPath, bool whatIf)
         {
 

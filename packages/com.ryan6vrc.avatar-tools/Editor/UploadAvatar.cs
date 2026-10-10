@@ -21,6 +21,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     ///
     /// The loop lives in <see cref="RunCore"/>, which is pure over an injectable per-avatar delegate + a
     /// saveAssets action so all stop/classify/redact semantics are unit-testable with a fake delegate. The
+    /// Ahead of the loop, <see cref="Preflight"/> reads each row's live record — shared by <c>whatIf</c> and the
+    /// real batch, so the two cannot classify a row differently — and <see cref="RunBatch"/> starts no upload
+    /// while any row's local id names a record the signed-in account does not own. The
     /// REAL upload adapter (<see cref="RealUploadOne"/>) wraps <see cref="CauReflect.UploadOne"/> and owns
     /// the two decisions that need live SDK state: the id-persistence verify (Uploaded vs ReservedNoBundle)
     /// and the per-handle attempt ceiling. RunCore trusts the <see cref="UploadOutcome"/> it is handed.
@@ -87,6 +90,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // The terminal summary, memoized so Status() is idempotent — the RunLog is written exactly once
         // when the batch first reaches a terminal state, not on every poll. Reset when a new batch starts.
         static string _terminalSummary;
+        // The in-flight whatIf. It reads each row's live record, which only progresses on the editor update
+        // loop, so it is kicked and polled like the batch; _lastWasPreview says which of the two Status()
+        // answers for.
+        static System.Threading.Tasks.Task<string> _preview;
+        static bool _lastWasPreview;
 
         /// <summary>The status file: this batch's progress, on disk, readable WITHOUT the MCP bridge.
         /// <see cref="Status"/> alone was not enough — it is C# the agent invokes over MCP, and a modal
@@ -123,7 +131,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             GameObject[] avatars,
             Func<GameObject, System.Threading.Tasks.Task<UploadOutcome>> uploadOne,
             Action saveAssets,
-            Action<int, string> onProgress = null)
+            Action<int, string> onProgress = null,
+            Func<int, string> stateOf = null)
         {
             var report = new UploadReport();
             int n = avatars != null ? avatars.Length : 0;
@@ -140,7 +149,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return report;
                 }
 
-                string state = ClassifyAvatar(go).state;
+                // The preflight's state when a batch ran one: it read the live record, which the local
+                // id alone cannot stand in for.
+                string state = stateOf != null ? stateOf(i) : ClassifyAvatar(go).state;
                 // Announce BEFORE awaiting: the upload we are about to start is the one that can raise a
                 // modal, and once it does nothing else in this process runs. The status file must already
                 // name it, or the agent reads a wedge with no idea which avatar wedged it.
@@ -202,26 +213,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var refuse = CheckPreconditions();
             if (refuse != null) return Refuse(refuse);
 
+            if (_preview != null && !_preview.IsCompleted)
+                return Refuse("a whatIf is still reading live records — poll UploadAvatar.Status()");
+
             if (whatIf)
             {
-                // Per-avatar read-only classification. Uploads nothing, dirties no asset — but note the
-                // preconditions above have already run, so the first whatIf of a domain may have issued a
-                // NETWORK request (the saved-credential restore) and changed in-memory SDK auth state.
-                // "Read-only" here means read-only about your avatars, not free of side effects.
+                // Reads, never writes: each row's live record (a GET under the signed-in account) and its
+                // import settings. The preconditions above have already run, so the first whatIf of a domain
+                // may also have issued the saved-credential restore and changed in-memory SDK auth state.
+                if (_inflight != null && !_inflight.IsCompleted)
+                    return Refuse("an upload batch is in flight — poll UploadAvatar.Status()");
+                if (_inflight != null) BatchStatus(); // finalize before Status() starts answering for the whatIf
                 int n = avatars != null ? avatars.Length : 0;
-                var rows = new StringBuilder();
-                for (int i = 0; i < n; i++)
+                _preview = WhatIfCore(avatars, LiveRead, CurrentUserId(), go =>
                 {
-                    var go = avatars[i];
-                    var (state, publishName) = ClassifyAvatar(go);
-                    bool noPm = go == null || go.GetComponent<PipelineManager>() == null;
-                    if (rows.Length > 0) rows.Append("; ");
-                    rows.Append("handle=").Append(go != null ? go.name : "(null)")
-                        .Append(" state=").Append(state)
-                        .Append(" publishName=").Append(publishName);
-                    if (noPm) rows.Append(" (no PipelineManager — never uploaded)");
-                }
-                return "[upload-avatar] (whatIf) " + n + " avatar(s): " + rows + " => PASS";
+                    int offenders = ConformImportSettings.CountOffenders(go, out int unscanned);
+                    return (offenders, unscanned);
+                });
+                _lastWasPreview = true;
+                // A batch of first uploads fetches nothing and is already complete.
+                return _preview.IsCompleted
+                    ? Status()
+                    : "[upload-avatar] (whatIf) reading " + n + " live record(s); poll UploadAvatar.Status()";
             }
 
             // Execute path: fire-and-forget the async batch, return immediately. The editor update loop
@@ -232,7 +245,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // A completed-but-not-yet-finalized batch: Watch hasn't ticked, so overwriting _inflight here
             // would drop its RunLog entirely — a hole in "the log always lands". Finalize it first
             // (Status() is idempotent and memoized, so this is a no-op if Watch already ran).
-            if (_inflight != null) Status();
+            if (_inflight != null) BatchStatus();
             if (!CauReflect.TryGetBuilder(out var builder, out var whyBuilder))
                 return Refuse(whyBuilder);
             _terminalSummary = null;
@@ -250,8 +263,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                               "stale record would read as this batch's result. Path: " + StatusPath);
             }
 
-            _inflight = RunCore(avatars, go => RealUploadOne(go, builder), () => AssetDatabase.SaveAssets(),
-                                (i, name) => WriteStatus("running", "uploading", i, name, out _));
+            _lastWasPreview = false;
+            _inflight = RunBatch(avatars, LiveRead, CurrentUserId(),
+                                 go => RealUploadOne(go, builder), () => AssetDatabase.SaveAssets(),
+                                 (i, name) => WriteStatus("running", "uploading", i, name, out _));
             // Self-driven terminal write: without this the RunLog lands only when the agent polls Status(),
             // so a batch that finishes while MCP is unreachable leaves nothing on disk at all.
             EditorApplication.update -= Watch;
@@ -268,7 +283,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             if (_inflight == null || !_inflight.IsCompleted) return;
             EditorApplication.update -= Watch;
-            try { Status(); }                    // idempotent: writes the RunLog + memoizes, exactly once
+            try { BatchStatus(); }               // idempotent: writes the RunLog + memoizes, exactly once
             catch (Exception e) { Debug.LogError("[upload-avatar] terminal write failed: " + e.Message); }
         }
 
@@ -345,10 +360,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>Poll the in-flight execute batch. The upload is async-driven — Run returns immediately and
         /// the editor's update loop pumps CAU's continuations; the agent polls this until it stops reporting
         /// "running". The RunLog is written (and the summary memoized) exactly once at the terminal state, so
-        /// repeated polling is idempotent — including the FAULTED path, which also gets a RunLog.</summary>
-        public static string Status()
+        /// repeated polling is idempotent — including the FAULTED path, which also gets a RunLog. After a
+        /// <c>whatIf</c> it answers for that read instead, until the next batch starts.</summary>
+        public static string Status() => _lastWasPreview ? PreviewStatus() : BatchStatus();
+
+        static string PreviewStatus()
         {
-            if (_inflight == null) return "[upload-avatar] no batch started";
+            if (!_preview.IsCompleted) return "[upload-avatar] (whatIf) reading live records…";
+            if (_preview.IsFaulted || _preview.IsCanceled)
+            {
+                var ex = _preview.Exception != null ? _preview.Exception.GetBaseException() : null;
+                return "[upload-avatar] (whatIf) all => FAIL error=" +
+                       UploadAvatarLogic.RedactIds(ex != null ? ex.Message : "the read was canceled");
+            }
+            return _preview.Result;
+        }
+
+        static string BatchStatus()
+        {
+            if (_inflight == null)
+                return "[upload-avatar] no batch or whatIf in flight in this editor domain — a domain reload " +
+                       "drops one mid-read, so re-run a whatIf you were polling";
             if (!_inflight.IsCompleted) return "[upload-avatar] running…";
             if (_terminalSummary != null) return _terminalSummary;
 
@@ -546,11 +578,134 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public static (string state, string publishName) ClassifyAvatar(GameObject go)
         {
             if (go == null) return ("unknown", "(null)");
+            return (UploadAvatarLogic.ClassifyBlueprint(LocalBlueprintId(go)), go.name);
+        }
+
+        // Null when there is no PipelineManager. Never surfaced.
+        static string LocalBlueprintId(GameObject go)
+        {
             var pm = go.GetComponent<PipelineManager>();
-            if (pm == null) return (UploadAvatarLogic.ClassifyBlueprint(null), go.name);
+            if (pm == null) return null;
             var prop = new SerializedObject(pm).FindProperty("blueprintId");
-            string id = prop != null ? prop.stringValue : pm.blueprintId;
-            return (UploadAvatarLogic.ClassifyBlueprint(id), go.name);
+            return prop != null ? prop.stringValue : pm.blueprintId;
+        }
+
+        // ── Live-record preflight ───────────────────────────────────────────────────────────────
+
+        /// <summary>Read every row's live record, in order, and classify it. A row with no local id is not
+        /// fetched. Pure over the injected <paramref name="read"/>, so the classification a caller reads
+        /// before publishing is testable without the SDK.</summary>
+        internal static async System.Threading.Tasks.Task<UploadAvatarLogic.RowSight[]> Preflight(
+            GameObject[] avatars,
+            Func<string, System.Threading.Tasks.Task<UploadAvatarLogic.RecordRead>> read,
+            string currentUserId)
+        {
+            int n = avatars != null ? avatars.Length : 0;
+            var sights = new UploadAvatarLogic.RowSight[n];
+            for (int i = 0; i < n; i++)
+            {
+                var go = avatars[i];
+                if (go == null)
+                {
+                    sights[i] = new UploadAvatarLogic.RowSight { handle = "(null)", error = "null avatar entry",
+                                                                 state = UploadAvatarLogic.StateUnknown };
+                    continue;
+                }
+                // Read the name BEFORE the await: the object can be destroyed across it.
+                string handle = go.name, id = LocalBlueprintId(go);
+                bool hasId = !string.IsNullOrEmpty(id);
+                var record = hasId ? await read(id) : default;
+                sights[i] = UploadAvatarLogic.Sight(handle, hasId, record, currentUserId);
+            }
+            return sights;
+        }
+
+        /// <summary>The report for a batch the preflight stops, or null when every row may upload. Nothing
+        /// uploads in a stopped batch: the blocking rows are <c>failed</c> with the fix in <c>error</c>, the
+        /// rest <c>not-attempted</c>.</summary>
+        internal static UploadReport BlockedReport(UploadAvatarLogic.RowSight[] sights)
+        {
+            bool any = false;
+            foreach (var s in sights) any |= s.Blocks;
+            if (!any) return null;
+
+            var report = new UploadReport { result = "FAIL" };
+            foreach (var s in sights)
+                report.rows.Add(s.Blocks
+                    ? new Row { handle = s.handle, state = s.state, result = "failed",
+                                // No status is no classifiable signal, which is never retryable here.
+                                cls = s.readFailed && s.status.HasValue
+                                    ? UploadAvatarLogic.Classify(s.status, false, false) : "real",
+                                error = UploadAvatarLogic.RedactIds(s.error) }
+                    : new Row { handle = s.handle, state = s.state, result = "not-attempted" });
+            return report;
+        }
+
+        /// <summary>The real batch: preflight, then <see cref="RunCore"/> carrying the preflight's states —
+        /// or the blocked report, with no upload attempted.</summary>
+        internal static async System.Threading.Tasks.Task<UploadReport> RunBatch(
+            GameObject[] avatars,
+            Func<string, System.Threading.Tasks.Task<UploadAvatarLogic.RecordRead>> read,
+            string currentUserId,
+            Func<GameObject, System.Threading.Tasks.Task<UploadOutcome>> uploadOne,
+            Action saveAssets,
+            Action<int, string> onProgress = null)
+        {
+            var sights = await Preflight(avatars, read, currentUserId);
+            var blocked = BlockedReport(sights);
+            if (blocked != null) return blocked;
+            return await RunCore(avatars, uploadOne, saveAssets, onProgress, i => sights[i].state);
+        }
+
+        /// <summary>The whatIf: the import-settings count per row, then the preflight, as one line.</summary>
+        internal static async System.Threading.Tasks.Task<string> WhatIfCore(
+            GameObject[] avatars,
+            Func<string, System.Threading.Tasks.Task<UploadAvatarLogic.RecordRead>> read,
+            string currentUserId,
+            Func<GameObject, (int offenders, int unscanned)> importScan)
+        {
+            int n = avatars != null ? avatars.Length : 0;
+            int[] offenders = new int[n], unscanned = new int[n];
+            // Before the first await, while every object is known to be alive.
+            for (int i = 0; i < n; i++)
+                (offenders[i], unscanned[i]) = avatars[i] != null ? importScan(avatars[i]) : (-1, 0);
+            var sights = await Preflight(avatars, read, currentUserId);
+            return UploadAvatarLogic.WhatIfSummary(sights, offenders, unscanned);
+        }
+
+        const int LiveReadTimeoutMs = 30000;
+
+        static string CurrentUserId() => APIUser.CurrentUser != null ? APIUser.CurrentUser.id : null;
+
+        /// <summary>One live read through <see cref="VrcApiReflect"/>, the reader the record doors share. A 404
+        /// and an id-less record are the same answer; every other fault is a failed read, classified from
+        /// its status.</summary>
+        static async System.Threading.Tasks.Task<UploadAvatarLogic.RecordRead> LiveRead(string id)
+        {
+            if (!VrcApiReflect.TryGetAvatar(id, out var raw, out var why))
+                return UploadAvatarLogic.RecordRead.Failed(null, why);
+            var task = (System.Threading.Tasks.Task)raw;
+            // Bounded: the SDK's read takes no timeout, and one that never completed would hold the
+            // in-flight slot, refusing every later Run until a domain reload.
+            await System.Threading.Tasks.Task.WhenAny(task, System.Threading.Tasks.Task.Delay(LiveReadTimeoutMs));
+            if (!task.IsCompleted)
+                return UploadAvatarLogic.RecordRead.Failed(null, "no answer from the VRChat API in " +
+                                                                 (LiveReadTimeoutMs / 1000) + "s");
+            if (task.IsCanceled) return UploadAvatarLogic.RecordRead.Failed(null, "the read was canceled");
+            if (task.IsFaulted)
+            {
+                int? status = VrcApiReflect.FaultStatus(raw);
+                return status == 404
+                    ? UploadAvatarLogic.RecordRead.NotFound()
+                    : UploadAvatarLogic.RecordRead.Failed(status, VrcApiReflect.DescribeFault(raw));
+            }
+            var record = VrcApiReflect.Result(raw);
+            if (string.IsNullOrEmpty(VrcApiReflect.GetString(record, "ID")))
+                return UploadAvatarLogic.RecordRead.NotFound();
+            var pending = record.GetType().GetProperty("PendingUpload");
+            return UploadAvatarLogic.RecordRead.Found(
+                VrcApiReflect.GetName(record), VrcApiReflect.GetString(record, "AuthorId"),
+                pending != null && pending.GetValue(record) is bool b && b);
         }
 
         /// <summary>The upload REFUSE register: returns the first unmet precondition (with its named fix) or

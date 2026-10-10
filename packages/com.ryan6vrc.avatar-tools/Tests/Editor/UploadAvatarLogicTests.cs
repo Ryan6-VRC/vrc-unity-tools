@@ -46,6 +46,75 @@ public class UploadAvatarLogicTests
         Assert.IsFalse(l.MayAttempt("a"));
     }
 
+    // ── Sight: the whole table, one row per branch ──────────────────────────────────────────
+
+    [Test] public void Sight_NoLocalIdIsFirstUploadUnderTheSceneName()
+    {
+        var s = UploadAvatarLogic.Sight("Scene", false, default, "usr_me");
+        Assert.AreEqual("first-upload", s.state);
+        Assert.AreEqual("Scene", s.publishName);
+        Assert.IsFalse(s.Blocks);
+    }
+
+    [Test] public void Sight_OwnedRecordIsUpdateUnderTheLiveName()
+    {
+        var s = UploadAvatarLogic.Sight("Scene", true, UploadAvatarLogic.RecordRead.Found("Live", "usr_me", false), "usr_me");
+        Assert.AreEqual("update", s.state);
+        Assert.AreEqual("Live", s.publishName);
+        Assert.IsFalse(s.Blocks);
+    }
+
+    [Test] public void Sight_ReservedRecordIsPendingUpload()
+    {
+        var s = UploadAvatarLogic.Sight("Scene", true, UploadAvatarLogic.RecordRead.Found("Live", "usr_me", true), "usr_me");
+        Assert.AreEqual("pending-upload", s.state);
+        Assert.AreEqual("Live", s.publishName);
+    }
+
+    [Test] public void Sight_MissingAndAnotherAccountsRecordBothBlockAsNotVisible()
+    {
+        var missing = UploadAvatarLogic.Sight("Scene", true, UploadAvatarLogic.RecordRead.NotFound(), "usr_me");
+        var foreign = UploadAvatarLogic.Sight("Scene", true, UploadAvatarLogic.RecordRead.Found("Theirs", "usr_other", false), "usr_me");
+        foreach (var s in new[] { missing, foreign })
+        {
+            Assert.AreEqual("not-visible", s.state);
+            Assert.IsTrue(s.Blocks);
+            Assert.IsFalse(s.readFailed);
+            Assert.IsNull(s.publishName, "a name that will not publish must not be printed as one");
+        }
+    }
+
+    [Test] public void Sight_AFailedReadIsUnknownAndKeepsItsStatus()
+    {
+        var s = UploadAvatarLogic.Sight("Scene", true, UploadAvatarLogic.RecordRead.Failed(503, "down"), "usr_me");
+        Assert.AreEqual("unknown", s.state);
+        Assert.IsTrue(s.Blocks);
+        Assert.IsTrue(s.readFailed);
+        Assert.AreEqual(503, s.status);
+    }
+
+    [Test] public void Sight_NoSignedInUserCannotVouchForOwnership()
+    {
+        var s = UploadAvatarLogic.Sight("Scene", true, UploadAvatarLogic.RecordRead.Found("Live", "usr_me", false), null);
+        Assert.AreEqual("unknown", s.state);
+        Assert.IsTrue(s.Blocks);
+    }
+
+    [Test] public void WhatIfSummary_ABlockingRowFailsTheVerdictAndRedactsItsError()
+    {
+        var sights = new[]
+        {
+            UploadAvatarLogic.Sight("A", false, default, "usr_me"),
+            UploadAvatarLogic.Sight("B", true, UploadAvatarLogic.RecordRead.Failed(500, "GET avtr_123 failed"), "usr_me"),
+        };
+        string line = UploadAvatarLogic.WhatIfSummary(sights, new[] { 0, -1 }, new[] { 1, 0 });
+        StringAssert.Contains("handle=A state=first-upload publishName=\"A\" importOffenders=0 (1 validation row(s) unscanned)", line);
+        StringAssert.Contains("handle=B state=unknown importOffenders=unscanned error=", line);
+        StringAssert.DoesNotContain("avtr_123", line);
+        StringAssert.DoesNotContain("ConformImportSettings", line, "no offenders, no hint");
+        StringAssert.EndsWith("=> FAIL", line);
+    }
+
     [Test] public void Blueprint_EmptyIsFirstUpload()
     {
         Assert.AreEqual("first-upload", UploadAvatarLogic.ClassifyBlueprint(null));
