@@ -42,6 +42,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// so a slow bake is never called dead; short enough that a discarded callback is not a long wedge.</summary>
         private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(5);
         private static readonly Dictionary<int, bool> InFlight = new Dictionary<int, bool>();
+        /// <summary>Roots whose in-flight bake was scheduled with a probe.</summary>
+        private static readonly HashSet<int> InFlightProbed = new HashSet<int>();
 
         // Keyed on name AND instance id: the path must be STABLE (the caller re-reads it after a transport
         // timeout, so a timestamp is out) but two roots named "Avatar" in one scene would otherwise share a
@@ -57,14 +59,21 @@ namespace Ryan6Vrc.AgentTools.Editor
             int key = root.GetInstanceID();
             if (InFlight.TryGetValue(key, out bool running) && running)
             {
-                // The running bake was scheduled without this probe and cannot take it on, so returning its
-                // PENDING path would hand the caller an artifact that reads as if the probe had been dropped.
-                if (probe != null)
-                    return "[ReportComposition] FAIL: a bake of '" + root.name + "' is already running and was started "
-                         + "without this probe, so the probe would never run — wait for Verify(<avatarRoot>) to leave "
+                // A running bake that was scheduled with NO probe cannot take one on, so its PENDING path would
+                // hand this caller an artifact that reads as if the probe had been dropped. One scheduled WITH a
+                // probe gets the ordinary answer: the transport re-sends a timed-out call, and that re-send is
+                // the same probe arriving twice, which must not be told to bake again.
+                if (probe != null && !InFlightProbed.Contains(key))
+                {
+                    string refusal = "[ReportComposition] FAIL: a bake of '" + root.name + "' is already running and was started "
+                         + "without a probe, so this probe would never run — wait for Verify(<avatarRoot>) to leave "
                          + "PENDING, then re-issue the call | log=" + path;
+                    Debug.LogError(refusal);
+                    return refusal;
+                }
                 return "[ReportComposition] " + root.name + ": mode=bake => PENDING (already running) | log=" + path;
             }
+            if (probe != null) InFlightProbed.Add(key); else InFlightProbed.Remove(key);
 
             // One bake back is kept, because the path is stable on purpose and this stub is about to replace it.
             if (KeepPrevious(FullPath(path))) RunLogFormat.PublishArtifact(RunLogFormat.SnapshotDir, path + PreviousSuffix);
@@ -73,7 +82,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             WriteArtifact(path, "# ReportComposition (bake): " + root.name + "\n\nstatus: " + Pending
                 + "\nstarted: " + DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
                 + "\n\nThe bake is running. Re-read this file, or call `ReportComposition.Verify(<avatarRoot>)`.\n"
-                + "Do NOT re-issue the bake: a second call while this one is in flight returns this same path.\n"
+                + "Do NOT re-issue the bake: a second call while this one is in flight returns this same path"
+                + (probe != null ? "" : ", and one carrying a probe is refused because this bake was started without it") + ".\n"
                 + "The last completed bake of this root, if there was one, is beside this file as `"
                 + Path.GetFileName(path) + PreviousSuffix + "`.\n");
             InFlight[key] = true;
@@ -168,7 +178,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             // The read happens INSIDE the scope by necessity, not by style: the post-callback destroys the
             // clone's generated assets, so every playable-layer controller BuiltDeclarations exists to read is
             // null once the scope closes (AvatarBake's doc comment has the measurement).
-            using (var bake = AvatarBake.Begin(root))
+            // Taken on the clone before any pass runs; a throw here must cost the Constraints section, not the bake.
+            ConstraintSnapshot constraintsBefore = null;
+            string snapshotError = null;
+            using (var bake = AvatarBake.Begin(root, null, c =>
+            {
+                try { constraintsBefore = SnapshotConstraintRefs(c); }
+                catch (Exception e) { snapshotError = "the pre-build snapshot threw " + e.GetType().Name + ": " + e.Message; }
+            }))
             {
                 if (!bake.Ok)
                 {
@@ -209,8 +226,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                     SdkTextureMegabytes(root), perfRead.Stats != null ? perfRead.Stats.textureMegabytes : null,
                     swapAuthored, swapBuilt, paramFilter, out textureKeys);
                 string constraintKeys;
-                var constraints = ConstraintSection(ReadMissingConstraintRefs(root), ReadMissingConstraintRefs(clone),
-                    paramFilter, out constraintKeys);
+                ConstraintRead constraintRead;
+                try { constraintRead = ReadLostConstraintRefs(clone, constraintsBefore); }
+                catch (Exception e) { constraintRead = new ConstraintRead { Error = "the built read threw " + e.GetType().Name + ": " + e.Message }; }
+                if (snapshotError != null) constraintRead.Error = snapshotError;
+                var constraints = ConstraintSection(constraintRead, paramFilter, out constraintKeys);
                 // LAST, after every read above: the probe is the caller's code holding the clone, and whatever
                 // it does to the clone can then spoil only its own section.
                 string probeKey = null;
@@ -504,114 +524,155 @@ namespace Ryan6Vrc.AgentTools.Editor
             return sum.ToString(CultureInfo.InvariantCulture);
         }
 
-        // ── Constraints: references the build left pointing at a destroyed object ──────────────────────
+        // ── Constraints: references the build took away ───────────────────────────────────────────────
 
-        /// <summary>One object reference on a constraint whose object no longer exists.
-        /// <c>Property</c> is the serialized property path, the handle a caller addresses the slot by.</summary>
-        internal struct MissingRefRow
+        /// <summary>One object reference a constraint held before the build and does not hold after it.</summary>
+        internal struct LostRefRow
         {
-            public string Path;      // the constraint's hierarchy path relative to the side's own root
+            public string Path;      // the constraint's hierarchy path on the BUILT clone
             public string Type;
-            public string Property;  // null on a component whose properties could not be walked
+            public string Property;  // the serialized property path, the handle a caller addresses the slot by
+            public string Was;       // what it referenced before the build, as a path on the unbuilt clone
             public string Caveat;
+        }
+
+        /// <summary>What <see cref="SnapshotConstraintRefs"/> recorded and <see cref="ReadLostConstraintRefs"/>
+        /// compares against: per constraint component, every object-reference property that held an object,
+        /// and what that object was.</summary>
+        internal sealed class ConstraintSnapshot
+        {
+            public readonly Dictionary<Component, Dictionary<string, string>> Refs =
+                new Dictionary<Component, Dictionary<string, string>>();
+        }
+
+        internal sealed class ConstraintRead
+        {
+            /// <summary>Null when the read did not happen; <see cref="Error"/> then says why.</summary>
+            public List<LostRefRow> Rows;
+            public string Error;
+            /// <summary>Constraints the snapshot held that no longer exist: the build removed or replaced them.</summary>
+            public int Removed;
+            /// <summary>Constraints on the built clone the snapshot never saw: the build made them.</summary>
+            public int Added;
         }
 
         private static readonly Regex VrcSourceSlot = new Regex(@"^Sources\.source(\d+)\.");
 
-        /// <summary>Every object reference on a VRC or Unity constraint under <paramref name="root"/>, inactive
-        /// included, that is <b>missing</b>: null to read while its serialized instance id is non-zero.
-        /// <para>That pair is the only thing separating a destroyed reference from one never assigned, and the
-        /// difference is the whole read: an unassigned source slot is legal and vendor avatars ship them, while
-        /// a destroyed one is what a build pass leaves behind when it removes a bone a constraint names.
-        /// Measured on an <c>Object.Instantiate</c> clone, which is what the bake reads: both cases compare
-        /// <c>== null</c>, the VRC getter hands back a wrapper for both and Unity's a true null for both, and
-        /// <c>objectReferenceInstanceIDValue</c> reads 0 for the unassigned one and non-zero for the destroyed
-        /// one in both families.</para>
-        /// <para>Every object-reference property is walked rather than a list of field names, so a destroyed
-        /// <c>TargetTransform</c> or world-up is found by the same test as a destroyed source, and a field a
-        /// later SDK adds needs no change here. The two families never overlap: a VRC constraint does not
-        /// implement <c>IConstraint</c>.</para></summary>
-        internal static List<MissingRefRow> ReadMissingConstraintRefs(GameObject root)
+        private static List<Component> Constraints(GameObject root)
         {
-            var rows = new List<MissingRefRow>();
-            if (root == null) return rows;
-            var components = new List<Component>();
-            components.AddRange(root.GetComponentsInChildren<VRC.Dynamics.VRCConstraintBase>(true));
+            // The two families never overlap: a VRC constraint does not implement IConstraint.
+            var list = new List<Component>();
+            list.AddRange(root.GetComponentsInChildren<VRC.Dynamics.VRCConstraintBase>(true));
             foreach (var c in root.GetComponentsInChildren<UnityEngine.Animations.IConstraint>(true))
-                if (c is Component) components.Add((Component)c);
-
-            foreach (var c in components)
-            {
-                if (c == null) continue;
-                string path = RelPath(root, c.transform), type = c.GetType().Name;
-                try
-                {
-                    var vrc = c as VRC.Dynamics.VRCConstraintBase;
-                    int sourceCount = vrc != null ? vrc.Sources.Count : -1;
-                    var it = new SerializedObject(c).GetIterator();
-                    while (it.Next(true))
-                    {
-                        if (it.propertyType != SerializedPropertyType.ObjectReference) continue;
-                        if (it.objectReferenceValue != null || it.objectReferenceInstanceIDValue == 0) continue;
-                        var row = new MissingRefRow { Path = path, Type = type, Property = it.propertyPath };
-                        var slot = VrcSourceSlot.Match(it.propertyPath);
-                        int index;
-                        if (slot.Success && sourceCount >= 0
-                            && int.TryParse(slot.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out index)
-                            && index >= sourceCount)
-                            row.Caveat = "a slot at or past the constraint's source count ("
-                                       + sourceCount.ToString(CultureInfo.InvariantCulture)
-                                       + "), which the client does not solve (`docs/runtime.md` §Constraints)";
-                        rows.Add(row);
-                    }
-                }
-                catch (Exception e)
-                {
-                    rows.Add(new MissingRefRow
-                    {
-                        Path = path, Type = type,
-                        Caveat = "this component's properties could not be walked (" + e.GetType().Name
-                               + "), so a missing reference on it is not excluded",
-                    });
-                }
-            }
-            return rows;
+                if (c is Component) list.Add((Component)c);
+            return list;
         }
 
-        /// <summary>The <c>## Constraints</c> section and (out) its summary key. Pure over the two reads. The
-        /// rows are the built side's; the authored side contributes one count, because a reference already
-        /// missing before the build is not the build's doing and the two sides share no key to pair rows on
-        /// (the build renames and moves the objects a path would name).</summary>
-        internal static List<string> ConstraintSection(List<MissingRefRow> authored, List<MissingRefRow> built,
-                                                       string paramFilter, out string summaryKey)
+        /// <summary>Record, on the clone BEFORE any build pass runs, every object reference each constraint
+        /// holds. Keyed on the component instance, because the build mutates the clone in place: the instance
+        /// is the one handle that survives the renames and reparenting a path would not.
+        /// <para>The comparison has to be before-against-after on the same objects. A destroyed reference cannot
+        /// be recognised on the built clone alone: AAO re-maps every component's references when its passes
+        /// finish and writes a plain null over one whose object is gone (<c>ObjectMappingContext.OnDeactivate</c>,
+        /// read from AAO 1.9.18), which leaves exactly the bytes of a slot that was never assigned — and an
+        /// unassigned slot is legal.</para></summary>
+        internal static ConstraintSnapshot SnapshotConstraintRefs(GameObject clone)
         {
-            int authoredMissing = authored.Count(r => r.Property != null);
-            int builtMissing = built.Count(r => r.Property != null);
+            var snapshot = new ConstraintSnapshot();
+            foreach (var c in Constraints(clone))
+            {
+                if (c == null) continue;
+                var held = new Dictionary<string, string>(StringComparer.Ordinal);
+                var it = new SerializedObject(c).GetIterator();
+                while (it.Next(true))
+                {
+                    if (it.propertyType != SerializedPropertyType.ObjectReference) continue;
+                    var o = it.objectReferenceValue;
+                    if (o == null || o is MonoScript) continue;
+                    var t = o is Transform ? (Transform)o : o is Component ? ((Component)o).transform
+                          : o is GameObject ? ((GameObject)o).transform : null;
+                    held[it.propertyPath] = t != null && t.IsChildOf(clone.transform) ? RelPath(clone, t) : o.name;
+                }
+                snapshot.Refs[c] = held;
+            }
+            return snapshot;
+        }
+
+        /// <summary>Every reference in <paramref name="before"/> that the same component no longer holds on
+        /// the built <paramref name="clone"/>. A reference the build re-pointed at another object is not a
+        /// row; a constraint the build destroyed or made has no before-and-after to compare and is counted.</summary>
+        internal static ConstraintRead ReadLostConstraintRefs(GameObject clone, ConstraintSnapshot before)
+        {
+            var read = new ConstraintRead();
+            if (before == null) { read.Error = "no snapshot of the clone was taken before the build"; return read; }
+            read.Rows = new List<LostRefRow>();
+            read.Added = Constraints(clone).Count(c => c != null && !before.Refs.ContainsKey(c));
+            foreach (var kv in before.Refs)
+            {
+                var c = kv.Key;
+                if (c == null) { read.Removed++; continue; }
+                var vrc = c as VRC.Dynamics.VRCConstraintBase;
+                int sourceCount = vrc != null ? vrc.Sources.Count : -1;
+                var so = new SerializedObject(c);
+                foreach (var held in kv.Value)
+                {
+                    var p = so.FindProperty(held.Key);
+                    if (p != null && p.objectReferenceValue != null) continue;
+                    var row = new LostRefRow
+                    {
+                        Path = RelPath(clone, c.transform), Type = c.GetType().Name, Property = held.Key, Was = held.Value,
+                    };
+                    var slot = VrcSourceSlot.Match(held.Key);
+                    int index;
+                    if (p == null) row.Caveat = "the property is no longer on the component";
+                    else if (slot.Success && sourceCount >= 0
+                        && int.TryParse(slot.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out index)
+                        && index >= sourceCount)
+                        row.Caveat = "a slot at or past the constraint's source count ("
+                                   + sourceCount.ToString(CultureInfo.InvariantCulture)
+                                   + "), which the client does not solve (`docs/runtime.md` §Constraints)";
+                    read.Rows.Add(row);
+                }
+            }
+            return read;
+        }
+
+        /// <summary>The <c>## Constraints</c> section and (out) its summary key. Pure over the read.</summary>
+        internal static List<string> ConstraintSection(ConstraintRead read, string paramFilter, out string summaryKey)
+        {
             var lines = new List<string>
             {
-                "constraint references on the clone whose object no longer exists; paramFilter does not narrow this section"
+                "object references the avatar's constraints held before the build and lost in it; paramFilter does not narrow this section"
                     + (string.IsNullOrEmpty(paramFilter) ? ""
                        : " (`" + RunLogFormat.Cell(paramFilter) + "` is active and narrows the parameter tables ONLY)"),
                 "",
-                "| constraint (path) | type | property | caveat |",
-                "| --- | --- | --- | --- |",
             };
-            if (built.Count == 0) lines.Add("| _(none)_ | | | |");
-            foreach (var r in built.OrderBy(r => r.Path, StringComparer.Ordinal).ThenBy(r => r.Property, StringComparer.Ordinal))
-                lines.Add("| `" + RunLogFormat.Cell(r.Path) + "` | " + r.Type + " | "
-                        + (r.Property != null ? "`" + RunLogFormat.Cell(r.Property) + "`" : "unread") + " | "
-                        + RunLogFormat.Cell(r.Caveat ?? "") + " |");
+            if (read.Rows == null)
+            {
+                lines.Add("**The constraint read did not complete, so no row is published:** "
+                        + RunLogFormat.Cell(read.Error ?? "(no error recorded)"));
+                summaryKey = "lostConstraintRefs=unread";
+                return lines;
+            }
+            lines.Add("| constraint (built path) | type | property | referenced before the build | caveat |");
+            lines.Add("| --- | --- | --- | --- | --- |");
+            if (read.Rows.Count == 0) lines.Add("| _(none)_ | | | | |");
+            foreach (var r in read.Rows.OrderBy(r => r.Path, StringComparer.Ordinal).ThenBy(r => r.Property, StringComparer.Ordinal))
+                lines.Add("| `" + RunLogFormat.Cell(r.Path) + "` | " + r.Type + " | `" + RunLogFormat.Cell(r.Property)
+                        + "` | `" + RunLogFormat.Cell(r.Was) + "` | " + RunLogFormat.Cell(r.Caveat ?? "") + " |");
             lines.Add("");
-            lines.Add("**A row is a missing reference**: null to read, with the instance id of a destroyed object still "
-                    + "serialized. It is what a build pass leaves when it destroys an object a constraint names (AAO "
-                    + "`MergeBone` on a constrained bone), and no ranked stat moves with it. Every object reference on "
-                    + "every VRC and Unity constraint is walked, so a destroyed `TargetTransform` or world-up object is "
-                    + "a row beside a destroyed source. A slot that was never assigned is not a row: it is legal, and "
-                    + "`ReportGimmick` tables a rig's sources.");
-            lines.Add("The authored root holds " + authoredMissing.ToString(CultureInfo.InvariantCulture)
-                    + " such reference(s) before the build. The two sides are not paired row to row, so equal counts "
-                    + "do not show that the build added none.");
-            summaryKey = "missingConstraintRefs=" + builtMissing.ToString(CultureInfo.InvariantCulture);
+            lines.Add("**A row is a reference the build took away**: the constraint held an object before the preprocess "
+                    + "chain ran and holds none after it. That is what a pass leaves when it destroys an object a "
+                    + "constraint names (AAO `MergeBone` on a constrained bone), and no ranked stat moves with it. "
+                    + "Every object reference on every VRC and Unity constraint is compared, so a lost `TargetTransform` "
+                    + "or world-up object is a row beside a lost source. A reference the build re-pointed at another "
+                    + "object is not a row, and neither is a slot that was empty before the build: this section says "
+                    + "nothing about a reference that was already broken as authored.");
+            lines.Add("Compared on the constraints that exist both before and after the build. The build removed "
+                    + read.Removed.ToString(CultureInfo.InvariantCulture) + " constraint component(s) and made "
+                    + read.Added.ToString(CultureInfo.InvariantCulture) + " (a converted constraint is one of each); "
+                    + "neither kind has a before and an after, so neither is compared.");
+            summaryKey = "lostConstraintRefs=" + read.Rows.Count.ToString(CultureInfo.InvariantCulture);
             return lines;
         }
 
@@ -620,8 +681,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Run the caller's <paramref name="probe"/> against the clone and render what it returned as
         /// the <c>## Probe</c> section. The call and its catch live here so a throwing probe costs only this
         /// section: the bake's other reads are already taken, and the scope still disposes the clone and fires
-        /// the paired post-callback. Fenced with four backticks, so probe text carrying its own code fence or a
-        /// line this tool's readers key on stays inert.</summary>
+        /// the paired post-callback. Fenced, so probe text carrying its own code fence or a line this tool's
+        /// readers key on stays inert.</summary>
         internal static List<string> ProbeSection(Func<GameObject, string> probe, GameObject clone, out string summaryKey)
         {
             var lines = new List<string>
@@ -641,9 +702,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             summaryKey = "probe=ok";
             if (text == null) { lines.Add("(returned null)"); return lines; }
             if (text.Length == 0) { lines.Add("(returned empty)"); return lines; }
-            lines.Add("````");
+            // One backtick longer than the longest run in the text, so nothing the probe returns can close it.
+            int longest = 0, run = 0;
+            foreach (char ch in text) { run = ch == '`' ? run + 1 : 0; if (run > longest) longest = run; }
+            string fence = new string('`', Math.Max(3, longest) + 1);
+            lines.Add(fence);
             foreach (var l in text.Replace("\r", "").Split('\n')) lines.Add(l);
-            lines.Add("````");
+            lines.Add(fence);
             return lines;
         }
 
