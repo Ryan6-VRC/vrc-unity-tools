@@ -143,27 +143,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // memory) — so the file holds what the scene holds and the restore discards only this session's
             // own edits. Only scenes under Assets/: a package scene is never the caller's work, and NDMF's and
             // Modular Avatar's preview scenes DESTROY their own roots when saved. An untitled scene has no file
-            // to save to or restore from, so it is still a refusal.
+            // to save to or restore from, so it refuses — checked before any save, so a refusal writes nothing.
             var untitled = new List<string>();
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                var s = SceneManager.GetSceneAt(i);
+                if (string.IsNullOrEmpty(s.path)) untitled.Add(string.IsNullOrEmpty(s.name) ? "<untitled>" : s.name);
+            }
+            if (untitled.Count > 0)
+                return Fail("scene(s) with no disk path loaded: [" + string.Join(",", untitled) + "] — End() "
+                    + "restores the setup from disk and has nothing to restore these from. Save them "
+                    + "(manage_scene save) or close them");
+
             var saved = new List<string>();
             var saveFailed = new List<string>();
             for (int i = 0; i < SceneManager.sceneCount; i++)
             {
                 var s = SceneManager.GetSceneAt(i);
-                if (string.IsNullOrEmpty(s.path)) { untitled.Add(string.IsNullOrEmpty(s.name) ? "<untitled>" : s.name); continue; }
                 if (!s.path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)) continue;
                 string label = string.IsNullOrEmpty(s.name) ? s.path : s.name;
                 bool ok;
                 try { ok = EditorSceneManager.SaveScene(s); } catch (Exception) { ok = false; }
                 if (ok) saved.Add(label); else saveFailed.Add(label);
             }
-            if (untitled.Count > 0)
-                return Fail("scene(s) with no disk path loaded: [" + string.Join(",", untitled) + "] — End() "
-                    + "restores the setup from disk and has nothing to restore these from. Save them "
-                    + "(manage_scene save) or close them");
             if (saveFailed.Count > 0)
                 return Fail("could not save loaded scene(s) [" + string.Join(",", saveFailed) + "] — End() "
-                    + "restores the setup from disk and would discard what they hold. Save or close them");
+                    + "restores the setup from disk and would discard what they hold. Save or close them"
+                    + (saved.Count > 0 ? " (saved=[" + string.Join(",", saved) + "])" : ""));
 
             // BEFORE any session state exists. Creating the RunLog dir leaves the AssetDatabase blind to it, so
             // the first write pays a full Refresh — and a Refresh with a compile pending reloads the domain,
