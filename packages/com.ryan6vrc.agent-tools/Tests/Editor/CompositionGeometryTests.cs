@@ -41,8 +41,8 @@ public class CompositionGeometryTests
         // The line submesh's indices must not reach the count, and the row must SAY they were left out.
         StringAssert.Contains("| 6 | 6 |", Row(lines, "Mixed"));
         StringAssert.Contains("submesh 1 is Lines", Row(lines, "Mixed"));
-        Assert.AreEqual("| total (all) | | | 20 | 20 | |", Total(lines, "all"));
-        Assert.AreEqual("| total (skinned) | | | 16 | 16 | |", Total(lines, "skinned"));
+        Assert.AreEqual("| total (all) | | | 20 | 20 | | |", Total(lines, "all"));
+        Assert.AreEqual("| total (skinned) | | | 16 | 16 | | |", Total(lines, "skinned"));
         Assert.AreEqual("tris=20 trisSkinned=16 trisActive=16", keys);
     }
 
@@ -62,9 +62,9 @@ public class CompositionGeometryTests
 
         StringAssert.Contains("| skinned | no |", Row(lines, "OffObject"));
         StringAssert.Contains("| skinned | no |", Row(lines, "OffRenderer"));
-        Assert.AreEqual("| total (all) | | | 22 | 22 | |", Total(lines, "all"));
-        Assert.AreEqual("| total (skinned) | | | 22 | 22 | |", Total(lines, "skinned"));
-        Assert.AreEqual("| total (active) | | | 10 | 10 | |", Total(lines, "active"));
+        Assert.AreEqual("| total (all) | | | 22 | 22 | | |", Total(lines, "all"));
+        Assert.AreEqual("| total (skinned) | | | 22 | 22 | | |", Total(lines, "skinned"));
+        Assert.AreEqual("| total (active) | | | 10 | 10 | | |", Total(lines, "active"));
         StringAssert.Contains("trisActive=10", keys);
     }
 
@@ -89,7 +89,7 @@ public class CompositionGeometryTests
         StringAssert.Contains("| unreadable | unreadable |", row);
         StringAssert.Contains("not readable", row);
         // Unknown is not zero: neither unreadable row contributes, and the total stays the readable sum.
-        Assert.AreEqual("| total (all) | | | 9 | 9 | |", Total(lines, "all"));
+        Assert.AreEqual("| total (all) | | | 9 | 9 | | |", Total(lines, "all"));
         Assert.AreEqual("tris=9 trisSkinned=9 trisActive=9", keys);
     }
 
@@ -127,7 +127,7 @@ public class CompositionGeometryTests
 
         StringAssert.Contains("| 3 | 3 |", Row(lines, "Sleeve"));
         StringAssert.Contains("| 5 | 5 |", Row(lines, "Sleeve #2"));
-        Assert.AreEqual("| total (all) | | | 8 | 8 | |", Total(lines, "all"));
+        Assert.AreEqual("| total (all) | | | 8 | 8 | | |", Total(lines, "all"));
     }
 
     [Test]
@@ -156,7 +156,7 @@ public class CompositionGeometryTests
         StringAssert.Contains("| skinned (authored-only) | yes | 4 | — |", Row(lines, "Deleted"));
         StringAssert.Contains("| skinned (built-only) | yes | — | 14 |", Row(lines, "Merged"));
         StringAssert.Contains("| 10 | 10 |", Row(lines, "Kept"));
-        Assert.AreEqual("| total (all) | | | 14 | 24 | |", Total(lines, "all"));
+        Assert.AreEqual("| total (all) | | | 14 | 24 | | |", Total(lines, "all"));
     }
 
     // ── Fixture ─────────────────────────────────────────────────────────────────────────────────────

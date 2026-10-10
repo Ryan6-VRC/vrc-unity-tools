@@ -119,15 +119,57 @@ public class CompositionSyncTests
     }
 
     [Test]
-    public void AParamFilter_isNamedAsNotNarrowingTheSection()
+    public void AParamFilter_narrowsThePerParameterTable_andNeverTheFigure()
     {
-        var read = new CompositionBake.SyncRead { Bits = 10 };
+        var read = new CompositionBake.SyncRead { Bits = 10, Params = BuiltParams() };
         string keys;
         var lines = CompositionBake.SyncSection(read, "Hair/", out keys);
 
-        StringAssert.Contains("paramFilter does not narrow this section", lines[0]);
+        StringAssert.Contains("narrows the per-parameter table", lines[0]);
         StringAssert.Contains("Hair/", lines[0]);
+        Assert.AreEqual("syncedBits=10 compressor=no", keys, "the figure is the whole avatar's under any filter");
+        Assert.IsTrue(lines.Contains("| `Hair/Toggle` | Bool | no |"));
+        Assert.IsFalse(lines.Any(l => l.StartsWith("| `Body/Slider` |")), "a name the filter misses is not a row");
     }
+
+    [Test]
+    public void EveryBuiltParameter_isARowUnderItsBuiltName_onEveryBranchOfTheFigure()
+    {
+        // The compressor branch returns early with VRCFury's text fenced; the table must still follow it,
+        // because that is the build where a reader most needs to see which names stopped syncing.
+        var compressed = new CompositionBake.SyncRead
+        {
+            Bits = 250, Layer = true, Component = true, ComponentText = "Old Total: 311 bits", OldTotal = 311,
+            Params = BuiltParams(),
+        };
+        string keys;
+        var lines = CompositionBake.SyncSection(compressed, null, out keys);
+
+        Assert.AreEqual("syncedBits=250 compressor=yes syncedBitsBefore=311", keys);
+        int header = lines.IndexOf("| built parameter | type | synced |");
+        Assert.Greater(header, lines.LastIndexOf("```"), "the table sits below the quoted component text");
+        Assert.IsTrue(lines.Contains("| `Hair/Toggle` | Bool | no |"));
+        Assert.IsTrue(lines.Contains("| `Body/Slider` | Float | yes |"));
+        AssertNoRatio(lines);
+    }
+
+    [Test]
+    public void AnUnreachableParametersAsset_isNotRead_ratherThanAnEmptyTable()
+    {
+        var read = new CompositionBake.SyncRead { BitsError = "the clone descriptor's expressionParameters is null" };
+        string keys;
+        var lines = CompositionBake.SyncSection(read, null, out keys);
+
+        Assert.IsFalse(lines.Contains("| built parameter | type | synced |"));
+        Assert.IsTrue(lines.Any(l => l.Contains("built parameters were not read")));
+    }
+
+    private static System.Collections.Generic.List<CompositionBake.BuiltParam> BuiltParams() =>
+        new System.Collections.Generic.List<CompositionBake.BuiltParam>
+        {
+            new CompositionBake.BuiltParam { Name = "Hair/Toggle", Type = "Bool", Synced = false },
+            new CompositionBake.BuiltParam { Name = "Body/Slider", Type = "Float", Synced = true },
+        };
 
     [Test]
     public void TheLayerMatch_acceptsVRCFurysFeaturePrefix_andNothingLooser()

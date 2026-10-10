@@ -41,9 +41,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// including the failure path: the preprocess may already have run, and the SDK's hooks keep state
         /// across the pair that the next build would otherwise read.</summary>
         /// <param name="cloneName">the clone's GameObject name; null =&gt; "&lt;source&gt; (composition bake)".</param>
-        internal static AvatarBakeScope Begin(GameObject source, string cloneName = null)
+        /// <param name="beforePreprocess">called with the clone after it is made and before the chain runs: the
+        /// one moment a caller can record what the clone held before any build pass touched it.</param>
+        internal static AvatarBakeScope Begin(GameObject source, string cloneName = null,
+                                              Action<GameObject> beforePreprocess = null)
         {
-            return new AvatarBakeScope(source, cloneName);
+            return new AvatarBakeScope(source, cloneName, null, null, beforePreprocess);
         }
 
         /// <summary>The verbatim cleanup-note tokens, pinned here because they are spliced into a CALLER's
@@ -131,7 +134,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// The seam exists because the properties worth testing here — the pairing fires exactly once,
         /// fires on the FAILURE path too, and survives a throwing callback — are unreachable otherwise.</summary>
         internal AvatarBakeScope(GameObject source, string cloneName,
-                                 Func<GameObject, bool> preprocess, Action postprocess)
+                                 Func<GameObject, bool> preprocess, Action postprocess,
+                                 Action<GameObject> beforePreprocess = null)
         {
             _preprocess = preprocess ?? (go =>
                 VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks.OnPreprocessAvatar(go));
@@ -149,6 +153,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // throw only because its target sits in the active scene.
                 _clone.name = cloneName ?? source.name + " (composition bake)";
                 _clone.SetActive(true); // an inactive avatar is not a valid preprocess target
+                if (beforePreprocess != null) beforePreprocess(_clone);
 
                 // Owed the instant the chain is ENTERED, not once it returns: a hook that throws midway has
                 // already moved SDK state that only the post-callback puts back.
