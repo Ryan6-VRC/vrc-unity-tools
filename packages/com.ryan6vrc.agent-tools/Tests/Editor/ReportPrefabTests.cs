@@ -177,6 +177,39 @@ public class ReportPrefabTests
     }
 
     [Test]
+    public void Run_instanceNestedInsideAnOwnedInstance_isNotRowedWithItsOutersCounts()
+    {
+        // Holder's file owns ONE PrefabInstance, Outer's. The Nested inside Outer is an instance root too, but
+        // it shares Outer's handle, so every list read off it is Outer's: a second row would repeat Outer's
+        // counts under another name and read as a second finding.
+        BuildChain(false);
+        const string outerPath = TmpDir + "/Outer.prefab", holderPath = TmpDir + "/Holder.prefab";
+        var outerGo = new GameObject("Outer");
+        try
+        {
+            var nested = (GameObject)PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(NestedPath));
+            nested.transform.SetParent(outerGo.transform);
+            PrefabUtility.SaveAsPrefabAsset(outerGo, outerPath);
+        }
+        finally { Object.DestroyImmediate(outerGo); }
+        var holderGo = new GameObject("Holder");
+        try
+        {
+            var outer = (GameObject)PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(outerPath));
+            outer.transform.SetParent(holderGo.transform);
+            PrefabUtility.SaveAsPrefabAsset(holderGo, holderPath);
+        }
+        finally { Object.DestroyImmediate(holderGo); }
+        AssetDatabase.Refresh();
+        PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(holderPath));
+        EditorSceneManager.SaveScene(SceneManager_Active(), ScenePath);
+
+        string l1 = Level(Body(Run("Holder")), 1);
+        StringAssert.Contains("**instances owned by this file** (1)\n- `Outer` <- `" + outerPath + "`", l1);
+        StringAssert.DoesNotContain("- `Outer/Nested` <-", l1);
+    }
+
+    [Test]
     public void Run_all_rowsEveryTierAndKeepsCounts()
     {
         BuildChain(true);
