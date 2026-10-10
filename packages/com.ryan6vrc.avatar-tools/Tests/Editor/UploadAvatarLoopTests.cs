@@ -117,6 +117,16 @@ public class UploadAvatarLoopTests
 
             Assert.AreEqual("failed", report.rows[0].result);
             Assert.AreEqual("transient", report.rows[0].cls);
+
+            // No status is no signal: never retryable.
+            report = UploadAvatar.RunBatch(new[] { a },
+                Reads(new System.Collections.Generic.Dictionary<string, UploadAvatarLogic.RecordRead>
+                {
+                    ["avtr_a"] = UploadAvatarLogic.RecordRead.Failed(null, "no answer"),
+                }), Me,
+                go => Task.FromResult(UploadAvatar.UploadOutcome.Uploaded()),
+                () => { }).GetAwaiter().GetResult();
+            Assert.AreEqual("real", report.rows[0].cls);
         }
         finally { Object.DestroyImmediate(a); }
     }

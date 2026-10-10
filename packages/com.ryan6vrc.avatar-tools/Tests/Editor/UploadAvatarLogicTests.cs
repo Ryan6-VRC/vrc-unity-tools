@@ -109,7 +109,7 @@ public class UploadAvatarLogicTests
         };
         string line = UploadAvatarLogic.WhatIfSummary(sights, new[] { 0, -1 }, new[] { 1, 0 });
         StringAssert.Contains("handle=A state=first-upload publishName=\"A\" importOffenders=0 (1 validation row(s) unscanned)", line);
-        StringAssert.Contains("handle=B state=unknown error=", line);
+        StringAssert.Contains("handle=B state=unknown importOffenders=unscanned error=", line);
         StringAssert.DoesNotContain("avtr_123", line);
         StringAssert.DoesNotContain("ConformImportSettings", line, "no offenders, no hint");
         StringAssert.EndsWith("=> FAIL", line);

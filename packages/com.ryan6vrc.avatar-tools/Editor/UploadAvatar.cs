@@ -378,7 +378,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         static string BatchStatus()
         {
-            if (_inflight == null) return "[upload-avatar] no batch started";
+            if (_inflight == null)
+                return "[upload-avatar] no batch or whatIf in flight in this editor domain — a domain reload " +
+                       "drops one mid-read, so re-run a whatIf you were polling";
             if (!_inflight.IsCompleted) return "[upload-avatar] running…";
             if (_terminalSummary != null) return _terminalSummary;
 
@@ -631,7 +633,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var s in sights)
                 report.rows.Add(s.Blocks
                     ? new Row { handle = s.handle, state = s.state, result = "failed",
-                                cls = s.readFailed ? UploadAvatarLogic.Classify(s.status, false, false) : "real",
+                                // No status is no classifiable signal, which is never retryable here.
+                                cls = s.readFailed && s.status.HasValue
+                                    ? UploadAvatarLogic.Classify(s.status, false, false) : "real",
                                 error = UploadAvatarLogic.RedactIds(s.error) }
                     : new Row { handle = s.handle, state = s.state, result = "not-attempted" });
             return report;
@@ -669,6 +673,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return UploadAvatarLogic.WhatIfSummary(sights, offenders, unscanned);
         }
 
+        const int LiveReadTimeoutMs = 30000;
+
         static string CurrentUserId() => APIUser.CurrentUser != null ? APIUser.CurrentUser.id : null;
 
         /// <summary>One live read through <see cref="VrcApiReflect"/>, the reader the record doors share. A 404
@@ -679,7 +685,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!VrcApiReflect.TryGetAvatar(id, out var raw, out var why))
                 return UploadAvatarLogic.RecordRead.Failed(null, why);
             var task = (System.Threading.Tasks.Task)raw;
-            try { await task; } catch (Exception) { /* classified from the task below */ }
+            // Bounded: the SDK's read takes no timeout, and one that never completed would hold the
+            // in-flight slot, refusing every later Run until a domain reload.
+            await System.Threading.Tasks.Task.WhenAny(task, System.Threading.Tasks.Task.Delay(LiveReadTimeoutMs));
+            if (!task.IsCompleted)
+                return UploadAvatarLogic.RecordRead.Failed(null, "no answer from the VRChat API in " +
+                                                                 (LiveReadTimeoutMs / 1000) + "s");
             if (task.IsCanceled) return UploadAvatarLogic.RecordRead.Failed(null, "the read was canceled");
             if (task.IsFaulted)
             {

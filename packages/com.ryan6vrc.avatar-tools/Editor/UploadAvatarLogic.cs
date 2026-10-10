@@ -124,7 +124,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>The whatIf line. <paramref name="importOffenders"/>[i] is row i's count of import
-        /// settings the SDK's validations reject, or -1 where no scan ran; <paramref name="rowsUnscanned"/>[i]
+        /// settings the SDK's validations reject, or -1 where no scan ran (a null entry, a root the scan refuses); <paramref name="rowsUnscanned"/>[i]
         /// is how many validation rows that scan could not evaluate. An offender does not fail the verdict:
         /// a build pass can mask one (VRCFury's texture clone masks the mip check), so it is not certain to
         /// block the upload.</summary>
@@ -138,7 +138,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (i > 0) rows.Append("; ");
                 rows.Append("handle=").Append(s.handle).Append(" state=").Append(s.state);
                 if (s.publishName != null) rows.Append(" publishName=").Append(AvatarRecordLogic.Quote(s.publishName));
-                if (importOffenders[i] >= 0)
+                // Said, not omitted: a missing field would read as a clean scan.
+                if (importOffenders[i] < 0) rows.Append(" importOffenders=unscanned");
+                else
                 {
                     rows.Append(" importOffenders=").Append(importOffenders[i]);
                     if (rowsUnscanned[i] > 0) rows.Append(" (").Append(rowsUnscanned[i]).Append(" validation row(s) unscanned)");
