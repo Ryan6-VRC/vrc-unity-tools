@@ -195,10 +195,13 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Instance roots under this level whose PrefabInstance this level's file owns: their own five
         /// lists are readable here and nowhere else. Inherited nested roots share the level root's handle and
-        /// are skipped — they belong to the level that owns them.</summary>
+        /// are skipped — they belong to the level that owns them. So does an instance root nested inside an
+        /// owned instance: it shares that instance's handle, every list read off it is the outer's, and the
+        /// outer's row already routes to the asset that owns it.</summary>
         private static void AppendOwnedInstances(StringBuilder doc, StringBuilder summary, Level l, HashSet<GameObject> added, bool all)
         {
             var rootHandle = PrefabUtility.GetPrefabInstanceHandle(l.Root);
+            var rowed = new HashSet<Object>();
             var rows = new List<string>();
             foreach (var t in l.Root.GetComponentsInChildren<Transform>(true))
             {
@@ -206,6 +209,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (go == l.Root || !PrefabUtility.IsAnyPrefabInstanceRoot(go)) continue;
                 var h = PrefabUtility.GetPrefabInstanceHandle(go);
                 if (h == null || h == rootHandle) continue;
+                // Parents are walked before their children, so the first root seen on a handle is its outermost.
+                if (!rowed.Add(h)) continue;
                 if (!string.Equals(AssetDatabase.GetAssetPath(h), l.IsScene ? "" : l.Path, StringComparison.Ordinal)) continue;
                 var mods = PrefabUtility.GetPropertyModifications(go);
                 rows.Add("`" + Cell(RelPath(t, l.Root.transform)) + "` <- `" + Cell(PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go)) + "`"

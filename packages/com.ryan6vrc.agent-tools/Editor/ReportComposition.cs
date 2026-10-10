@@ -64,9 +64,18 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// the SDK's rating per category, and each physbone chain's share of the transform budget. Edit mode only.
         /// Default off: cheap and safe is the default,
         /// exactness is opt-in. <paramref name="paramFilter"/> narrows every parameter table to names
-        /// containing it, for chasing one parameter without paying for the whole avatar.</summary>
-        public static string Run(string avatarRoot, bool bake = false, string paramFilter = null)
+        /// containing it, for chasing one parameter without paying for the whole avatar.
+        /// <para><paramref name="probe"/> is for a read of the built clone that no section makes: bake mode
+        /// hands it the clone and prints what it returns under <c>## Probe</c>. It runs on a later editor tick,
+        /// after this call has returned <c>PENDING</c> and after every section has been read, and the clone and
+        /// the build's generated assets are destroyed as soon as it returns — so return text, never an object.
+        /// Read-only against the clone is the contract; nothing enforces it.</para></summary>
+        public static string Run(string avatarRoot, bool bake = false, string paramFilter = null,
+                                 Func<GameObject, string> probe = null)
         {
+            // First, so the refusal needs no avatar: a probe is handed the built clone, and plain mode builds none.
+            if (probe != null && !bake)
+                return Refuse("probe: runs against the built clone, which only bake:true makes — call Run(avatarRoot, bake:true, probe: …)");
             var handle = SceneHandle.Resolve(avatarRoot);
             if (!handle.Ok) return Refuse("avatarRoot: " + handle.Refusal);
             var root = handle.Object;
@@ -81,7 +90,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             var census = Census(root, descriptor, paramFilter);
             if (!bake) return EmitPlain(root, census, paramFilter);
-            return CompositionBake.Begin(root, census, paramFilter);
+            return CompositionBake.Begin(root, census, paramFilter, probe);
         }
 
         /// <summary>Re-read the verdict of a <c>bake:true</c> run from its artifact. The bake outlives the
@@ -470,7 +479,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         internal static string RenderBody(GameObject root, CensusResult c, string paramFilter, string mode,
             List<string> bakeSection, List<string> geometrySection = null, List<string> textureSection = null,
-            List<string> performanceSection = null, List<string> syncSection = null)
+            List<string> performanceSection = null, List<string> syncSection = null,
+            List<string> constraintSection = null, List<string> probeSection = null)
         {
             var sb = new StringBuilder();
             sb.Append("# ReportComposition: ").Append(root.name).Append('\n');
@@ -533,6 +543,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append("\n## Sync\n\n");
                 foreach (var l in syncSection) sb.Append(l).Append('\n');
             }
+            if (constraintSection != null)
+            {
+                sb.Append("\n## Constraints\n\n");
+                foreach (var l in constraintSection) sb.Append(l).Append('\n');
+            }
+            if (probeSection != null)
+            {
+                sb.Append("\n## Probe\n\n");
+                foreach (var l in probeSection) sb.Append(l).Append('\n');
+            }
             // Scope is emitted in BOTH modes. It used to be the `else` arm of the bake section, so a bake
             // artifact — the one whose heading promises composed truth — lost every scope rule while still
             // rendering the whole Parameters table above, including its authored-only `synced` column.
@@ -540,16 +560,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (bakeSection == null)
                 sb.Append("Plain mode reports what is AUTHORED. It makes no namespace-resolution claim: ").Append(ScopeAuthoredNames).Append(".\n");
             else
-                sb.Append("The **Bake diff**, **Geometry**, **Textures**, **Performance** and **Sync** sections are measured against a fresh build — names in ")
-                  .Append("the first, triangles in the second, texture memory in the third, the SDK's own performance scan in the fourth, the built sync state in the fifth. Everything ABOVE them — the ")
+                sb.Append("The **Bake diff**, **Geometry**, **Textures**, **Performance**, **Sync** and **Constraints** sections are measured against a fresh build — names in ")
+                  .Append("the first, triangles and UV channels in the second, texture memory in the third, the SDK's own performance scan in the fourth, the built sync state in the fifth, constraint references the build left missing in the sixth. Everything ABOVE them — the ")
                   .Append("merge-surface, parameter and menu tables — is still the authored census, and the bake ")
                   .Append("resolves only the names: read a row's build-time identity from the diff, not from the tables.\n");
             sb.Append("An empty writers cell reads `").Append(ScopeWriters).Append("` because the writer set for a parameter is open — an empty cell is not a finding.\n");
             if (bakeSection != null)
                 sb.Append("**The `synced` / `saved` / `default` columns are read from the authored parameters assets, and bake ")
                   .Append("mode does not revisit them** — `docs/runtime.md` §VRCFury build-time reshaping owns that trap. ")
-                  .Append("The **Sync** section is the built read: the total and whether the Parameter Compressor compressed. ")
-                  .Append("Per-parameter compressor membership is only in the component text it quotes.\n");
+                  .Append("The **Sync** section is the built read: the total, whether the Parameter Compressor compressed, ")
+                  .Append("and each built parameter's `networkSynced`.\n");
             sb.Append("Humanoid mapping is not read here; `CheckHumanoidRig.InspectAvatar` is the door that reports a humanoid-vs-skinned divergence.\n");
             return sb.ToString();
         }

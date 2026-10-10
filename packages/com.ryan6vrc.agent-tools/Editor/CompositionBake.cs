@@ -50,17 +50,32 @@ namespace Ryan6Vrc.AgentTools.Editor
             RunLogFormat.SnapshotDir + "/composition-bake_" + RunLogFormat.Sanitize(root.name)
             + "_" + root.GetInstanceID().ToString("X", CultureInfo.InvariantCulture) + ".md";
 
-        internal static string Begin(GameObject root, ReportComposition.CensusResult census, string paramFilter)
+        internal static string Begin(GameObject root, ReportComposition.CensusResult census, string paramFilter,
+                                     Func<GameObject, string> probe = null)
         {
             string path = ArtifactPath(root);
             int key = root.GetInstanceID();
             if (InFlight.TryGetValue(key, out bool running) && running)
+            {
+                // The running bake was scheduled without this probe and cannot take it on, so returning its
+                // PENDING path would hand the caller an artifact that reads as if the probe had been dropped.
+                if (probe != null)
+                    return "[ReportComposition] FAIL: a bake of '" + root.name + "' is already running and was started "
+                         + "without this probe, so the probe would never run — wait for Verify(<avatarRoot>) to leave "
+                         + "PENDING, then re-issue the call | log=" + path;
                 return "[ReportComposition] " + root.name + ": mode=bake => PENDING (already running) | log=" + path;
+            }
+
+            // One bake back is kept, because the path is stable on purpose and this stub is about to replace it.
+            if (KeepPrevious(FullPath(path))) RunLogFormat.PublishArtifact(RunLogFormat.SnapshotDir, path + PreviousSuffix);
 
             // The path is on disk BEFORE the work starts, so a transport timeout loses nothing.
             WriteArtifact(path, "# ReportComposition (bake): " + root.name + "\n\nstatus: " + Pending
+                + "\nstarted: " + DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
                 + "\n\nThe bake is running. Re-read this file, or call `ReportComposition.Verify(<avatarRoot>)`.\n"
-                + "Do NOT re-issue the bake: a second call while this one is in flight returns this same path.\n");
+                + "Do NOT re-issue the bake: a second call while this one is in flight returns this same path.\n"
+                + "The last completed bake of this root, if there was one, is beside this file as `"
+                + Path.GetFileName(path) + PreviousSuffix + "`.\n");
             InFlight[key] = true;
 
             var rootRef = root;
@@ -68,7 +83,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             step = () =>
             {
                 EditorApplication.update -= step;
-                try { Run(rootRef, census, paramFilter, path); }
+                try { Run(rootRef, census, paramFilter, path, probe); }
                 finally { InFlight[key] = false; }
             };
             EditorApplication.update += step;
@@ -83,7 +98,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (!File.Exists(full))
                 return "[ReportComposition] FAIL: no bake artifact at " + path + " — run Report(<avatarRoot>, bake:true) first";
             string text = File.ReadAllText(full);
-            if (text.Contains("status: " + Pending))
+            if (!IsFinished(text) && text.Contains("status: " + Pending))
             {
                 // A domain reload discards the scheduled callback WITHOUT running it and clears the in-memory
                 // in-flight flag, leaving the artifact reading `pending` forever. Nothing in the editor can be
@@ -105,18 +120,46 @@ namespace Ryan6Vrc.AgentTools.Editor
                                 : "[ReportComposition] " + root.name + ": mode=bake => OK | log=" + path;
         }
 
-        private static void Run(GameObject root, ReportComposition.CensusResult census, string paramFilter, string path)
+        internal const string PreviousSuffix = ".prev.md";
+
+        /// <summary>A finished bake's artifact opens with its summary line; the pending stub and a refusal open
+        /// with a heading. Keyed on the opening rather than on a search of the body, because the body quotes
+        /// text this tool does not write (VRCFury's debug text, a caller's probe output).</summary>
+        internal static bool IsFinished(string artifactText) =>
+            artifactText != null && artifactText.StartsWith("summary: ", StringComparison.Ordinal);
+
+        /// <summary>Copy a FINISHED bake at <paramref name="fullPath"/> to its <see cref="PreviousSuffix"/>
+        /// sibling, replacing the one before it. A pending stub or a refusal is not copied, so a failed re-bake
+        /// never costs the last good one. Never throws: a copy that fails must not stop the bake it precedes.</summary>
+        internal static bool KeepPrevious(string fullPath)
+        {
+            try
+            {
+                if (!File.Exists(fullPath) || !IsFinished(File.ReadAllText(fullPath))) return false;
+                File.Copy(fullPath, fullPath + PreviousSuffix, true);
+                return true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[ReportComposition] could not keep the previous bake artifact beside " + fullPath
+                               + " (" + e.GetType().Name + ") — the bake proceeds and overwrites it.");
+                return false;
+            }
+        }
+
+        private static void Run(GameObject root, ReportComposition.CensusResult census, string paramFilter, string path,
+                                Func<GameObject, string> probe)
         {
             if (root == null)
             {
-                WriteArtifact(path, Refusal(path, "the avatar root was destroyed before the bake ran", "(destroyed)"));
+                WriteArtifact(path, Refusal(path, "the avatar root was destroyed before the bake ran", "(destroyed)", probe != null));
                 return;
             }
             // Rechecked here as well as at Run: play can be entered between scheduling and this tick, and a bake
             // then would measure the play build.
             if (EditorApplication.isPlayingOrWillChangePlaymode)
             {
-                WriteArtifact(path, Refusal(path, "play mode was entered before the bake ran; exit play and re-issue the bake", root.name));
+                WriteArtifact(path, Refusal(path, "play mode was entered before the bake ran; exit play and re-issue the bake", root.name, probe != null));
                 return;
             }
 
@@ -134,7 +177,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // to prevent, so bake mode publishes no table at all when the bake did not happen. A hook
                     // that THREW is reported as the crash it was, not as a refusal that never happened.
                     string failedStage = bake.DescribeFailure();
-                    WriteArtifact(path, Refusal(path, failedStage, root.name));
+                    WriteArtifact(path, Refusal(path, failedStage, root.name, probe != null));
                     Debug.LogError("[ReportComposition] " + root.name + ": mode=bake => FAIL (" + failedStage + ") | log=" + path);
                     return;
                 }
@@ -165,6 +208,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var textures = TextureSection(texAuthored, texBuilt,
                     SdkTextureMegabytes(root), perfRead.Stats != null ? perfRead.Stats.textureMegabytes : null,
                     swapAuthored, swapBuilt, paramFilter, out textureKeys);
+                string constraintKeys;
+                var constraints = ConstraintSection(ReadMissingConstraintRefs(root), ReadMissingConstraintRefs(clone),
+                    paramFilter, out constraintKeys);
+                // LAST, after every read above: the probe is the caller's code holding the clone, and whatever
+                // it does to the clone can then spoil only its own section.
+                string probeKey = null;
+                var probed = probe != null ? ProbeSection(probe, clone, out probeKey) : null;
                 string summary = string.Format(CultureInfo.InvariantCulture,
                     // `unattributed=` is deliberately GONE rather than kept with a narrower meaning: it used to
                     // count ambiguity and built-only rows together, so preserving the key while the number moves
@@ -172,7 +222,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // signal that the denominator changed. Renaming both halves makes the change visible.
                     // unlintableSurfaces rides here too, not only EmitPlain: bake is the EXACTNESS mode, so a
                     // surface this run could not walk is where the omission costs most.
-                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} {15} {16} {17} mode=bake => OK | log={12}",
+                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} {15} {16} {17} {18}{19} mode=bake => OK | log={12}",
                     root.name, census.Surfaces.Count, census.Params.Count,
                     diff.Count(d => d.Category == "kept"), diff.Count(d => d.Category == "renamed"),
                     diff.Count(d => d.Category == "dropped"), diff.Count(d => d.Category == "merged"),
@@ -181,7 +231,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     diff.Count(d => d.Category == "not-in-scope"),
                     diff.Count(d => d.Category == "built-side-unread"), path,
                     census.UnlintableSurfaces > 0 ? " unlintableSurfaces=" + census.UnlintableSurfaces : "",
-                    geometryKeys, textureKeys, perfKeys, syncKeys);
+                    geometryKeys, textureKeys, perfKeys, syncKeys, constraintKeys,
+                    probeKey != null ? " " + probeKey : "");
 
                 var section = new List<string>
                 {
@@ -243,7 +294,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                           + "pre-optimizer view.");
 
                 string body = "summary: " + summary + "\n\n"
-                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry, textures, performance, sync);
+                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry, textures, performance, sync, constraints, probed);
                 WriteArtifact(path, body);
                 Debug.Log(summary);
             }   // scope closes: the clone is destroyed and OnPostprocessAvatar fires, in that order
@@ -263,6 +314,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             public long Tris;
             public bool Unreadable;
             public string Caveat;
+            /// <summary>The mesh's UV channels as <c>channel:components</c> (<c>0:2 1:4</c>), <c>none</c> for a
+            /// mesh carrying no UV channel, null where there is no mesh. Vertex LAYOUT, read off the attribute
+            /// descriptors, so it is there for a mesh whose index buffer is not readable.</summary>
+            public string Uv;
         }
 
         /// <summary>Every <c>SkinnedMeshRenderer</c> and <c>MeshRenderer</c> under <paramref name="root"/>,
@@ -298,6 +353,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     Path = RelPath(root, r.transform), Skinned = skinned,
                     Active = r.gameObject.activeInHierarchy && r.enabled,
+                    Uv = mesh != null ? UvLayout(mesh) : null,
                 };
                 if (mesh == null || !mesh.isReadable)
                 {
@@ -323,6 +379,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             return rows;
         }
 
+        private static string UvLayout(Mesh mesh)
+        {
+            var parts = new List<string>();
+            for (int i = 0; i < 8; i++)
+            {
+                var attr = (UnityEngine.Rendering.VertexAttribute)((int)UnityEngine.Rendering.VertexAttribute.TexCoord0 + i);
+                if (mesh.HasVertexAttribute(attr))
+                    parts.Add(i.ToString(CultureInfo.InvariantCulture) + ":"
+                            + mesh.GetVertexAttributeDimension(attr).ToString(CultureInfo.InvariantCulture));
+            }
+            return parts.Count == 0 ? "none" : string.Join(" ", parts);
+        }
+
         private static string RelPath(GameObject root, Transform t)
         {
             if (t == root.transform) return "(root)";
@@ -345,12 +414,12 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             var lines = new List<string>
             {
-                "built triangles, authored against the clone; paramFilter does not narrow this section"
+                "built triangles and UV channels, authored against the clone; paramFilter does not narrow this section"
                     + (string.IsNullOrEmpty(paramFilter) ? ""
                        : " (`" + RunLogFormat.Cell(paramFilter) + "` is active and narrows the parameter tables ONLY, so these rows and totals are of the WHOLE avatar)"),
                 "",
-                "| renderer (path) | kind | active | authored tris | built tris | caveat |",
-                "| --- | --- | --- | --- | --- | --- |",
+                "| renderer (path) | kind | active | authored tris | built tris | built uv | caveat |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
             };
             foreach (var k in a.Keys.Union(b.Keys).OrderBy(s => s, StringComparer.Ordinal))
             {
@@ -365,13 +434,18 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // population rule above exists for.
                 if (inA && inB && a[k].Active != b[k].Active)
                     caveats.Add("active differs: authored=" + (a[k].Active ? "yes" : "no"));
+                // The same guard for the layout: the column shows the built side, so an authored one that
+                // differs is named rather than hidden.
+                if (inA && inB && a[k].Uv != b[k].Uv)
+                    caveats.Add("authored uv: " + (a[k].Uv ?? "unreadable"));
                 lines.Add("| `" + RunLogFormat.Cell(row.Path) + "` | " + (row.Skinned ? "skinned" : "mesh") + presence
                         + " | " + (row.Active ? "yes" : "no")
                         + " | " + TriCell(a, k) + " | " + TriCell(b, k)
+                        + " | " + (inB ? b[k].Uv ?? "unreadable" : "—")
                         + " | " + RunLogFormat.Cell(string.Join("; ", caveats)) + " |");
             }
             foreach (var t in new[] { "all", "skinned", "active" })
-                lines.Add("| total (" + t + ") | | | " + Subtotal(authored, t) + " | " + Subtotal(built, t) + " | |");
+                lines.Add("| total (" + t + ") | | | " + Subtotal(authored, t) + " | " + Subtotal(built, t) + " | | |");
             lines.Add("");
             lines.Add("**The three subtotals.** `all` is every renderer counted here; `skinned` only the "
                     + "`SkinnedMeshRenderer`s; `active` only those of them active in the hierarchy with the "
@@ -380,6 +454,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                     + "An **authored-only** row carries geometry the build removed. This section attributes "
                     + "nothing to a blendshape: a drop says the triangles went, never which shape's footprint "
                     + "they were (`ReportShapeOverlap` prints an authored footprint per shape at edit time).");
+            lines.Add("**`built uv` is the built mesh's vertex layout**, `channel:components` for each UV channel "
+                    + "the mesh carries and `none` for a mesh with no UV channel: what a shader sampling that "
+                    + "channel is handed, not whether the data in it survived. An optimizer's merged mesh widening "
+                    + "a channel or dropping an all-zero one is the ordinary result of the merge, and a merged row "
+                    + "is built-only, so it has no authored layout to compare against here.");
             summaryKeys = "tris=" + Subtotal(built, "all") + " trisSkinned=" + Subtotal(built, "skinned")
                         + " trisActive=" + Subtotal(built, "active");
             return lines;
@@ -423,6 +502,149 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sum += r.Tris;
             }
             return sum.ToString(CultureInfo.InvariantCulture);
+        }
+
+        // ── Constraints: references the build left pointing at a destroyed object ──────────────────────
+
+        /// <summary>One object reference on a constraint whose object no longer exists.
+        /// <c>Property</c> is the serialized property path, the handle a caller addresses the slot by.</summary>
+        internal struct MissingRefRow
+        {
+            public string Path;      // the constraint's hierarchy path relative to the side's own root
+            public string Type;
+            public string Property;  // null on a component whose properties could not be walked
+            public string Caveat;
+        }
+
+        private static readonly Regex VrcSourceSlot = new Regex(@"^Sources\.source(\d+)\.");
+
+        /// <summary>Every object reference on a VRC or Unity constraint under <paramref name="root"/>, inactive
+        /// included, that is <b>missing</b>: null to read while its serialized instance id is non-zero.
+        /// <para>That pair is the only thing separating a destroyed reference from one never assigned, and the
+        /// difference is the whole read: an unassigned source slot is legal and vendor avatars ship them, while
+        /// a destroyed one is what a build pass leaves behind when it removes a bone a constraint names.
+        /// Measured on an <c>Object.Instantiate</c> clone, which is what the bake reads: both cases compare
+        /// <c>== null</c>, the VRC getter hands back a wrapper for both and Unity's a true null for both, and
+        /// <c>objectReferenceInstanceIDValue</c> reads 0 for the unassigned one and non-zero for the destroyed
+        /// one in both families.</para>
+        /// <para>Every object-reference property is walked rather than a list of field names, so a destroyed
+        /// <c>TargetTransform</c> or world-up is found by the same test as a destroyed source, and a field a
+        /// later SDK adds needs no change here. The two families never overlap: a VRC constraint does not
+        /// implement <c>IConstraint</c>.</para></summary>
+        internal static List<MissingRefRow> ReadMissingConstraintRefs(GameObject root)
+        {
+            var rows = new List<MissingRefRow>();
+            if (root == null) return rows;
+            var components = new List<Component>();
+            components.AddRange(root.GetComponentsInChildren<VRC.Dynamics.VRCConstraintBase>(true));
+            foreach (var c in root.GetComponentsInChildren<UnityEngine.Animations.IConstraint>(true))
+                if (c is Component) components.Add((Component)c);
+
+            foreach (var c in components)
+            {
+                if (c == null) continue;
+                string path = RelPath(root, c.transform), type = c.GetType().Name;
+                try
+                {
+                    var vrc = c as VRC.Dynamics.VRCConstraintBase;
+                    int sourceCount = vrc != null ? vrc.Sources.Count : -1;
+                    var it = new SerializedObject(c).GetIterator();
+                    while (it.Next(true))
+                    {
+                        if (it.propertyType != SerializedPropertyType.ObjectReference) continue;
+                        if (it.objectReferenceValue != null || it.objectReferenceInstanceIDValue == 0) continue;
+                        var row = new MissingRefRow { Path = path, Type = type, Property = it.propertyPath };
+                        var slot = VrcSourceSlot.Match(it.propertyPath);
+                        int index;
+                        if (slot.Success && sourceCount >= 0
+                            && int.TryParse(slot.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out index)
+                            && index >= sourceCount)
+                            row.Caveat = "a slot at or past the constraint's source count ("
+                                       + sourceCount.ToString(CultureInfo.InvariantCulture)
+                                       + "), which the client does not solve (`docs/runtime.md` §Constraints)";
+                        rows.Add(row);
+                    }
+                }
+                catch (Exception e)
+                {
+                    rows.Add(new MissingRefRow
+                    {
+                        Path = path, Type = type,
+                        Caveat = "this component's properties could not be walked (" + e.GetType().Name
+                               + "), so a missing reference on it is not excluded",
+                    });
+                }
+            }
+            return rows;
+        }
+
+        /// <summary>The <c>## Constraints</c> section and (out) its summary key. Pure over the two reads. The
+        /// rows are the built side's; the authored side contributes one count, because a reference already
+        /// missing before the build is not the build's doing and the two sides share no key to pair rows on
+        /// (the build renames and moves the objects a path would name).</summary>
+        internal static List<string> ConstraintSection(List<MissingRefRow> authored, List<MissingRefRow> built,
+                                                       string paramFilter, out string summaryKey)
+        {
+            int authoredMissing = authored.Count(r => r.Property != null);
+            int builtMissing = built.Count(r => r.Property != null);
+            var lines = new List<string>
+            {
+                "constraint references on the clone whose object no longer exists; paramFilter does not narrow this section"
+                    + (string.IsNullOrEmpty(paramFilter) ? ""
+                       : " (`" + RunLogFormat.Cell(paramFilter) + "` is active and narrows the parameter tables ONLY)"),
+                "",
+                "| constraint (path) | type | property | caveat |",
+                "| --- | --- | --- | --- |",
+            };
+            if (built.Count == 0) lines.Add("| _(none)_ | | | |");
+            foreach (var r in built.OrderBy(r => r.Path, StringComparer.Ordinal).ThenBy(r => r.Property, StringComparer.Ordinal))
+                lines.Add("| `" + RunLogFormat.Cell(r.Path) + "` | " + r.Type + " | "
+                        + (r.Property != null ? "`" + RunLogFormat.Cell(r.Property) + "`" : "unread") + " | "
+                        + RunLogFormat.Cell(r.Caveat ?? "") + " |");
+            lines.Add("");
+            lines.Add("**A row is a missing reference**: null to read, with the instance id of a destroyed object still "
+                    + "serialized. It is what a build pass leaves when it destroys an object a constraint names (AAO "
+                    + "`MergeBone` on a constrained bone), and no ranked stat moves with it. Every object reference on "
+                    + "every VRC and Unity constraint is walked, so a destroyed `TargetTransform` or world-up object is "
+                    + "a row beside a destroyed source. A slot that was never assigned is not a row: it is legal, and "
+                    + "`ReportGimmick` tables a rig's sources.");
+            lines.Add("The authored root holds " + authoredMissing.ToString(CultureInfo.InvariantCulture)
+                    + " such reference(s) before the build. The two sides are not paired row to row, so equal counts "
+                    + "do not show that the build added none.");
+            summaryKey = "missingConstraintRefs=" + builtMissing.ToString(CultureInfo.InvariantCulture);
+            return lines;
+        }
+
+        // ── Probe: the caller's own read of the clone ─────────────────────────────────────────────────
+
+        /// <summary>Run the caller's <paramref name="probe"/> against the clone and render what it returned as
+        /// the <c>## Probe</c> section. The call and its catch live here so a throwing probe costs only this
+        /// section: the bake's other reads are already taken, and the scope still disposes the clone and fires
+        /// the paired post-callback. Fenced with four backticks, so probe text carrying its own code fence or a
+        /// line this tool's readers key on stays inert.</summary>
+        internal static List<string> ProbeSection(Func<GameObject, string> probe, GameObject clone, out string summaryKey)
+        {
+            var lines = new List<string>
+            {
+                "the caller's probe, run against the clone after every section above was read and before the clone "
+                    + "was destroyed. The text is the caller's, quoted whole; any object it names is gone.",
+                "",
+            };
+            string text;
+            try { text = probe(clone); }
+            catch (Exception e)
+            {
+                lines.Add("**The probe threw, so it reported nothing:** " + e.GetType().Name + ": " + RunLogFormat.Cell(e.Message));
+                summaryKey = "probe=threw";
+                return lines;
+            }
+            summaryKey = "probe=ok";
+            if (text == null) { lines.Add("(returned null)"); return lines; }
+            if (text.Length == 0) { lines.Add("(returned empty)"); return lines; }
+            lines.Add("````");
+            foreach (var l in text.Replace("\r", "").Split('\n')) lines.Add(l);
+            lines.Add("````");
+            return lines;
         }
 
         // ── Textures: memory, authored against built ──────────────────────────────────────────────────
@@ -845,7 +1067,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             public int? OldTotal;
             /// <summary><c>VRCExpressionParameters.MAX_PARAMETER_COST</c>, read from the SDK so the text never carries a literal.</summary>
             public int Max = VRCExpressionParameters.MAX_PARAMETER_COST;
+            /// <summary>Every parameter of the built expression parameters asset, in asset order; null when the
+            /// asset could not be reached, which is a different answer from an asset declaring nothing.</summary>
+            public List<BuiltParam> Params;
         }
+
+        internal struct BuiltParam { public string Name, Type; public bool Synced; }
 
         private const string CompressorTitle = "Parameter Compressor";
         private const string CompressorDebugType = "VF.Model.VRCFuryDebugInfo";
@@ -870,6 +1097,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 try { read.Bits = ep.CalcTotalCost(); }
                 catch (Exception e) { read.BitsError = "CalcTotalCost threw " + e.GetType().Name + ": " + e.Message; }
+                read.Params = new List<BuiltParam>();
+                if (ep.parameters != null)
+                    foreach (var p in ep.parameters)
+                        if (p != null && !string.IsNullOrEmpty(p.name))
+                            read.Params.Add(new BuiltParam { Name = p.name, Type = p.valueType.ToString(), Synced = p.networkSynced });
             }
 
             if (d != null)
@@ -913,12 +1145,41 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// a fault, and a reader shown <c>254/256</c> treats it as one. No verdict is emitted.</summary>
         internal static List<string> SyncSection(SyncRead read, string paramFilter, out string summaryKeys)
         {
+            var lines = SyncFigure(read, paramFilter, out summaryKeys);
+            lines.Add("");
+            if (read.Params == null)
+            {
+                lines.Add("**The built parameters were not read, so no per-parameter row is published:** "
+                        + RunLogFormat.Cell(read.BitsError ?? "(no error recorded)"));
+                return lines;
+            }
+            lines.Add("| built parameter | type | synced |");
+            lines.Add("| --- | --- | --- |");
+            var shown = string.IsNullOrEmpty(paramFilter) ? read.Params
+                : read.Params.Where(p => p.Name.IndexOf(paramFilter, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+            if (shown.Count == 0) lines.Add("| _(none)_ | | |");
+            foreach (var p in shown)
+                lines.Add("| `" + RunLogFormat.Cell(p.Name) + "` | " + p.Type + " | " + (p.Synced ? "yes" : "no") + " |");
+            lines.Add("");
+            lines.Add("**`synced` is the built asset's `networkSynced`, under the BUILT name** (the Bake diff maps an "
+                    + "authored name to it). A `no` here beside an authored `yes` in the Parameters table means the "
+                    + "build stopped syncing that parameter under its own name, and the Parameter Compressor is one "
+                    + "cause among several: VRCFury also unsyncs a parameter it drives as an animated animator "
+                    + "parameter, and VRChat's own global names. A compressed parameter still replicates, through "
+                    + "the compressor's channel; the others do not. So read `compressor=` before calling a row "
+                    + "compressed, and a `no` with `compressor=no` is never one.");
+            return lines;
+        }
+
+        /// <summary>The section's figure and compressor answer: everything above the per-parameter table.</summary>
+        private static List<string> SyncFigure(SyncRead read, string paramFilter, out string summaryKeys)
+        {
             string max = read.Max.ToString(CultureInfo.InvariantCulture);
             var lines = new List<string>
             {
-                "the clone's built sync state; paramFilter does not narrow this section"
+                "the clone's built sync state; paramFilter narrows the per-parameter table at the end of this section and nothing above it"
                     + (string.IsNullOrEmpty(paramFilter) ? ""
-                       : " (`" + RunLogFormat.Cell(paramFilter) + "` is active and narrows the parameter tables ONLY)"),
+                       : " (`" + RunLogFormat.Cell(paramFilter) + "` is active, so that table is narrowed; the figures are of the WHOLE avatar)"),
                 "",
             };
             if (read.Bits == null)
@@ -1614,13 +1875,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                  + "and this row does not say so.";
         }
 
-        private static string Refusal(string path, string stage, string name) =>
+        private static string Refusal(string path, string stage, string name, bool probeSupplied) =>
             "# ReportComposition (bake)\n\nstatus: FAILED\n\nsummary: [ReportComposition] mode=bake => FAIL ("
             + stage + ") | log=" + path
             + "\n\nThe bake did not complete, so this artifact carries NO parameter table. Authored-census rows are "
             + "deliberately not published here: presenting them under a heading that promises composed truth is the "
             + "misread this door exists to prevent. Run `Report(<avatarRoot>)` without the flag for the authored census, "
-            + "knowing it is authored.\n";
+            + "knowing it is authored.\n"
+            + (probeSupplied ? "\nThe probe supplied with this call did not run: there was no built clone to hand it.\n" : "");
 
         private static string FullPath(string assetPath) =>
             Path.Combine(Application.dataPath.Substring(0, Application.dataPath.Length - "Assets".Length), assetPath);
