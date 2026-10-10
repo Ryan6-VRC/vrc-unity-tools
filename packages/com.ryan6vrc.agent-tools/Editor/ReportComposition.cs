@@ -561,7 +561,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append("Plain mode reports what is AUTHORED. It makes no namespace-resolution claim: ").Append(ScopeAuthoredNames).Append(".\n");
             else
                 sb.Append("The **Bake diff**, **Geometry**, **Textures**, **Performance**, **Sync** and **Constraints** sections are measured against a fresh build — names in ")
-                  .Append("the first, triangles and UV channels in the second, texture memory in the third, the SDK's own performance scan in the fourth, the built sync state in the fifth, constraint references the build left missing in the sixth. Everything ABOVE them — the ")
+                  .Append("the first, triangles and UV channels in the second, texture memory in the third, the SDK's own performance scan in the fourth, the built sync state in the fifth, the references constraints lost in the build in the sixth. Everything ABOVE them — the ")
                   .Append("merge-surface, parameter and menu tables — is still the authored census, and the bake ")
                   .Append("resolves only the names: read a row's build-time identity from the diff, not from the tables.\n");
             sb.Append("An empty writers cell reads `").Append(ScopeWriters).Append("` because the writer set for a parameter is open — an empty cell is not a finding.\n");
