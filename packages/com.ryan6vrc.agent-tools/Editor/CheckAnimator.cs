@@ -563,12 +563,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         // binding path before resolution — CheckAvatar passes the VRCF FullController rewriter so a binding is
         // resolved the way the build will (rewriteBindings then nearest-match). A rewrite returning null
         // means a delete-rule drops that binding at build, so it is skipped (not unresolved).
-        // <paramref name="absoluteRoot"/> is the avatar root of a VRCFury frame, null for every other frame.
+        // <paramref name="absoluteRoot"/> is the avatar root when the frame is a VRCFury FullController, else null.
         // Under VRCFury a path that starts with `/` AFTER the rewrite — authored that way or produced by a
         // rule — is the absolute form (AnimationBindingUtils.ResolveTarget's absolute branch,
         // nondestructive.md): the build resolves it from the avatar root with no ancestor walk, so the probe
-        // here does the same, against absoluteRoot only and never roots. With absoluteRoot null a leading
-        // `/` has no special meaning and the literal path is probed like any other. The returned pair always
+        // here does the same, against absoluteRoot only and never roots. With absoluteRoot null the form
+        // is not honoured here and the literal path is probed like any other. The returned pair always
         // carries the ORIGINAL binding (what the .anim holds — what a repath must target).
         internal static List<(AnimationClip clip, EditorCurveBinding binding)> CollectUnresolvedBindings(
             AnimatorController controller, List<GameObject> roots, Func<string, string> pathRewrite = null,

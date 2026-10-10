@@ -65,7 +65,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// at error-tier (true) or demotes them to a single collapsed advisory (false — a build-rewrite auto
         /// site). <paramref name="pathRewrite"/> (null ⇒ identity) rewrites each binding path before
         /// resolution (a VRCFury FullController's rewriteBindings). <paramref name="absoluteRoot"/> (null
-        /// outside a VRCFury frame) is the avatar root a leading-`/` binding path resolves from. Returns the
+        /// unless the frame is a VRCFury FullController) is the avatar root a leading-`/` binding path resolves from. Returns the
         /// raw counts + offenders + rule notes; the caller computes the verdict and renders the report.</summary>
         public static LintResult Run(AnimatorController controller, List<GameObject> roots,
                                      bool brokenBindingIsError, Func<string, string> pathRewrite,
