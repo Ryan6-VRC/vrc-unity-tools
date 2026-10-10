@@ -114,6 +114,9 @@ public class RecordPlayTests
         StringAssert.Contains("must be non-empty", Refusal("tf:Armature/Upper Arm"));
         StringAssert.Contains("must be non-empty", Refusal("tf:Armature/"));
         Assert.AreEqual("arm", Parse("arm=tf:Armature/Upper Arm")[0].Alias);
+        // A line break in an alias would split the header row.
+        StringAssert.Contains("must be non-empty", Refusal("a\nb=tf:Body"));
+        StringAssert.Contains("must be non-empty", Refusal("tf:Armature/Up\rper"));
     }
 
     // ── Parameter name match ──────────────────────────────────────────────────────────────────────

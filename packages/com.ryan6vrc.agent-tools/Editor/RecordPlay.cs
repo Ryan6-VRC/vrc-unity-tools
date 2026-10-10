@@ -16,8 +16,9 @@ using VRC.Dynamics;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// A frame-stepped play-mode recorder: declared columns, one CSV row per emulator runtime per player
-    /// frame, under <see cref="RunLogFormat.RunLogDir"/>. Doors: <see cref="Run"/> starts a take,
+    /// A frame-stepped play-mode recorder: declared columns, one CSV row per player frame for the local
+    /// runtime and for each of its non-local clones, under <see cref="RunLogFormat.RunLogDir"/>. The mirror
+    /// and shadow clones are not recorded. Doors: <see cref="Run"/> starts a take,
     /// <see cref="MoveAvatar"/> scripts the local avatar root, <see cref="Mark"/> labels a phase,
     /// <see cref="End"/> ends the take, <see cref="Status"/> reports. The meta-repo's
     /// <c>tools/report_play.py</c> reads the file.
@@ -147,11 +148,17 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (_take == null) return Fail("no take running; the last one stopped: " + _lastStop);
             string counts = Counts(_take);
             string path = _take.Path;
-            Stop("End()");
+            string fault = Stop("End()");
+            if (fault != null)
+                return Fail("the take ended (" + counts + "), but " + path + " has no stop line, so report_play.py reads it as still open: " + fault);
             // For the Project window only, and only here: the other stops run inside play exit or a domain
             // reload, and the editor's next refresh picks the file up without help.
-            string asset = RunLogFormat.RunLogDir + path.Substring(Root().Length).Replace('\\', '/');
-            RunLogFormat.PublishArtifact(asset.Substring(0, asset.LastIndexOf('/')), asset);
+            try
+            {
+                string asset = RunLogFormat.RunLogDir + path.Substring(Root().Length).Replace('\\', '/');
+                RunLogFormat.PublishArtifact(asset.Substring(0, asset.LastIndexOf('/')), asset);
+            }
+            catch (Exception e) { counts += " | not published to the Project window: " + e.Message; }
             return Ok("End", path, counts);
         }
 
@@ -350,8 +357,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     }
                 }
                 string alias = m.Groups["alias"].Success ? m.Groups["alias"].Value.Trim() : c.Target.Substring(c.Target.LastIndexOf('/') + 1);
-                if (alias.Length == 0 || alias.IndexOfAny(new[] { ',', ' ', '"', '#' }) >= 0)
-                    return "column '" + e + "': alias '" + alias + "' must be non-empty with no comma, space, quote or #";
+                if (alias.Length == 0 || alias.IndexOfAny(new[] { ',', ' ', '"', '#', '\r', '\n' }) >= 0)
+                    return "column '" + OneLine(e) + "': alias '" + OneLine(alias) + "' must be non-empty with no comma, space, quote, # or line break";
                 if (!aliases.Add(alias))
                     return "column '" + e + "': alias '" + alias + "' is taken (reserved: " + string.Join(", ", Reserved) + "); give it alias=";
                 c.Alias = alias;
@@ -555,12 +562,14 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Stop and plumbing ─────────────────────────────────────────────────────────────────────
 
-        private static void Stop(string reason)
+        /// <summary>Ends the take. Returns null, or why the stop line could not be written.</summary>
+        private static string Stop(string reason)
         {
             var t = _take;
             _take = null;
             EditorApplication.update -= Tick;
-            if (t == null) return;
+            if (t == null) return null;
+            string fault = null;
             reason = OneLine(reason);
             _lastStop = reason + " at frame " + t.Last + " (" + t.Path + ")";
             var tail = new StringBuilder();
@@ -568,8 +577,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (t.PendingMove != null) tail.Append("# f=").Append(t.Last).Append(" move never started: the take stopped first\n");
             tail.Append("# f=").Append(t.Last).Append(" stopped: ").Append(reason).Append('\n');
             try { File.AppendAllText(t.Path, tail.ToString()); }
-            catch (Exception e) { _lastStop += "; the stop line could not be written: " + e.Message; }
+            catch (Exception e) { fault = e.Message; _lastStop += "; the stop line could not be written: " + fault; }
             Debug.Log(Tag + " stopped: " + _lastStop);
+            return fault;
         }
 
         private static void Flush(Take t, StringBuilder sb)
