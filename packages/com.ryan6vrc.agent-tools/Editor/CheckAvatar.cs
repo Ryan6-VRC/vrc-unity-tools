@@ -483,7 +483,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             var clipSeen = new HashSet<(int ctrl, int clip, string path, Type type)>();
             foreach (var p in pairs)
             {
-                foreach (var (clip, b) in CollectUnresolvedBindingsCalled(p.Controller, p.Roots, p.PathRewrite))
+                foreach (var (clip, b) in CollectUnresolvedBindingsCalled(p.Controller, p.Roots, p.PathRewrite,
+                             p.Kind == FrameKind.VRCF ? avatarGO : null))
                 {
                     string clipAssetPath = AssetDatabase.GetAssetPath(clip);
                     if (IsSdkProxyClip(clipAssetPath)) continue; // VRChat SDK humanoid proxy — swapped at runtime, never a scene ref
@@ -729,8 +730,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         // off" behaviour: under D1 every unresolved-in-scene binding is a real, non-advisory clip-binding
         // offender (mapped to CLASSIFY, never FAIL).
         private static IEnumerable<(AnimationClip clip, EditorCurveBinding binding)> CollectUnresolvedBindingsCalled(
-            AnimatorController controller, List<GameObject> roots, Func<string, string> pathRewrite)
-            => CheckAnimator.CollectUnresolvedBindings(controller, roots, pathRewrite);
+            AnimatorController controller, List<GameObject> roots, Func<string, string> pathRewrite,
+            GameObject absoluteRoot)
+            => CheckAnimator.CollectUnresolvedBindings(controller, roots, pathRewrite, absoluteRoot);
 
         // VRChat SDK proxy animations (Packages/com.vrchat.*/…/ProxyAnim/proxy_*.anim) are humanoid-muscle
         // placeholders the SDK swaps at runtime; their bone-path bindings never resolve to a scene object and

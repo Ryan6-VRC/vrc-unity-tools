@@ -64,10 +64,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// no-basis-root CheckAnimator run does. <paramref name="brokenBindingIsError"/> places broken bindings
         /// at error-tier (true) or demotes them to a single collapsed advisory (false — a build-rewrite auto
         /// site). <paramref name="pathRewrite"/> (null ⇒ identity) rewrites each binding path before
-        /// resolution (a VRCFury FullController's rewriteBindings). Returns the raw counts + offenders +
-        /// rule notes; the caller computes the verdict and renders the report.</summary>
+        /// resolution (a VRCFury FullController's rewriteBindings). <paramref name="absoluteRoot"/> (null
+        /// unless the frame is a VRCFury FullController) is the avatar root a leading-`/` binding path resolves from. Returns the
+        /// raw counts + offenders + rule notes; the caller computes the verdict and renders the report.</summary>
         public static LintResult Run(AnimatorController controller, List<GameObject> roots,
-                                     bool brokenBindingIsError, Func<string, string> pathRewrite)
+                                     bool brokenBindingIsError, Func<string, string> pathRewrite,
+                                     GameObject absoluteRoot = null)
         {
             // ---- Collect the state/state-machine topology once (owning layers only) -------------------
             var states = new List<StateCtx>();
@@ -95,7 +97,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             RuleDriverOnAnimatedParam(controller, states, machines, curveWritten, rep);
             RuleEntryShadow(machines, rep);
             RuleDeadTransition(states, rep);
-            RuleBrokenBinding(controller, roots, pathRewrite, rep);
+            RuleBrokenBinding(controller, roots, pathRewrite, absoluteRoot, rep);
 
             // ---- Advisory-tier rules ------------------------------------------------------------------
             RuleWdInconsistency(states, rep);
@@ -553,7 +555,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Rule 4: brokenBinding (error, or advisory under a build-rewrite auto site) -----------
         private static void RuleBrokenBinding(AnimatorController controller, List<GameObject> roots,
-            Func<string, string> pathRewrite, LintResult rep)
+            Func<string, string> pathRewrite, GameObject absoluteRoot, LintResult rep)
         {
             if (roots.Count == 0)
             {
@@ -566,7 +568,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // path each broken binding is a genuine named failure and gets its own line.
             var demotedSamples = new List<string>();
 
-            foreach (var (clip, b) in CheckAnimator.CollectUnresolvedBindings(controller, roots, pathRewrite))
+            foreach (var (clip, b) in CheckAnimator.CollectUnresolvedBindings(controller, roots, pathRewrite, absoluteRoot))
             {
                 rep.BrokenBinding++;
                 if (rep.BrokenBindingIsError)

@@ -413,6 +413,84 @@ public class CheckAvatarTests
             "an absolute (leading-/) rewrite must resolve against the avatar root, not read as a break: " + r);
     }
 
+    // The absolute form needs no rewrite rule: a clip AUTHORED with a leading `/` under a rule-less
+    // FullController resolves from the avatar root at build. Fails against a walk that honours the form
+    // only when a rewriter exists.
+    [Test]
+    public void Vrcf_authoredAbsoluteBinding_noRules_resolvesFromAvatarRoot()
+    {
+        var a = NewAvatar("LintVrcfSlash");
+        NewChild(NewChild(a, "Armature"), "Bone");
+        var prop = NewChild(NewChild(a, "Deep"), "Prop");
+        AddVrcfFullController(prop, NewController("VrcfSlashCtrl", NewClip(TmpDir, "VrcfSlashClip", "/Armature/Bone")), prop);
+
+        var r = Inspect("LintVrcfSlash");
+        StringAssert.Contains("clipBinding=0", r,
+            "an authored leading-/ binding under a rule-less FullController resolves from the avatar root: " + r);
+    }
+
+    // Absolute means the avatar root ONLY — no ancestor walk. `Local` sits under the mount, where the
+    // walk-up form would find it, and nowhere under the avatar root, so the build drops `/Local`.
+    [Test]
+    public void Vrcf_authoredAbsoluteBinding_absentUnderAvatarRoot_isReported()
+    {
+        var a = NewAvatar("LintVrcfSlashMiss");
+        var prop = NewChild(NewChild(a, "Deep"), "Prop");
+        NewChild(prop, "Local");
+        AddVrcfFullController(prop, NewController("VrcfSlashMissCtrl", NewClip(TmpDir, "VrcfSlashMissClip", "/Local")), prop);
+
+        var r = Inspect("LintVrcfSlashMiss");
+        StringAssert.Contains("clipBinding=1", r,
+            "a leading-/ binding is probed at the avatar root only, never up the mount's ancestor chain: " + r);
+    }
+
+    // The absolute form is VRCFury's. Under an MA MergeAnimator a leading `/` has no special meaning, so
+    // the literal path stays a break even though the trimmed one exists under the avatar root.
+    [Test]
+    public void Ma_leadingSlashBinding_isNotAbsolute()
+    {
+        var a = NewAvatar("LintMaSlash");
+        NewChild(NewChild(a, "Armature"), "Bone");
+        var outfit = NewChild(a, "Outfit");
+        AddMaMergeAnimator(outfit, NewController("MaSlashCtrl", NewClip(TmpDir, "MaSlashClip", "/Armature/Bone")));
+
+        var r = Inspect("LintMaSlash");
+        StringAssert.Contains("clipBinding=1", r,
+            "a leading-/ binding under an MA frame is not VRCFury's absolute form: " + r);
+    }
+
+    // CheckAnimator's auto basis hands the walk the mount alone, so the absolute form needs the avatar
+    // root passed beside it: a nested mount is the case that tells the two apart.
+    [Test]
+    public void Lint_vrcfAuthoredAbsoluteBinding_resolvesFromAvatarRoot()
+    {
+        var a = NewAvatar("LintVrcfSlashA");
+        NewChild(NewChild(a, "Armature"), "Bone");
+        var prop = NewChild(NewChild(a, "Deep"), "Prop");
+        var ctrl = NewController("VrcfSlashACtrl", NewClip(TmpDir, "VrcfSlashAClip", "/Armature/Bone"));
+        AddVrcfFullController(prop, ctrl, prop);
+
+        var r = CheckAnimator.Run(ctrl, "auto", mergeSite: "LintVrcfSlashA/Deep/Prop");
+        ReadLog(r);
+        StringAssert.Contains("brokenBinding=0 ", r,
+            "an authored leading-/ binding under a nested FullController resolves from the avatar root: " + r);
+    }
+
+    [Test]
+    public void Lint_vrcfAuthoredAbsoluteBinding_absentUnderAvatarRoot_isReported()
+    {
+        var a = NewAvatar("LintVrcfSlashAMiss");
+        var prop = NewChild(NewChild(a, "Deep"), "Prop");
+        NewChild(prop, "Local");
+        var ctrl = NewController("VrcfSlashAMissCtrl", NewClip(TmpDir, "VrcfSlashAMissClip", "/Local"));
+        AddVrcfFullController(prop, ctrl, prop);
+
+        var r = CheckAnimator.Run(ctrl, "auto", mergeSite: "LintVrcfSlashAMiss/Deep/Prop");
+        ReadLog(r);
+        StringAssert.Contains("brokenBinding=1 ", r,
+            "a leading-/ binding is probed at the avatar root, never at the mount: " + r);
+    }
+
     // A matched delete rule drops the binding at build — it must not surface as a break.
     [Test]
     public void Vrcf_rewriteBindings_deleteRule_dropsBinding()

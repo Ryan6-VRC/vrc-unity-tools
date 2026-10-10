@@ -76,6 +76,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             Func<string, string> pathRewrite = null;  // VRCF FullController rewriteBindings under basis=auto (else identity)
             GameObject siteAvatarGO = null;           // the avatar this controller was linted ON, for the multiplicity count
             GameObject usedMount = null;              // the mount the basis actually resolved to
+            GameObject absoluteRoot = null;           // VRCF auto site only: where a leading-`/` binding resolves from
 
             if (basis == "explicit")
             {
@@ -118,13 +119,20 @@ namespace Ryan6Vrc.AgentTools.Editor
                 buildRewrite = d.BuildRewrite;
                 detection = d.DetectionLine;
                 pathRewrite = d.PathRewrite;
+                // VRCFury builds the OUTERMOST descriptor and resolves a leading-`/` binding from it, so the
+                // absolute root is the topmost descriptor above the site, not the nearest.
+                if (d.Vrcf && siteGO != null)
+                {
+                    var above = siteGO.GetComponentsInParent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>(true);
+                    if (above.Length > 0) absoluteRoot = above[above.Length - 1].gameObject;
+                }
             }
 
             // ---- Run the shared rule set on the resolved basis. The rule methods, topology collectors,
             //      and report data live in ControllerRules so a future compiler can run the SAME rules on an
             //      in-memory controller; CheckAnimator owns only basis resolution (above) and rendering (below).
             //      brokenBindingIsError = !buildRewrite: a build-rewrite auto site demotes broken bindings.
-            var r = ControllerRules.Run(controller, roots, !buildRewrite, pathRewrite);
+            var r = ControllerRules.Run(controller, roots, !buildRewrite, pathRewrite, absoluteRoot);
             notes.AddRange(r.Notes); // rule-produced caveats (skipped rules), after the basis-resolution notes
 
             return Emit(controller, r, detection, notes, MergeSiteMultiplicity(controller, siteAvatarGO, usedMount, notes));
@@ -133,7 +141,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ----- auto basis detection (untyped SerializedObject reads; missing MA/VRCFury assemblies -----
         //        degrade to "no such component" → the standard zero-component refusal) -----------------
 
-        private struct AutoResult { public string Refusal; public GameObject Root; public bool BuildRewrite; public string DetectionLine; public Func<string, string> PathRewrite; }
+        private struct AutoResult { public string Refusal; public GameObject Root; public bool BuildRewrite; public string DetectionLine; public Func<string, string> PathRewrite; public bool Vrcf; }
 
         private static AutoResult DetectAuto(AnimatorController controller, string mergeSite, List<string> notes)
         {
@@ -235,7 +243,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             // VRCF only: the FullController's "Path Rewrite Rules" (rewriteBindings) as a path transform,
             // applied to each binding path BEFORE the nearest-match ancestor walk (the build applies them in
             // that order). null ⇒ identity (no rules). Returns null for a path a delete-rule drops (the
-            // binding vanishes at build — not a real break). CheckAnimator ignores it; CheckAvatar applies it.
+            // binding vanishes at build — not a real break).
             public Func<string, string> PathRewrite;
             // VRCF only: the FullController's rootBindingsApplyToAvatar. When set, an EMPTY-path binding is
             // left at the avatar root by the build's nearest-match rewriter instead of being matched onto the
@@ -539,7 +547,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                           "inflated by paths those rules would relocate.");
             return new AutoResult
             {
-                Root = frame.Root, BuildRewrite = true,
+                Root = frame.Root, BuildRewrite = true, Vrcf = true,
                 DetectionLine = "basis=auto→mount(" + PathOf(frame.Root) + ") [VRCFury FullController]",
                 // Honour THIS FullController's rewriteBindings so the (demoted) broken-binding count is
                 // truthful — without it, paths a declared rule relocates read as unresolvable (a lying count).
@@ -554,15 +562,17 @@ namespace Ryan6Vrc.AgentTools.Editor
         // <paramref name="pathRewrite"/> (default null ⇒ identity, CheckAnimator's behavior) transforms each
         // binding path before resolution — CheckAvatar passes the VRCF FullController rewriter so a binding is
         // resolved the way the build will (rewriteBindings then nearest-match). A rewrite returning null
-        // means a delete-rule drops that binding at build, so it is skipped (not unresolved). A rewrite
-        // yielding a leading-`/` path is VRCFury's absolute form (AnimationBindingUtils.ResolveTarget's
-        // absolute branch, nondestructive.md): the build resolves it from the avatar root with no ancestor
-        // walk, so the probe here does the same — against the LAST entry of roots only, which every caller
-        // builds as the avatar-most root (AncestorChain appends upward; the explicit basis appends avatarGO
-        // last). The returned pair always carries the ORIGINAL binding (what the .anim holds — what a repath
-        // must target).
+        // means a delete-rule drops that binding at build, so it is skipped (not unresolved).
+        // <paramref name="absoluteRoot"/> is the avatar root when the frame is a VRCFury FullController, else null.
+        // Under VRCFury a path that starts with `/` AFTER the rewrite — authored that way or produced by a
+        // rule — is the absolute form (AnimationBindingUtils.ResolveTarget's absolute branch,
+        // nondestructive.md): the build resolves it from the avatar root with no ancestor walk, so the probe
+        // here does the same, against absoluteRoot only and never roots. With absoluteRoot null the form
+        // is not honoured here and the literal path is probed like any other. The returned pair always
+        // carries the ORIGINAL binding (what the .anim holds — what a repath must target).
         internal static List<(AnimationClip clip, EditorCurveBinding binding)> CollectUnresolvedBindings(
-            AnimatorController controller, List<GameObject> roots, Func<string, string> pathRewrite = null)
+            AnimatorController controller, List<GameObject> roots, Func<string, string> pathRewrite = null,
+            GameObject absoluteRoot = null)
         {
             var unresolved = new List<(AnimationClip, EditorCurveBinding)>();
             foreach (var clip in AnimatorClipWalk.CollectClips(controller))
@@ -575,20 +585,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     if (IsHumanoidAnimatorCurve(b)) continue; // muscle/root curves have no scene object
                     var probe = b; // struct copy — preserves type/propertyName/isPPtrCurve, only path may change
-                    bool absolute = false;
                     if (pathRewrite != null)
                     {
                         string rewritten = pathRewrite(b.path);
                         if (rewritten == null) continue; // a delete-rule drops this binding at build — not a break
-                        absolute = rewritten.StartsWith("/");
-                        probe.path = absolute ? rewritten.TrimStart('/') : rewritten;
+                        probe.path = rewritten;
                     }
                     bool resolved = false;
-                    if (absolute)
+                    if (absoluteRoot != null && probe.path.StartsWith("/"))
                     {
-                        if (roots.Count > 0 &&
-                            AnimationUtility.GetAnimatedObject(roots[roots.Count - 1], probe) != null)
-                            resolved = true;
+                        probe.path = probe.path.TrimStart('/');
+                        resolved = AnimationUtility.GetAnimatedObject(absoluteRoot, probe) != null;
                     }
                     else
                     {
