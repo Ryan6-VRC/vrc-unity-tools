@@ -5,21 +5,16 @@ using System.Text.RegularExpressions;
 using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 using UnityEngine;
-using UnityEngine.Animations;
 using UnityEngine.TestTools;
-using VRC.Dynamics;
-using VRC.SDK3.Dynamics.Constraint.Components;
 
 /// <summary>
-/// The bake's reads of the built clone that are not a parameter, a triangle or a byte: constraint references
-/// the build left missing, each mesh's UV layout, the caller's probe, and the one-back copy of the artifact.
-/// Each makes a claim a reader acts on without a second look, so the cases pin the line between the states
-/// that look alike: a destroyed reference against one never assigned, a probe that returned nothing against
-/// one that threw, a finished artifact against a stub.
+/// The bake's reads of the built clone that are not a parameter, a triangle or a byte: each mesh's UV layout,
+/// the caller's probe, and the one-back copy of the artifact. Each makes a claim a reader acts on without a
+/// second look, so the cases pin the line between the states that look alike: no UV channel against no row,
+/// a probe that returned nothing against one that threw, a finished artifact against a stub.
 ///
 /// Objects are left for the next test's <c>NewScene(Single)</c> to take rather than destroyed —
-/// <c>docs/verify.md</c> §Test venue. The one destroy below runs on a clone inside
-/// <c>AvatarBakeScope</c>'s injectable seam, the way the build itself removes an object.
+/// <c>docs/verify.md</c> §Test venue.
 /// </summary>
 public class CompositionBuiltReadsTests
 {
@@ -27,89 +22,6 @@ public class CompositionBuiltReadsTests
     public void SetUp() => UnityEditor.SceneManagement.EditorSceneManager.NewScene(
         UnityEditor.SceneManagement.NewSceneSetup.EmptyScene,
         UnityEditor.SceneManagement.NewSceneMode.Single);
-
-    // ── Constraints ─────────────────────────────────────────────────────────────────────────────────
-
-    [Test]
-    public void AReferenceTheBuildTookAway_isARow_howeverTheBuildLeftTheSlot()
-    {
-        var source = new GameObject("Avatar");
-        var live = Child(source, "Live");
-        var doomed = Child(source, "Doomed");
-
-        var vrc = Child(source, "VrcHost").AddComponent<VRCParentConstraint>();
-        var sources = vrc.Sources;
-        sources.Add(new VRCConstraintSource(live.transform, 1f));
-        sources.Add(new VRCConstraintSource(null, 1f));          // empty before the build: legal, never a row
-        sources.Add(new VRCConstraintSource(doomed.transform, 1f));
-        vrc.Sources = sources;
-
-        var unity = Child(source, "UnityHost").AddComponent<ParentConstraint>();
-        unity.AddSource(new ConstraintSource { sourceTransform = live.transform, weight = 1f });
-        unity.AddSource(new ConstraintSource { sourceTransform = doomed.transform, weight = 1f });
-
-        var moved = Child(source, "MovedHost").AddComponent<ParentConstraint>();
-        moved.AddSource(new ConstraintSource { sourceTransform = doomed.transform, weight = 1f });
-
-        Child(source, "GoneHost").AddComponent<ParentConstraint>();
-
-        // The seam stands in for the build, and leaves a lost reference in each state a real pass does: the
-        // VRC slot keeps the destroyed object's id (nothing swept it), the Unity slot is overwritten with a
-        // plain null (AAO's re-map after its passes), which is byte-identical to a slot never assigned. One
-        // source is re-pointed, one constraint destroyed, one made. The scope is NOT disposed.
-        CompositionBake.ConstraintSnapshot before = null;
-        var scope = new AvatarBakeScope(source, "Avatar (bake)",
-            clone =>
-            {
-                var liveOnClone = clone.transform.Find("Live");
-                clone.transform.Find("MovedHost").GetComponent<ParentConstraint>()
-                     .SetSource(0, new ConstraintSource { sourceTransform = liveOnClone, weight = 1f });
-                Object.DestroyImmediate(clone.transform.Find("Doomed").gameObject);
-                clone.transform.Find("UnityHost").GetComponent<ParentConstraint>()
-                     .SetSource(1, new ConstraintSource { sourceTransform = null, weight = 1f });
-                Object.DestroyImmediate(clone.transform.Find("GoneHost").GetComponent<ParentConstraint>());
-                clone.transform.Find("Live").gameObject.AddComponent<ParentConstraint>();
-                return true;
-            },
-            () => { },
-            clone => before = CompositionBake.SnapshotConstraintRefs(clone));
-        Assert.IsTrue(scope.Ok, scope.DescribeFailure());
-
-        var read = CompositionBake.ReadLostConstraintRefs(scope.Clone, before);
-
-        CollectionAssert.AreEquivalent(
-            new[] { "VrcHost|VRCParentConstraint|Sources.source2.SourceTransform|Doomed",
-                    "UnityHost|ParentConstraint|m_Sources.Array.data[1].sourceTransform|Doomed" },
-            read.Rows.Select(r => r.Path + "|" + r.Type + "|" + r.Property + "|" + r.Was).ToArray(),
-            "both lost sources are rows; the re-pointed source and the slot empty from the start are not");
-        Assert.IsTrue(read.Rows.All(r => r.Caveat == null), "a slot inside the source count carries no caveat");
-        Assert.AreEqual(1, read.Removed);
-        Assert.AreEqual(1, read.Added);
-
-        string key;
-        var lines = CompositionBake.ConstraintSection(read, null, out key);
-        Assert.AreEqual("lostConstraintRefs=2", key);
-        Assert.IsTrue(lines.Any(l => l.StartsWith("| `VrcHost` | VRCParentConstraint | `Sources.source2.SourceTransform` | `Doomed` |")));
-        Assert.IsTrue(lines.Any(l => l.Contains("removed 1 constraint component(s) and made 1")));
-    }
-
-    [Test]
-    public void TheSection_saysNoneForAnEmptyRead_andUnreadWhenThereWasNoSnapshot()
-    {
-        string key;
-        var empty = CompositionBake.ConstraintSection(
-            new CompositionBake.ConstraintRead { Rows = new List<CompositionBake.LostRefRow>() }, "Hair/", out key);
-        Assert.AreEqual("lostConstraintRefs=0", key);
-        Assert.IsTrue(empty.Any(l => l.StartsWith("| _(none)_ |")));
-        StringAssert.Contains("Hair/", empty[0]);
-
-        // No snapshot means nothing was compared, which must never read as nothing lost.
-        var unread = CompositionBake.ConstraintSection(
-            CompositionBake.ReadLostConstraintRefs(new GameObject("Clone"), null), null, out key);
-        Assert.AreEqual("lostConstraintRefs=unread", key);
-        Assert.IsFalse(unread.Any(l => l.StartsWith("| _(none)_ |")));
-        Assert.IsTrue(unread.Any(l => l.Contains("did not complete")));
-    }
 
     // ── Geometry: the UV column ─────────────────────────────────────────────────────────────────────
 

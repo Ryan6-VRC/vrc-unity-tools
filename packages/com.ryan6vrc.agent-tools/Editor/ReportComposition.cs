@@ -480,7 +480,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal static string RenderBody(GameObject root, CensusResult c, string paramFilter, string mode,
             List<string> bakeSection, List<string> geometrySection = null, List<string> textureSection = null,
             List<string> performanceSection = null, List<string> syncSection = null,
-            List<string> constraintSection = null, List<string> probeSection = null)
+            List<string> probeSection = null)
         {
             var sb = new StringBuilder();
             sb.Append("# ReportComposition: ").Append(root.name).Append('\n');
@@ -543,11 +543,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append("\n## Sync\n\n");
                 foreach (var l in syncSection) sb.Append(l).Append('\n');
             }
-            if (constraintSection != null)
-            {
-                sb.Append("\n## Constraints\n\n");
-                foreach (var l in constraintSection) sb.Append(l).Append('\n');
-            }
             if (probeSection != null)
             {
                 sb.Append("\n## Probe\n\n");
@@ -560,8 +555,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (bakeSection == null)
                 sb.Append("Plain mode reports what is AUTHORED. It makes no namespace-resolution claim: ").Append(ScopeAuthoredNames).Append(".\n");
             else
-                sb.Append("The **Bake diff**, **Geometry**, **Textures**, **Performance**, **Sync** and **Constraints** sections are measured against a fresh build — names in ")
-                  .Append("the first, triangles and UV channels in the second, texture memory in the third, the SDK's own performance scan in the fourth, the built sync state in the fifth, the references constraints lost in the build in the sixth. Everything ABOVE them — the ")
+                sb.Append("The **Bake diff**, **Geometry**, **Textures**, **Performance** and **Sync** sections are measured against a fresh build — names in ")
+                  .Append("the first, triangles and UV channels in the second, texture memory in the third, the SDK's own performance scan in the fourth, the built sync state in the fifth. Everything ABOVE them — the ")
                   .Append("merge-surface, parameter and menu tables — is still the authored census, and the bake ")
                   .Append("resolves only the names: read a row's build-time identity from the diff, not from the tables.\n");
             sb.Append("An empty writers cell reads `").Append(ScopeWriters).Append("` because the writer set for a parameter is open — an empty cell is not a finding.\n");
