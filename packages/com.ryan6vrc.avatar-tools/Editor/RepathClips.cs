@@ -119,6 +119,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var clips = AnimatorClipWalk.CollectClips(controller);
                 log.Count("clipsScanned", clips.Count);
 
+                // Clips beside the controller that it does not reference are invisible to the walk above.
+                string ctrlDir = System.IO.Path.GetDirectoryName(log.source ?? "")?.Replace((char)92, '/');
+                var strays = new List<string>();
+                if (!string.IsNullOrEmpty(ctrlDir))
+                    foreach (string guid in AssetDatabase.FindAssets("t:AnimationClip", new[] { ctrlDir }))
+                    {
+                        string cpath = AssetDatabase.GUIDToAssetPath(guid);
+                        if (!cpath.EndsWith(".anim", StringComparison.OrdinalIgnoreCase) || cpath == log.source) continue;
+                        if (System.IO.Path.GetDirectoryName(cpath).Replace((char)92, '/') != ctrlDir) continue; // direct children only
+                        var c = AssetDatabase.LoadAssetAtPath<AnimationClip>(cpath);
+                        if (c != null && !clips.Contains(c)) strays.Add(TransplantCore.Leaf(cpath));
+                    }
+                log.Count("clipsUnreferenced", strays.Count);
+                if (strays.Count > 0)
+                    log.Warning("clip in controller folder not referenced by the controller, not repathed: " +
+                        string.Join(", ", strays.ToArray()));
+
                 // ── Build the plan: per clip, the longest-oldPath-wins rewrite of each matching binding
                 //    (matched ONCE against the ORIGINAL path — no cascade) ──
                 var moveMatched = new int[moves.Length];
