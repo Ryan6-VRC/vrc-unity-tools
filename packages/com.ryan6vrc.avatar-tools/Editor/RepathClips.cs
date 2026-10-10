@@ -126,6 +126,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     foreach (string guid in AssetDatabase.FindAssets("t:AnimationClip", new[] { ctrlDir }))
                     {
                         string cpath = AssetDatabase.GUIDToAssetPath(guid);
+                        if (!cpath.EndsWith(".anim", StringComparison.OrdinalIgnoreCase) || cpath == log.source) continue;
                         if (System.IO.Path.GetDirectoryName(cpath).Replace((char)92, '/') != ctrlDir) continue; // direct children only
                         var c = AssetDatabase.LoadAssetAtPath<AnimationClip>(cpath);
                         if (c != null && !clips.Contains(c)) strays.Add(TransplantCore.Leaf(cpath));

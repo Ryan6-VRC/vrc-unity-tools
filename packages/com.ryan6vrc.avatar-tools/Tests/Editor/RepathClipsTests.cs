@@ -242,4 +242,25 @@ public class RepathClipsTests
         StringAssert.Contains("not referenced by the controller, not repathed", s);
         Assert.AreEqual(1, AnimatorTestHelpers.Count(s, "clipsUnreferenced"));
     }
+    [Test]
+    public void Stray_listing_skips_subfolders_and_clips_embedded_in_other_controllers()
+    {
+        string cp = Root + "/Listed.controller", clip = Root + "/Listed.anim";
+        var ctrl = BuildWithClip(cp, clip, "Real");
+        AnimatorTestHelpers.EnsureFolder(Root + "/Sub");
+        AnimatorTestHelpers.Save(AnimatorTestHelpers.MakeClip(Root + "/Sub/Deep.anim"), Root + "/Sub/Deep.anim");
+        AnimatorTestHelpers.Save(AnimatorTestHelpers.MakeClip(Root + "/Direct.anim"), Root + "/Direct.anim");
+        // A neighbouring controller holding an embedded clip: a clip-bearing asset that is not a .anim.
+        var other = AnimatorController.CreateAnimatorControllerAtPath(Root + "/Other.controller");
+        var emb = new AnimationClip { name = "Embedded" };
+        AssetDatabase.AddObjectToAsset(emb, other);
+        AssetDatabase.SaveAssets();
+
+        string s = RepathClips.Run(ctrl, new[] { "Real" }, new[] { "Moved" });
+
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(s, "clipsUnreferenced"), "only Direct.anim");
+        StringAssert.Contains("Direct.anim", s);
+        StringAssert.DoesNotContain("Deep.anim", s);
+        StringAssert.DoesNotContain("Embedded", s);
+    }
 }

@@ -42,7 +42,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (drivenHasConstraint && !replaceExisting) ws++; else wc++;
                 }
                 // The duplicate is a clone, so the source's count is the duplicate's too.
-                int wpb = src.GetComponentsInChildren<VRCPhysBone>(true).Length;
+                int wpb = CountPhysBoneChains(src);
                 return $"[ConstrainedDuplicate] (whatIf) would duplicate '{src.name}' as '{dupName}', " +
                        $"{kind}/{direction}, {wc} constraint(s), {ws} skipped{PhysBoneWarning(wpb)} => PASS";
             }
@@ -76,7 +76,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             Transform drivenRoot = direction == ConstraintDirection.DuplicateFollowsOriginal ? dup : src;
-            int pbCount = drivenRoot.GetComponentsInChildren<VRCPhysBone>(true).Length;
+            int pbCount = CountPhysBoneChains(drivenRoot);
             string pbWarn = PhysBoneWarning(pbCount);
             if (pbCount > 0) Debug.LogWarning("[ConstrainedDuplicate]" + pbWarn);
 
@@ -85,12 +85,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Selection.activeGameObject = dupObj;
             Undo.CollapseUndoOperations(undoGroup);
 
-            return $"[ConstrainedDuplicate] '{dup.name}' created, {created} constraint(s), {skipped} skipped{pbWarn}, " +
-                   $"root {GetHierarchyPath(dup)} => PASS";
+            return $"[ConstrainedDuplicate] '{dup.name}' created, {created} constraint(s), {skipped} skipped, " +
+                   $"root {GetHierarchyPath(dup)}{pbWarn} => PASS";
+        }
+
+        // Chains whose effective root is the driven root, above it, or inside it: all of them run on constrained bones.
+        private static int CountPhysBoneChains(Transform drivenRoot)
+        {
+            int n = 0;
+            foreach (VRCPhysBone pb in drivenRoot.root.GetComponentsInChildren<VRCPhysBone>(true))
+            {
+                Transform eff = pb.rootTransform != null ? pb.rootTransform : pb.transform;
+                if (drivenRoot.IsChildOf(eff) || eff.IsChildOf(drivenRoot)) n++;
+            }
+            return n;
         }
 
         private static string PhysBoneWarning(int n)
-            => n == 0 ? "" : $" WARN: {n} VRCPhysBone(s) under the constrained side — a constraint on each bone of a physbone chain pins the strand; strip or exclude those bones";
+            => n == 0 ? "" : $" warnings=[{n} VRCPhysBone chain(s) on the constrained bones; a constraint on each bone pins the strand]";
 
         private static bool HasVRCConstraint(Transform t)
             => t.GetComponent<VRCRotationConstraint>() != null || t.GetComponent<VRCParentConstraint>() != null;
