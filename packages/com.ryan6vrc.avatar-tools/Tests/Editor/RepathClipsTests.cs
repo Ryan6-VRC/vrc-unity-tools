@@ -229,4 +229,17 @@ public class RepathClipsTests
         probe.AssertWasNotSaved();
     }
 
+    [Test]
+    public void Unreferenced_clip_in_controller_folder_warns_and_is_counted()
+    {
+        string cp = Root + "/Stray.controller", clip = Root + "/Stray.anim";
+        var ctrl = BuildWithClip(cp, clip, "Real");
+        AnimatorTestHelpers.Save(AnimatorTestHelpers.MakeClip(Root + "/Orphan.anim"), Root + "/Orphan.anim");
+
+        string s = RepathClips.Run(ctrl, new[] { "Real" }, new[] { "Moved" });
+
+        StringAssert.Contains("=> PASS", s);
+        StringAssert.Contains("not referenced by the controller, not repathed", s);
+        Assert.AreEqual(1, AnimatorTestHelpers.Count(s, "clipsUnreferenced"));
+    }
 }

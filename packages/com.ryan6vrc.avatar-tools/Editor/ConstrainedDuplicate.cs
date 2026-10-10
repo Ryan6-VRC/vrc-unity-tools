@@ -4,6 +4,7 @@ using UnityEditor;
 using UnityEngine;
 using VRC.Dynamics;
 using VRC.SDK3.Dynamics.Constraint.Components;
+using VRC.SDK3.Dynamics.PhysBone.Components;
 using Ryan6Vrc.AgentTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Editor
@@ -40,8 +41,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         : HasVRCConstraint(kv.Value);
                     if (drivenHasConstraint && !replaceExisting) ws++; else wc++;
                 }
+                // The duplicate is a clone, so the source's count is the duplicate's too.
+                int wpb = src.GetComponentsInChildren<VRCPhysBone>(true).Length;
                 return $"[ConstrainedDuplicate] (whatIf) would duplicate '{src.name}' as '{dupName}', " +
-                       $"{kind}/{direction}, {wc} constraint(s), {ws} skipped => PASS";
+                       $"{kind}/{direction}, {wc} constraint(s), {ws} skipped{PhysBoneWarning(wpb)} => PASS";
             }
 
             Undo.IncrementCurrentGroup();
@@ -72,14 +75,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 else skipped++;
             }
 
+            Transform drivenRoot = direction == ConstraintDirection.DuplicateFollowsOriginal ? dup : src;
+            int pbCount = drivenRoot.GetComponentsInChildren<VRCPhysBone>(true).Length;
+            string pbWarn = PhysBoneWarning(pbCount);
+            if (pbCount > 0) Debug.LogWarning("[ConstrainedDuplicate]" + pbWarn);
+
             EditorUtility.SetDirty(sourceRoot);
             EditorUtility.SetDirty(dupObj);
             Selection.activeGameObject = dupObj;
             Undo.CollapseUndoOperations(undoGroup);
 
-            return $"[ConstrainedDuplicate] '{dup.name}' created, {created} constraint(s), {skipped} skipped, " +
+            return $"[ConstrainedDuplicate] '{dup.name}' created, {created} constraint(s), {skipped} skipped{pbWarn}, " +
                    $"root {GetHierarchyPath(dup)} => PASS";
         }
+
+        private static string PhysBoneWarning(int n)
+            => n == 0 ? "" : $" WARN: {n} VRCPhysBone(s) under the constrained side — a constraint on each bone of a physbone chain pins the strand; strip or exclude those bones";
 
         private static bool HasVRCConstraint(Transform t)
             => t.GetComponent<VRCRotationConstraint>() != null || t.GetComponent<VRCParentConstraint>() != null;

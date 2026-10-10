@@ -73,4 +73,18 @@ public class ConstrainedDuplicateSourceTailTests
         }
         finally { Object.DestroyImmediate(root); }
     }
+
+    [Test]
+    public void WhatIf_WarnsWhenPhysBonesSitUnderTheConstrainedHierarchy()
+    {
+        var root = new GameObject("Rig");
+        try
+        {
+            Assert.That(ConstrainedDuplicate.Run(root, whatIf: true), Does.Not.Contain("VRCPhysBone"));
+            var chain = new GameObject("Chain"); chain.transform.SetParent(root.transform);
+            chain.AddComponent<VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone>();
+            Assert.That(ConstrainedDuplicate.Run(root, whatIf: true), Does.Contain("1 VRCPhysBone(s)"));
+        }
+        finally { Object.DestroyImmediate(root); }
+    }
 }
