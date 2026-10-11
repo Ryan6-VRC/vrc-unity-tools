@@ -8,7 +8,7 @@ using VRC.Dynamics;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
-    /// <summary>How garments clip bodies at the current pose, edit or play: the length of the line where their surfaces
+    /// <summary>How garments clip bodies as they stand, at rest in edit mode or at the current pose in play: the length of the line where their surfaces
     /// cross, and the garment vertices behind each body's nearest face, split by body, body region and garment group.
     /// Contract: docs/unity-tools.md.</summary>
     [AgentTool]
@@ -42,7 +42,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if ((err = ResolveGroups(rt, groups, out var gt)) != null) return Fail(err);
             var r = Measure(rt, body, gar, gt);
             string summary = Tag + " " + DrivePhysBones.FullPath(rt) + " bodies=" + string.Join(",", body.Select(b => b.label)) + " garments=" + string.Join(",", gar.Select(g => g.label))
-                + " => OK | " + Format(r) + " | " + Maps(r, rt);
+                + " => OK | " + Format(r) + " | " + Maps(r, rt) + Pending(rt);
             var line = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "report-clipping_" + RunLogFormat.Sanitize(rt.name), summary, summary + "\n\n" + Legend + "\n\n" + Table(r.buckets, int.MaxValue) + "\n", ".md");
             Debug.Log(line);
             return line + "\n" + Legend + "\n" + Table(r.buckets, TableCap);
@@ -53,6 +53,28 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         internal static string Maps(Result r, Transform rt) => "groups=" + r.groupSource + " regionBones=" + r.regionBones
             + (r.regionBones == 0 ? " (the Animator on '" + rt.name + "' carries no humanoid Avatar: every region reads " + Unmapped + ")" : "");
+
+        /// <summary>The merges the build has yet to run under the root: Modular Avatar <c>MergeArmature</c> components and
+        /// VRCFury <c>ArmatureLink</c> features, both gone from a built avatar. Reflected by name, so an absent
+        /// framework counts none.</summary>
+        internal static List<string> PendingMerges(Transform rt)
+        {
+            var at = new List<string>();
+            var ma = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
+            if (ma != null) foreach (var c in rt.GetComponentsInChildren(ma, true)) at.Add(AnimationUtility.CalculateTransformPath(c.transform, rt));
+            var vf = VendorReflect.FindType("VF.Model.VRCFury"); var link = VendorReflect.FindType("VF.Model.Feature.ArmatureLink");
+            var content = vf?.GetField("content");
+            if (content != null && link != null)
+                foreach (var c in rt.GetComponentsInChildren(vf, true)) if (link.IsInstanceOfType(content.GetValue(c))) at.Add(AnimationUtility.CalculateTransformPath(c.transform, rt));
+            return at;
+        }
+
+        internal static string Pending(Transform rt)
+        {
+            var at = PendingMerges(rt); if (at.Count == 0) return "";
+            return " | pendingMerges=" + at.Count + " (" + string.Join(", ", at.Take(4)) + (at.Count > 4 ? ", …" : "") + ": the build has not run these, so what they attach is not reliably carried by a bone turned on"
+                + " this instance; read rest here and a pose in play)";
+        }
 
         internal const string Legend = "Each body is measured apart and the totals sum them. crossingCm: length of the line where the garment's triangles cross the body's, the"
             + " measure of one surface showing through another; it reads zero for a garment lying wholly inside the body. behind/signed: every other garment vertex against"

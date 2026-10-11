@@ -297,6 +297,22 @@ public class DynamicsDoorsTests
         finally { Object.DestroyImmediate(root.gameObject); }
     }
 
+    // A row no build has merged still carries its merge components, and the report names each so a pose on it is not read.
+    [Test]
+    public void PendingMerges_namesEachMergeArmature_andNoneOnABareRig()
+    {
+        var root = new GameObject("Row").transform;
+        try
+        {
+            Node("Hips", Node("Armature", root));
+            Assert.AreEqual(0, ReportClipping.PendingMerges(root).Count); Assert.AreEqual("", ReportClipping.Pending(root));
+            Node("Armature.Outfit", Node("Outfit", root)).gameObject.AddComponent<nadena.dev.modular_avatar.core.ModularAvatarMergeArmature>();
+            CollectionAssert.AreEqual(new[] { "Outfit/Armature.Outfit" }, ReportClipping.PendingMerges(root));
+            StringAssert.Contains("pendingMerges=1 (Outfit/Armature.Outfit:", ReportClipping.Pending(root));
+        }
+        finally { Object.DestroyImmediate(root.gameObject); }
+    }
+
     // Merged ears and tail skin to their own bones, so an innermost-group walk keeps them out of a hair chain's bucket.
     [Test]
     public void GroupOf_takesTheInnermostGroup_andOtherwiseOther()
