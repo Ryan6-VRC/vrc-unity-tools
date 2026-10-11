@@ -42,7 +42,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if ((err = ResolveGroups(rt, groups, out var gt)) != null) return Fail(err);
             var r = Measure(rt, body, gar, gt);
             string summary = Tag + " " + DrivePhysBones.FullPath(rt) + " bodies=" + string.Join(",", body.Select(b => b.label)) + " garments=" + string.Join(",", gar.Select(g => g.label))
-                + " => OK | " + Format(r) + " | " + Maps(r, rt) + Unmerged(rt);
+                + " => OK | " + Format(r) + " | " + Maps(r, rt) + Pending(rt);
             var line = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "report-clipping_" + RunLogFormat.Sanitize(rt.name), summary, summary + "\n\n" + Legend + "\n\n" + Table(r.buckets, int.MaxValue) + "\n", ".md");
             Debug.Log(line);
             return line + "\n" + Legend + "\n" + Table(r.buckets, TableCap);
@@ -54,10 +54,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal static string Maps(Result r, Transform rt) => "groups=" + r.groupSource + " regionBones=" + r.regionBones
             + (r.regionBones == 0 ? " (the Animator on '" + rt.name + "' carries no humanoid Avatar: every region reads " + Unmapped + ")" : "");
 
-        /// <summary>The merges no build has run yet under the root: Modular Avatar <c>MergeArmature</c> components and
+        /// <summary>The merges the build has yet to run under the root: Modular Avatar <c>MergeArmature</c> components and
         /// VRCFury <c>ArmatureLink</c> features, both gone from a built avatar. Reflected by name, so an absent
         /// framework counts none.</summary>
-        internal static List<string> UnmergedArmatures(Transform rt)
+        internal static List<string> PendingMerges(Transform rt)
         {
             var at = new List<string>();
             var ma = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
@@ -69,11 +69,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             return at;
         }
 
-        static string Unmerged(Transform rt)
+        internal static string Pending(Transform rt)
         {
-            var at = UnmergedArmatures(rt); if (at.Count == 0) return "";
-            return " | unmergedArmatures=" + at.Count + " (" + string.Join(", ", at.Take(4)) + (at.Count > 4 ? ", …" : "") + ": no build has merged these, so a bone turned on this"
-                + " instance moves only what that one transform skins; this reading is the rest pose's, and a pose is read in play)";
+            var at = PendingMerges(rt); if (at.Count == 0) return "";
+            return " | pendingMerges=" + at.Count + " (" + string.Join(", ", at.Take(4)) + (at.Count > 4 ? ", …" : "") + ": the build has not run these, so what they attach is not reliably carried by a bone turned on"
+                + " this instance; read rest here and a pose in play)";
         }
 
         internal const string Legend = "Each body is measured apart and the totals sum them. crossingCm: length of the line where the garment's triangles cross the body's, the"

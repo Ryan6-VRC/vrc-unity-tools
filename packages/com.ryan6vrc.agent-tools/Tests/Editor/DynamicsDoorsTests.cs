@@ -297,17 +297,18 @@ public class DynamicsDoorsTests
         finally { Object.DestroyImmediate(root.gameObject); }
     }
 
-    // A row no build has merged carries its outfits' armatures apart, and the report names each so a pose on it is not read.
+    // A row no build has merged still carries its merge components, and the report names each so a pose on it is not read.
     [Test]
-    public void UnmergedArmatures_namesEachMergeArmature_andNoneOnABareRig()
+    public void PendingMerges_namesEachMergeArmature_andNoneOnABareRig()
     {
         var root = new GameObject("Row").transform;
         try
         {
             Node("Hips", Node("Armature", root));
-            Assert.AreEqual(0, ReportClipping.UnmergedArmatures(root).Count);
+            Assert.AreEqual(0, ReportClipping.PendingMerges(root).Count); Assert.AreEqual("", ReportClipping.Pending(root));
             Node("Armature.Outfit", Node("Outfit", root)).gameObject.AddComponent<nadena.dev.modular_avatar.core.ModularAvatarMergeArmature>();
-            CollectionAssert.AreEqual(new[] { "Outfit/Armature.Outfit" }, ReportClipping.UnmergedArmatures(root));
+            CollectionAssert.AreEqual(new[] { "Outfit/Armature.Outfit" }, ReportClipping.PendingMerges(root));
+            StringAssert.Contains("pendingMerges=1 (Outfit/Armature.Outfit:", ReportClipping.Pending(root));
         }
         finally { Object.DestroyImmediate(root.gameObject); }
     }
