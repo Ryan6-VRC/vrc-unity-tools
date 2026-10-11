@@ -297,6 +297,21 @@ public class DynamicsDoorsTests
         finally { Object.DestroyImmediate(root.gameObject); }
     }
 
+    // A row no build has merged carries its outfits' armatures apart, and the report names each so a pose on it is not read.
+    [Test]
+    public void UnmergedArmatures_namesEachMergeArmature_andNoneOnABareRig()
+    {
+        var root = new GameObject("Row").transform;
+        try
+        {
+            Node("Hips", Node("Armature", root));
+            Assert.AreEqual(0, ReportClipping.UnmergedArmatures(root).Count);
+            Node("Armature.Outfit", Node("Outfit", root)).gameObject.AddComponent<nadena.dev.modular_avatar.core.ModularAvatarMergeArmature>();
+            CollectionAssert.AreEqual(new[] { "Outfit/Armature.Outfit" }, ReportClipping.UnmergedArmatures(root));
+        }
+        finally { Object.DestroyImmediate(root.gameObject); }
+    }
+
     // Merged ears and tail skin to their own bones, so an innermost-group walk keeps them out of a hair chain's bucket.
     [Test]
     public void GroupOf_takesTheInnermostGroup_andOtherwiseOther()
