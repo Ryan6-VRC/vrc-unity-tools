@@ -208,6 +208,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var syncRead = ReadSync(clone);
                 string syncKeys;
                 var sync = SyncSection(syncRead, paramFilter, out syncKeys);
+                // Inside the scope too: the built menus are generated assets the post-callback sweeps.
+                string menuKey;
+                var builtMenu = BuiltMenuSection(ReadBuiltMenu(clone), paramFilter, out menuKey);
                 // Both texture reads sit INSIDE the scope for ReadGeometry's reason: the optimizers' output
                 // textures are NDMF `__Generated` assets the post-callback deletes, so after the scope closes
                 // the built side has nothing left to measure.
@@ -229,7 +232,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     // signal that the denominator changed. Renaming both halves makes the change visible.
                     // unlintableSurfaces rides here too, not only EmitPlain: bake is the EXACTNESS mode, so a
                     // surface this run could not walk is where the omission costs most.
-                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} {15} {16} {17}{18} mode=bake => OK | log={12}",
+                    "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} {15} {16} {17} {19}{18} mode=bake => OK | log={12}",
                     root.name, census.Surfaces.Count, census.Params.Count,
                     diff.Count(d => d.Category == "kept"), diff.Count(d => d.Category == "renamed"),
                     diff.Count(d => d.Category == "dropped"), diff.Count(d => d.Category == "merged"),
@@ -239,7 +242,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     diff.Count(d => d.Category == "built-side-unread"), path,
                     census.UnlintableSurfaces > 0 ? " unlintableSurfaces=" + census.UnlintableSurfaces : "",
                     geometryKeys, textureKeys, perfKeys, syncKeys,
-                    probeKey != null ? " " + probeKey : "");
+                    probeKey != null ? " " + probeKey : "", menuKey);
 
                 var section = new List<string>
                 {
@@ -301,7 +304,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                           + "pre-optimizer view.");
 
                 string body = "summary: " + summary + "\n\n"
-                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry, textures, performance, sync, probed);
+                            + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry, textures, performance, sync, builtMenu, probed);
                 WriteArtifact(path, body);
                 Debug.Log(summary);
             }   // scope closes: the clone is destroyed and OnPostprocessAvatar fires, in that order
@@ -1128,6 +1131,108 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             lines.Add("synced bits: " + bits + "; the Parameter Compressor did not run (it engages above the SDK's MAX_PARAMETER_COST of " + max + ").");
             summaryKeys = "syncedBits=" + bits + " compressor=no";
+            return lines;
+        }
+
+        // ── Built menu: the clone's expressions menu, control by control ──────────────────────────────
+
+        /// <summary>One control of the built menu. <c>Parameter</c> is null for a control that names none.</summary>
+        internal struct BuiltMenuRow { public string Path, Type, Parameter, SubParameters; public float Value; }
+
+        /// <summary>The clone's built expressions menu, walked depth-first in control order. <see cref="Rows"/>
+        /// is null with <see cref="Error"/> when the root menu was not reached, a different answer from a menu
+        /// holding no controls. Cut walks (depth cap, a submenu reopening one of its own ancestors) are named
+        /// in <see cref="Notes"/>, never dropped silently.</summary>
+        internal sealed class BuiltMenuRead
+        {
+            public List<BuiltMenuRow> Rows;
+            public string Error;
+            public readonly List<string> Notes = new List<string>();
+        }
+
+        private const int BuiltMenuMaxDepth = 12;
+
+        internal static BuiltMenuRead ReadBuiltMenu(GameObject clone)
+        {
+            var d = clone.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
+            if (d == null) return new BuiltMenuRead { Error = "the clone has no VRCAvatarDescriptor" };
+            if (d.expressionsMenu == null) return new BuiltMenuRead { Error = "the clone descriptor's expressionsMenu is null" };
+            return ReadMenu(d.expressionsMenu);
+        }
+
+        /// <summary>The walk itself, over any menu. A submenu reached twice from different parents is listed
+        /// twice, because the built menu shows it twice: deduplicating by asset would hide exactly that. Only a
+        /// submenu reopening one of its own ancestors is cut, since that walk never ends.</summary>
+        internal static BuiltMenuRead ReadMenu(VRCExpressionsMenu root)
+        {
+            var read = new BuiltMenuRead { Rows = new List<BuiltMenuRow>() };
+            var open = new List<VRCExpressionsMenu>();
+            void Walk(VRCExpressionsMenu menu, string path, int depth)
+            {
+                if (menu.controls == null) return;
+                if (depth > BuiltMenuMaxDepth)
+                {
+                    read.Notes.Add("the walk stopped at depth " + BuiltMenuMaxDepth + " under `" + path + "`; deeper controls are not in the table.");
+                    return;
+                }
+                open.Add(menu);
+                foreach (var c in menu.controls)
+                {
+                    if (c == null) continue;
+                    string p = string.IsNullOrEmpty(path) ? c.name : path + "/" + c.name;
+                    read.Rows.Add(new BuiltMenuRow
+                    {
+                        Path = p, Type = c.type.ToString(), Value = c.value,
+                        Parameter = c.parameter != null && !string.IsNullOrEmpty(c.parameter.name) ? c.parameter.name : null,
+                        SubParameters = c.subParameters == null ? null
+                            : string.Join(", ", c.subParameters.Where(s => s != null && !string.IsNullOrEmpty(s.name)).Select(s => s.name)),
+                    });
+                    if (c.subMenu == null) continue;
+                    if (open.Contains(c.subMenu))
+                        read.Notes.Add("`" + p + "` opens a menu already open above it (a cycle); its controls are listed once, at the first opening.");
+                    else Walk(c.subMenu, p, depth + 1);
+                }
+                open.RemoveAt(open.Count - 1);
+            }
+            Walk(root, "", 0);
+            return read;
+        }
+
+        /// <summary>The <c>## Built menu</c> section and (out) its summary key. Pure over the read. It reports
+        /// the built menu and joins nothing to the authored Menu controls table: the build rewrites paths and
+        /// names, so any pairing would be inference this section has no basis for.</summary>
+        internal static List<string> BuiltMenuSection(BuiltMenuRead read, string paramFilter, out string summaryKey)
+        {
+            var lines = new List<string>
+            {
+                "the clone's built expressions menu, every control in menu order"
+                    + (string.IsNullOrEmpty(paramFilter) ? ""
+                       : "; `" + RunLogFormat.Cell(paramFilter) + "` narrows the table to controls whose parameter or a sub-parameter contains it, and the summary count is of the WHOLE menu"),
+                "",
+            };
+            if (read.Rows == null)
+            {
+                lines.Add("**The built menu was not read, so no row is published:** " + RunLogFormat.Cell(read.Error ?? "(no error recorded)"));
+                summaryKey = "builtMenuControls=unread";
+                return lines;
+            }
+            summaryKey = "builtMenuControls=" + read.Rows.Count.ToString(CultureInfo.InvariantCulture);
+            bool Hit(string s) => s != null && s.IndexOf(paramFilter, StringComparison.OrdinalIgnoreCase) >= 0;
+            var shown = string.IsNullOrEmpty(paramFilter) ? read.Rows
+                : read.Rows.Where(r => Hit(r.Parameter) || Hit(r.SubParameters)).ToList();
+            lines.Add("| path | type | built parameter | value | sub-parameters |");
+            lines.Add("| --- | --- | --- | --- | --- |");
+            if (shown.Count == 0) lines.Add("| _(none)_ | | | | |");
+            foreach (var r in shown)
+                lines.Add("| `" + RunLogFormat.Cell(r.Path) + "` | " + r.Type
+                        + " | " + (r.Parameter == null ? "—" : "`" + RunLogFormat.Cell(r.Parameter) + "`")
+                        + " | " + (r.Parameter == null ? "—" : r.Value.ToString("G", CultureInfo.InvariantCulture))
+                        + " | " + (string.IsNullOrEmpty(r.SubParameters) ? "—" : "`" + RunLogFormat.Cell(r.SubParameters) + "`") + " |");
+            foreach (var n in read.Notes) lines.Add("> note: " + n + "  ");
+            lines.Add("");
+            lines.Add("**Paths are the built menu's own**, including the pages a framework adds when one overflows (`More`), "
+                    + "so a path here need not match an authored one. A parameter is the name the built animator reads, "
+                    + "auto-named Modular Avatar toggles included; the Bake diff maps an authored name to it.");
             return lines;
         }
 
