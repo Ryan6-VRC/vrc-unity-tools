@@ -71,6 +71,15 @@ public class CompositionBuiltMenuTests
     }
 
     [Test]
+    public void AStaleSubMenuOnAToggle_isNotOpened()
+    {
+        var toggle = Toggle("Was a folder", "T");
+        toggle.subMenu = Menu(Toggle("Hidden", "H"));
+        var read = CompositionBake.ReadMenu(Menu(toggle));
+        CollectionAssert.AreEqual(new[] { "Was a folder" }, read.Rows.Select(r => r.Path).ToArray());
+    }
+
+    [Test]
     public void ACycle_isCutOnce_andNamed()
     {
         var inner = Menu(Toggle("T", "T"));

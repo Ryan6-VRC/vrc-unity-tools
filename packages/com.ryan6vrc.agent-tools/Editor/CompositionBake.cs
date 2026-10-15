@@ -1187,7 +1187,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                         SubParameters = c.subParameters == null ? null
                             : string.Join(", ", c.subParameters.Where(s => s != null && !string.IsNullOrEmpty(s.name)).Select(s => s.name)),
                     });
-                    if (c.subMenu == null) continue;
+                    // A control retyped away from SubMenu can keep a stale subMenu reference that nothing opens.
+                    if (c.type != VRCExpressionsMenu.Control.ControlType.SubMenu || c.subMenu == null) continue;
                     if (open.Contains(c.subMenu))
                         read.Notes.Add("`" + p + "` opens a menu already open above it (a cycle); its controls are listed once, at the first opening.");
                     else Walk(c.subMenu, p, depth + 1);
@@ -1230,9 +1231,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                         + " | " + (string.IsNullOrEmpty(r.SubParameters) ? "—" : "`" + RunLogFormat.Cell(r.SubParameters) + "`") + " |");
             foreach (var n in read.Notes) lines.Add("> note: " + n + "  ");
             lines.Add("");
-            lines.Add("**Paths are the built menu's own**, including the pages a framework adds when one overflows (`More`), "
-                    + "so a path here need not match an authored one. A parameter is the name the built animator reads, "
-                    + "auto-named Modular Avatar toggles included; the Bake diff maps an authored name to it.");
+            lines.Add("**Paths are the built menu's own**, including the pages a framework adds when one overflows "
+                    + "(Modular Avatar's `More`; VRCFury's `Next`, or its menu-settings override), so a path here need not match an "
+                    + "authored one. A parameter is the name the built animator reads. An auto-named Modular Avatar toggle has no "
+                    + "authored name, so the Bake diff rows its parameter `built-only`; this table is where its control is named.");
             return lines;
         }
 
