@@ -121,6 +121,33 @@ public class DynamicsDoorsTests
         StringAssert.Contains(named, WriteDynamics.ParseTable(json, out _));
     }
 
+    // A scale multiplies what it finds, so a factor that silently did nothing, or a default standing in for an omitted
+    // one, would be a wrong answer with no error. JsonUtility fills an omitted float with 0, so 0 is the omission.
+    [TestCase("{\"scales\":[{\"under\":\"Armature\"}]}", "omitted, zero or negative")]
+    [TestCase("{\"scales\":[{\"under\":\"Armature\",\"factor\":0}]}", "omitted, zero or negative")]
+    [TestCase("{\"scales\":[{\"under\":\"Armature\",\"factor\":-1.2}]}", "omitted, zero or negative")]
+    [TestCase("{\"scales\":[{\"under\":\"Armature\",\"factor\":1}]}", "changes nothing")]
+    [TestCase("{\"scales\":[{\"factor\":1.25}]}", "needs under")]
+    public void Table_scaleRows_refuseAMissingOrInertFactorAndAMissingPath(string json, string named)
+    {
+        var err = WriteDynamics.ParseTable(json, out _);
+        StringAssert.Contains("scales[0]", err);
+        StringAssert.Contains(named, err);
+        if (!named.Contains("under")) StringAssert.Contains(WriteDynamics.NotRerunnable, err, "a factor refusal says the scale is one-way");
+    }
+
+    [Test]
+    public void Table_scaleRows_parseBesideTheOtherSections()
+    {
+        Assert.IsNull(WriteDynamics.ParseTable("{\"scales\":[{\"under\":\"Armature/Hips\",\"factor\":1.25},{\"under\":\"Dynamics\",\"factor\":0.8}],"
+            + "\"colliders\":[{\"collider\":\"pbc/hips\",\"set\":[\"radius=0.14\"]}]}", out var t));
+        Assert.AreEqual(2, t.scales.Length);
+        Assert.AreEqual("Armature/Hips", t.scales[0].under); Assert.AreEqual(1.25f, t.scales[0].factor);
+        Assert.AreEqual(0.8f, t.scales[1].factor);
+        Assert.IsNull(WriteDynamics.ParseTable("{\"colliders\":[{\"collider\":\"A\",\"set\":[\"radius=1\"]}]}", out t));
+        Assert.AreEqual(0, t.scales.Length, "a table without scales has none");
+    }
+
     [Test]
     public void Table_createAndColliderRows_parse()
     {
