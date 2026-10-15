@@ -13,7 +13,11 @@ namespace Ryan6Vrc.AgentTools.Editor
     [AgentTool]
     public static class WriteDynamics
     {
-        [Serializable] public class Table { public Node[] nodes = new Node[0]; public Move[] moves = new Move[0]; public PhysBoneSet[] physbones = new PhysBoneSet[0]; public ColliderSet[] colliders = new ColliderSet[0]; public ConstraintRow[] constraints = new ConstraintRow[0]; }
+        [Serializable] public class Table { public Scale[] scales = new Scale[0]; public Node[] nodes = new Node[0]; public Move[] moves = new Move[0]; public PhysBoneSet[] physbones = new PhysBoneSet[0]; public ColliderSet[] colliders = new ColliderSet[0]; public ConstraintRow[] constraints = new ConstraintRow[0]; }
+        /// <summary>Multiplies the length fields of every physbone and collider hosted or rooted at or under <c>under</c>
+        /// (<c>.</c> or the root's own name for the root itself) by <c>factor</c>. No default factor: JsonUtility reads an
+        /// omitted one as 0, which is refused with 1.</summary>
+        [Serializable] public class Scale { public string under; public float factor; }
         [Serializable] public class Node { public string parent, name, rotation = ""; public bool physbone; public NodeCollider collider = new NodeCollider(); }
         [Serializable] public class NodeCollider { public string shape = "", position = "0,0,0", rotation = "0,0,0"; public float radius = 0.05f, height = 0.2f; }
         [Serializable] public class Move { public string physbone; public string from; public string[] to = new string[0]; }
@@ -51,8 +55,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (play && isPrefab) return Fail("a prefab asset is edit-mode only; in play pass the live scene root");
             if (isPrefab && !whatIf && (root.Replace('\\', '/').StartsWith("Assets/Vendor/") || root.Replace('\\', '/').StartsWith("Packages/")))
                 return Fail("'" + root + "' is vendor or package content, which this door never saves; write a scene instance or an owned prefab (whatIf may still preview it)");
-            if (play && (t.moves.Length + t.nodes.Length > 0 || t.physbones.Any(p => p.create || p.remove) || t.constraints.Any(c => c.remove)))
-                return Fail("nodes, moves, creates and removes are edit-mode only (the solver's chains are built at play entry); exit play and re-run");
+            if (play && (t.scales.Length + t.moves.Length + t.nodes.Length > 0 || t.physbones.Any(p => p.create || p.remove) || t.constraints.Any(c => c.remove)))
+                return Fail("scales, nodes, moves, creates and removes are edit-mode only (the solver's chains are built at play entry, and a scale is a one-way edit to the authored rig); exit play and re-run");
             if (play && t.physbones.Length + t.colliders.Length > 0 && DrivePhysBones.Running) return Fail("a DrivePhysBones drive is running and a live physbone or collider write changes its chains mid-sample; wait for DrivePhysBones.Status() to finish");
             if (play && t.physbones.Length > 0 && _pump != null) return Fail("a live field set is still cycling its physbone hosts; poll WriteDynamics.Status(), then call again");
             if (play && t.physbones.Length > 0 && EditorApplication.isPaused) return Fail("the editor is paused (a held GrabPhysBone freezes it), so no frame can pass for a field set to reach the solver: GrabPhysBone.Release(resume: true) first");
@@ -63,8 +67,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             try
             {
                 // Every mutation is undo-recorded into one group, so a refusal, a whatIf or a write-time throw reverts it whole.
-                var log = new List<string>(); Action writes = null; var named = new List<VRCPhysBoneBase>(); var baked = new List<(string target, VRCConstraintBase con)>();
-                err = MakeNodes(go.transform, t.nodes, log, out int made);
+                var log = new List<string>(); Action writes = null; int made = 0; var named = new List<VRCPhysBoneBase>(); var baked = new List<(string target, VRCConstraintBase con)>();
+                err = ScaleRows(go.transform, t.scales, log);
+                if (err == null) err = MakeNodes(go.transform, t.nodes, log, out made);
                 if (err == null) err = MakePhysBones(go.transform, t.physbones, log);
                 if (err == null) err = Plan(go.transform, t, play, log, named, baked, out writes);
                 if (err == null && !whatIf) try { writes(); } catch (Exception e) { err = "a write threw and the whole table was rolled back: " + e.GetType().Name + ": " + e.Message; }
@@ -72,8 +77,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (err != null || whatIf) Undo.RevertAllDownToGroup(group);
                 if (err != null) return Fail(err);
                 if (!whatIf && isPrefab) PrefabUtility.SaveAsPrefabAsset(go, root);
-                string summary = Tag + (whatIf ? " Preview " : " Write ") + root + (play ? " (live)" : "") + " => OK | nodes=" + made + " moves=" + t.moves.Sum(m => m.to.Length) + " physbones=" + t.physbones.Length
-                    + " colliders=" + t.colliders.Length + " constraints=" + t.constraints.Length + offsets + (whatIf ? " | whatIf: nothing written" : isPrefab ? " | saved" : play ? " | reverts on play exit" : " | scene dirtied, not saved");
+                string summary = Tag + (whatIf ? " Preview " : " Write ") + root + (play ? " (live)" : "") + " => OK | scales=" + t.scales.Length + " nodes=" + made + " moves=" + t.moves.Sum(m => m.to.Length) + " physbones=" + t.physbones.Length
+                    + " colliders=" + t.colliders.Length + " constraints=" + t.constraints.Length + offsets + (t.scales.Length > 0 ? " | " + NotRerunnable : "") + (whatIf ? " | whatIf: nothing written" : isPrefab ? " | saved" : play ? " | reverts on play exit" : " | scene dirtied, not saved");
                 if (play && !whatIf && named.Count > 0) { SessionState.SetInt(SessionKey, PlaySession.Current); return CycleHosts(go.transform, root, summary, named, log); }
                 var line = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "write-dynamics_" + RunLogFormat.Leaf(root), summary, string.Join("\n", log) + "\n", ".md");
                 Debug.Log(line);
@@ -227,6 +232,90 @@ namespace Ryan6Vrc.AgentTools.Editor
             EditorApplication.update += _pump;
             return pending + "\n" + string.Join("\n", log.Take(12)) + (log.Count > 12 ? "\n… " + (log.Count - 12) + " more rows in the log" : "");
         }
+
+        /// <summary>The sentence ParseTable's factor refusals end on, and every Preview or Write summary of a table that
+        /// carries scales.</summary>
+        internal const string NotRerunnable = "a scale multiplies what it finds, so re-running the table scales again";
+
+        static readonly string[] PhysBoneLengths = { "radius", "endpointPosition" }, ColliderLengths = { "radius", "height", "position" };
+
+        /// <summary>A factor within float noise of 1 changes nothing and is refused with it.</summary>
+        internal static bool IsUnitFactor(float f) => Mathf.Abs(f - 1f) < 1e-6f;
+
+        /// <summary>A scale row's <c>under</c>: <c>.</c> is the root itself, and so is the root's own name unless it
+        /// also resolves as a child path, which is refused as ambiguous; anything else is <see cref="Find"/>'s.</summary>
+        internal static Transform ResolveUnder(Transform root, string under, out string err)
+        {
+            if (under == ".") { err = null; return root; }
+            var t = Find(root, under, out err);
+            if (under != root.name) return t;
+            if (t == null && err.Contains("resolves to nothing")) { err = null; return root; }
+            err = "'" + under + "' names both the root and " + (t != null ? "its child `" + PathOf(root, t) + "`" : "objects under it") + "; pass \".\" for the root or the child's full path";
+            return null;
+        }
+
+        /// <summary>How a scale row's path is printed: the root as <c>.</c> with its name, never an empty path.</summary>
+        static string Label(Transform root, Transform t) => t == root ? ". (the root '" + root.name + "')" : PathOf(root, t);
+
+        /// <summary>The planning half of the scales, pure over transforms: which row reaches which target. A target is a
+        /// component's host and its effective root (its <c>rootTransform</c>, else the host), and a row reaches it when
+        /// either sits at or under the row's path, the host first, so a holder-hosted physbone is reached through the
+        /// chain it roots. Refuses a path that resolves to nothing, a row that reaches no target, and a target two rows
+        /// reach, which would scale twice. Returns the first refusal, or null with <paramref name="plan"/> holding
+        /// (row, target index, reached through the root) in row order.</summary>
+        internal static string PlanScales(Transform root, Scale[] rows, IList<(Transform host, Transform effRoot)> targets, out List<(int row, int target, bool byRoot)> plan)
+        {
+            plan = new List<(int, int, bool)>(); var owner = new Dictionary<int, int>();
+            for (int i = 0; i < rows.Length; i++)
+            {
+                var at = ResolveUnder(root, rows[i].under, out var err); if (at == null) return "scales[" + i + "]: " + err;
+                int reached = 0;
+                for (int k = 0; k < targets.Count; k++)
+                {
+                    var (host, eff) = targets[k];
+                    bool byHost = host != null && host.IsChildOf(at), byRoot = !byHost && eff != null && eff.IsChildOf(at);
+                    if (!byHost && !byRoot) continue;
+                    if (owner.TryGetValue(k, out var j))
+                        return "scales[" + j + "] and scales[" + i + "] both reach the component on `" + Label(root, host) + "`, which would scale it twice; give each path one row, and where paths nest with different factors, name sibling paths so every component sits under exactly one row";
+                    owner[k] = i; plan.Add((i, k, byRoot)); reached++;
+                }
+                if (reached == 0) return "scales[" + i + "]: nothing at or under '" + rows[i].under + "' hosts or roots a physbone or collider; name the path that does";
+            }
+            return null;
+        }
+
+        /// <summary>The first rows to apply, ahead of the nodes, so every later row's value is absolute: each row multiplies
+        /// physbone <c>radius</c> and <c>endpointPosition</c> and collider <c>radius</c>, <c>height</c> and <c>position</c> on
+        /// every component <see cref="PlanScales"/> gives it. Curves, angles and stiffness are ratios and stay. Written
+        /// through SerializedObject into the caller's Undo group, one log line per component in the table's own
+        /// <c>field=value</c> form, before -> after, naming the root it was reached through when that was not its host.</summary>
+        static string ScaleRows(Transform root, Scale[] rows, List<string> log)
+        {
+            if (rows.Length == 0) return null;
+            var comps = root.GetComponentsInChildren<VRCPhysBoneBase>(true).Cast<Component>().Concat(root.GetComponentsInChildren<VRCPhysBoneColliderBase>(true)).ToList();
+            var targets = comps.Select(c => (c.transform, c is VRCPhysBoneBase pb ? EffRoot(pb) : ((VRCPhysBoneColliderBase)c).rootTransform != null ? ((VRCPhysBoneColliderBase)c).rootTransform : c.transform)).ToList();
+            var err = PlanScales(root, rows, targets, out var plan); if (err != null) return err;
+            foreach (var (row, k, byRoot) in plan)
+            {
+                var c = comps[k]; float f = rows[row].factor;
+                bool isPb = c is VRCPhysBoneBase; var so = new SerializedObject(c); var parts = new List<string>();
+                foreach (var name in isPb ? PhysBoneLengths : ColliderLengths)
+                {
+                    var p = so.FindProperty(name);
+                    if (p == null || (p.propertyType != SerializedPropertyType.Float && p.propertyType != SerializedPropertyType.Vector3))
+                        return "scales: " + c.GetType().Name + " has no float or Vector3 field '" + name + "' (VRChat SDK drift); nothing was scaled";
+                    if (p.propertyType == SerializedPropertyType.Float) { parts.Add(name + "=" + Num(p.floatValue) + " -> " + Num(p.floatValue * f)); p.floatValue *= f; }
+                    else { parts.Add(name + "=" + Vec(p.vector3Value) + " -> " + Vec(p.vector3Value * f)); p.vector3Value *= f; }
+                }
+                so.ApplyModifiedProperties();
+                log.Add("scale x" + Num(f) + " " + (isPb ? "physbone" : "collider") + " `" + Label(root, c.transform) + "`"
+                    + (byRoot ? " (reached through its root `" + Label(root, targets[k].Item2) + "`)" : "") + " " + string.Join(" ", parts));
+            }
+            return null;
+        }
+
+        static string Num(float v) => v.ToString("0.######", CultureInfo.InvariantCulture);
+        static string Vec(Vector3 v) => Num(v.x) + "," + Num(v.y) + "," + Num(v.z);
 
         /// <summary>Creates each absent node (an existing one is left alone): an empty child at the parent's origin,
         /// world <c>rotation</c> as <c>x,y,z</c> Euler (blank keeps the parent's), with an optional bare physbone and an
@@ -451,8 +540,16 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             t = null; text = text?.Trim() ?? "";
             if (!text.StartsWith("{") && File.Exists(text)) text = File.ReadAllText(text).Trim();
-            if (!text.StartsWith("{")) return "the table is a JSON object ({\"nodes\":[…],\"moves\":[…],\"physbones\":[…],\"colliders\":[…],\"constraints\":[…]}) or a path to a file holding one";
+            if (!text.StartsWith("{")) return "the table is a JSON object ({\"scales\":[…],\"nodes\":[…],\"moves\":[…],\"physbones\":[…],\"colliders\":[…],\"constraints\":[…]}) or a path to a file holding one";
             try { t = JsonUtility.FromJson<Table>(text); } catch (ArgumentException e) { return "table JSON does not parse: " + e.Message; }
+            for (int i = 0; i < t.scales.Length; i++)
+            {
+                var r = t.scales[i];
+                if (string.IsNullOrEmpty(r.under)) return "scales[" + i + "] needs under, the path whose physbones and colliders it scales, and a factor";
+                if (r.factor <= 0f || IsUnitFactor(r.factor))
+                    return "scales[" + i + "]: factor " + Num(r.factor) + (IsUnitFactor(r.factor) ? " changes nothing" : " is omitted, zero or negative (JsonUtility reads an omitted factor as 0)")
+                        + "; give the size ratio new/old (1.25 grows a quarter) and land it once: " + NotRerunnable;
+            }
             for (int i = 0; i < t.nodes.Length; i++)
                 if (string.IsNullOrEmpty(t.nodes[i].parent) || string.IsNullOrEmpty(t.nodes[i].name) || t.nodes[i].name.Contains("/")) return "nodes[" + i + "] needs parent and a bare name";
             for (int i = 0; i < t.moves.Length; i++)

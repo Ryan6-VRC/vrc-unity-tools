@@ -45,6 +45,10 @@ namespace Ryan6Vrc.AgentTools.Editor
     ///     constraint on the base bone. Each offender is marked <c>[live]</c>/<c>[not-live]</c> relative to
     ///     the avatar root, so a mixed-live physbone group reads as the per-range variant set it usually is
     ///     (docs/outfits.md) rather than N components to reconcile.
+    ///   - <b>blendshape-action</b>: a VRCFury BlendShape action, in any feature's action lists, whose shape no
+    ///     SkinnedMeshRenderer in the set VRCFury searches carries (every one under the avatar root, or the one
+    ///     renderer the action names). VRCFury's BlendshapeActionBuilder builds such an action to an empty clip
+    ///     with its warning commented out, so nothing else says so. Read from the placed scene like the first two.
     ///
     /// The first two resolve against the PLACED scene (the load-bearing model, spec D1): a to-be-merged bone
     /// is physically present pre-bake and resolves now; a base-rename break does not. So this predicts nothing
@@ -138,6 +142,21 @@ namespace Ryan6Vrc.AgentTools.Editor
             "component inside the FullController's subtree: constrain it to the anchor instead of parenting " +
             "it there, or anchor with a VRCFury ArmatureLink, which moves after the rename " +
             "(docs/nondestructive.md §Choosing a framework).";
+
+        /// <summary>Fires iff at least one blendshape-action offender exists.</summary>
+        internal const string BlendshapeActionNoteLine =
+            "VRCFury builds a BlendShape action whose shape no renderer it searches carries to nothing, and says " +
+            "nothing. The repair is the shape (author the key on the mesh that should carry it) or the action (name a " +
+            "shape the set carries, point it at the renderer that has it, or remove it). Objects the build strips " +
+            "first (tagged EditorOnly, or carrying a VRCFury Delete During Upload) count on neither side. Not modelled: " +
+            "a mesh or shape a build step adds, and an un-upgraded legacy field (Breathing's version-0 `blendshape` " +
+            "string), which VRCFury converts to an action only on upgrade.";
+
+        // The serialized VRCFury names the blendshape-action walk reads, by string only (no typed reference to
+        // VRCFury internals): the component and the action type whose builder skips a missing shape silently.
+        internal const string VrcfComponentFullName = "VF.Model.VRCFury";
+        internal const string VrcfBlendShapeActionFullName = "VF.Model.StateAction.BlendShapeAction";
+        internal const string EditorOnlyTag = "EditorOnly";
 
         // The MA components that reparent a node: BoneProxyProcessor, MergeArmatureHook and
         // WorldFixedObjectProcessor SetParent the GameObject they sit on, and ReplaceObjectPass SetParents the
@@ -519,6 +538,19 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             ScanMergeConflicts(avatarGO, rep);
 
+            var actionsUnchecked = new HashSet<Component>();
+            foreach (var hit in CollectBlendshapeActions(avatarGO,
+                         (c, field) => { if (actionsUnchecked.Add(c)) rep.UnlintableActions++; BlendshapeUnreflected(c, field, rep); },
+                         (type, n) => { rep.UnlintableActions += n; BlendshapeTypeMissing(type, n, rep); }))
+                rep.BlendshapeActions.Add(new Offender
+                {
+                    Kind = "blendshape-action",
+                    Path = hit.Shape,
+                    Host = "VRCFury " + hit.Feature + " @ " + PathOf(hit.Host.gameObject),
+                    Property = hit.Property,
+                    Searched = hit.Searched,
+                });
+
             return Emit(rep);
         }
 
@@ -580,6 +612,26 @@ namespace Ryan6Vrc.AgentTools.Editor
             Debug.LogWarning(msg);
             rep.Notes.Add(FailLoudNotePrefix + msg.Substring("[CheckAvatar] ".Length));
             rep.UnlintableSurfaces++;
+        }
+
+        // The blendshape-action walk's fail-loud: a VRCFury field it reads did not reflect, so the actions under that
+        // component (or under every component, for the type itself) went unchecked, and a clean count must not read
+        // as coverage.
+        private static void BlendshapeUnreflected(Component c, string field, Report rep)
+        {
+            string msg = "[CheckAvatar] VRCFury field '" + field + "' on " + c.GetType().Name + " @ " + PathOf(c.gameObject)
+                       + " did not reflect — BlendShape actions it covers were NOT checked by this run.";
+            Debug.LogWarning(msg);
+            rep.Notes.Add(FailLoudNotePrefix + msg.Substring("[CheckAvatar] ".Length));
+        }
+
+        // The type the walk matches on is gone, which blinds the walk for every VRCFury component under the root.
+        private static void BlendshapeTypeMissing(string type, int components, Report rep)
+        {
+            string msg = "[CheckAvatar] VRCFury type '" + type + "' does not resolve in the loaded VRCFury — no BlendShape action on any of the "
+                       + components + " VRCFury components under the root was checked by this run; re-pin CheckAvatar.VrcfBlendShapeActionFullName.";
+            Debug.LogWarning(msg);
+            rep.Notes.Add(FailLoudNotePrefix + msg.Substring("[CheckAvatar] ".Length));
         }
 
         // R-K: the frame caveat that rides beside an MA MergeAnimator whose relativePathRoot did not resolve.
@@ -836,6 +888,108 @@ namespace Ryan6Vrc.AgentTools.Editor
             return names;
         }
 
+        // ── BlendShape-action walk ───────────────────────────────────────────────────────────────────────
+        // Every VRCFury component under the root, and every managed reference anywhere in its feature whose type leaf
+        // is BlendShapeAction (a Toggle's states, but also Talking, Blinking, a Puppet stop, a SmoothLoop's nested
+        // states). The search set is VRCFury's own: VRCFuryBuilder.Run first strips every object below the avatar root
+        // that is tagged EditorOnly or carries a DeleteDuringUpload feature (EditorOnlyUtils), then BlendshapeActionBuilder
+        // takes every remaining SkinnedMeshRenderer, inactive included, when allRenderers is on, else the one renderer
+        // named and only if it is one of those. The action is an offender when no renderer in that set has the shape on
+        // its sharedMesh; an action on a stripped component never builds, so it is not swept. Read by SerializedObject
+        // and type-name leaf, never a typed reference. A field that does not reflect goes to onUnreflected and the
+        // actions it covers are skipped; a missing action type goes to onTypeMissing with the number of components it
+        // blinds, and nothing is swept.
+        internal struct BlendshapeActionHit
+        {
+            public Component Host;      // the VRCFury component
+            public string Feature;      // its feature's type leaf (Toggle, Talking, ...)
+            public string Property;     // the action's serialized property path, the handle a SerializedObject fix takes
+            public string Shape;        // the blendShape it names
+            public string Searched;     // the renderer set it searched, named
+        }
+
+        internal static List<BlendshapeActionHit> CollectBlendshapeActions(GameObject root, Action<Component, string> onUnreflected,
+            Action<string, int> onTypeMissing)
+        {
+            var hits = new List<BlendshapeActionHit>();
+            if (root == null) return hits;
+            var fury = new List<Component>();
+            foreach (var c in root.GetComponentsInChildren<Component>(true))
+                if (c != null && c.GetType().FullName == VrcfComponentFullName && !StrippedAtBuild(c.transform, root.transform)) fury.Add(c);
+            if (fury.Count == 0) return hits;
+            // The leaf this walk matches must still exist, or a VRCFury rename reads as "no actions": blind, so loud.
+            if (VendorReflect.FindType(VrcfBlendShapeActionFullName) == null) { onTypeMissing(VrcfBlendShapeActionFullName, fury.Count); return hits; }
+            var skins = new List<SkinnedMeshRenderer>();
+            foreach (var smr in root.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+                if (!StrippedAtBuild(smr.transform, root.transform)) skins.Add(smr);
+            foreach (var c in fury)
+            {
+                SerializedObject so;
+                try { so = new SerializedObject(c); } catch { onUnreflected(c, "VRCF (SerializedObject)"); continue; }
+                var content = so.FindProperty("content");
+                if (content == null) { onUnreflected(c, "VRCF.content"); continue; }
+                string ftn = content.managedReferenceFullTypename;
+                if (string.IsNullOrEmpty(ftn)) { onUnreflected(c, "VRCF.content (feature type unresolved)"); continue; }
+                string feature = Leaf(ftn);
+                var it = content.Copy(); var end = content.GetEndProperty(true);
+                bool enter = true;
+                while (it.Next(enter) && !SerializedProperty.EqualContents(it, end))
+                {
+                    enter = true;
+                    if (it.propertyType != SerializedPropertyType.ManagedReference || Leaf(it.managedReferenceFullTypename) != "BlendShapeAction") continue;
+                    enter = false; // an action carries no nested actions
+                    var shape = it.FindPropertyRelative("blendShape");
+                    var all = it.FindPropertyRelative("allRenderers");
+                    var named = it.FindPropertyRelative("renderer");
+                    if (shape == null || shape.propertyType != SerializedPropertyType.String) { onUnreflected(c, "BlendShapeAction.blendShape"); continue; }
+                    if (all == null || all.propertyType != SerializedPropertyType.Boolean) { onUnreflected(c, "BlendShapeAction.allRenderers"); continue; }
+                    if (named == null || named.propertyType != SerializedPropertyType.ObjectReference) { onUnreflected(c, "BlendShapeAction.renderer"); continue; }
+                    string name = shape.stringValue ?? "";
+                    var target = named.objectReferenceValue as Renderer;
+                    string searched;
+                    bool found = false;
+                    if (all.boolValue)
+                    {
+                        foreach (var smr in skins) if (Carries(smr, name)) { found = true; break; }
+                        searched = "every SkinnedMeshRenderer under the avatar root the build keeps (" + skins.Count + ")";
+                    }
+                    else if (target == null) searched = "no renderer (allRenderers is off and renderer is unset)";
+                    else if (!(target is SkinnedMeshRenderer)) searched = "renderer `" + PathOf(target.gameObject) + "` only, a " + target.GetType().Name + ", which VRCFury never searches";
+                    else if (!target.transform.IsChildOf(root.transform)) searched = "renderer `" + PathOf(target.gameObject) + "` only, outside the avatar root, which VRCFury never searches";
+                    else if (!skins.Contains((SkinnedMeshRenderer)target)) searched = "renderer `" + PathOf(target.gameObject) + "` only, which the build strips (EditorOnly or Delete During Upload)";
+                    else { found = Carries((SkinnedMeshRenderer)target, name); searched = "renderer `" + PathOf(target.gameObject) + "` only"; }
+                    if (found) continue;
+                    hits.Add(new BlendshapeActionHit { Host = c, Feature = feature, Property = it.propertyPath, Shape = name, Searched = searched });
+                }
+            }
+            return hits;
+        }
+
+        // What VRCFuryBuilder.Run removes before any builder runs (EditorOnlyUtils.RemoveEditorOnlyObjects): an object
+        // strictly below the avatar root that is tagged EditorOnly or carries a VRCFury DeleteDuringUpload feature, with
+        // everything under it. The root itself is never removed.
+        private static bool StrippedAtBuild(Transform t, Transform root)
+        {
+            for (; t != null && t != root; t = t.parent)
+            {
+                if (t.CompareTag(EditorOnlyTag)) return true;
+                foreach (var c in t.GetComponents<Component>())
+                {
+                    if (c == null || c.GetType().FullName != VrcfComponentFullName) continue;
+                    SerializedProperty content;
+                    try { content = new SerializedObject(c).FindProperty("content"); } catch { continue; }
+                    if (content != null && Leaf(content.managedReferenceFullTypename) == "DeleteDuringUpload") return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool Carries(SkinnedMeshRenderer smr, string shape)
+            => smr != null && smr.sharedMesh != null && smr.sharedMesh.GetBlendShapeIndex(shape) >= 0;
+
+        private static string Leaf(string typeName)
+            => string.IsNullOrEmpty(typeName) ? "" : typeName.Substring(typeName.LastIndexOf('.') + 1);
+
         // ── Merge-conflict scan (pure grouping core) ─────────────────────────────────────────────────
         // Merge-conflict scan: two dynamics components (grouped within a category) that resolve to the same
         // POST-MERGE transform, where ≥1 is mergeable-sourced (its raw target name-merges onto a shared bone).
@@ -931,16 +1085,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             int clipBinding = rep.ClipBindings.Count;
             int anchorSeam = rep.AnchorSeams.Count;
             int mergeConflict = rep.MergeConflicts.Count;
-            string result = (maSceneRef > 0 || clipBinding > 0 || anchorSeam > 0 || mergeConflict > 0) ? "CLASSIFY" : "PASS";
+            int blendshapeAction = rep.BlendshapeActions.Count;
+            string result = (maSceneRef > 0 || clipBinding > 0 || anchorSeam > 0 || mergeConflict > 0 || blendshapeAction > 0) ? "CLASSIFY" : "PASS";
 
             // On the SUMMARY, not just the body — a bare `=> PASS` would read as coverage this run lacks.
             // Not folded into the verdict: a gap in reach is not a reference break, and blurring them would
             // make CLASSIFY stop meaning "an offender is named below".
-            string unlintablePart = rep.UnlintableSurfaces > 0
-                ? string.Format(CultureInfo.InvariantCulture, " unlintableSurfaces={0}", rep.UnlintableSurfaces) : "";
+            string unlintablePart = (rep.UnlintableSurfaces > 0
+                ? string.Format(CultureInfo.InvariantCulture, " unlintableSurfaces={0}", rep.UnlintableSurfaces) : "")
+                + (rep.UnlintableActions > 0
+                ? string.Format(CultureInfo.InvariantCulture, " unlintableActions={0}", rep.UnlintableActions) : "");
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[CheckAvatar] {0}: maSceneRef={1} clipBinding={2} anchorSeam={3} mergeConflict={4}{5} => {6}",
-                rep.Root.name, maSceneRef, clipBinding, anchorSeam, mergeConflict, unlintablePart, result);
+                "[CheckAvatar] {0}: maSceneRef={1} clipBinding={2} anchorSeam={3} mergeConflict={4} blendshapeAction={5}{6} => {7}",
+                rep.Root.name, maSceneRef, clipBinding, anchorSeam, mergeConflict, blendshapeAction, unlintablePart, result);
 
             var sb = new StringBuilder();
             sb.Append("# CheckAvatar: ").Append(rep.Root.name).Append('\n');
@@ -952,6 +1109,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             sb.Append("- clipBinding: ").Append(clipBinding).Append('\n');
             sb.Append("- anchorSeam: ").Append(anchorSeam).Append('\n');
             sb.Append("- mergeConflict: ").Append(mergeConflict).Append('\n');
+            sb.Append("- blendshapeAction: ").Append(blendshapeAction).Append('\n');
 
             sb.Append("\n## Offenders\n\n");
             sb.Append("### MA-scene-ref\n\n");
@@ -993,6 +1151,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                       .Append(string.IsNullOrEmpty(h.Detail) ? "" : ", " + h.Detail).Append(")\n");
             }
 
+            sb.Append("\n### blendshape-action\n\n");
+            if (rep.BlendshapeActions.Count == 0) sb.Append("_(none)_\n");
+            else foreach (var o in rep.BlendshapeActions)
+                sb.Append("- **blendshape-action** shape=`").Append(o.Path)
+                  .Append("` property=`").Append(o.Property)
+                  .Append("` searched=").Append(o.Searched)
+                  .Append(" [").Append(o.Host).Append("]\n");
+
             sb.Append("\n## Notes\n\n");
             sb.Append("- ").Append(ExcludedEdgeLine).Append('\n');
             sb.Append("- ").Append(DiscretionLimitsLine).Append('\n');
@@ -1009,6 +1175,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append("- ").Append(AnchorSeamScopeLine).Append('\n');
             if (rep.AnchorSeams.Count > 0)
                 sb.Append("- ").Append(AnchorSeamNoteLine).Append('\n');
+            if (rep.BlendshapeActions.Count > 0)
+                sb.Append("- ").Append(BlendshapeActionNoteLine).Append('\n');
             if (AnyMixedLivePhysboneGroup(rep.MergeConflicts))
                 sb.Append("- ").Append(VariantSetNoteLine).Append('\n');
             if (!rep.Root.activeInHierarchy)
@@ -1035,7 +1203,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         private struct Offender
         {
             public string Kind;
-            public string Path;          // MA-scene-ref: failing referencePath. clip-binding: binding scene path. anchor-seam: the carrier's scene path.
+            public string Path;          // MA-scene-ref: failing referencePath. clip-binding: binding scene path. anchor-seam: the carrier's scene path. blendshape-action: the shape name.
             public string Host;          // component/site label
             public string Animator;      // clip-binding only
             public string Clip;          // clip-binding only
@@ -1044,6 +1212,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Parameter;     // anchor-seam only — the parameter it writes, which the build leaves bare
             public string Anchor;        // anchor-seam only — scene path of the relocated node (what a repair moves)
             public string AnchorLabel;   // anchor-seam only — the MA relocator's short type name(s)
+            public string Property;      // blendshape-action only — the action's serialized property path on its VRCFury component
+            public string Searched;      // blendshape-action only — the renderer set VRCFury searches for the shape
         }
 
         private class Report
@@ -1054,9 +1224,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             public readonly List<Offender> ClipBindings = new List<Offender>();
             public readonly List<Offender> AnchorSeams = new List<Offender>();
             public readonly List<MergeConflict> MergeConflicts = new List<MergeConflict>();
+            public readonly List<Offender> BlendshapeActions = new List<Offender>();
             public readonly List<string> FrameUncertain = new List<string>(); // R-K frame caveats (uncertain AND certain-but-captioned)
             public readonly List<string> Notes = new List<string>();          // R-H fail-loud + degrade notes
             public int UnlintableSurfaces;                                    // surfaces mounting a controller this door cannot walk
+            public int UnlintableActions;                                     // VRCFury components whose BlendShape actions went unchecked
         }
     }
 }

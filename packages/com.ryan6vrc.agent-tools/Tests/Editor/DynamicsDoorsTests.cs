@@ -121,6 +121,83 @@ public class DynamicsDoorsTests
         StringAssert.Contains(named, WriteDynamics.ParseTable(json, out _));
     }
 
+    // A scale multiplies what it finds, so a factor that silently did nothing, or a default standing in for an omitted
+    // one, would be a wrong answer with no error. JsonUtility fills an omitted float with 0, so 0 is the omission.
+    [TestCase("{\"scales\":[{\"under\":\"Armature\"}]}", "omitted, zero or negative")]
+    [TestCase("{\"scales\":[{\"under\":\"Armature\",\"factor\":0}]}", "omitted, zero or negative")]
+    [TestCase("{\"scales\":[{\"under\":\"Armature\",\"factor\":-1.2}]}", "omitted, zero or negative")]
+    [TestCase("{\"scales\":[{\"under\":\"Armature\",\"factor\":1}]}", "changes nothing")]
+    [TestCase("{\"scales\":[{\"under\":\"Armature\",\"factor\":1.0000001}]}", "changes nothing")]
+    [TestCase("{\"scales\":[{\"factor\":1.25}]}", "needs under")]
+    public void Table_scaleRows_refuseAMissingOrInertFactorAndAMissingPath(string json, string named)
+    {
+        var err = WriteDynamics.ParseTable(json, out _);
+        StringAssert.Contains("scales[0]", err);
+        StringAssert.Contains(named, err);
+        if (!named.Contains("under")) StringAssert.Contains(WriteDynamics.NotRerunnable, err, "a factor refusal says the scale is one-way");
+    }
+
+    [Test]
+    public void Table_scaleRows_parseBesideTheOtherSections()
+    {
+        Assert.IsNull(WriteDynamics.ParseTable("{\"scales\":[{\"under\":\"Armature/Hips\",\"factor\":1.25},{\"under\":\"Dynamics\",\"factor\":0.8}],"
+            + "\"colliders\":[{\"collider\":\"pbc/hips\",\"set\":[\"radius=0.14\"]}]}", out var t));
+        Assert.AreEqual(2, t.scales.Length);
+        Assert.AreEqual("Armature/Hips", t.scales[0].under); Assert.AreEqual(1.25f, t.scales[0].factor);
+        Assert.AreEqual(0.8f, t.scales[1].factor);
+        Assert.IsNull(WriteDynamics.ParseTable("{\"colliders\":[{\"collider\":\"A\",\"set\":[\"radius=1\"]}]}", out t));
+        Assert.AreEqual(0, t.scales.Length, "a table without scales has none");
+    }
+
+    // The planning half of the scales, over bare transforms: which row reaches which component.
+    static WriteDynamics.Scale[] Rows(params (string under, float factor)[] r)
+        => r.Select(x => new WriteDynamics.Scale { under = x.under, factor = x.factor }).ToArray();
+
+    [Test]
+    public void PlanScales_reachesByHostOrRoot_andNamesTheRoot()
+    {
+        var root = new GameObject("Hair").transform;
+        try
+        {
+            var chain = Node("Back", Node("Armature", root));
+            var holder = Node("PB_Back", Node("Dynamics", root));
+            var targets = new List<(Transform, Transform)> { (holder, chain), (root, root), (chain, chain) };
+            Assert.IsNull(WriteDynamics.PlanScales(root, Rows(("Armature", 2f)), targets, out var plan));
+            Assert.AreEqual(2, plan.Count);
+            Assert.AreEqual((0, 0, true), plan[0], "a holder-hosted physbone is reached through the chain it roots");
+            Assert.AreEqual((0, 2, false), plan[1]);
+            Assert.IsNull(WriteDynamics.PlanScales(root, Rows((".", 2f)), targets, out plan));
+            Assert.AreEqual(3, plan.Count, "`.` is the root itself, so every target under it");
+            Assert.IsNull(WriteDynamics.PlanScales(root, Rows(("Hair", 2f)), targets, out plan));
+            Assert.AreEqual(3, plan.Count, "the root's own name is the root");
+        }
+        finally { Object.DestroyImmediate(root.gameObject); }
+    }
+
+    [Test]
+    public void PlanScales_refusesDoubleReach_nothingUnder_andAnAmbiguousRootName()
+    {
+        var root = new GameObject("Hair").transform;
+        try
+        {
+            var hips = Node("Hips", Node("Armature", root));
+            Node("Empty", root);
+            var targets = new List<(Transform, Transform)> { (hips, hips) };
+            var err = WriteDynamics.PlanScales(root, Rows(("Armature", 2f), ("Armature/Hips", 0.5f)), targets, out _);
+            StringAssert.Contains("scales[0] and scales[1] both reach", err);
+            StringAssert.Contains("sibling paths", err);
+            StringAssert.DoesNotContain("product", err);
+            StringAssert.Contains("both reach", WriteDynamics.PlanScales(root, Rows(("Armature", 2f), ("Armature", 2f)), targets, out _));
+            StringAssert.Contains("hosts or roots", WriteDynamics.PlanScales(root, Rows(("Empty", 2f)), targets, out _));
+            StringAssert.Contains("resolves to nothing", WriteDynamics.PlanScales(root, Rows(("Nope", 2f)), targets, out _));
+            Node("Hair", root);
+            StringAssert.Contains("names both the root", WriteDynamics.PlanScales(root, Rows(("Hair", 2f)), targets, out _));
+            Assert.IsNull(WriteDynamics.PlanScales(root, Rows(("Armature/Hips", 2f), ("Empty", 2f)), new List<(Transform, Transform)> { (hips, hips), (root.Find("Empty"), root.Find("Empty")) }, out var plan));
+            Assert.AreEqual(2, plan.Count, "sibling paths each take their own components");
+        }
+        finally { Object.DestroyImmediate(root.gameObject); }
+    }
+
     [Test]
     public void Table_createAndColliderRows_parse()
     {
