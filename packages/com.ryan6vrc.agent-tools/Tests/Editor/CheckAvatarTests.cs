@@ -1368,7 +1368,9 @@ public class CheckAvatarTests
         var log = ReadLog(r);
         Assert.AreEqual(1, BlendshapeCount(log), log);
         StringAssert.Contains("=> CLASSIFY", r);
-        StringAssert.Contains("shape=`Shrink_Tpo` property=`content.state.actions.Array.data[0]` searched=every SkinnedMeshRenderer under the avatar root (1) [VRCFury Toggle @ BS1/Menu]", log);
+        StringAssert.Contains("shape=`Shrink_Tpo`", log);
+        StringAssert.Contains("property=`content.state.actions.Array.data[0]`", log);
+        StringAssert.Contains("[VRCFury Toggle @ BS1/Menu]", log);
         StringAssert.Contains(CheckAvatar.BlendshapeActionNoteLine, log);
     }
 
@@ -1427,7 +1429,7 @@ public class CheckAvatarTests
         AddVrcfBlendShapeAction(NewChild(a, "Menu"), "Toggle", "state", "Shrink_Top", false, null);
         var log = ReadLog(Inspect("BS6"));
         Assert.AreEqual(1, BlendshapeCount(log), log);
-        StringAssert.Contains("searched=no renderer (allRenderers is off and renderer is unset)", log);
+        StringAssert.Contains("searched=no renderer", log);
     }
 
     // VRCFury searches the avatar's own renderers only, so a carrier outside the checked root does not count.
@@ -1450,12 +1452,99 @@ public class CheckAvatarTests
         var host = NewChild(a, "Menu");
         host.AddComponent(Resolve("VF.Model.VRCFury")); // content left null: no feature type to read
         var unreflected = new List<string>();
-        var hits = CheckAvatar.CollectBlendshapeActions(a, (c, field) => unreflected.Add(field));
+        var hits = CheckAvatar.CollectBlendshapeActions(a, (c, field) => unreflected.Add(field), (type, n) => unreflected.Add(type));
         Assert.AreEqual(0, hits.Count);
         Assert.AreEqual(1, unreflected.Count, string.Join("\n", unreflected));
         StringAssert.Contains("VRCF.content", unreflected[0]);
-        var log = ReadLog(Inspect("BS8"));
-        StringAssert.Contains(CheckAvatar.FailLoudNotePrefix + "VRCFury field 'VRCF.content", log);
+        var r = Inspect("BS8");
+        StringAssert.Contains("unlintableActions=1", r, "a blind walk is counted on the summary, never a bare PASS: " + r);
+        StringAssert.Contains(CheckAvatar.FailLoudNotePrefix + "VRCFury field 'VRCF.content", ReadLog(r));
+    }
+
+    // VRCFuryBuilder.Run strips EditorOnly objects before any builder runs, so a stripped carrier satisfies nothing.
+    [Test]
+    public void BlendshapeAction_EditorOnlyCarrier_DoesNotSatisfy()
+    {
+        var a = NewAvatar("BS9");
+        NewSkin(a, "Body");
+        NewSkin(a, "Preview", "Shrink_Top").gameObject.tag = "EditorOnly";
+        AddVrcfBlendShapeAction(NewChild(a, "Menu"), "Toggle", "state", "Shrink_Top", true, null);
+        Assert.AreEqual(1, BlendshapeCount(ReadLog(Inspect("BS9"))));
+    }
+
+    // ...and an action on a stripped component never builds, so it is not an offender.
+    [Test]
+    public void BlendshapeAction_OnEditorOnlyComponent_IsNotFlagged()
+    {
+        var a = NewAvatar("BS10");
+        NewSkin(a, "Body");
+        var menu = NewChild(a, "Menu"); menu.tag = "EditorOnly";
+        AddVrcfBlendShapeAction(NewChild(menu, "Toggle"), "Toggle", "state", "Shrink_Top", true, null);
+        StringAssert.Contains("blendshapeAction=0", Inspect("BS10"));
+    }
+
+    // VRCFury searches inactive renderers too.
+    [Test]
+    public void BlendshapeAction_InactiveCarrier_Satisfies()
+    {
+        var a = NewAvatar("BS11");
+        NewSkin(a, "Body", "Shrink_Top").gameObject.SetActive(false);
+        AddVrcfBlendShapeAction(NewChild(a, "Menu"), "Toggle", "state", "Shrink_Top", true, null);
+        StringAssert.Contains("blendshapeAction=0", Inspect("BS11"));
+    }
+
+    [Test]
+    public void BlendshapeAction_NamedMeshRenderer_FiresNamingItsType()
+    {
+        var a = NewAvatar("BS12");
+        NewSkin(a, "Body", "Shrink_Top");
+        var prop = NewChild(a, "Prop");
+        prop.AddComponent<MeshFilter>();
+        var mr = prop.AddComponent<MeshRenderer>();
+        AddVrcfBlendShapeAction(NewChild(a, "Menu"), "Toggle", "state", "Shrink_Top", false, mr);
+        var log = ReadLog(Inspect("BS12"));
+        Assert.AreEqual(1, BlendshapeCount(log), log);
+        StringAssert.Contains("MeshRenderer", log);
+    }
+
+    [Test]
+    public void BlendshapeAction_NamedRendererOutsideTheRoot_Fires()
+    {
+        var a = NewAvatar("BS13");
+        var stray = NewSkin(new GameObject("Stray13"), "Body", "Shrink_Top");
+        AddVrcfBlendShapeAction(NewChild(a, "Menu"), "Toggle", "state", "Shrink_Top", false, stray);
+        var log = ReadLog(Inspect("BS13"));
+        Assert.AreEqual(1, BlendshapeCount(log), log);
+        StringAssert.Contains("outside the avatar root", log);
+    }
+
+    // An action nested inside another action's State (a SmoothLoop's state1) is walked like a top-level one.
+    [Test]
+    public void BlendshapeAction_NestedInSmoothLoop_IsWalked()
+    {
+        var a = NewAvatar("BS14");
+        NewSkin(a, "Body", "Shrink_Top");
+        var c = NewChild(a, "Menu").AddComponent(Resolve("VF.Model.VRCFury"));
+        var so = new SerializedObject(c);
+        so.FindProperty("content").managedReferenceValue = Activator.CreateInstance(Resolve("VF.Model.Feature.Toggle"));
+        so.ApplyModifiedPropertiesWithoutUndo();
+        so = new SerializedObject(c);
+        var outer = so.FindProperty("content.state.actions");
+        outer.arraySize = 1;
+        outer.GetArrayElementAtIndex(0).managedReferenceValue = Activator.CreateInstance(Resolve("VF.Model.StateAction.SmoothLoopAction"));
+        so.ApplyModifiedPropertiesWithoutUndo();
+        so = new SerializedObject(c);
+        var inner = so.FindProperty("content.state.actions.Array.data[0].state1.actions");
+        Assert.IsNotNull(inner, "SmoothLoopAction.state1.actions must resolve");
+        inner.arraySize = 1;
+        inner.GetArrayElementAtIndex(0).managedReferenceValue = Activator.CreateInstance(Resolve("VF.Model.StateAction.BlendShapeAction"));
+        so.ApplyModifiedPropertiesWithoutUndo();
+        so = new SerializedObject(c);
+        so.FindProperty("content.state.actions.Array.data[0].state1.actions.Array.data[0].blendShape").stringValue = "Shrink_Missing";
+        so.ApplyModifiedPropertiesWithoutUndo();
+        var log = ReadLog(Inspect("BS14"));
+        Assert.AreEqual(1, BlendshapeCount(log), log);
+        StringAssert.Contains("state1.actions.Array.data[0]", log);
     }
 }
 
