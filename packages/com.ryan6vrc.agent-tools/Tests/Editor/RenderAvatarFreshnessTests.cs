@@ -442,6 +442,26 @@ public class RenderAvatarFreshnessTests
         string msg = RenderAvatar.Fail("Hair", "target not found");
         StringAssert.StartsWith("[RenderAvatar] Hair => FAIL:", msg);
     }
+
+    [Test]
+    public void ResolveFramePrefix_RelativeLandsUnderTestOutput_AbsoluteAndLedPrefixDoNot()
+    {
+        string root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "r6v_frameprefix_" + System.Guid.NewGuid().ToString("N"));
+        try
+        {
+            string bare = RenderAvatar.ResolveFramePrefix("stage_pose", root).Replace('\\', '/');
+            StringAssert.EndsWith("/test-output/stage_pose", bare);
+            Assert.IsTrue(System.IO.Directory.Exists(System.IO.Path.Combine(root, "test-output")));
+
+            string led = RenderAvatar.ResolveFramePrefix("test-output/sub/a", root).Replace('\\', '/');
+            StringAssert.EndsWith("/test-output/sub/a", led);
+            StringAssert.DoesNotContain("test-output/test-output", led);
+
+            string abs = System.IO.Path.Combine(root, "elsewhere", "x");
+            Assert.AreEqual(abs, RenderAvatar.ResolveFramePrefix(abs, root));
+        }
+        finally { if (System.IO.Directory.Exists(root)) System.IO.Directory.Delete(root, true); }
+    }
 }
 
 // Namespace deliberately contains "modular_avatar" and the type name contains marker "ShapeChanger"
