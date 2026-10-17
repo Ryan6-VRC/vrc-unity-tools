@@ -509,7 +509,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <param name="showGizmos">draw component gizmos (physbone/contact/collider) into the capture.</param>
         /// <param name="resolution">per-tile square edge in px; the sheet is auto-downscaled to a ~2048 edge cap.</param>
         /// <param name="framePrefix">when set, each angle's tile is also written as <c>&lt;framePrefix&gt;_&lt;angle&gt;.png</c>
-        /// (an absolute path prefix, e.g. <c>&lt;dir&gt;/&lt;stage&gt;_&lt;pose&gt;</c>), the per-view layout frame tilers read.</param>
+        /// (e.g. <c>&lt;dir&gt;/&lt;stage&gt;_&lt;pose&gt;</c>), the per-view layout frame tilers read. An absolute prefix is
+        /// written as given; a relative one lands under the project's <c>test-output/</c> (created as needed), and one that
+        /// already starts with <c>test-output/</c> is not doubled.</param>
         public static string Run(
             string target,
             string[] angles = null,
@@ -523,8 +525,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (!r.ok) return r.fail;
             string png = WriteSheetAndManifest(r);
             if (png == null) return Fail(r.label, "failed to write the grab PNG/manifest to temp (disk full or locked path?)");
-            if (framePrefix != null && !WriteFrames(r, framePrefix))
-                return Fail(r.label, "failed to write the per-angle frames at '" + framePrefix + "_<angle>.png' (missing directory or locked path?)");
+            if (framePrefix != null)
+            {
+                framePrefix = ResolveFramePrefix(framePrefix, Directory.GetParent(Application.dataPath).FullName);
+                if (!WriteFrames(r, framePrefix))
+                    return Fail(r.label, "failed to write the per-angle frames at '" + framePrefix + "_<angle>.png' (missing directory or locked path?)");
+            }
             string proxyInfo = (r.proxiesKept + r.proxiesHidden) > 0
                 ? " proxies=kept:" + r.proxiesKept + ",hidden:" + r.proxiesHidden : "";
             // cam=ok signals a diffable camera manifest was written beside the png — CaptureDiff's `against`.
@@ -1366,6 +1372,19 @@ namespace Ryan6Vrc.AgentTools.Editor
                 + identical + "/" + r.manifest.views.Length + originNote + r.hideNote + r.proxyNote + r.horizonNote + r.settleNote + r.canaryNote + " | png=" + pngB;
             Debug.Log(summary);
             return summary;
+        }
+
+        // A relative prefix resolves under <projectRoot>/test-output/ (run output never lands in the project root);
+        // one already led by "test-output/" is taken as project-root-relative, not doubled. Absolute passes through.
+        internal static string ResolveFramePrefix(string prefix, string projectRoot)
+        {
+            if (Path.IsPathRooted(prefix)) return prefix;
+            string p = prefix.Replace('\\', '/');
+            while (p.StartsWith("./", StringComparison.Ordinal)) p = p.Substring(2);
+            if (!p.StartsWith("test-output/", StringComparison.Ordinal)) p = "test-output/" + p;
+            string full = Path.GetFullPath(Path.Combine(projectRoot, p));
+            Directory.CreateDirectory(Path.GetDirectoryName(full));
+            return full;
         }
 
         // One PNG per angle, cut back out of the composed sheet in Compose's row-major layout.
