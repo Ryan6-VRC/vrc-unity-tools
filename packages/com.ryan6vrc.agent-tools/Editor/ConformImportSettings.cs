@@ -308,9 +308,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 // No disclosure on this row, deliberately. A "render check owed" needs a baseline to compare
                 // against and there is none: the upload is BLOCKED without this fix, so no build carrying the old
-                // setting ever shipped. The fix is also forced — the only other way to satisfy the SDK is changing
-                // importBlendShapeNormals off Calculate, which is `own-base`'s standard anyway. Flagging it would
-                // hand the reader an obligation they cannot discharge and a choice they do not have.
+                // setting ever shipped. Nor does the fix change what a mesh looks like against the house standard:
+                // Calculate with the legacy flag imports no blendshape normals, the same mesh `own-base`'s None
+                // imports (docs/blender.md). Flagging it would hand the reader an obligation they cannot discharge.
                 bool legacySet;
                 if (legacyProp != null
                     && mi.importBlendShapeNormals == ModelImporterNormals.Calculate
