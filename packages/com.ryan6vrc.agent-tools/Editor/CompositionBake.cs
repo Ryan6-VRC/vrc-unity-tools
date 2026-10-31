@@ -340,7 +340,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// The other half of the same question is what the chain SKIPS when no upload is happening: VRCFury's
         /// <c>DisablePluginsWhenNotUploadingHook</c> inhibits six named callback types (Poiyomi's and liltoon's
         /// material lockdown, UdonSharp's recompile, and the SDK's product/network id assignment), none of
-        /// which touches a mesh — read from VRCFury 1.1427.0's source; re-read that list if a triangle count
+        /// which touches a mesh — read from VRCFury 1.1436.0's source; re-read that list if a triangle count
         /// ever disagrees with an uploaded avatar's.</para></summary>
         internal static List<GeoRow> ReadGeometry(GameObject root)
         {
