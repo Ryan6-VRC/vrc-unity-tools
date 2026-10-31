@@ -1287,9 +1287,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // playAudio: the VRCAnimatorPlayAudio serializable surface. The AudioSource is addressed by
-            // hierarchy path (sourcePath) — the SDK resolves the live Source at runtime; clips are asset paths.
-            // Volume/pitch are [min, max] ranges.
 #if VRC_FT_SETS_PRESENT
             // faceTrackingSets: { sets: { <Blendshapes Set name>: <entry>, ... } } — one blendSets element per
             // entry, in map order. An entry is one of four forms:
@@ -1349,7 +1346,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case null:
                         throw new EmitException($"{ctx}: expected a weight (0..1), a parameter name, or a map, got null");
                     default:
-                        e.weight = Bounded(AsFloat(value, ctx), 0f, 1f, ctx);
+                        e.weight = Bounded(FtNum(value, ctx), 0f, 1f, ctx);
                         return e;
                 }
             }
@@ -1367,16 +1364,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     string k = ctx + "." + kv.Key;
                     switch (kv.Key)
                     {
-                        case FaceTrackingSetKeys.Weight: e.weight = Bounded(AsFloat(kv.Value, k), 0f, 1f, k); break;
+                        case FaceTrackingSetKeys.Weight: e.weight = Bounded(FtNum(kv.Value, k), 0f, 1f, k); break;
                         case FaceTrackingSetKeys.Source:
                             e.type = FtSets.SourceType.Parameter;
                             e.sourceParameter = RequireSource(AsString(kv.Value, k), ctx);
                             break;
-                        case FaceTrackingSetKeys.SourceMin: e.sourceMin = AsFloat(kv.Value, k); range = true; break;
-                        case FaceTrackingSetKeys.SourceMax: e.sourceMax = AsFloat(kv.Value, k); range = true; break;
-                        case FaceTrackingSetKeys.DestMin: e.destMin = Bounded(AsFloat(kv.Value, k), 0f, 1f, k); range = true; break;
-                        case FaceTrackingSetKeys.DestMax: e.destMax = Bounded(AsFloat(kv.Value, k), 0f, 1f, k); range = true; break;
-                        case FaceTrackingSetKeys.LerpSpeed: e.lerpSpeed = Bounded(AsFloat(kv.Value, k), 0f, 100f, k); break;
+                        case FaceTrackingSetKeys.SourceMin: e.sourceMin = FtNum(kv.Value, k); range = true; break;
+                        case FaceTrackingSetKeys.SourceMax: e.sourceMax = FtNum(kv.Value, k); range = true; break;
+                        case FaceTrackingSetKeys.DestMin: e.destMin = Bounded(FtNum(kv.Value, k), 0f, 1f, k); range = true; break;
+                        case FaceTrackingSetKeys.DestMax: e.destMax = Bounded(FtNum(kv.Value, k), 0f, 1f, k); range = true; break;
+                        case FaceTrackingSetKeys.LerpSpeed: e.lerpSpeed = Bounded(FtNum(kv.Value, k), 0f, 100f, k); break;
                         default:
                             throw new EmitException($"{ctx}: unknown field '{kv.Key}' (expected weight/source/sourceMin/sourceMax/destMin/destMax/lerpSpeed)");
                     }
@@ -1394,6 +1391,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return src;
             }
 
+            // A float-valued entry key: a YAML boolean is refused rather than read as 0/1 (the bare form refuses it
+            // too), and so is a non-finite number — 1e100 overflows to infinity, which no SDK field can round-trip.
+            private static float FtNum(object v, string ctx)
+            {
+                if (v is bool) throw new EmitException($"{ctx}: expected a number, got a boolean");
+                float f = AsFloat(v, ctx);
+                if (float.IsNaN(f) || float.IsInfinity(f))
+                    throw new EmitException($"{ctx}: {(v is double d ? d.ToString(CultureInfo.InvariantCulture) : f.ToString(CultureInfo.InvariantCulture))} is not a finite float");
+                return f;
+            }
+
             // NaN fails both comparisons, so it is refused with the out-of-range values.
             private static float Bounded(float v, float min, float max, string ctx)
             {
@@ -1404,6 +1412,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 #endif
 
+            // playAudio: the VRCAnimatorPlayAudio serializable surface. The AudioSource is addressed by
+            // hierarchy path (sourcePath) — the SDK resolves the live Source at runtime; clips are asset paths.
+            // Volume/pitch are [min, max] ranges.
             private static void PopulatePlayAudio(VRCAnimatorPlayAudio c, Dictionary<string, object> fields)
             {
                 foreach (var kv in fields)
@@ -1965,7 +1976,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public const string DestMin = "destMin", DestMax = "destMax", LerpSpeed = "lerpSpeed";
             public const int MaxEntries = 64;
             public const string NeedsSdk = "behaviour: faceTrackingSets needs com.vrchat.avatars >= 3.10.6 "
-                + "(VRCAnimatorFaceTrackingBlendshapesSet); this project has an older SDK";
+                + "(VRCAnimatorFaceTrackingBlendshapesSet), and this project's SDK is below 3.10.6 final — a 3.10.6 "
+                + "prerelease counts as below, since the gate is the com.vrchat.avatars >= 3.10.6 versionDefine";
         }
 
         internal static class PlayAudioKeys

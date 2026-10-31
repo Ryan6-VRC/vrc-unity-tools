@@ -801,6 +801,10 @@ layers:
         new object[] { "{ sets: { X: ~ } }", "got null" },
         new object[] { "{ sets: { \"\": 1 } }", "empty Blendshapes Set name" },
         new object[] { "{ sets: { X: 1 }, debug: hi }", "unknown field 'debug'" },
+        new object[] { "{ sets: { X: { weight: on } } }", "got a boolean" },
+        new object[] { "{ sets: { X: { source: P, lerpSpeed: true } } }", "got a boolean" },
+        new object[] { "{ sets: { X: { source: P, sourceMax: 1e100 } } }", "not a finite float" },
+        new object[] { "{ sets: { X: { source: P, sourceMin: -1e100 } } }", "not a finite float" },
     };
 
     private static readonly string[] FtSetsRangeKeys = { "sourceMin", "sourceMax", "destMin", "destMax" };
@@ -906,6 +910,7 @@ layers:
         var doc = AnimatorSchemaYaml.Parse(AnimatorTestHelpers.FtSetsDoc, "test");
         var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
         StringAssert.Contains("faceTrackingSets needs com.vrchat.avatars >= 3.10.6", ex.Message);
+        StringAssert.Contains("a 3.10.6 prerelease counts as below", ex.Message);
         StringAssert.DoesNotContain("unknown kind", ex.Message);
     }
 #endif

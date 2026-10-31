@@ -296,7 +296,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>Every parameter a face-tracking Blendshapes Set behaviour reads: the sourceParameter of each
-        /// Parameter-type entry. Feeds the undeclared-param rule only — an entry naming no declared parameter reads
+        /// Parameter-type entry. Feeds the undeclared-param rule and <see cref="CollectParamUsage"/>'s read census — an entry naming no declared parameter reads
         /// nothing, the same certainty as a driver Copy's source. It deliberately does NOT feed
         /// driverOnAnimatedParam: that rule's read half rests on a measurement of the driver, and whether this
         /// behaviour's state-entry read of a clip-bound parameter sees the animated value or the declared default
@@ -420,8 +420,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// where a parameter is touched.
         ///
         /// Reads: transition conditions (AnyState, Entry, sub-state-machine edges, state transitions), the
-        /// four per-state motion parameters, blend-tree axes and Direct children, and a driver <c>Copy</c>'s
-        /// source. Writes: every driver op's destination, synced-layer override drivers, and clip parameter
+        /// four per-state motion parameters, blend-tree axes and Direct children, a driver <c>Copy</c>'s
+        /// source, and a face-tracking Blendshapes Set entry's source parameter. Writes: every driver op's destination, synced-layer override drivers, and clip parameter
         /// curves. A parameter both read and written appears in both, which is the normal case for a
         /// latch — this is a census, not a classification.
         ///
@@ -472,8 +472,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                             Conds(t.conditions, m.Path + " → " + child.stateMachine.name);
                 if (m.Sm.behaviours != null)
                     foreach (var b in m.Sm.behaviours)
+                    {
                         DriverOps(b, m.Path + " (SM driver)", (n, w, isSource) =>
                         { if (isSource) Read(n, w); else Write(n, w); });
+                        FaceTrackingSetParams(b, m.Path + " (SM faceTrackingSets)", Read);
+                    }
             }
             foreach (var s in states)
             {
@@ -486,8 +489,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 BlendParams(st.motion, s.Path, Read);
                 if (st.behaviours != null)
                     foreach (var b in st.behaviours)
+                    {
                         DriverOps(b, s.Path + " (driver)", (n, w, isSource) =>
                         { if (isSource) Read(n, w); else Write(n, w); });
+                        FaceTrackingSetParams(b, s.Path + " (faceTrackingSets)", Read);
+                    }
             }
 
             for (int li = 0; li < layers.Length; li++)

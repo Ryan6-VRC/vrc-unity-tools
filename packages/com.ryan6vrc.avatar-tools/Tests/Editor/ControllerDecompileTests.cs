@@ -1375,9 +1375,43 @@ public class ControllerDecompileTests
 
         var w = ControllerDecompile.Walk(emitted.Controller);
         Assert.AreEqual(0, w.Refusals.Count, "hidden fields are tolerated, not refused: " + string.Join(" | ", w.Refusals));
-        Assert.IsTrue(w.Notes.Any(n => n.Contains("faceTrackingSets fields hidden")), "the tolerance is noted");
+        var note = w.Notes.SingleOrDefault(n => n.Contains("faceTrackingSets fields hidden"));
+        Assert.IsNotNull(note, "the tolerance is noted");
+        StringAssert.Contains("'Lids' (Value)", note, "the note names the entry and its type");
+        StringAssert.Contains("sourceParameter 'Stale'", note, "and each non-default hidden value");
+        StringAssert.Contains("convertRange on", note);
+        StringAssert.Contains("ranges 0..1 -> 0..0.5", note);
         var sets = (Dictionary<string, object>)w.Doc.Layers[0].Root.States[0].Behaviours[0].Fields["sets"];
         Assert.AreEqual(0.25f, AsF(sets["Lids"]), 1e-6f, "still the bare weight");
+    }
+
+    [Test]
+    public void CleanController_Keeps_A_Parameter_Only_A_FaceTrackingSets_Entry_Reads()
+    {
+        // The prune deletes every parameter it did not collect, so a set entry's source must count as a reference
+        // or a clean leaves the kept behaviour naming an undeclared parameter.
+        var src = AnimatorSchemaYaml.Parse(AnimatorTestHelpers.FtSetsDoc, "test");
+        ControllerEmit.Build(src, out var emitted);
+        var layers = emitted.Controller.layers;
+        var referenced = CleanController.CollectReferencedParameters(layers, layers);
+        Assert.IsTrue(referenced.Contains("Gate"), "a bare-parameter entry's source is referenced");
+        Assert.IsTrue(referenced.Contains("Lip"), "a ranged source entry's source is referenced");
+    }
+
+    [Test]
+    public void Walk_FaceTrackingSets_Non_Finite_Source_Range_Refuses()
+    {
+        // An infinite bound would decode as a number no document can carry back; refuse it while the range is on.
+        var src = AnimatorSchemaYaml.Parse(AnimatorTestHelpers.FtSetsDoc, "test");
+        ControllerEmit.Build(src, out var emitted);
+        var ft = FtSetsOn(emitted);
+        var e = ft.blendSets.First(x => x.type == VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Parameter && x.convertRange);
+        e.sourceMax = float.PositiveInfinity;
+        EditorUtility.SetDirty(ft);
+
+        var w = ControllerDecompile.Walk(emitted.Controller);
+        Assert.IsTrue(w.Refusals.Any(r => r.Contains("source range") && r.Contains("not finite")),
+            "a non-finite source bound -> located refusal; got: " + string.Join(" | ", w.Refusals));
     }
 
     [Test]
@@ -1399,6 +1433,8 @@ public class ControllerDecompileTests
     [Test] public void Walk_FaceTrackingSets_Repeated_Set_Name_Refuses() => Assert.Ignore(AnimatorTestHelpers.FtSetsSkip);
     [Test] public void Walk_FaceTrackingSets_Hidden_Fields_Are_Tolerated_With_A_Note() => Assert.Ignore(AnimatorTestHelpers.FtSetsSkip);
     [Test] public void Walk_FaceTrackingSets_Out_Of_Bounds_Lerp_Refuses() => Assert.Ignore(AnimatorTestHelpers.FtSetsSkip);
+    [Test] public void Walk_FaceTrackingSets_Non_Finite_Source_Range_Refuses() => Assert.Ignore(AnimatorTestHelpers.FtSetsSkip);
+    [Test] public void CleanController_Keeps_A_Parameter_Only_A_FaceTrackingSets_Entry_Reads() => Assert.Ignore(AnimatorTestHelpers.FtSetsSkip);
 #endif
 
     private static void EnsureScratch()

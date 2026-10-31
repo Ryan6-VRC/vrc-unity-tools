@@ -471,7 +471,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>Every controller-parameter name the kept layers reference: transition
         /// conditions, state speed/time/mirror/cycle-offset bindings, blend-tree blend params
-        /// (incl. direct-blend children), and VRC parameter-driver reads/writes. A synced layer
+        /// (incl. direct-blend children), VRC parameter-driver reads/writes, and face-tracking Blendshapes Set
+        /// entry sources. A synced layer
         /// (<c>syncedLayerIndex &gt;= 0</c>) has a null stateMachine — it borrows the source
         /// layer's structure and carries per-state override motions/behaviours — so it resolves
         /// against <paramref name="allLayers"/> (mirrors <c>AnimatorClipWalk</c>'s synced-layer
@@ -576,6 +577,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (behaviours == null) return;
             foreach (var b in behaviours)
             {
+#if VRC_FT_SETS_PRESENT
+                // A face-tracking Blendshapes Set entry reads its source parameter on state entry; pruning that
+                // parameter would leave the kept behaviour naming an undeclared one.
+                if (b is VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet ft)
+                {
+                    if (ft.blendSets != null)
+                        foreach (var e in ft.blendSets)
+                            if (e != null && e.type == VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Parameter
+                                && !string.IsNullOrEmpty(e.sourceParameter))
+                                used.Add(e.sourceParameter);
+                    continue;
+                }
+#endif
                 var driver = b as VRC.SDKBase.VRC_AvatarParameterDriver;
                 if (driver == null || driver.parameters == null) continue;
                 foreach (var p in driver.parameters)

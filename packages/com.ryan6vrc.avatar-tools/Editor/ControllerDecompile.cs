@@ -1681,7 +1681,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 var b = new Behaviour { Kind = FtKeys.Kind };
                 var sets = new Dictionary<string, object>();
-                bool inertMoved = false;
+                var hidden = new List<string>();
                 int count = c.blendSets == null ? 0 : c.blendSets.Count;
                 if (count > FtKeys.MaxEntries)
                     Refuse($"behaviour on {loc}: faceTrackingSets carries {count} entries; the SDK processes only the first "
@@ -1704,7 +1704,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         case FtSets.SourceType.Value:
                             if (!InRange(e.weight, 0f, 1f)) { Refuse($"{ctx}: weight {e.weight} is outside 0..1, which the compiler refuses"); continue; }
-                            if (!string.IsNullOrEmpty(e.sourceParameter) || e.convertRange || !InspectorRanges(e)) inertMoved = true;
+                            {
+                                var held = new List<string>();
+                                if (!string.IsNullOrEmpty(e.sourceParameter)) held.Add($"sourceParameter '{e.sourceParameter}'");
+                                if (e.convertRange) held.Add("convertRange on");
+                                if (!InspectorRanges(e)) held.Add(RangeText(e));
+                                if (held.Count > 0) hidden.Add($"'{name}' (Value): {string.Join(", ", held)}");
+                            }
                             if (e.lerpSpeed == 0f) sets[name] = e.weight;
                             else sets[name] = new Dictionary<string, object> { { FtKeys.Weight, e.weight }, { FtKeys.LerpSpeed, e.lerpSpeed } };
                             break;
@@ -1715,7 +1721,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                 Refuse($"{ctx}: destination range {e.destMin}..{e.destMax} leaves 0..1, which the compiler refuses");
                                 continue;
                             }
-                            if (e.weight != 1f || (!e.convertRange && !InspectorRanges(e))) inertMoved = true;
+                            if (e.convertRange && !(IsFinite(e.sourceMin) && IsFinite(e.sourceMax)))
+                            {
+                                Refuse($"{ctx}: source range {e.sourceMin}..{e.sourceMax} is not finite, which the compiler refuses");
+                                continue;
+                            }
+                            {
+                                var held = new List<string>();
+                                if (e.weight != 1f) held.Add($"weight {e.weight.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+                                if (!e.convertRange && !InspectorRanges(e)) held.Add(RangeText(e) + " with convertRange off");
+                                if (held.Count > 0) hidden.Add($"'{name}' (Parameter): {string.Join(", ", held)}");
+                            }
                             if (!e.convertRange && e.lerpSpeed == 0f) { sets[name] = e.sourceParameter; break; }
                             var m = new Dictionary<string, object> { { FtKeys.Source, e.sourceParameter } };
                             if (e.convertRange)
@@ -1732,14 +1748,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
                 if (sets.Count > 0) b.Fields[FtKeys.Sets] = sets;
-                if (inertMoved)
+                if (hidden.Count > 0)
                     _result.Notes.Add($"behaviour on {loc}: faceTrackingSets fields hidden for an entry's source type held "
-                        + "non-default values; they recompile at the inspector's new-element values (weight 1, ranges 0/1/0/1, no source)");
+                        + $"non-default values, which recompile at the inspector's new-element values (weight 1, ranges 0/1/0/1, "
+                        + $"no source): {string.Join("; ", hidden)}");
                 return b;
             }
 
             private static bool InspectorRanges(FtSets.BlendSet e) =>
                 e.sourceMin == 0f && e.sourceMax == 1f && e.destMin == 0f && e.destMax == 1f;
+
+            private static string RangeText(FtSets.BlendSet e)
+            {
+                var ci = System.Globalization.CultureInfo.InvariantCulture;
+                return $"ranges {e.sourceMin.ToString(ci)}..{e.sourceMax.ToString(ci)} -> {e.destMin.ToString(ci)}..{e.destMax.ToString(ci)}";
+            }
+
+            private static bool IsFinite(float v) => !float.IsNaN(v) && !float.IsInfinity(v);
 
             // NaN fails both comparisons.
             private static bool InRange(float v, float min, float max) => v >= min && v <= max;
