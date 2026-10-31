@@ -457,7 +457,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (ClearSceneDirtinessMethod != null)
                         ClearSceneDirtinessMethod.Invoke(null, new object[] { sc });
                     else
-                        // API drifted — surface it rather than silently leaving a scene dirty (rule 7).
+                        // API drifted — surface it rather than silently leaving a scene dirty.
                         residualNote += " note=scene-dirty-uncleared: EditorSceneManager.ClearSceneDirtiness internals drifted";
                 }
 
