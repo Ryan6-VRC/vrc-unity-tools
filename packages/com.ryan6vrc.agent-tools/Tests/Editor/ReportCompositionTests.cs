@@ -83,6 +83,37 @@ public class ReportCompositionTests
         Assert.IsFalse(usage.Reads.ContainsKey("Written"), "a Set destination is not a read");
     }
 
+#if VRC_FT_SETS_PRESENT
+    [Test]
+    public void ParamUsage_countsAFaceTrackingSetSource_asARead()
+    {
+        // The undeclared-param lint already treats a set entry's source as a read; the census must agree, or the
+        // provenance table shows the parameter as writers-only.
+        var c = new AnimatorController();
+        c.AddParameter("Gate", AnimatorControllerParameterType.Float);
+        c.AddParameter("Unread", AnimatorControllerParameterType.Float);
+        c.AddLayer("L");
+        var a = c.layers[0].stateMachine.AddState("A");
+        var ft = a.AddStateMachineBehaviour<VRC.SDK3.Avatars.Components.VRCAnimatorFaceTrackingBlendshapesSet>();
+        ft.blendSets = new List<VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet.BlendSet>
+        {
+            new VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet.BlendSet
+            { blendshapesSetName = "Lids", type = VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Parameter, sourceParameter = "Gate" },
+            new VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet.BlendSet
+            { blendshapesSetName = "Eye", type = VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Value, sourceParameter = "Unread", weight = 1f },
+        };
+
+        var usage = ControllerRules.CollectParamUsage(c);
+
+        Assert.IsTrue(usage.Reads.ContainsKey("Gate"), "a Parameter entry's source is a READ");
+        Assert.IsFalse(usage.Writes.ContainsKey("Gate"), "and never a write");
+        Assert.IsFalse(usage.Reads.ContainsKey("Unread"), "a Value entry's hidden source reads nothing");
+    }
+#else
+    [Test] public void ParamUsage_countsAFaceTrackingSetSource_asARead() =>
+        Assert.Ignore("needs com.vrchat.avatars >= 3.10.6 (VRCAnimatorFaceTrackingBlendshapesSet); TestEditor is on an older SDK");
+#endif
+
     [Test]
     public void ParamUsage_onANullController_isEmptyRatherThanThrowing()
     {

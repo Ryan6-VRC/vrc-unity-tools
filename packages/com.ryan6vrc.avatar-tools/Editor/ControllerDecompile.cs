@@ -12,6 +12,10 @@ using PlayableLayer = VRC.SDKBase.VRC_PlayableLayerControl.BlendableLayer;
 using LayerCtrlLayer = VRC.SDKBase.VRC_AnimatorLayerControl.BlendableLayer;
 using AudioOrder = VRC.SDKBase.VRC_AnimatorPlayAudio.Order;
 using AudioApply = VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings;
+#if VRC_FT_SETS_PRESENT
+using FtSets = VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet;
+using FtKeys = Ryan6Vrc.AvatarTools.Editor.ControllerEmit.FaceTrackingSetKeys;
+#endif
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
@@ -20,7 +24,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     /// <see cref="AnimatorController"/> back into an <see cref="AnimDocument"/>. Re-emitting the produced
     /// document reproduces the controller — <see cref="ControllerEmit"/> is the authoritative spec, and every
     /// decoder here inverts one of its emit paths (parameters, clips, layers/states/transitions, motions +
-    /// blend trees, the seven behaviour encoders, sub-machines, Entry/Any ladders).
+    /// blend trees, the eight behaviour encoders, sub-machines, Entry/Any ladders).
     ///
     /// REACHABILITY: only objects reachable from a layer's state machine become part of the Doc; unreachable
     /// sub-assets (dead weight an owned cleaner would strip) are COUNTED in <see cref="WalkResult.OrphanCount"/>,
@@ -647,7 +651,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // census catches. m_TransitionOffset was a fourth until the schema grew `offset:` to bind it.
             //
             // SCOPE (what the census actually covers — the rest stays a hand-allowlist): the TOP-LEVEL scalar
-            // fields of AnimatorState, state/any/entry transitions, BlendTree, and the seven VRC SMB kinds.
+            // fields of AnimatorState, state/any/entry transitions, BlendTree, and the eight VRC SMB kinds.
             // NOT covered — array-element structs (ChildMotion / ChildAnimatorState / ChildAnimatorStateMachine /
             // AnimatorCondition at depth > 0, guarded by the recursive decoders' own explicit binding) and
             // AnimatorControllerLayer (a struct, so not SerializedObject-sweepable).
@@ -742,6 +746,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 "PitchApplySettings", "Loop", "LoopApplySettings", "Clips", "ClipsApplySettings", "DelayInSeconds",
                 "PlayOnEnter", "StopOnEnter", "PlayOnExit", "StopOnExit", "debugString", "m_Name",
             };
+#if VRC_FT_SETS_PRESENT
+            // `blendSets` names the LIST, so — exactly as for the driver's `parameters` — nothing inside an element
+            // is swept; DecodeFaceTrackingSets reads every element field by hand.
+            private static readonly HashSet<string> FaceTrackingSetsAware = new HashSet<string> { "blendSets", "debugString", "m_Name" };
+#endif
 
             private void CompletenessSweep(Object o, HashSet<string> aware, string kind, string loc)
             {
@@ -1365,7 +1374,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return b.path.Length == 0 ? body : b.path + "/" + body;
             }
 
-            // ----- behaviours (invert the seven ControllerEmit.Populate* encoders) -----
+            // ----- behaviours (invert the eight ControllerEmit.Populate* encoders) -----
 
             private void DecodeBehaviourInto(List<Behaviour> into, StateMachineBehaviour smb, string loc)
             {
@@ -1383,6 +1392,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case VRC_AnimatorTemporaryPoseSpace ps: into.Add(DecodePoseSpace(ps)); break;
                     case VRC_AnimatorPlayAudio pa: into.Add(DecodePlayAudio(pa, loc)); break;
                     case VRC_AnimatorLayerControl lyc: into.Add(DecodeLayerControl(lyc, loc)); break;
+#if VRC_FT_SETS_PRESENT
+                    case FtSets ft: into.Add(DecodeFaceTrackingSets(ft, loc)); break;
+#endif
                     default:
                         Refuse($"behaviour on {loc}: unsupported SMB type '{smb.GetType().Name}' is out of vocabulary");
                         break;
@@ -1403,6 +1415,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case VRC_AnimatorTemporaryPoseSpace _: aware = PoseSpaceAware; break;
                     case VRC_AnimatorPlayAudio _: aware = PlayAudioAware; break;
                     case VRC_AnimatorLayerControl _: aware = LayerControlAware; break;
+#if VRC_FT_SETS_PRESENT
+                    case FtSets _: aware = FaceTrackingSetsAware; break;
+#endif
                     default: return; // null or unsupported (already refused)
                 }
                 CompletenessSweep(smb, aware, "behaviour on", loc);
@@ -1647,6 +1662,113 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 b.Fields["delayTime"] = c.delayTime;
                 return b;
             }
+
+#if VRC_FT_SETS_PRESENT
+            // Inverts ControllerEmit.PopulateFaceTrackingSets. Each element takes the SHORTEST of the four entry
+            // forms that reproduces it: a bare weight or a bare parameter name when lerpSpeed is 0 and no range is
+            // on, otherwise the map, carrying range keys only when convertRange is on and lerpSpeed only when
+            // non-zero — so an untouched element costs one token and a document never churns on a default.
+            //
+            // Every element field is read here by hand (the sweep stops at the list). Fields the element's type
+            // leaves inert — a Value element's sourceParameter/convertRange/ranges, a Parameter element's weight,
+            // and a Parameter element's ranges while convertRange is off — are TOLERATED, not refused: the SDK
+            // inspector hides them for that type and keeps whatever they held (it writes weight 1 and ranges
+            // 0/1/0/1 on every new element, and leaves the old values behind when an author flips the type), so a
+            // refusal would turn away ordinary inspector-made behaviours over fields the author cannot see. They
+            // recompile at the inspector's new-element values; when one held anything else, a tolerance note
+            // says so.
+            private Behaviour DecodeFaceTrackingSets(FtSets c, string loc)
+            {
+                var b = new Behaviour { Kind = FtKeys.Kind };
+                var sets = new Dictionary<string, object>();
+                var hidden = new List<string>();
+                int count = c.blendSets == null ? 0 : c.blendSets.Count;
+                if (count > FtKeys.MaxEntries)
+                    Refuse($"behaviour on {loc}: faceTrackingSets carries {count} entries; the SDK processes only the first "
+                        + $"{FtKeys.MaxEntries} and the compiler refuses more");
+                for (int i = 0; i < count; i++)
+                {
+                    var e = c.blendSets[i];
+                    string at = $"behaviour on {loc}: faceTrackingSets entry {i}";
+                    if (e == null) { Refuse(at + " is null"); continue; }
+                    string name = e.blendshapesSetName ?? "";
+                    if (name.Trim().Length == 0) { Refuse(at + " has an empty Blendshapes Set name, which the compiler refuses"); continue; }
+                    if (sets.ContainsKey(name))
+                    {
+                        Refuse($"{at} repeats Blendshapes Set '{name}' — the schema holds one entry per set name");
+                        continue;
+                    }
+                    string ctx = $"{at} ('{name}')";
+                    if (!InRange(e.lerpSpeed, 0f, 100f)) { Refuse($"{ctx}: lerpSpeed {e.lerpSpeed} is outside 0..100, which the compiler refuses"); continue; }
+                    switch (e.type)
+                    {
+                        case FtSets.SourceType.Value:
+                            if (!InRange(e.weight, 0f, 1f)) { Refuse($"{ctx}: weight {e.weight} is outside 0..1, which the compiler refuses"); continue; }
+                            {
+                                var held = new List<string>();
+                                if (!string.IsNullOrEmpty(e.sourceParameter)) held.Add($"sourceParameter '{e.sourceParameter}'");
+                                if (e.convertRange) held.Add("convertRange on");
+                                if (!InspectorRanges(e)) held.Add(RangeText(e));
+                                if (held.Count > 0) hidden.Add($"'{name}' (Value): {string.Join(", ", held)}");
+                            }
+                            if (e.lerpSpeed == 0f) sets[name] = e.weight;
+                            else sets[name] = new Dictionary<string, object> { { FtKeys.Weight, e.weight }, { FtKeys.LerpSpeed, e.lerpSpeed } };
+                            break;
+                        case FtSets.SourceType.Parameter:
+                            if (string.IsNullOrWhiteSpace(e.sourceParameter)) { Refuse(ctx + ": a Parameter entry with an empty source parameter, which the compiler refuses"); continue; }
+                            if (e.convertRange && !(InRange(e.destMin, 0f, 1f) && InRange(e.destMax, 0f, 1f)))
+                            {
+                                Refuse($"{ctx}: destination range {e.destMin}..{e.destMax} leaves 0..1, which the compiler refuses");
+                                continue;
+                            }
+                            if (e.convertRange && !(IsFinite(e.sourceMin) && IsFinite(e.sourceMax)))
+                            {
+                                Refuse($"{ctx}: source range {e.sourceMin}..{e.sourceMax} is not finite, which the compiler refuses");
+                                continue;
+                            }
+                            {
+                                var held = new List<string>();
+                                if (e.weight != 1f) held.Add($"weight {e.weight.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+                                if (!e.convertRange && !InspectorRanges(e)) held.Add(RangeText(e) + " with convertRange off");
+                                if (held.Count > 0) hidden.Add($"'{name}' (Parameter): {string.Join(", ", held)}");
+                            }
+                            if (!e.convertRange && e.lerpSpeed == 0f) { sets[name] = e.sourceParameter; break; }
+                            var m = new Dictionary<string, object> { { FtKeys.Source, e.sourceParameter } };
+                            if (e.convertRange)
+                            {
+                                m[FtKeys.SourceMin] = e.sourceMin; m[FtKeys.SourceMax] = e.sourceMax;
+                                m[FtKeys.DestMin] = e.destMin; m[FtKeys.DestMax] = e.destMax;
+                            }
+                            if (e.lerpSpeed != 0f) m[FtKeys.LerpSpeed] = e.lerpSpeed;
+                            sets[name] = m;
+                            break;
+                        default:
+                            Refuse($"{ctx}: unknown source type '{e.type}' — out of vocabulary");
+                            break;
+                    }
+                }
+                if (sets.Count > 0) b.Fields[FtKeys.Sets] = sets;
+                if (hidden.Count > 0)
+                    _result.Notes.Add($"behaviour on {loc}: faceTrackingSets fields hidden for an entry's source type held "
+                        + $"non-default values, which recompile at the inspector's new-element values (weight 1, ranges 0/1/0/1, "
+                        + $"no source): {string.Join("; ", hidden)}");
+                return b;
+            }
+
+            private static bool InspectorRanges(FtSets.BlendSet e) =>
+                e.sourceMin == 0f && e.sourceMax == 1f && e.destMin == 0f && e.destMax == 1f;
+
+            private static string RangeText(FtSets.BlendSet e)
+            {
+                var ci = System.Globalization.CultureInfo.InvariantCulture;
+                return $"ranges {e.sourceMin.ToString(ci)}..{e.sourceMax.ToString(ci)} -> {e.destMin.ToString(ci)}..{e.destMax.ToString(ci)}";
+            }
+
+            private static bool IsFinite(float v) => !float.IsNaN(v) && !float.IsInfinity(v);
+
+            // NaN fails both comparisons.
+            private static bool InRange(float v, float min, float max) => v >= min && v <= max;
+#endif
 
             private Behaviour DecodeLayerControl(VRC_AnimatorLayerControl c, string loc)
             {

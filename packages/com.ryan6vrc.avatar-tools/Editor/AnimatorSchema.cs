@@ -296,7 +296,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
     public sealed class Behaviour
     {
-        public string Kind;                     // "driver" | "tracking" | "playableLayer" | "locomotion" | "poseSpace" | "playAudio" | "layerControl"
+        public string Kind;                     // "driver" | "tracking" | "playableLayer" | "locomotion" | "poseSpace" | "playAudio" | "layerControl" | "faceTrackingSets"
         public Dictionary<string, object> Fields = new Dictionary<string, object>(); // decoded per-kind by ControllerEmit later
     }
 

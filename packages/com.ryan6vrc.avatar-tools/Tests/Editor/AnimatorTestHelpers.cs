@@ -12,6 +12,29 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 // reuses the grammar-agnostic fixture plumbing here (EnsureFolder, Save, etc.).
 public static class AnimatorTestHelpers
 {
+    // ---- faceTrackingSets (the Blendshapes Set state behaviour, com.vrchat.avatars >= 3.10.6) ----------------
+    // The component first ships in SDK 3.10.6, so every test that emits or decompiles one is compiled under
+    // VRC_FT_SETS_PRESENT (the avatar-tools asmdefs' versionDefine) and, below that SDK, replaced by a twin of the
+    // same name that skips with this reason — the skip is named in the run rather than the test vanishing.
+    public const string FtSetsSkip =
+        "needs com.vrchat.avatars >= 3.10.6 (VRCAnimatorFaceTrackingBlendshapesSet); TestEditor is on an older SDK";
+
+    // One state carrying all four entry forms, in a deliberately non-alphabetical order so a reordering hop
+    // shows: a bare weight, a bare parameter (under a set name that needs quoting), a weight map with a lerp, and
+    // a ranged parameter map with a lerp.
+    public const string FtSetsDoc =
+        "schema: 1\ncontroller: FtSets_Fx\nbasis: avatar-root\nrole: fx\n" +
+        "parameters:\n  Gate: float\n  Lip: float\n" +
+        "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+        "        behaviours:\n" +
+        "          - faceTrackingSets:\n" +
+        "              sets:\n" +
+        "                Lids: 0.25\n" +
+        "                \"FT Eyes\": Gate\n" +
+        "                Mouth: { weight: 1, lerpSpeed: 10 }\n" +
+        "                Cheek: { source: Lip, sourceMin: 0, sourceMax: 2, destMin: 1, destMax: 0, lerpSpeed: 30 }\n" +
+        "    default: S\n";
+
     // Sweep for suites that call the 2-arg ControllerEmit.Build door directly. That overload persists the
     // CONTROLLER only, so every call mints side assets that outlive the test — and a survivor is not inert:
     // leaked SDK ScriptableObjects in this assembly make ControllerEmit.AddStateMachineBehaviour return null
