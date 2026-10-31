@@ -17,6 +17,9 @@ using PlayableLayer = VRC.SDKBase.VRC_PlayableLayerControl.BlendableLayer;
 using LayerCtrlLayer = VRC.SDKBase.VRC_AnimatorLayerControl.BlendableLayer;
 using AudioOrder = VRC.SDKBase.VRC_AnimatorPlayAudio.Order;
 using AudioApply = VRC.SDKBase.VRC_AnimatorPlayAudio.ApplySettings;
+#if VRC_FT_SETS_PRESENT
+using FtSets = VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet;
+#endif
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
@@ -1062,7 +1065,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return bt;
             }
 
-            // ----- behaviours (all seven VRC SMB kinds) -----
+            // ----- behaviours (all eight VRC SMB kinds) -----
             // One encoder per kind: materialise the concrete VRC SMB via `add(typeof(...))`, then a per-field
             // switch that sets its fields and throws EmitException (named offender) on any unknown field.
             // The enum-token casing is DEFINED HERE (the token→enum maps below) — camelCase (e.g. `animation`),
@@ -1097,9 +1100,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case "layerControl":
                             PopulateLayerControl((VRCAnimatorLayerControl)add(typeof(VRCAnimatorLayerControl)), b.Fields);
                             break;
+                        case FaceTrackingSetKeys.Kind:
+#if VRC_FT_SETS_PRESENT
+                            PopulateFaceTrackingSets((VRCAnimatorFaceTrackingBlendshapesSet)add(typeof(VRCAnimatorFaceTrackingBlendshapesSet)), b.Fields);
+                            break;
+#else
+                            // The parse side is SDK-free, so a document carrying the kind reaches here on any SDK;
+                            // the component first ships in com.vrchat.avatars 3.10.6.
+                            throw new EmitException(FaceTrackingSetKeys.NeedsSdk);
+#endif
                         default:
                             throw new EmitException(
-                                $"behaviour: unknown kind '{b.Kind}' (expected driver/tracking/playableLayer/locomotion/poseSpace/playAudio/layerControl)");
+                                $"behaviour: unknown kind '{b.Kind}' (expected driver/tracking/playableLayer/locomotion/poseSpace/playAudio/layerControl/faceTrackingSets)");
                     }
                 }
             }
@@ -1278,6 +1290,120 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // playAudio: the VRCAnimatorPlayAudio serializable surface. The AudioSource is addressed by
             // hierarchy path (sourcePath) — the SDK resolves the live Source at runtime; clips are asset paths.
             // Volume/pitch are [min, max] ranges.
+#if VRC_FT_SETS_PRESENT
+            // faceTrackingSets: { sets: { <Blendshapes Set name>: <entry>, ... } } — one blendSets element per
+            // entry, in map order. An entry is one of four forms:
+            //   0.5                                   → type Value, weight 0.5
+            //   ParamName                             → type Parameter, sourceParameter ParamName
+            //   { weight: n, lerpSpeed: n }           → Value
+            //   { source: P, sourceMin, sourceMax, destMin, destMax, lerpSpeed } → Parameter; ANY of the four
+            //                                           range keys turns on convertRange (driver copy precedent)
+            // Every field the element's type leaves inert is written at the SDK inspector's new-element value
+            // (weight 1, ranges 0/1/0/1, empty sourceParameter), so a compiled element and an inspector-made one
+            // agree on what neither reads. The bounds are the inspector's: weight and the destination range clamp
+            // to 0..1, lerpSpeed to 0..100, and only the first 64 entries are processed (MaxBlendSetsPerBehavior)
+            // — so a value outside them is refused here rather than clamped by the first human to open it.
+            private static void PopulateFaceTrackingSets(VRCAnimatorFaceTrackingBlendshapesSet c, Dictionary<string, object> fields)
+            {
+                var list = new List<FtSets.BlendSet>();
+                foreach (var kv in fields)
+                {
+                    switch (kv.Key)
+                    {
+                        case FaceTrackingSetKeys.Sets:
+                            foreach (var e in AsMap(kv.Value, "faceTrackingSets.sets"))
+                                list.Add(BuildBlendSet(e.Key, e.Value));
+                            break;
+                        default:
+                            throw new EmitException($"faceTrackingSets: unknown field '{kv.Key}' (expected sets)");
+                    }
+                }
+                if (list.Count > FaceTrackingSetKeys.MaxEntries)
+                    throw new EmitException($"faceTrackingSets.sets: {list.Count} entries, but the SDK processes only the first "
+                        + $"{FaceTrackingSetKeys.MaxEntries} per behaviour — split them across two behaviours on the state");
+                c.blendSets = list;
+            }
+
+            private static FtSets.BlendSet BuildBlendSet(string name, object value)
+            {
+                string ctx = "faceTrackingSets.sets." + name;
+                if (string.IsNullOrWhiteSpace(name))
+                    throw new EmitException("faceTrackingSets.sets: an entry has an empty Blendshapes Set name — it would name no set");
+                var e = new FtSets.BlendSet
+                {
+                    blendshapesSetName = name, type = FtSets.SourceType.Value, sourceParameter = "", weight = 1f,
+                    convertRange = false, sourceMin = 0f, sourceMax = 1f, destMin = 0f, destMax = 1f, lerpSpeed = 0f,
+                };
+                switch (value)
+                {
+                    case string src:
+                        e.type = FtSets.SourceType.Parameter;
+                        e.sourceParameter = RequireSource(src, ctx);
+                        return e;
+                    case bool _:
+                        // on/off/true/false infer bool: a weight is a number, and a parameter literally named like a
+                        // YAML boolean needs quoting.
+                        throw new EmitException($"{ctx}: expected a weight (0..1), a parameter name, or a map, got a boolean — quote a parameter named like one");
+                    case Dictionary<string, object> m:
+                        return BuildBlendSetMap(e, m, ctx);
+                    case null:
+                        throw new EmitException($"{ctx}: expected a weight (0..1), a parameter name, or a map, got null");
+                    default:
+                        e.weight = Bounded(AsFloat(value, ctx), 0f, 1f, ctx);
+                        return e;
+                }
+            }
+
+            private static FtSets.BlendSet BuildBlendSetMap(FtSets.BlendSet e, Dictionary<string, object> m, string ctx)
+            {
+                bool hasWeight = m.ContainsKey(FaceTrackingSetKeys.Weight), hasSource = m.ContainsKey(FaceTrackingSetKeys.Source);
+                if (hasWeight && hasSource)
+                    throw new EmitException($"{ctx}: carries both weight and source — an entry is either a constant weight or a parameter read");
+                if (!hasWeight && !hasSource)
+                    throw new EmitException($"{ctx}: needs weight (a constant) or source (a parameter)");
+                bool range = false;
+                foreach (var kv in m)
+                {
+                    string k = ctx + "." + kv.Key;
+                    switch (kv.Key)
+                    {
+                        case FaceTrackingSetKeys.Weight: e.weight = Bounded(AsFloat(kv.Value, k), 0f, 1f, k); break;
+                        case FaceTrackingSetKeys.Source:
+                            e.type = FtSets.SourceType.Parameter;
+                            e.sourceParameter = RequireSource(AsString(kv.Value, k), ctx);
+                            break;
+                        case FaceTrackingSetKeys.SourceMin: e.sourceMin = AsFloat(kv.Value, k); range = true; break;
+                        case FaceTrackingSetKeys.SourceMax: e.sourceMax = AsFloat(kv.Value, k); range = true; break;
+                        case FaceTrackingSetKeys.DestMin: e.destMin = Bounded(AsFloat(kv.Value, k), 0f, 1f, k); range = true; break;
+                        case FaceTrackingSetKeys.DestMax: e.destMax = Bounded(AsFloat(kv.Value, k), 0f, 1f, k); range = true; break;
+                        case FaceTrackingSetKeys.LerpSpeed: e.lerpSpeed = Bounded(AsFloat(kv.Value, k), 0f, 100f, k); break;
+                        default:
+                            throw new EmitException($"{ctx}: unknown field '{kv.Key}' (expected weight/source/sourceMin/sourceMax/destMin/destMax/lerpSpeed)");
+                    }
+                }
+                if (range && !hasSource)
+                    throw new EmitException($"{ctx}: a range key applies only to a source entry — a constant weight has nothing to remap");
+                e.convertRange = range;
+                return e;
+            }
+
+            private static string RequireSource(string src, string ctx)
+            {
+                if (string.IsNullOrWhiteSpace(src))
+                    throw new EmitException($"{ctx}: empty source parameter — the entry would read nothing");
+                return src;
+            }
+
+            // NaN fails both comparisons, so it is refused with the out-of-range values.
+            private static float Bounded(float v, float min, float max, string ctx)
+            {
+                if (!(v >= min && v <= max))
+                    throw new EmitException($"{ctx}: {v.ToString(CultureInfo.InvariantCulture)} is outside "
+                        + $"{min.ToString(CultureInfo.InvariantCulture)}..{max.ToString(CultureInfo.InvariantCulture)}, the range the SDK inspector clamps it to");
+                return v;
+            }
+#endif
+
             private static void PopulatePlayAudio(VRCAnimatorPlayAudio c, Dictionary<string, object> fields)
             {
                 foreach (var kv in fields)
@@ -1827,6 +1953,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public const string LocalOnly = "localOnly", Set = "set", Add = "add", Copy = "copy", Random = "random";
             public const string Source = "source", SourceMin = "sourceMin", SourceMax = "sourceMax", DestMin = "destMin", DestMax = "destMax";
             public const string Min = "min", Max = "max", Chance = "chance", PreventRepeats = "preventRepeats";
+        }
+
+        // faceTrackingSets — the kind token and its field names, shared with ControllerDecompile. Declared outside
+        // the SDK guard so the kind is a known name on every SDK: below com.vrchat.avatars 3.10.6 emit refuses it
+        // as unsupported by the installed SDK, never as an unknown kind.
+        internal static class FaceTrackingSetKeys
+        {
+            public const string Kind = "faceTrackingSets", Sets = "sets";
+            public const string Weight = "weight", Source = "source", SourceMin = "sourceMin", SourceMax = "sourceMax";
+            public const string DestMin = "destMin", DestMax = "destMax", LerpSpeed = "lerpSpeed";
+            public const int MaxEntries = 64;
+            public const string NeedsSdk = "behaviour: faceTrackingSets needs com.vrchat.avatars >= 3.10.6 "
+                + "(VRCAnimatorFaceTrackingBlendshapesSet); this project has an older SDK";
         }
 
         internal static class PlayAudioKeys

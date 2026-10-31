@@ -465,6 +465,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     case VRC.SDKBase.VRC_AvatarParameterDriver drv:      AppendDriver(drv, sb); break;
                     case VRC.SDKBase.VRC_AnimatorTrackingControl tc:     AppendTracking(tc, sb); break;
+#if VRC_FT_SETS_PRESENT
+                    case VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet ft: AppendFaceTrackingSets(ft, sb); break;
+#endif
                     case VRC.SDKBase.VRC_AnimatorLocomotionControl lc:
                         sb.Append("- LocomotionControl: disableLocomotion=").Append(lc.disableLocomotion ? "true" : "false").Append('\n');
                         break;
@@ -522,6 +525,32 @@ namespace Ryan6Vrc.AgentTools.Editor
             T("mouth", tc.trackingMouth);
             sb.Append("- TrackingControl: ").Append(parts.Count == 0 ? "(all NoChange)" : string.Join(" ", parts)).Append('\n');
         }
+
+#if VRC_FT_SETS_PRESENT
+        // One line per blendSets entry, in list order: the set it weights, then the constant or the parameter read
+        // (with its range when convertRange is on), then the lerp speed when non-zero. The fields hidden for an
+        // entry's source type are not rendered — the inspector does not show them either.
+        private static void AppendFaceTrackingSets(VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet ft, StringBuilder sb)
+        {
+            sb.Append("- FaceTrackingBlendshapesSet:\n");
+            if (ft.blendSets == null) return;
+            foreach (var e in ft.blendSets)
+            {
+                if (e == null) { sb.Append("  - (null entry)\n"); continue; }
+                sb.Append("  - set=`").Append(e.blendshapesSetName).Append('`');
+                if (e.type == VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Parameter)
+                {
+                    sb.Append(" source=`").Append(e.sourceParameter).Append('`');
+                    if (e.convertRange)
+                        sb.Append(" range=[").Append(F(e.sourceMin)).Append("..").Append(F(e.sourceMax))
+                          .Append("]=>[").Append(F(e.destMin)).Append("..").Append(F(e.destMax)).Append(']');
+                }
+                else sb.Append(" weight=").Append(F(e.weight));
+                if (e.lerpSpeed != 0f) sb.Append(" lerpSpeed=").Append(F(e.lerpSpeed));
+                sb.Append('\n');
+            }
+        }
+#endif
 
         // ----- Dangling-motion GUID recovery (parse controller YAML once) -------------------------
 

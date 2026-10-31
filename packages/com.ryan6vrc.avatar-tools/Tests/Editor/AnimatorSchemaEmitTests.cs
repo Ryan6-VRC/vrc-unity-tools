@@ -200,6 +200,32 @@ public class AnimatorSchemaEmitTests
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
     }
 
+    // ---- faceTrackingSets: SDK-free, so it runs on every SDK ---------------------------------------
+    // Parse and Serialize never touch the component, so the four entry forms survive the document round trip
+    // even where the SDK lacks the type — what an older SDK refuses is the emit (ControllerEmitTests).
+
+    [Test]
+    public void Serialize_Roundtrips_FaceTrackingSets_Four_Entry_Forms()
+    {
+        var doc = AnimatorSchemaYaml.Parse(AnimatorTestHelpers.FtSetsDoc, "test");
+        string yaml = AnimatorSchemaEmit.Serialize(doc);
+        var back = AnimatorSchemaYaml.Parse(yaml, "roundtrip");
+
+        var b = back.Layers[0].Root.States[0].Behaviours.Single();
+        Assert.AreEqual("faceTrackingSets", b.Kind);
+        var sets = (Dictionary<string, object>)b.Fields["sets"];
+        CollectionAssert.AreEqual(new[] { "Lids", "FT Eyes", "Mouth", "Cheek" }, sets.Keys.ToList(), "map order is list order");
+        Assert.AreEqual(0.25f, AsF(sets["Lids"]), 1e-6f);
+        Assert.AreEqual("Gate", (string)sets["FT Eyes"]);
+        var mouth = (Dictionary<string, object>)sets["Mouth"];
+        Assert.AreEqual(10f, AsF(mouth["lerpSpeed"]), 1e-6f);
+        var cheek = (Dictionary<string, object>)sets["Cheek"];
+        Assert.AreEqual("Lip", (string)cheek["source"]);
+        Assert.AreEqual(0f, AsF(cheek["destMax"]), 1e-6f);
+
+        Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
+    }
+
     // ---- blend trees: nested 1d inside a direct tree, thresholds + directWeight --------------------
 
     [Test]

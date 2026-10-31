@@ -1,4 +1,5 @@
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
@@ -335,5 +336,41 @@ namespace Ryan6Vrc.AvatarTools.Tests
 
         [Test] public void Faithful_CommaConditionParam_EmitsOneQuotedScalar_Roundtrips() =>
             AssertConditionParamRoundtrips("comma", "a,b", quotedInYaml: true);
+
+        // ── faceTrackingSets (com.vrchat.avatars >= 3.10.6) ──────────────────────────────────────
+        // The Fixpoint_* contract through the real doors, for the one behaviour kind the TestCase list above cannot
+        // carry: below 3.10.6 the component does not exist and this is a same-named twin that skips. The value
+        // assertion reads the recompiled object, because a field reset to its default would still fixpoint.
+#if VRC_FT_SETS_PRESENT
+        [Test]
+        public void Fixpoint_FaceTrackingSets_Four_Entry_Forms()
+        {
+            var c0 = FixpointOracle.CompileTo(TestRoot, AnimatorTestHelpers.FtSetsDoc, "FtSets_Fx", "c0");
+            string yamlA = FixpointOracle.Decode(c0);
+            var c1 = FixpointOracle.CompileTo(TestRoot, yamlA, "FtSets_Fx", "c1");
+            Assert.AreEqual(yamlA, FixpointOracle.Decode(c1), "DecompileController -> CompileController -> DecompileController fixpoint");
+            StringAssert.Contains("=> PASS", CheckAnimator.Run(c1, "explicit", null, null, null));
+            // ReportController is the independent reader; compare only its rendering of this behaviour, the one
+            // block this test owns (the rest of the digest is the other fixpoint suites').
+            string FtLines(AnimatorController c) => string.Join("\n", ControllerGraphDigest.Of(c).Split('\n')
+                .Where(l => l.TrimStart().StartsWith("- FaceTrackingBlendshapesSet") || l.TrimStart().StartsWith("- set=")));
+            string ft0 = FtLines(c0);
+            StringAssert.Contains("set=`Cheek` source=`Lip` range=[0..2]=>[1..0] lerpSpeed=30", ft0);
+            Assert.AreEqual(ft0, FtLines(c1), "the independent reader agrees across the hop");
+
+            var ft = (VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet)c1.layers[0].stateMachine.states[0].state.behaviours[0];
+            Assert.AreEqual(4, ft.blendSets.Count);
+            var cheek = ft.blendSets[3];
+            Assert.AreEqual("Cheek", cheek.blendshapesSetName);
+            Assert.IsTrue(cheek.convertRange);
+            Assert.AreEqual(2f, cheek.sourceMax, 1e-6f);
+            Assert.AreEqual(1f, cheek.destMin, 1e-6f);
+            Assert.AreEqual(0f, cheek.destMax, 1e-6f);
+            Assert.AreEqual(30f, cheek.lerpSpeed, 1e-6f);
+            Assert.AreEqual(10f, ft.blendSets[2].lerpSpeed, 1e-6f);
+        }
+#else
+        [Test] public void Fixpoint_FaceTrackingSets_Four_Entry_Forms() => Assert.Ignore(AnimatorTestHelpers.FtSetsSkip);
+#endif
     }
 }

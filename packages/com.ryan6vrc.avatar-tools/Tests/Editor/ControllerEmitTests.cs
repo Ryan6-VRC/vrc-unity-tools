@@ -770,6 +770,146 @@ layers:
         StringAssert.Contains("unknown kind", ex.Message);
     }
 
+    // ---- faceTrackingSets (com.vrchat.avatars >= 3.10.6) ------------------------------------------------
+    // Below 3.10.6 the component does not exist: the one live test there is the named emit refusal, and every
+    // test that builds the component is a same-named twin that skips with AnimatorTestHelpers.FtSetsSkip.
+
+    private static ControllerEmit.EmitResult BuildFtSets(string body)
+    {
+        var doc = AnimatorSchemaYaml.Parse(
+            "schema: 1\ncontroller: FtSetsCase_Fx\nbasis: avatar-root\nrole: fx\n" +
+            "parameters:\n  P: float\n" +
+            "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
+            "        behaviours:\n          - faceTrackingSets: " + body + "\n" +
+            "    default: S\n", "test");
+        ControllerEmit.Build(doc, out var r);
+        return r;
+    }
+
+    // Each body breaks one bound or shape rule; the message must name what broke.
+    private static readonly object[] FtSetsRefusals =
+    {
+        new object[] { "{ sets: { X: 1.5 } }", "outside 0..1" },
+        new object[] { "{ sets: { X: { weight: 0.5, source: P } } }", "both weight and source" },
+        new object[] { "{ sets: { X: { lerpSpeed: 5 } } }", "needs weight" },
+        new object[] { "{ sets: { X: { source: P, destMax: 2 } } }", "outside 0..1" },
+        new object[] { "{ sets: { X: { source: P, lerpSpeed: 101 } } }", "outside 0..100" },
+        new object[] { "{ sets: { X: { weight: 1, sourceMin: 0 } } }", "applies only to a source entry" },
+        new object[] { "{ sets: { X: { source: P, speed: 1 } } }", "unknown field 'speed'" },
+        new object[] { "{ sets: { X: \"\" } }", "empty source parameter" },
+        new object[] { "{ sets: { X: on } }", "got a boolean" },
+        new object[] { "{ sets: { X: ~ } }", "got null" },
+        new object[] { "{ sets: { \"\": 1 } }", "empty Blendshapes Set name" },
+        new object[] { "{ sets: { X: 1 }, debug: hi }", "unknown field 'debug'" },
+    };
+
+    private static readonly string[] FtSetsRangeKeys = { "sourceMin", "sourceMax", "destMin", "destMax" };
+
+#if VRC_FT_SETS_PRESENT
+    [Test]
+    public void FaceTrackingSets_Four_Entry_Forms_Emit_Their_Elements()
+    {
+        var doc = AnimatorSchemaYaml.Parse(AnimatorTestHelpers.FtSetsDoc, "test");
+        ControllerEmit.Build(doc, out var r);
+        var ft = Only<VRCAnimatorFaceTrackingBlendshapesSet>(State(RootSm(r), "S"));
+        var e = ft.blendSets;
+        CollectionAssert.AreEqual(new[] { "Lids", "FT Eyes", "Mouth", "Cheek" }, e.Select(x => x.blendshapesSetName).ToList(),
+            "one element per entry, in map order");
+
+        var value = VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Value;
+        var param = VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Parameter;
+
+        Assert.AreEqual(value, e[0].type, "a bare number is a constant");
+        Assert.AreEqual(0.25f, e[0].weight, 1e-6f);
+        Assert.AreEqual(0f, e[0].lerpSpeed);
+
+        Assert.AreEqual(param, e[1].type, "a bare string is a parameter read");
+        Assert.AreEqual("Gate", e[1].sourceParameter);
+        Assert.IsFalse(e[1].convertRange);
+        Assert.AreEqual(1f, e[1].weight, "the hidden weight sits at the inspector's new-element value");
+
+        Assert.AreEqual(value, e[2].type);
+        Assert.AreEqual(1f, e[2].weight, 1e-6f);
+        Assert.AreEqual(10f, e[2].lerpSpeed, 1e-6f);
+        Assert.AreEqual("", e[2].sourceParameter);
+        Assert.IsFalse(e[2].convertRange);
+
+        Assert.AreEqual(param, e[3].type);
+        Assert.AreEqual("Lip", e[3].sourceParameter);
+        Assert.IsTrue(e[3].convertRange);
+        Assert.AreEqual(0f, e[3].sourceMin, 1e-6f);
+        Assert.AreEqual(2f, e[3].sourceMax, 1e-6f);
+        Assert.AreEqual(1f, e[3].destMin, 1e-6f);
+        Assert.AreEqual(0f, e[3].destMax, 1e-6f, "a reversed destination range survives (it inverts the gate)");
+        Assert.AreEqual(30f, e[3].lerpSpeed, 1e-6f);
+    }
+
+    [TestCaseSource(nameof(FtSetsRangeKeys))]
+    public void FaceTrackingSets_Any_Range_Key_Turns_ConvertRange_On(string key)
+    {
+        float v = key == "sourceMin" ? -1f : 0.5f;
+        var r = BuildFtSets("{ sets: { X: { source: P, " + key + ": " + v.ToString(System.Globalization.CultureInfo.InvariantCulture) + " } } }");
+        var e = Only<VRCAnimatorFaceTrackingBlendshapesSet>(State(RootSm(r), "S")).blendSets.Single();
+        Assert.IsTrue(e.convertRange, key + " alone turns the range on");
+        Assert.AreEqual(key == "sourceMin" ? v : 0f, e.sourceMin, 1e-6f);
+        Assert.AreEqual(key == "sourceMax" ? v : 1f, e.sourceMax, 1e-6f);
+        Assert.AreEqual(key == "destMin" ? v : 0f, e.destMin, 1e-6f);
+        Assert.AreEqual(key == "destMax" ? v : 1f, e.destMax, 1e-6f, "an absent key takes the inspector default 0/1/0/1");
+    }
+
+    [TestCaseSource(nameof(FtSetsRefusals))]
+    public void FaceTrackingSets_Refuses_By_Name(string body, string expected)
+    {
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => BuildFtSets(body));
+        StringAssert.Contains(expected, ex.Message);
+    }
+
+    [Test]
+    public void FaceTrackingSets_More_Than_64_Entries_Refuses()
+    {
+        var sb = new System.Text.StringBuilder("{ sets: { ");
+        for (int i = 0; i < 65; i++) sb.Append(i == 0 ? "" : ", ").Append("S").Append(i).Append(": 1");
+        sb.Append(" } }");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => BuildFtSets(sb.ToString()));
+        StringAssert.Contains("65 entries", ex.Message);
+        StringAssert.Contains("first 64", ex.Message);
+    }
+
+    [Test]
+    public void FaceTrackingSets_Undeclared_Source_Is_UndeclaredParam()
+    {
+        // The read side of the undeclared-param rule covers a Parameter entry's source, as it covers a driver
+        // copy's: a name the controller does not declare reads nothing.
+        var r = BuildFtSets("{ sets: { X: P, Y: Nowhere, Z: 0.5 } }");
+        var lint = Ryan6Vrc.AgentTools.Editor.ControllerRules.Run(r.Controller, new System.Collections.Generic.List<GameObject>(),
+            brokenBindingIsError: true, pathRewrite: null);
+        Assert.AreEqual(1, lint.UndeclaredParam, "only the undeclared source fires; P is declared and Z is a constant");
+        Assert.IsTrue(lint.Errors.Any(o => o.Kind == "undeclaredParam" && o.Detail.Contains("`Nowhere`")),
+            "the offender names the source");
+    }
+
+    [Test]
+    public void FaceTrackingSets_Below_3_10_6_Emit_Refuses_By_Name() =>
+        Assert.Ignore("meaningful only below com.vrchat.avatars 3.10.6; on this SDK the kind emits");
+#else
+    [Test] public void FaceTrackingSets_Four_Entry_Forms_Emit_Their_Elements() => Assert.Ignore(AnimatorTestHelpers.FtSetsSkip);
+    [TestCaseSource(nameof(FtSetsRangeKeys))] public void FaceTrackingSets_Any_Range_Key_Turns_ConvertRange_On(string key) => Assert.Ignore(AnimatorTestHelpers.FtSetsSkip);
+    [TestCaseSource(nameof(FtSetsRefusals))] public void FaceTrackingSets_Refuses_By_Name(string body, string expected) => Assert.Ignore(AnimatorTestHelpers.FtSetsSkip);
+    [Test] public void FaceTrackingSets_More_Than_64_Entries_Refuses() => Assert.Ignore(AnimatorTestHelpers.FtSetsSkip);
+    [Test] public void FaceTrackingSets_Undeclared_Source_Is_UndeclaredParam() => Assert.Ignore(AnimatorTestHelpers.FtSetsSkip);
+
+    [Test]
+    public void FaceTrackingSets_Below_3_10_6_Emit_Refuses_By_Name()
+    {
+        // The parse side is SDK-free, so the document reaches emit; emit names the SDK floor rather than calling
+        // the kind unknown.
+        var doc = AnimatorSchemaYaml.Parse(AnimatorTestHelpers.FtSetsDoc, "test");
+        var ex = Assert.Throws<ControllerEmit.EmitException>(() => { ControllerEmit.Build(doc, out _); });
+        StringAssert.Contains("faceTrackingSets needs com.vrchat.avatars >= 3.10.6", ex.Message);
+        StringAssert.DoesNotContain("unknown kind", ex.Message);
+    }
+#endif
+
     // ---- Determinism -----------------------------------------------------------------------------
 
     [Test]

@@ -158,7 +158,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                     if (child.stateMachine != null)
                         foreach (var t in m.Sm.GetStateMachineTransitions(child.stateMachine))
                             Conds(t.conditions, m.Path + " → " + child.stateMachine.name);
-                if (m.Sm.behaviours != null) foreach (var b in m.Sm.behaviours) DriverParams(b, m.Path + " (SM behaviour)", Ref);
+                if (m.Sm.behaviours != null)
+                    foreach (var b in m.Sm.behaviours)
+                    {
+                        DriverParams(b, m.Path + " (SM behaviour)", Ref);
+                        FaceTrackingSetParams(b, m.Path + " (SM behaviour)", Ref);
+                    }
             }
             foreach (var s in states)
             {
@@ -169,7 +174,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (st.mirrorParameterActive) Ref(st.mirrorParameter, s.Path + " mirrorParameter");
                 if (st.cycleOffsetParameterActive) Ref(st.cycleOffsetParameter, s.Path + " cycleOffset");
                 BlendParams(st.motion, s.Path, Ref);
-                if (st.behaviours != null) foreach (var b in st.behaviours) DriverParams(b, s.Path + " (driver)", Ref);
+                if (st.behaviours != null)
+                    foreach (var b in st.behaviours)
+                    {
+                        DriverParams(b, s.Path + " (driver)", Ref);
+                        FaceTrackingSetParams(b, s.Path + " (faceTrackingSets)", Ref);
+                    }
             }
 
             foreach (var kv in referenced)
@@ -283,6 +293,22 @@ namespace Ryan6Vrc.AgentTools.Editor
                 visit(p.name, where, false);
                 if (p.type == VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Copy) visit(p.source, where, true);
             }
+        }
+
+        /// <summary>Every parameter a face-tracking Blendshapes Set behaviour reads: the sourceParameter of each
+        /// Parameter-type entry. Feeds the undeclared-param rule only — an entry naming no declared parameter reads
+        /// nothing, the same certainty as a driver Copy's source. It deliberately does NOT feed
+        /// driverOnAnimatedParam: that rule's read half rests on a measurement of the driver, and whether this
+        /// behaviour's state-entry read of a clip-bound parameter sees the animated value or the declared default
+        /// has not been measured. The component first ships in com.vrchat.avatars 3.10.6.</summary>
+        private static void FaceTrackingSetParams(StateMachineBehaviour b, string where, Action<string, string> reff)
+        {
+#if VRC_FT_SETS_PRESENT
+            if (!(b is VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet ft) || ft.blendSets == null) return;
+            foreach (var e in ft.blendSets)
+                if (e != null && e.type == VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Parameter)
+                    reff(e.sourceParameter, where + " (source)");
+#endif
         }
 
         // ----- Rule 3c: driverOnAnimatedParam (error) -----------------------------------------------
