@@ -109,7 +109,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // ── Sanitized-filename collision guard (fail-loud, rule 7). Two DISTINCT authored clip names
+                // ── Sanitized-filename collision guard (fail-loud). Two DISTINCT authored clip names
                 //    can sanitize to one filename (e.g. "Wave Left" and "Wave_Left" → "Wave_Left.anim"); the
                 //    later write would silently clobber the earlier clip's file under a green PASS. These are
                 //    AUTHORED names, so a collision is an authoring error to surface — FAIL naming the colliding

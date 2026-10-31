@@ -1108,7 +1108,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // The transform a physbone's chain actually acts on. Delegated to the SDK's own null-resolving
-        // getter (CLAUDE.md rule 9), which is the same call CheckAvatar's DynamicsCategories registers and
+        // getter (CLAUDE.md rule 8), which is the same call CheckAvatar's DynamicsCategories registers and
         // its drift canary pins — a hand-rolled `rootTransform ?? transform` here would be the one
         // physbone-target resolution in the package with nothing watching it. A self-rooted pair sharing
         // one GameObject groups under this key too, which a rootTransform-only census misses.
