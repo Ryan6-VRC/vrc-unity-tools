@@ -8,10 +8,8 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using VRC.SDK3.Avatars.ScriptableObjects;
 
-// Behavioral tests for the emitted VRCExpressionsMenu: the asset CompileController persists beside the
-// controller, its sub-asset tree, and the lifecycle rules (GUID held across recompiles, stale asset swept).
-// These need the SDK types and the AssetDatabase; the parse/validate half is MenuSchemaTests. Run headless
-// via tools/run-editmode-tests.ps1; not via MCP run_tests — wrong venue. See docs/verify.md.
+// The emit half of the `menu:` surface, the VRCExpressionsMenu asset CompileController persists beside the
+// controller. The parse and validate half is MenuSchemaTests.
 public class MenuEmitTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/menu_tests";
@@ -57,8 +55,7 @@ layers: []
     [Test]
     public void ControlTypesLandAsTheSerializedNumbers()
     {
-        // The docs/menus.md trap: the serialized ints are NOT the enum ordinals. Emitting through the typed
-        // field makes the mistake unrepresentable, and this asserts the bytes VRChat actually reads.
+        // The serialized numbers VRChat reads, which are not the enum's ordinals (docs/menus.md).
         Compile(@"menu:
   - button: B
     param: Enable
@@ -93,8 +90,6 @@ layers: []
     [Test]
     public void SubMenuPagesAreSubAssetsOfTheOneFile()
     {
-        // The whole tree travels under one GUID, so a consumer references only the root and no page can be
-        // orphaned into a loose asset nobody points at.
         Compile(@"menu:
   - submenu: Colors
     controls:
@@ -111,8 +106,6 @@ layers: []
     [Test]
     public void RecompileHoldsTheGuid()
     {
-        // A consumer's FullController `menus:` row references this file by GUID; a delete+recreate would
-        // silently break every install.
         Compile(@"menu:
   - toggle: A
     param: Enable
@@ -131,7 +124,6 @@ layers: []
     [Test]
     public void RecompileSweepsStaleSubMenuPages()
     {
-        // Without the wholesale churn, a renamed or deleted sub-menu lingers inside the file forever.
         Compile(@"menu:
   - submenu: Gone
     controls:
@@ -158,9 +150,8 @@ layers: []
     [Test]
     public void RecompileReportsTheMenuInTheSummary()
     {
-        // The in-place branch destroys the in-memory root, and a destroyed UnityEngine.Object compares
-        // equal to null — so the summary has to key off a flag captured before that, or every recompile
-        // silently under-reports a menu that was in fact written.
+        // The in-place branch destroys the in-memory root, which then compares equal to null, so a summary
+        // reading it after that under-reports the menu it wrote.
         Compile(@"menu:
   - toggle: A
     param: Enable
@@ -175,8 +166,8 @@ layers: []
     [Test]
     public void InPlaceWrite_SyncsTheObjectName()
     {
-        // An entry moving its menu into built/ renames the file; the in-place write is the path that skips
-        // Unity's filename-driven rename, so m_Name would otherwise stay stale forever.
+        // The in-place write skips Unity's filename-driven rename, so a main asset renamed on disk keeps its
+        // old m_Name unless the write syncs it.
         Compile(@"menu:
   - toggle: A
     param: Enable
@@ -205,9 +196,7 @@ layers: []
     [Test]
     public void ControlOnAVrcBuiltIn_FailsTheCompile()
     {
-        // EmitVrcParameters excludes built-ins from the params asset exactly as it excludes scratch params,
-        // so VRChat never sees the name and the control is inert. SchemaValidation catches the scratch half
-        // but is System.*-only and cannot reach ControllerRules, so this half is refused at emit.
+        // SchemaValidation is System.*-only and cannot reach ControllerRules, so this refusal lives at emit.
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*emit:.*IsLocal.*=> FAIL"));
         File.WriteAllText(_srcPath, @"schema: 1
 controller: M_Fx
@@ -227,15 +216,14 @@ menu:
     [Test]
     public void FailedCompileDoesNotDestroyAPreExistingMenu()
     {
-        // "Nothing written on failure" covers side assets. A FRESH compile over a folder that already holds
-        // a menu skips ProofCompile — there is no prior controller to protect — so persisting before the
-        // lint would delete an asset CleanupAfterLint cannot restore.
+        // With its controller gone, a compile skips ProofCompile, so persisting before the lint would delete
+        // a menu CleanupAfterLint cannot restore.
         Compile(@"menu:
   - toggle: A
     param: Enable
 ");
         var before = File.ReadAllText(MenuPath);
-        AssetDatabase.DeleteAsset(OutDir + "/M_Fx.controller");   // controller gone, menu stays
+        AssetDatabase.DeleteAsset(OutDir + "/M_Fx.controller");
 
         // A document whose graph fails the lint: an unconditional state hop with no exit time.
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*graph lint.*=> FAIL"));
@@ -277,8 +265,6 @@ menu:
 
     // ---------- icons ----------
 
-    // A real imported 2x2 PNG under TestRoot. Encoded rather than checked in: the emit path needs a genuine
-    // Texture2D the AssetDatabase imported, and a fixture binary would be one more thing to keep alive.
     private string MakeIcon(string projectPath)
     {
         AnimatorTestHelpers.EnsureFolder(Path.GetDirectoryName(projectPath).Replace('\\', '/'));
@@ -291,7 +277,7 @@ menu:
         return projectPath;
     }
 
-    // The RunLog body behind a compile message ("… | log=<path>"), where the advisories live.
+    // The RunLog body behind a compile message, where the advisories live.
     private static string RunLogBody(string compileMessage)
     {
         int i = compileMessage.LastIndexOf("| log=", System.StringComparison.Ordinal);
@@ -302,8 +288,6 @@ menu:
     [Test]
     public void DocumentRelativeIcon_Resolves()
     {
-        // The portable form, and the one a library entry uses: the icon sits beside the yaml, named without
-        // reference to where the pair is mounted.
         var icon = MakeIcon(TestRoot + "/assets/Knob.png");
         StringAssert.Contains("=> OK", Compile("menu:\n  - toggle: T\n    param: Enable\n    icon: assets/Knob.png\n"));
         Assert.AreEqual(icon, AssetDatabase.GetAssetPath(Load().controls.Single().icon));
@@ -337,9 +321,6 @@ menu:
     [Test]
     public void MissingIcon_FailsTheCompileAndWritesNothing()
     {
-        // The authoring mistake: a path that resolves to nothing at all. Fatal, deliberately NOT degraded —
-        // there is no authored marker distinguishing an intended-dangling icon from a typo, and a silently
-        // icon-less control is exactly what the author would not notice.
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*icon not found.*=> FAIL"));
         var msg = Compile("menu:\n  - toggle: T\n    param: Enable\n    icon: assets/Nope.png\n");
         StringAssert.Contains("FAIL", msg);
@@ -350,9 +331,7 @@ menu:
     [Test]
     public void IconThatIsNotATexture_FailsByName()
     {
-        // Present, in the project, imported — but not an image. Distinguished from "not found" because the
-        // repair differs: this one is a real file at a wrong path. The first compile is what makes the
-        // controller exist as an imported non-texture asset to point at.
+        // The first compile makes the controller exist as an imported non-texture asset to point at.
         StringAssert.Contains("=> OK", Compile("menu:\n  - toggle: T\n    param: Enable\n"));
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*did not load as a Texture2D.*=> FAIL"));
         var msg = Compile("menu:\n  - toggle: T\n    param: Enable\n    icon: " + OutDir + "/M_Fx.controller\n");
@@ -363,10 +342,8 @@ menu:
     [Test]
     public void DocumentRelativeIconResolvesInAssetSpace_IncludingDotDot()
     {
-        // The path arithmetic must stay in ASSET space. Doing it on the filesystem happens to work under
-        // Assets/ and silently breaks for a `file:`-mounted package, whose Packages/… path names no folder
-        // on disk — measured: every icon in a mounted vrc-patterns emitted null before this was fixed. A
-        // `..` hop is the cheapest way to assert the collapse happens without leaving that space.
+        // A `file:`-mounted package's Packages/… path names no folder on disk, so the path arithmetic must stay
+        // in asset space; a `..` hop is the cheapest way to assert the collapse happens there.
         var icon = MakeIcon(TestRoot + "/assets/Knob.png");
         AnimatorTestHelpers.EnsureFolder(TestRoot + "/sub");
         var nested = TestRoot + "/sub/M_Fx.yaml";
@@ -378,10 +355,9 @@ menu:
     [Test]
     public void IconOutsideTheProject_EmitsNullAndAdvises()
     {
-        // THE GATE CASE, reproduced exactly: a yaml compiled from a filesystem path outside the project,
-        // with its icon beside it, into a host whose AssetDatabase cannot see either. The compile must
-        // SUCCEED with a null icon — failing here would make `icon:` unauthorable by the vrc-patterns
-        // library, whose gate compiles every entry this way (ControllerFixpoint.CompileToTemp).
+        // The vrc-patterns gate compiles every entry this way (ControllerFixpoint.CompileToTemp): a yaml outside
+        // the project, its icon beside it, into a host whose AssetDatabase sees neither. Failing here would
+        // make `icon:` unauthorable by that library.
         var outside = Path.Combine(Path.GetTempPath(), "f11_icon_" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
         Directory.CreateDirectory(Path.Combine(outside, "assets"));
         try
@@ -404,10 +380,8 @@ menu:
     [Test]
     public void OutOfProjectCompile_NeverFails_WhicheverSpelling()
     {
-        // The regime is decided by the DOCUMENT's location, so every icon spelling must degrade together.
-        // Keying on the icon's spelling instead made a project-spelled icon throw here — which would fail
-        // the whole gate run for an entry that compiles perfectly well in a project. The lowercase
-        // `assets/…` in the test above sidesteps that branch entirely, so it could not have caught it.
+        // The regime follows the document's location, so every icon spelling degrades together: a throw on a
+        // project-spelled icon would fail a gate run over an entry that compiles fine in a project.
         var outside = Path.Combine(Path.GetTempPath(), "f11_spell_" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
         Directory.CreateDirectory(outside);
         try
@@ -427,9 +401,9 @@ menu:
     [Test]
     public void InProjectDocumentGivenAnAbsolutePath_StillResolves()
     {
-        // Every interactive door hands Compile an ABSOLUTE path (the menu door calls Path.GetFullPath;
-        // OpenFilePanel returns absolute). Testing only the `Assets/…` spelling hid a total failure of the
-        // field there: the document read as out-of-project, and every icon silently emitted null.
+        // Every interactive door hands CompileController.Run an absolute path (the menu door calls
+        // Path.GetFullPath; OpenFilePanel returns absolute), which must not read as out-of-project and null
+        // every icon.
         var icon = MakeIcon(TestRoot + "/assets/Knob.png");
         File.WriteAllText(_srcPath, Head + "menu:\n  - toggle: T\n    param: Enable\n    icon: assets/Knob.png\n");
         var msg = CompileController.Run(Path.GetFullPath(_srcPath), OutDir);
@@ -442,8 +416,6 @@ menu:
     [Test]
     public void BackslashSeparatorsResolve_LikeForwardOnes()
     {
-        // A Windows-spelled path must not behave differently in-project (where it would fail an asset-space
-        // lookup) than at the gate (where Path.Combine accepts it).
         var icon = MakeIcon(TestRoot + "/assets/Knob.png");
         StringAssert.Contains("=> OK", Compile(@"menu:
   - toggle: T
@@ -468,8 +440,6 @@ menu:
     [Test]
     public void NoIcons_AdvisorySectionReadsNone()
     {
-        // The section is unconditional, so a document with no icons must still read cleanly rather than
-        // suggest something was skipped.
         StringAssert.Contains("## Compile advisory: unadjudicated menu icons\n\n_(none)_",
             RunLogBody(Compile("menu:\n  - toggle: T\n    param: Enable\n")));
     }
@@ -477,8 +447,6 @@ menu:
     [Test]
     public void SdkControlCapMatchesTheEchoedConstant()
     {
-        // SchemaValidation is System.*-only and mirrors the cap; this is the assertion that keeps the echo
-        // honest if the SDK ever moves it (ControllerEmit throws on the same mismatch during a real emit).
         Assert.AreEqual(VRCExpressionsMenu.MAX_CONTROLS, MenuLimits.MaxControlsPerMenu);
     }
 }

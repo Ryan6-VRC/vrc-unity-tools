@@ -1,5 +1,3 @@
-// Behavioral tests for OwnControllerClips. Throwaway on-disk assets under an owned scratch path; assert on
-// the returned one-line summary + post-mutation controller/clip state. Headless via tools/run-editmode-tests.ps1.
 using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.Animations;
@@ -88,8 +86,8 @@ public class OwnControllerClipsTests
         StringAssert.Contains("=> PASS", s);
         Assert.AreEqual(2, AnimatorTestHelpers.Count(s, "copiesMade"));
         Assert.AreEqual(2, AssetDatabase.FindAssets("t:AnimationClip", new[] { Out }).Length, "two distinct owned copies");
-        // End-state, not just file count: each state must retarget to its OWN distinct owned copy. A map
-        // pointing both states at one copy (orphaning the other file) would still pass the count assertions.
+        // A map pointing both states at one copy, orphaning the other file, would still pass the count
+        // assertions above.
         var m1 = FindState(ctrl, "S1").motion as AnimationClip;
         var m2 = FindState(ctrl, "S2").motion as AnimationClip;
         string p1 = AssetDatabase.GetAssetPath(m1), p2 = AssetDatabase.GetAssetPath(m2);
@@ -121,9 +119,8 @@ public class OwnControllerClipsTests
         StringAssert.Contains("=> PASS", s);
         Assert.AreEqual(0, AnimatorTestHelpers.Count(s, "residual"), "both nested + override slots retargeted");
         Assert.GreaterOrEqual(AnimatorTestHelpers.Count(s, "retargets"), 2);
-        // residual=0 only proves no slot still points at an in-scope VENDOR clip; a slot retargeted to the
-        // WRONG owned clip is still owned → residual=0. Inspect the actual end-state slots (re-walk ctrl,
-        // which survives Run's reimport; the pre-Run inner/st refs may be stale). Both must be owned copies.
+        // residual=0 only proves no slot still points at an in-scope vendor clip, so read the slots back. Re-walk
+        // ctrl, which survives Run's reimport; the pre-Run inner/st refs may be stale.
         var treeState = FindState(ctrl, "Tree");
         var innerBt = (treeState.motion as BlendTree).children[0].motion as BlendTree;
         var innerChild = innerBt.children[0].motion as AnimationClip;

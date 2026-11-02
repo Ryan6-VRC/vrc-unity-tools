@@ -11,11 +11,11 @@ namespace Ryan6Vrc.AgentTools.Editor
     {
         Found,
         NotFound,
-        /// <summary>The handle names more than one object. Refusing beats picking: a handle that can pick the
-        /// wrong object is wrong for a read door too, just more quietly than for a writer.</summary>
+        /// <summary>The handle names more than one object.</summary>
         Ambiguous,
-        /// <summary>An instance id that resolves to an object outside the searched domain — a prefab asset, or
-        /// an object in prefab isolation / a preview scene. Only the id rung can reach these.</summary>
+        /// <summary>An instance id that resolves outside the active scene: a prefab asset, or an object in prefab
+        /// isolation, a preview scene or another loaded scene. Only the id rung can reach these, because
+        /// <see cref="EditorUtility.InstanceIDToObject"/> is not scene-scoped.</summary>
         OutOfDomain,
     }
 
@@ -24,25 +24,14 @@ namespace Ryan6Vrc.AgentTools.Editor
         public SceneHandleOutcome Outcome;
         /// <summary>Set on <see cref="SceneHandleOutcome.Found"/> only.</summary>
         public GameObject Object;
-        /// <summary>Set on every non-Found outcome, minted here rather than by the calling door: agent-facing
-        /// strings are born at a closed set of carriers (`tool-design.md` §Diagnostics are governed prose), and
-        /// twelve doors each formatting a match list is twelve echoes of one diagnostic. A door prefixes its own
-        /// envelope and adds no prose of its own.</summary>
+        /// <summary>Set on every non-Found outcome. A door prefixes its own envelope and adds no prose of its own.</summary>
         public string Refusal;
 
         public bool Ok { get { return Outcome == SceneHandleOutcome.Found; } }
     }
 
-    /// <summary>The one string→scene-GameObject resolver behind every string scene handle in `agent-tools` and
-    /// `avatar-tools`. Ladder: hierarchy path → instance id → bare name, over the ACTIVE scene.
-    ///
-    /// <para>The instance-id rung is the only one that can leave the active scene — <see
-    /// cref="EditorUtility.InstanceIDToObject"/> is not scene-scoped — which is why it alone returns
-    /// <see cref="SceneHandleOutcome.OutOfDomain"/>, covering a prefab asset, a prefab stage and another
-    /// loaded scene alike.</para>
-    ///
-    /// <para>Not here: resolving a path RELATIVE to a known root (`RenderAvatar.ResolveDescendant`). That is a
-    /// different question with one caller, and folding it in would widen this surface for nobody.</para></summary>
+    /// <summary>Resolves a door's string scene handle, in both packages, over the active scene: hierarchy path,
+    /// then instance id, then bare name.</summary>
     internal static class SceneHandle
     {
         internal static SceneHandleResult Resolve(string handle)
@@ -53,11 +42,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             var scene = SceneManager.GetActiveScene();
 
-            // Ladder order is path → id → name, preserved from the twelve copies this replaces. The two
-            // deviations both exist to keep a refusal from dead-ending: an Ambiguous path falls through to the
-            // id rung (otherwise a handle that is BOTH a duplicated name and an instance id refuses while
-            // advising the very handle it refused), and an out-of-domain id yields to an Ambiguous path, whose
-            // message is the more actionable of the two.
+            // An Ambiguous path falls through to the id rung: otherwise a handle that is both a duplicated name
+            // and an instance id refuses while advising the very handle it refused. An out-of-domain id then
+            // yields to that Ambiguous path, whose message is the more actionable of the two.
             var byPath = ByPath(handle, scene);
             if (byPath.Ok) return byPath;
 
@@ -74,8 +61,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 + " — tried hierarchy path, instance id, then object name.");
         }
 
-        // ── Rung 1: hierarchy path ────────────────────────────────────────────────────────────────────────
-
         private static SceneHandleResult ByPath(string handle, Scene scene)
         {
             var segs = handle.Trim('/').Split('/');
@@ -85,18 +70,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Decide(hits, handle, "hierarchy path");
         }
 
-        /// <summary>Branching descent. Never <c>Transform.Find</c>: it returns the FIRST same-named child, so a
-        /// path walked with it is a silent coin-flip at every depth — and duplicate-named siblings are the
-        /// ordinary composed-avatar shape (an unmerged outfit carries its own Armature/Hips beside the base's).
-        /// Collecting the whole frontier is what makes the ambiguity refusal true of paths and not just names.</summary>
+        /// <summary>Never <c>Transform.Find</c>: it returns the first same-named child, and duplicate-named siblings
+        /// are the ordinary composed-avatar shape (an unmerged outfit carries its own Armature/Hips beside the
+        /// base's). Collecting the whole frontier is what lets a path refuse as ambiguous.</summary>
         private static void Descend(Transform t, string[] segs, int depth, List<GameObject> into)
         {
             if (depth == segs.Length) { into.Add(t.gameObject); return; }
             foreach (Transform child in t)
                 if (child.name == segs[depth]) Descend(child, segs, depth + 1, into);
         }
-
-        // ── Rung 2: instance id ───────────────────────────────────────────────────────────────────────────
 
         private static SceneHandleResult ById(string handle, Scene scene)
         {
@@ -111,19 +93,13 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             if (go.scene == scene) return new SceneHandleResult { Outcome = SceneHandleOutcome.Found, Object = go };
 
-            // Split by cause: a prefab ASSET is on disk and has no scene at all, while a prefab stage, a
-            // preview scene or another loaded scene is a live scene that simply is not the active one. One
-            // message for both would send the reader looking in a scene for something that is a file.
-            // Measured, against the assumption: NDMF's preview scene DOES appear in SceneManager's
-            // enumeration (it is a real additively-opened scene under Packages/, unlike
-            // EditorSceneManager.NewPreviewScene()). Nothing here depends on that — only the active scene is
-            // searched — but do not reintroduce a wider domain believing preview scenes are excluded for free.
+            // NDMF's preview scene appears in SceneManager's enumeration (a real additively-opened scene under
+            // Packages/, unlike EditorSceneManager.NewPreviewScene()), so a search wider than the active scene
+            // would take it in.
             return Refuse(SceneHandleOutcome.OutOfDomain, go.scene.IsValid()
                 ? "instance id " + id + " ('" + go.name + "') is not in the active scene (prefab isolation, a preview scene, or another loaded scene) — open or activate the scene holding it."
                 : "instance id " + id + " ('" + go.name + "') is inside a prefab asset, not a loaded scene — place it, or pass an asset path to a door that takes one.");
         }
-
-        // ── Rung 3: bare name ─────────────────────────────────────────────────────────────────────────────
 
         private static SceneHandleResult ByName(string handle, Scene scene)
         {
@@ -138,10 +114,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (Transform child in t) CollectByName(child, name, into);
         }
 
-        // ── Deciding ─────────────────────────────────────────────────────────────────────────────────────
-
-        /// <summary>One hit resolves; several refuse. Refusing beats picking even for a read door — a wrong
-        /// object reported confidently is worse than a refusal that hands back the handles which disambiguate.</summary>
         private static SceneHandleResult Decide(List<GameObject> hits, string handle, string rung)
         {
             if (hits.Count == 1) return new SceneHandleResult { Outcome = SceneHandleOutcome.Found, Object = hits[0] };
@@ -163,11 +135,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Refuse(SceneHandleOutcome.Ambiguous, sb.ToString());
         }
 
-        // ── Rendering ─────────────────────────────────────────────────────────────────────────────────────
-
-        /// <summary>Hierarchy path plus instance id — the two handles that disambiguate, in the order a caller
-        /// should try them. The id is last resort: two objects can share a path only across scenes, which this
-        /// resolver does not span, but duplicate-named siblings make paths equal in practice.</summary>
         private static string Describe(GameObject go)
         {
             return MergeSurfaces.PathOf(go) + " (id " + go.GetInstanceID() + ")";

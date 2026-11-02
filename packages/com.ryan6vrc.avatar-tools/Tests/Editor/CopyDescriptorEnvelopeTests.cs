@@ -4,9 +4,8 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// R3 migration pins: CopyDescriptor reports through the shared RunLog envelope. Arg-guard FAILs must
-// write a RunLog with the | log= trailer (previously a bare trailer-less line with no artifact), and
-// gate FAILs must land in offender grammar (previously the bespoke gateError key).
+// CopyDescriptor reports through the shared RunLog envelope: arg-guard FAILs write a RunLog with the | log=
+// trailer, and gate FAILs land in offender grammar.
 public class CopyDescriptorEnvelopeTests
 {
     static string LogPathOf(string summary) => summary.Substring(summary.IndexOf("log=") + 4);
@@ -22,8 +21,8 @@ public class CopyDescriptorEnvelopeTests
         UnityEditor.AssetDatabase.DeleteAsset(path);
     }
 
-    // Minimal rig that passes both gates: unit scale (gate A) and one identically-named blendshape on
-    // each side's face SMR (gate B).
+    // Minimal rig that passes both gates: unit scale (scale/orientation) and one identically-named blendshape
+    // on each side's face SMR (blendshape parity).
     static GameObject BuildFaceRig(string name)
     {
         var root = new GameObject(name);
@@ -48,8 +47,8 @@ public class CopyDescriptorEnvelopeTests
         StringAssert.Contains("=> PASS", s);
         StringAssert.Contains("criticalRefs=", s);
 
-        // The single envelope writer emits counts only where added — the whatIf artifact must
-        // honestly omit the execute-only counters, not zero them (the old dual-writer contract).
+        // The envelope writer emits counts only where added, so the whatIf artifact omits the execute-only
+        // counters rather than zeroing them.
         var path = LogPathOf(s);
         var json = System.IO.File.ReadAllText(path);
         StringAssert.Contains("\"kind\": \"copy-descriptor\"", json);
@@ -66,7 +65,7 @@ public class CopyDescriptorEnvelopeTests
     public void Gate_fail_names_the_offender_in_the_envelope()
     {
         var owned = new GameObject("Owned");
-        owned.transform.localScale = new Vector3(2f, 2f, 2f); // gate A: scale mismatch vs vendor
+        owned.transform.localScale = new Vector3(2f, 2f, 2f);
         var vendor = new GameObject("Vendor");
         LogAssert.Expect(LogType.Error, new Regex("gate scale/orientation"));
         var s = CopyDescriptor.Run(owned, vendor);

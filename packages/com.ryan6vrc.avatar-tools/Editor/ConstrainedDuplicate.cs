@@ -186,8 +186,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // internal, not private: ConstrainedDuplicateSourceTailTests pins the source-tail contract directly.
-        // Reached through the existing InternalsVisibleTo, so the door grows no test-only seam.
         internal static bool TryReplaceSources(VRCConstraintBase constraint, Transform driver)
         {
             if (constraint == null || driver == null) return false;
@@ -198,18 +196,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 sources.Add(new VRCConstraintSource(driver, 1f));
                 constraint.Sources = sources;
 
-                // Clear() resets totalLength and leaves the SLOTS filled (measured): after a Clear+Add on
-                // a constraint that had three sources, totalLength reads 1 while source1 and source2 still
-                // hold their old transforms. The editor solves every filled slot and the client solves only
-                // the first totalLength (docs/runtime.md §Constraints), so that residue is a source which
-                // works in every play-mode pass and does nothing in-game — this door would author the exact
-                // defect ReportGimmick.ScanConstraintLengths reports. The public API cannot address a slot
-                // past the length, so the tail is cleared through SerializedObject.
+                // Clear() resets totalLength and leaves the SLOTS filled, so an old source survives past the
+                // new length, where it works in every play-mode pass and does nothing in-game
+                // (docs/runtime.md §Constraints). The public API cannot address a slot past the length, so
+                // the tail is cleared through SerializedObject.
                 var so = new SerializedObject(constraint);
-                // Fail loud on a schema change rather than silently resuming the defect. The reader half
-                // (ReportGimmick.ScanConstraintLengths) raises a degraded note when it cannot address these
-                // properties; without this the writer would quietly no-op its tail clear and keep returning
-                // true while the reader shouted about the same drift.
                 if (so.FindProperty("Sources.source1.SourceTransform") == null)
                 {
                     Debug.LogWarning($"{constraint.GetType().Name} on '{constraint.gameObject.name}': cannot " +

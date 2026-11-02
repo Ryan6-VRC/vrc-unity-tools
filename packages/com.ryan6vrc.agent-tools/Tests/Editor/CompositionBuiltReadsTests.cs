@@ -9,12 +9,7 @@ using UnityEngine.TestTools;
 
 /// <summary>
 /// The bake's reads of the built clone that are not a parameter, a triangle or a byte: each mesh's UV layout,
-/// the caller's probe, and the one-back copy of the artifact. Each makes a claim a reader acts on without a
-/// second look, so the cases pin the line between the states that look alike: no UV channel against no row,
-/// a probe that returned nothing against one that threw, a finished artifact against a stub.
-///
-/// Objects are left for the next test's <c>NewScene(Single)</c> to take rather than destroyed —
-/// <c>docs/verify.md</c> §Test venue.
+/// the caller's probe, and the one-back copy of the artifact.
 /// </summary>
 public class CompositionBuiltReadsTests
 {

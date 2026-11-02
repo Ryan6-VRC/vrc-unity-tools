@@ -9,19 +9,10 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// Reproportion-safety guard: the bind (humanDescription.skeleton) is frozen into the
-    /// .meta at rig time and does NOT self-update. If the model geometry changed (a
-    /// reproportion re-export) without re-running MatchHumanoidRig, the stored bind disagrees
-    /// with the current bones -> folded hips. This asserts each humanoid bone's stored bind
-    /// LOCAL POSITION still matches the current model node, FAILing (named) on any drift. Run it
-    /// as an entry guard before relying on an existing rig.
-    ///
-    /// Position only — deliberately NOT rotation. Reproportioning moves bones (limb lengths /
-    /// translations change), so position is the load-bearing signal and the one that folds the
-    /// hips. Local rotation is preserved across a reproportion, and Unity stores a thumb-corrected
-    /// bind rotation in skeleton[] that legitimately differs from the raw FBX node localRotation
-    /// (~13deg on ThumbProximal) even on a pristine rig — so a rotation check produces guaranteed
-    /// false positives on healthy rigs while catching nothing that position misses.
+    /// Entry guard before relying on an existing rig: each humanoid bone's stored bind must still match
+    /// the model's local position. Position only, because Unity's thumb-corrected bind rotation differs
+    /// from the raw FBX node's (~13deg on ThumbProximal) even on a healthy rig.
+    /// Contract: docs/unity-tools.md.
     /// </summary>
     [AgentTool]
     public static class CheckHumanoidRig
@@ -47,8 +38,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (skel.Length == 0)
                 return Fail(label, ourFbxPath, "humanDescription.skeleton is empty (rig never run)");
 
-            // The built Avatar is the proof a humanoid rig actually exists; a stale/missing one means
-            // there is no trustworthy rig to compare against — fail loudly before diffing.
             UnityEngine.Avatar builtAvatar = null;
             foreach (var o in AssetDatabase.LoadAllAssetsAtPath(ourFbxPath))
                 if (o is UnityEngine.Avatar) { builtAvatar = (UnityEngine.Avatar)o; break; }
@@ -92,19 +81,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return Finish(head, pass, label, ourFbxPath, bonesChecked, drifted);
         }
 
-        // ── Helpers ─────────────────────────────────────────────────────────────────────────────
-
         private static string Fail(string label, string path, string why, int bonesChecked = 0)
         {
             string head = "[CheckHumanoidRig] " + label + ": => FAIL (" + why + ")";
             return Finish(head, false, label, path, bonesChecked, new List<string> { why });
         }
 
-        /// <summary>Shared tail: JSON body → <see cref="RunLogFormat.WriteRunLog"/> (kind-prefixed
-        /// filename, honest write-failure degradation to a trailer-less bare FAIL — the old bespoke
-        /// writer swallowed a write failure into a warning and still asserted its verdict), then
-        /// severity-log. Filename was <c>reproportion_freshness_…</c>, a name inherited from the
-        /// tool's reproportion-flow origin that disagreed with its JSON <c>kind</c>.</summary>
         private static string Finish(string head, bool pass, string label, string path, int bonesChecked, List<string> drifted)
         {
             var sb = new StringBuilder();
@@ -121,8 +103,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("]\n}");
 
             string res = RunLogFormat.WriteRunLog(RunLogDir, "check-humanoid-rig_" + label, head, sb.ToString(), ".json");
-            // Anchored to WriteRunLog's exact success contract (summary + " | log=" + path), not a
-            // floating substring.
             bool wroteLog = res.StartsWith(head + " | log=", StringComparison.Ordinal);
             if (pass && wroteLog) Debug.Log(res); else Debug.LogError(res);
             return res;
@@ -134,17 +114,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Avatar-scoped door: proxy / name-shadow divergence ───────────────────────────────────────
 
-        /// <summary>Label prefix for every summary/RunLog <see cref="InspectAvatar"/> emits — kept
-        /// distinct from <see cref="Run"/>'s "[CheckHumanoidRig]" so an avatar-scoped log can never be
-        /// misread as a bind-drift one (the CheckSeam / "CheckSeam:bare" precedent — docs/unity-tools.md).</summary>
         private const string AvatarLabelPrefix = "[CheckHumanoidRig:avatar]";
 
-        /// <summary>Scope note carried on every avatar-door run, PASS included: a zero count reads the
-        /// mapping as the built <c>Avatar</c> reports it (plus the source <c>ModelImporter</c> when the
-        /// avatar asset is importer-backed) over the SkinnedMeshRenderers present in the scene right now,
-        /// pre-build — not as "no divergence exists anywhere". A generated/standalone Avatar with no
-        /// ModelImporter is not a failure — the importer half is simply unavailable and the live mapping
-        /// stands alone.</summary>
         internal const string ScopeNoteLine =
             "scan scope: reads the humanoid mapping as the built Avatar reports it (plus the source " +
             "ModelImporter when the avatar asset is importer-backed) over the SkinnedMeshRenderers present " +
@@ -163,24 +134,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private struct DivergenceRow { public string Kind; public string BoneLabel; public string MappedPath; public string OtherPath; }
 
         /// <summary>
-        /// Composed-avatar divergence guard: a humanoid rig's ONLY source of truth is the source model's
-        /// <c>ModelImporter.humanDescription</c> — never a prefab, scene, controller, or clip. A rig can
-        /// legitimately map humanoid <c>Head</c> to a transform like <c>Head_Proxy</c>, a SIBLING of the
-        /// skinned <c>Head</c> bone; every other artifact that looks a bone up BY NAME then silently reads
-        /// the wrong transform. <see cref="Run"/> cannot see this — it only asserts bind-vs-geometry drift
-        /// on one FBX. This door starts from a PLACED avatar and reports the divergence: a humanoid bone
-        /// mapped to a transform no renderer weights (<b>proxy</b>), and a plain name lookup landing on the
-        /// wrong transform because some OTHER node carries the humanoid label (<b>name-shadow</b>). A bone
-        /// can hit both classes; each is emitted once per class it hits.
-        ///
-        /// Verdict mirrors <c>Ryan6Vrc.AgentTools.Editor.CheckAvatar.Run</c> exactly: PASS (no
-        /// divergence found), CLASSIFY (a finding for the agent to route — never a tool failure), FAIL
-        /// (bad input: unresolved handle, no descriptor, no Animator, no humanoid avatar — bare, no RunLog
-        /// trailer, same family discipline as a CheckAvatar bad-input refusal).
-        ///
-        /// Read-only: mutates no scene object, no asset, dirties nothing. <paramref name="avatarRoot"/> is
-        /// a scene handle resolved by the shared <c>SceneHandle</c> (hierarchy path, then instance id,
-        /// then name, in the active scene; an ambiguous handle is refused rather than guessed).
+        /// Names proxy and name-shadow divergence on a placed avatar (classes: docs/unity-tools.md).
+        /// PASS: none found. CLASSIFY: findings for the agent to route, never a tool failure. FAIL: bad
+        /// input, a bare line with no RunLog trailer.
         /// </summary>
         public static string InspectAvatar(string avatarRoot)
         {
@@ -200,32 +156,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!animator.avatar.isHuman)
                 return FailAvatar("'" + avatarRoot + "' Animator.avatar is not humanoid");
 
-            // ---- source model + importer map (context only; the live mapping below is authoritative) ----
             string modelPath = AssetDatabase.GetAssetPath(animator.avatar);
             string modelLabel = string.IsNullOrEmpty(modelPath) ? "(none)" : Leaf(modelPath);
-            var importerMap = new Dictionary<string, string>(StringComparer.Ordinal); // humanName -> boneName
+            var importerMap = new Dictionary<string, string>(StringComparer.Ordinal);
             if (!string.IsNullOrEmpty(modelPath))
             {
                 var imp = AssetImporter.GetAtPath(modelPath) as ModelImporter;
-                if (imp != null) // not importer-backed (generated/standalone Avatar) ⇒ NOT a failure, just no map
+                if (imp != null)
                 {
                     var human = imp.humanDescription.human ?? new HumanBone[0];
                     foreach (var hb in human) importerMap[hb.humanName] = hb.boneName;
                 }
             }
 
-            // ---- live mapping: every HumanBodyBones the built Avatar actually maps ----------------------
             var liveMap = new Dictionary<HumanBodyBones, Transform>();
             foreach (HumanBodyBones bone in Enum.GetValues(typeof(HumanBodyBones)))
             {
                 if (bone == HumanBodyBones.LastBone) continue;
                 var t = animator.GetBoneTransform(bone);
-                if (t != null) liveMap[bone] = t; // null ⇒ unmapped optional bone, not an error
+                if (t != null) liveMap[bone] = t;
             }
 
-            // ---- skinned-weight set: renderer.bones actually weighted at NONZERO, plus every rootBone ----
-            // Collected by instance AND by name, because pre-bake the instance set is the wrong index: see
-            // the classify block below for why an instance-only test reports a whole skeleton as proxied.
             var skinned = new HashSet<Transform>();
             var skinnedNames = new HashSet<string>(StringComparer.Ordinal);
             foreach (var smr in avatarGO.GetComponentsInChildren<SkinnedMeshRenderer>(true))
@@ -249,7 +200,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (used[i] && bones[i] != null) { skinned.Add(bones[i]); skinnedNames.Add(bones[i].name); }
             }
 
-            // ---- name index over the whole avatar (for name-shadow) --------------------------------------
             var byName = new Dictionary<string, List<Transform>>(StringComparer.Ordinal);
             foreach (var t in avatarGO.GetComponentsInChildren<Transform>(true))
             {
@@ -257,7 +207,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 list.Add(t);
             }
 
-            // ---- classify: proxy (unskinned mapping) + name-shadow (a decoy carries the plain label) -----
             var rows = new List<DivergenceRow>();
             var ambiguous = new List<string>();
             foreach (var kv in liveMap)
@@ -266,34 +215,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var mapped = kv.Value;
                 string label = bone.ToString();
 
-                // Skinned by INSTANCE or by NAME. The name arm is not laxity — pre-bake it is the only arm
-                // that can be right. On a composed avatar the renderers skin a MERGEABLE's armature copy
-                // (`<root>/<Module>/Armature/Hips/Spine`), which MergeArmature zips onto the base's
-                // (`<root>/Armature/Hips/Spine`) at build, so every humanoid bone fails an instance test
-                // and an instance-only read reports the entire skeleton as proxied. Measured on an ordinary
-                // composed avatar: 4 bones matched by instance, 49 by name only, 0 by neither. The same
-                // pre-bake fact is recorded for ReportGimmick's `chain subtree` cell in docs/unity-tools.md.
-                // Name matching is a HEURISTIC, and the emitted scope note says so: it is the merge's own
-                // matching rule, right exactly where the merge is, and unable to tell a bone that will zip
-                // from an unrelated transform that happens to share a name.
+                // Why both arms: ScopeNoteLine. Measured on an ordinary composed avatar: 4 bones matched by
+                // instance, 49 by name only, 0 by neither.
                 bool skinnedByInstance = skinned.Contains(mapped);
                 bool skinnedByNameOnly = !skinnedByInstance && skinnedNames.Contains(mapped.name);
                 if (!skinnedByInstance && !skinnedByNameOnly)
                 {
-                    string candidate = FindProxyCandidate(mapped, skinned, skinnedNames, label); // "candidate", never asserted as THE bone
+                    string candidate = FindProxyCandidate(mapped, skinned, skinnedNames, label);
                     rows.Add(new DivergenceRow { Kind = "proxy", BoneLabel = label, MappedPath = PathOf(mapped), OtherPath = candidate });
                 }
                 else if (skinnedByNameOnly)
                 {
-                    // The name arm carries a cost in the other direction and it is not allowed to be silent.
-                    // `skinnedNames` spans the whole avatar, and MergeArmature duplicates the base armature —
-                    // proxy nodes included — into every mergeable, so an outfit whose renderers skin a copy of
-                    // `Head_Proxy` masks the base's genuine proxy row. That row would then vanish into a PASS.
-                    // Counted and named instead: a masked row is ambiguous, not clean.
                     ambiguous.Add(label + " (" + PathOf(mapped) + "): skinned only by NAME, not by this instance");
                 }
 
-                // A shadow exists only where the mapping points somewhere OTHER than the plainly-named bone.
                 // Where the humanoid bone IS the transform named for it, a second same-named transform is the
                 // ordinary base/mergeable pair the build is about to zip — flagging that manufactures an
                 // offender on every composed avatar.
@@ -303,20 +238,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         if (other == mapped) continue;
                         rows.Add(new DivergenceRow { Kind = "name-shadow", BoneLabel = label, MappedPath = PathOf(mapped), OtherPath = PathOf(other) });
-                        break; // one decoy names the finding; a second same-named decoy is the same finding
+                        break;
                     }
             }
 
             return FinishAvatar(avatarGO, liveMap.Count, modelLabel, importerMap, rows, ambiguous);
         }
 
-        // Nearest skinned candidate for a proxy row: a same-parent sibling, or a descendant of the mapped
-        // transform, named either the humanoid label or the mapped name minus a "_Proxy"-style suffix.
-        // Never asserted as the intended bone — the offender says "candidate".
-        // "Skinned" here must mean what it means at the classify site one screen up — instance OR name.
-        // Using instance alone made this return null on almost every real avatar (measured: 4 bones skinned
-        // by instance against 49 by name), so every proxy row said "(no candidate found)" while the candidate
-        // was sitting right beside it.
+        // `Skinned` must match the classify site's instance-or-name test: instance alone finds no candidate
+        // on a composed avatar.
         private static string FindProxyCandidate(Transform mapped, HashSet<Transform> skinned,
                                                  HashSet<string> skinnedNames, string label)
         {
@@ -351,9 +281,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return err;
         }
 
-        /// <summary>Shared avatar-door tail: JSON body → <see cref="RunLogFormat.WriteRunLog"/>, filename
-        /// stem <c>check-humanoid-rig-avatar_&lt;rootName&gt;</c>, JSON <c>kind</c> distinct from
-        /// <see cref="Run"/>'s so the two artifact families can never be confused on disk.</summary>
         private static string FinishAvatar(GameObject root, int bonesChecked, string modelLabel,
             Dictionary<string, string> importerMap, List<DivergenceRow> rows, List<string> ambiguous)
         {
@@ -376,8 +303,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append("  \"bonesChecked\": ").Append(bonesChecked).Append(",\n");
             sb.Append("  \"result\": ").Append(Q(pass ? "PASS" : "CLASSIFY")).Append(",\n");
             sb.Append("  \"scope\": ").Append(Q(ScopeNoteLine)).Append(",\n");
-            // A masked row is a SUPPRESSED finding, so it rides the summary as its own count rather than
-            // living only here: a PASS beside a nonzero nameMasked= is not the same claim as a clean one.
+            // Masked rows do not change the verdict, so they ride the summary as their own count: a PASS
+            // beside a nonzero nameMasked= is not the same claim as a clean one.
             sb.Append("  \"nameMasked\": [");
             for (int i = 0; i < ambiguous.Count; i++) sb.Append(i == 0 ? "" : ", ").Append(Q(ambiguous[i]));
             sb.Append("],\n");

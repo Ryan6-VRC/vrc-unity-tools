@@ -8,10 +8,6 @@ using UnityEditor.Animations;
 using UnityEngine;
 using UnityEngine.TestTools;
 
-// Edge-case robustness tests for CompileController (kickoff item V). Behavioral, through the Compile
-// door — same venue as CompileControllerTests: headless via tools/run-editmode-tests.ps1, never MCP
-// run_tests. FAIL/WARN logs are declared with LogAssert.Expect so the runner doesn't count them as
-// failures.
 public class CompileControllerRobustnessTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/ccrobust_tests";
@@ -19,21 +15,16 @@ public class CompileControllerRobustnessTests
     [SetUp]
     public void SetUp()
     {
-        // EnsureFolder (AssetDatabase.CreateFolder) registers TestRoot as a valid asset folder as it creates
-        // it — what the old Directory.CreateDirectory + project-wide Refresh() pair was really buying.
         AnimatorTestHelpers.EnsureFolder(TestRoot);
     }
 
     [TearDown]
     public void TearDown()
     {
-        // No trailing Refresh(): DeleteAsset already tells the AssetDatabase the folder is gone, and the raw
-        // Directory.Delete is only a fallback for a folder the AssetDatabase never adopted.
         if (AssetDatabase.IsValidFolder(TestRoot)) AssetDatabase.DeleteAsset(TestRoot);
         if (Directory.Exists(TestRoot)) Directory.Delete(TestRoot, true);
     }
 
-    // Read the RunLog body a successful compile writes in-band (`… | log=<path>`).
     private static string ReadRunLogBody(string result)
     {
         const string marker = "| log=";
@@ -44,9 +35,6 @@ public class CompileControllerRobustnessTests
         return File.ReadAllText(logPath);
     }
 
-    // ── Gap 2 — a layer too large to bound cheaply must SURFACE that the frame-latency advisory was
-    // skipped, not vanish silently. The >128-state node-count guard previously returned no advisory AND
-    // no skip note, unlike the step-budget (over-dense) path.
     [Test]
     public void FrameLatency_Advisory_Skip_Is_Surfaced_For_Oversized_Layer()
     {
@@ -70,9 +58,6 @@ public class CompileControllerRobustnessTests
         StringAssert.Contains("Big", body, "the skip note names the offending layer");
     }
 
-    // ── Gap 3 — clobbering a controller with NO compile provenance (hand-authored, or produced by another
-    // tool) must warn before it is stripped in place. Previously the warning fired only for controllers we
-    // ourselves had stamped — blind to the highest-value clobber case.
     [Test]
     public void Recompile_Over_HandAuthored_Controller_Warns()
     {
@@ -98,7 +83,7 @@ public class CompileControllerRobustnessTests
     }
 
     // ── Asserts on the .meta TEXT because AssetImporter.GetAtPath cannot testify to persistence at all
-    // (StampProvenance owns why). A green run here is the only evidence the stamp survives without a reimport.
+    // (StampProvenance owns why).
     [Test]
     public void Provenance_Stamp_Reaches_The_Meta_On_Disk_And_Survives_An_Idempotent_Recompile()
     {
@@ -120,9 +105,8 @@ public class CompileControllerRobustnessTests
             "the unchanged stamp is still on disk after a no-op recompile, and nothing reported a failure");
     }
 
-    // ── A stamp may carry a path — older compiles wrote `compiled-from:<path>;srchash:<hash>`, and those
-    // controllers are committed. Both signals must keep reading that form, which is the one case where
-    // ExtractField has to stop the hash at a ';' the emitted form does not contain.
+    // ── Older compiles wrote `compiled-from:<path>;srchash:<hash>`, and those controllers are committed, so
+    // WarnIfOutOfBand must keep reading that form.
     [Test]
     public void Legacy_Stamp_With_A_Path_Still_Parses_As_Provenance()
     {
@@ -131,8 +115,8 @@ public class CompileControllerRobustnessTests
         File.WriteAllText(src, AnimatorSchemaYamlTests.DebounceDoc);
         StringAssert.Contains("=> OK", CompileController.Run(src, outDir, whatIf: false));
 
-        // Restamp in the old shape, with a hash that cannot match the source — so a correct parse reaches
-        // signal (b), "srchash differs", rather than signal (a), "no provenance at all".
+        // Restamp in the old shape, with a hash that cannot match the source, so a correct parse warns that the
+        // srchash differs rather than that there is no provenance.
         var imp = AssetImporter.GetAtPath(outDir + "/Debounce_Fx.controller");
         imp.userData = "compiled-from:Packages/com.ryan6vrc.patterns/x/controller.yaml;srchash:deadbeefdeadbeef";
         imp.SaveAndReimport();
@@ -142,10 +126,8 @@ public class CompileControllerRobustnessTests
         StringAssert.Contains("=> OK", CompileController.Run(src, outDir, whatIf: false));
     }
 
-    // ── Gap 1 (scope decision, recorded as an executable contract) — inline clip bindings resolve
-    // UnityEngine-namespace component types ONLY. A binding to a UI / VRC-SDK component (here
-    // UnityEngine.UI.Image, whose simple name is not under the UnityEngine namespace) is refused
-    // fail-loud, by design — not silently mis-emitted. Guards against a future silent broadening.
+    // ── UnityEngine.UI.Image is outside ControllerEmit.BindingNamespaces, so a binding to it is refused
+    // fail-loud rather than mis-emitted.
     [Test]
     public void Inline_Binding_To_NonUnityEngine_Component_Is_Refused()
     {
@@ -166,8 +148,6 @@ public class CompileControllerRobustnessTests
         AnimatorTestHelpers.DeleteRefusalArtifact(result);
     }
 
-    // ── Gap 4 — "nothing written on failure" extends to FOLDERS. A fresh compile into a not-yet-existing
-    // nested outDir that then fails emit must leave no leftover empty folders it created.
     [Test]
     public void Failed_Fresh_Compile_Leaves_No_Empty_Folders()
     {

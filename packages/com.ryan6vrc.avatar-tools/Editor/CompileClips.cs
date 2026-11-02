@@ -11,51 +11,34 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// The external-clip-write DOOR: compile a clips-file <c>.yaml</c> source into standalone, VISIBLE
-    /// <c>.anim</c> assets under <paramref name="outDir"/> — one per declared clip. A clips file is the
-    /// same animator-schema surface as a controller (<c>schema: 1</c>, <c>basis: avatar-root</c>) but
-    /// carries <c>clips:</c> and NO <c>layers:</c>; its optional <c>parameters:</c> supply the AAP-binding
-    /// name set that routes a bare binding to an Animator-property curve.
+    /// Compiles a clips-file <c>.yaml</c> into standalone, visible <c>.anim</c> assets under <c>outDir</c>, one per
+    /// declared clip. A clips file is the animator-schema surface (<c>schema: 1</c>, <c>basis: avatar-root</c>) with
+    /// <c>clips:</c> and no <c>layers:</c>; its optional <c>parameters:</c> supply the names that route a bare
+    /// binding to an Animator-property curve. The summary follows <see cref="TransplantCore.Finish"/>, with each
+    /// emitted clip's ref path in <c>notes=[…]</c>.
     ///
-    /// <para>Pipeline: parse (<see cref="AnimatorSchemaYaml"/>) → validate (<see cref="SchemaValidation"/>)
-    /// + two clips-only guards → BUILD EVERY clip in memory (<see cref="ControllerEmit.BuildClipContent"/>)
-    /// → write each GUID-stable in place → RunLog. Result carried on the one-line summary via the
-    /// <see cref="TransplantCore.Finish"/> grammar (like <see cref="OwnControllerClips"/>, since this is a
-    /// mutating WRITER), each emitted clip's ref path folded into <c>notes=[…]</c>.</para>
+    /// <para><b>Batch-atomic.</b> Every clip is built in memory and every guard runs before the first write, so a
+    /// refusal writes no <c>.anim</c>. <b>GUID-stable.</b> An existing <c>.anim</c> is cleared and rewritten in place,
+    /// never DeleteAsset+CreateAsset or CreateAsset onto the occupied path: both mint a new GUID and break external
+    /// references. <b>Emit-only.</b> <c>outDir</c> is never pruned: a clip absent from the source is left untouched.</para>
     ///
-    /// <para><b>BATCH-ATOMIC.</b> Every clip is built in memory FIRST; a single bad binding
-    /// (<see cref="ControllerEmit.EmitException"/>) fails the whole run before ANY file is written — never a
-    /// partial emit. <b>GUID-STABLE.</b> An existing <c>.anim</c> at the target path is loaded and rewritten
-    /// IN PLACE (residual curves/refs/events cleared first), never DeleteAsset+CreateAsset — so its GUID, and
-    /// any external reference to it, survives a recompile. <b>EMIT-ONLY.</b> <paramref name="outDir"/> is
-    /// never enumerated for pruning: a clip absent from the source is left untouched. External clips are
-    /// VISIBLE main assets — never <see cref="HideFlags.HideInHierarchy"/> (that flag is for the
-    /// controller-embedded sub-asset path only).</para>
-    ///
-    /// <para><b>DIVERGENCE GUARD.</b> Before writing, each existing target <c>.anim</c> is compared to the
-    /// content stamp WE last wrote for it. A clip whose on-disk content diverges from its stamp — or
-    /// carries no stamp at all — was touched OUT OF BAND (a human hand-edit, or a pre-existing hand-authored
-    /// <c>.anim</c> we never emitted). Any divergence REFUSES the whole run writing nothing (batch-atomic),
-    /// naming each offender — unless <paramref name="force"/>, which overwrites + re-stamps and notes each
-    /// clobber. This compares disk-to-stamp, NOT to the YAML: recompiling our own untouched output (identical
-    /// OR changed source) rehashes to the stamp and is never diverged, so only a human edit trips the guard.
-    /// Because the guard trusts the stamp, a clip that gets WRITTEN but cannot be stamped FAILs this run naming
-    /// it, instead of passing green and reading as hand-edited on the next one.</para>
+    /// <para><b>Divergence guard.</b> Each existing target is compared to the content stamp last written for it, not
+    /// to the YAML, so recompiling untouched output from identical or changed source never trips it. A clip whose
+    /// on-disk content diverges from its stamp, or that carries none, was touched out of band: the whole run refuses,
+    /// naming each offender, unless <c>force</c>, which overwrites, re-stamps and notes each clobber. Because the guard
+    /// trusts the stamp, a clip written but not stamped FAILs this run naming it, rather than reading as hand-edited
+    /// on the next one.</para>
     /// </summary>
     [AgentTool]
     public static class CompileClips
     {
-        /// <summary>Compile the clips-file YAML at <paramref name="sourcePath"/> (a filesystem path) into
-        /// external <c>.anim</c> assets under <paramref name="outDir"/> (an <c>Assets/…</c>-relative folder).
-        /// With <paramref name="whatIf"/> nothing is written — the summary still carries every would-be ref
-        /// path. <paramref name="force"/> = override safety guards: it overrides BOTH the outDir-writability
-        /// guard (write owned copies into read-only Assets/Vendor or Packages territory) AND the divergence
-        /// guard (overwrite a hand-edited / unstamped existing <c>.anim</c> instead of refusing). Returns the
-        /// one-line PASS/FAIL summary with the RunLog path folded on (<c>… => RESULT | log=&lt;path&gt;</c>).</summary>
-        // Positional order matches CompileController.Run(sourcePath, outDir, whatIf): `whatIf` is third on
-        // both compile doors. Under one door name the two are textually interchangeable, and a third
-        // positional that meant `force` here and `whatIf` there would turn a preview into an overwrite that
-        // also defeats the read-only-outDir guard. Named arguments remain the documented call style.
+        /// <summary>Compile the clips-file YAML at <paramref name="sourcePath"/> (a filesystem path) into external
+        /// <c>.anim</c> assets under <paramref name="outDir"/> (an <c>Assets/…</c>-relative folder). With
+        /// <paramref name="whatIf"/> nothing is written, and the summary still carries every would-be ref path.
+        /// <paramref name="force"/> overrides both the read-only-outDir guard (Assets/Vendor, Packages) and the divergence
+        /// guard. Returns the one-line summary with the RunLog path folded on (<c>… => RESULT | log=&lt;path&gt;</c>).</summary>
+        // `whatIf` is third on both compile doors: a third positional meaning `force` here and `whatIf` on
+        // CompileController.Run would turn a preview into an overwrite that also defeats the read-only-outDir guard.
         public static string Run(string sourcePath, string outDir, bool whatIf = false, bool force = false)
         {
             var log = new RunLog("compile-clips") { whatIf = whatIf, source = sourcePath };
@@ -63,7 +46,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             try
             {
-                // ── Read + parse the source (clips file = schema:1 + basis:avatar-root + clips:, no layers:) ──
                 if (string.IsNullOrEmpty(sourcePath)) return Fail(log, label, "sourcePath is empty");
                 if (!File.Exists(sourcePath)) return Fail(log, label, "source file not found: " + sourcePath);
                 if (string.IsNullOrEmpty(outDir)) return Fail(log, label, "outDir is null or empty");
@@ -76,9 +58,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 label = TransplantCore.Sanitize(doc.ControllerName ?? "clips");
 
-                // ── Document validation. On a clips-only doc this checks schema-version + reserved-param and
-                //    SKIPS every layer/state rule (its layer loop sees zero layers) — a non-empty list is a
-                //    real defect. ──
                 var vErrors = SchemaValidation.Validate(doc);
                 if (vErrors.Count > 0)
                 {
@@ -86,8 +65,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return Fail(log, label, "validation failed (" + vErrors.Count + ")");
                 }
 
-                // ── Two clips-only guards. A doc with layers is a CONTROLLER (route to CompileController); a
-                //    doc with no clips has nothing to emit. Both are fail-loud, named. ──
                 if (doc.Layers.Count > 0)
                     return Fail(log, label, "layers present — this is a controller; use CompileController");
                 if (doc.Clips.Count == 0)
@@ -95,9 +72,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 string outClean = outDir.Replace('\\', '/').TrimEnd('/');
 
-                // ── outDir ownership guard: never write owned copies into read-only territory (Assets/Vendor
-                //    or Packages) — the "never alter vendor assets" invariant. force overrides (with a loud
-                //    note). Mirrors OwnControllerClips. ──
                 if (!TransplantCore.IsWritableAsset(outClean))
                 {
                     if (force) log.Note("read-only outDir override (force): " + outClean);
@@ -109,17 +83,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // ── Sanitized-filename collision guard (fail-loud). Two DISTINCT authored clip names
-                //    can sanitize to one filename (e.g. "Wave Left" and "Wave_Left" → "Wave_Left.anim"); the
-                //    later write would silently clobber the earlier clip's file under a green PASS. These are
-                //    AUTHORED names, so a collision is an authoring error to surface — FAIL naming the colliding
-                //    names + shared filename, writing NOTHING (consistent with batch-atomicity). We deliberately
-                //    do NOT guid-suffix like OwnControllerClips (that tool dedups vendor churn; here the intent
-                //    is legible authored filenames). ──
-                // OrdinalIgnoreCase, not Ordinal: the platform filesystem (VRChat-pinned Windows/NTFS) is
-                // case-insensitive, so "Wave" and "wave" occupy ONE file. Under Ordinal they'd hash to distinct
-                // keys, the guard would pass, and the write loop's case-insensitive LoadAssetAtPath would resolve
-                // the second to the first and silently clobber it — the exact failure this guard prevents.
+                // Two authored names can sanitize to one filename, and the later write would clobber the earlier clip.
+                // OrdinalIgnoreCase because NTFS is case-insensitive: "Wave" and "wave" occupy one file.
                 var byFile = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
                 foreach (var spec in doc.Clips)
                 {
@@ -134,17 +99,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (log.offenders.Count > 0)
                     return Fail(log, label, "sanitized-filename collision (nothing written)");
 
-                // The declared Animator-parameter names: the gate BuildClipContent uses to route a bare
-                // binding to an Animator-property curve (AAP) rather than a scene binding.
                 var paramNames = new HashSet<string>(doc.Parameters.Select(p => p.Name));
 
-                // ── BUILD-ALL-IN-MEMORY FIRST (batch atomicity). A bad binding on ANY clip fails the whole
-                //    run here, before a single file is written — never a partial external-clip set on disk. ──
-                // built[...] holds detached, unmanaged AnimationClip instances. Each is adopted (CreateAsset) or
-                // destroyed (in-place reuse / whatIf) in the write loop below, and its slot nulled the instant it
-                // is — so the finally frees ONLY the leftovers an early refusal (bad binding, collision, divergence,
-                // read-only) or a whatIf would otherwise strand. Adopted clips (which BECAME the asset) are nulled,
-                // never destroyed.
+                // Detached clips. The write loop adopts or destroys each and nulls its slot, so the finally frees only
+                // what a refusal or exception strands.
                 var built = new Dictionary<string, AnimationClip>();
                 try
                 {
@@ -158,21 +116,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // ── Divergence guard (force-gated), scanned as its OWN pass BEFORE any write so a refusal
-                //    leaves every .anim untouched (batch-atomic, like the collision/bad-binding guards). For
-                //    each already-existing target, `diverged` iff its on-disk content differs from the stamp WE
-                //    last wrote for it (ReadContentStamp == null → hand-authored/never emitted here; or hash !=
-                //    stamp → edited out of band since our last emit). This compares DISK to our own stamp, not to
-                //    the YAML: the stamp records the disk hash, so recompiling our own untouched output — identical
-                //    OR changed source — rehashes to the stamp and is NOT diverged (overwrites silently). Only a
-                //    human hand-edit or an unstamped pre-existing .anim trips this. force overrides: overwrite +
-                //    re-stamp (the reload-stamp loop below) + a loud per-clobber note. ──
-                var diverged = new List<string>(); // authored names whose on-disk .anim diverges from our stamp
+                // Divergence guard: see the class doc.
+                var diverged = new List<string>();
                 foreach (var spec in doc.Clips)
                 {
                     string path = outClean + "/" + TransplantCore.Sanitize(spec.Name) + ".anim";
                     var onDisk = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
-                    if (onDisk == null) continue; // absent target — nothing to clobber
+                    if (onDisk == null) continue;
                     string stamp = ReadContentStamp(path);
                     if (stamp == null || HashClipContent(onDisk) != stamp) diverged.Add(spec.Name);
                 }
@@ -192,7 +142,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 if (!whatIf) TransplantCore.EnsureFolderExists(outClean);
 
-                // ── Write each clip GUID-stable in place (or, in whatIf, just record the intended path). ──
                 int created = 0, reused = 0;
                 foreach (var spec in doc.Clips)
                 {
@@ -203,24 +152,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (whatIf)
                     {
                         if (existing != null) reused++; else created++;
-                        UnityEngine.Object.DestroyImmediate(b); // nothing written — free the build source
+                        UnityEngine.Object.DestroyImmediate(b);
                         built[spec.Name] = null;
                     }
                     else if (existing != null)
                     {
-                        // In-place rewrite: keep the asset (and its GUID), clear residual, copy the built
-                        // content. NEVER DeleteAsset+CreateAsset or CreateAsset onto an occupied path — both
-                        // mint a new GUID and break external references to the clip.
                         ClearAndCopy(existing, b);
-                        UnityEngine.Object.DestroyImmediate(b); // detached build source, no longer needed
+                        UnityEngine.Object.DestroyImmediate(b);
                         built[spec.Name] = null;
                         reused++;
                     }
                     else
                     {
-                        // Absent path → the built clip BECOMES the new asset (visible main asset; no hideFlags).
                         AssetDatabase.CreateAsset(b, path);
-                        built[spec.Name] = null; // adopted as the asset — must NOT be destroyed by the finally
+                        built[spec.Name] = null;
                         created++;
                     }
                     log.Note(path);
@@ -235,20 +180,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         if (emittedClip != null) AssetDatabase.SaveAssetIfDirty(emittedClip);
                     }
 
-                    // ── Content-provenance stamp. Reload each emitted clip FROM DISK and stamp the hash of THAT
-                    //    on-disk clip — never the in-memory `built` clip. Float/tangent serialization can drift
-                    //    subtly across the in-memory→.anim round-trip, so stamping the disk hash guarantees the
-                    //    stamp equals what the divergence guard recomputes from the .anim; an unmodified
-                    //    clip can never read as diverged. Nothing to stamp under whatIf (nothing was written). ──
-                    // TWO passes, split exactly where OwnMaterial's streaming-mipmap batch splits (same problem,
-                    // same shape). Every stamp ends in SaveAndReimport, and un-batched that is one full import
-                    // per emitted clip (measured ~0.06s each on a ~0.11s floor — the dominant cost of a
-                    // compile), so the imports go inside ONE asset-editing batch and coalesce. Everything that
-                    // READS the AssetDatabase stays OUTSIDE it — the clip load, the hash, and the importer
-                    // lookup alike: resolution is unreliable while importing is paused, so a GetAtPath in there
-                    // can hand back null and drop that clip's stamp. Deferring the imports is safe because the
-                    // stamp is only ever READ on a later call (ReadContentStamp, for the divergence guard
-                    // above) — never within this run.
+                    // Stamp the hash of the clip reloaded from disk, never the in-memory `built` clip: float and tangent
+                    // serialization can drift across the .anim round-trip, and the divergence guard recomputes from disk.
+                    // Stage every stamp outside the asset-editing batch and persist them inside it (StageContentStamp says
+                    // why). Deferring the imports is safe because the stamp is only read on a later call.
                     int unstamped = 0;
                     var toPersist = new List<AssetImporter>();
                     foreach (var spec in doc.Clips)
@@ -275,10 +210,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             AssetDatabase.StopAssetEditing();
                         }
                     }
-                    // A lost stamp is a FAIL, not a shrug — and reported here, where the cause is: the clip is
-                    // on disk unstamped, so the NEXT compile's divergence guard reads it as hand-edited and
-                    // refuses the whole run over a clip nobody touched. Raised after the healthy stamps are
-                    // persisted so one bad path costs only its own stamp.
+                    // Raised after the batch so one bad path costs only its own stamp.
                     if (unstamped > 0)
                         return Fail(log, label, "wrote " + doc.Clips.Count + " clip(s) but " + unstamped +
                             " could not be stamped — those will read as diverged on the next compile");
@@ -291,9 +223,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 finally
                 {
-                    // Free any built clip that never became an asset — every adopted/destroyed slot was nulled
-                    // above, so this frees only what an early refusal or whatIf stranded (no double-free, and
-                    // adopted assets are untouched).
                     foreach (var kv in built)
                         if (kv.Value != null) UnityEngine.Object.DestroyImmediate(kv.Value);
                 }
@@ -307,20 +236,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return TransplantCore.Finish(log, label);
         }
 
-        // ── Content-hash provenance ────────────────────────────────────────────────────────────────────
-        //
-        // A deterministic, order-INDEPENDENT hash over an emitted clip's CONTENT (curves, object refs, events,
-        // settings). The divergence guard recomputes this from disk and refuses to clobber a clip whose content
-        // diverges from its stamp; the stamp pass only writes + reads it back. Reuses ControllerEmit.SourceHash so the hash width /
-        // format matches the sibling srchash provenance.
-
-        /// <summary>Deterministic content hash of <paramref name="clip"/> — order-independent (binding lists
-        /// sorted), so two clips with the same content hash equal regardless of authoring/enumeration order.
-        /// Covers frameRate/wrapMode/legacy, every float curve (keys with time/value/in-out-tangent/in-out-weight/
-        /// weightedMode in round-trip "R" + pre/post wrap), every object-reference curve (key times + target
-        /// instance identity), animation events (incl. messageOptions), and the clip settings. Hashes only
-        /// human-editable, round-trip-STABLE fields — deliberately NOT clip.localBounds (auto-derived from the
-        /// curves; Unity may recompute it, which would manufacture false divergence).</summary>
+        /// <summary>Order-independent content hash over the human-editable, round-trip-stable fields of
+        /// <paramref name="clip"/>. Excludes <c>clip.localBounds</c>: it derives from the curves and Unity may recompute
+        /// it, which would manufacture false divergence.</summary>
         public static string HashClipContent(AnimationClip clip)
         {
             if (clip == null) return ControllerEmit.SourceHash("");
@@ -330,7 +248,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
               .Append(";wrapMode=").Append(((int)clip.wrapMode).ToString(CultureInfo.InvariantCulture))
               .Append(";legacy=").Append(clip.legacy).Append('\n');
 
-            // Float curves — sorted by path+type+propertyName (order-independent).
             foreach (var b in AnimationUtility.GetCurveBindings(clip)
                          .OrderBy(x => x.path, StringComparer.Ordinal)
                          .ThenBy(x => x.type == null ? "" : x.type.FullName, StringComparer.Ordinal)
@@ -347,17 +264,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                           .Append(R(k.inTangent)).Append('/').Append(R(k.outTangent)).Append('/')
                           .Append(R(k.inWeight)).Append('/').Append(R(k.outWeight)).Append('/')
                           .Append(((int)k.weightedMode).ToString(CultureInfo.InvariantCulture)).Append(';');
-                    // Per-curve wrap: human-editable, serialized as m_Pre/PostInfinity, stable disk↔disk.
                     sb.Append('~').Append(((int)curve.preWrapMode).ToString(CultureInfo.InvariantCulture))
                       .Append('/').Append(((int)curve.postWrapMode).ToString(CultureInfo.InvariantCulture));
                 }
                 sb.Append('\n');
             }
 
-            // Object-reference (PPtr) curves — same sort; key times + STABLE target identity (RefId). Not
-            // exercised by CompileClips' own output: the clips: grammar produces only float curves via
-            // BuildClipContent. This branch exists so a hand-edited .anim carrying a PPtr curve hashes stably
-            // for the divergence guard's check.
+            // CompileClips' own output never reaches this branch: the clips: grammar produces only float curves. It
+            // exists so a hand-edited .anim carrying a PPtr curve hashes stably for the divergence guard.
             foreach (var b in AnimationUtility.GetObjectReferenceCurveBindings(clip)
                          .OrderBy(x => x.path, StringComparer.Ordinal)
                          .ThenBy(x => x.type == null ? "" : x.type.FullName, StringComparer.Ordinal)
@@ -373,7 +287,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 sb.Append('\n');
             }
 
-            // Animation events — order-preserving (event order is itself content).
+            // Unsorted: event order is itself content.
             foreach (var e in AnimationUtility.GetAnimationEvents(clip))
                 sb.Append("E ").Append(R(e.time)).Append('|').Append(e.functionName).Append('|')
                   .Append(e.stringParameter).Append('|').Append(R(e.floatParameter)).Append('|')
@@ -382,7 +296,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                   .Append(((int)e.messageOptions).ToString(CultureInfo.InvariantCulture))
                   .Append('\n');
 
-            // Clip settings (loopTime etc.).
             var s = AnimationUtility.GetAnimationClipSettings(clip);
             sb.Append("S loopTime=").Append(s.loopTime)
               .Append(";loopBlend=").Append(s.loopBlend)
@@ -406,12 +319,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return ControllerEmit.SourceHash(sb.ToString());
         }
 
-        // Round-trip float formatting — "R" so serialization is lossless and deterministic.
         static string R(float f) => f.ToString("R", CultureInfo.InvariantCulture);
 
-        // Stable identity for a PPtr target: asset GUID+localFileId (survives domain reload / reimport / restart)
-        // rather than a session-local GetInstanceID (the only otherwise non-deterministic term in the hash).
-        // Fallback to iid for a scene/non-asset object with no GUID.
+        // Asset GUID+localFileId, because an instance ID is session-local and would churn the hash. Only a scene
+        // or non-asset object with no GUID falls back to one.
         static string RefId(UnityEngine.Object o)
         {
             if (o == null) return "null";
@@ -420,15 +331,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 : "iid:" + o.GetInstanceID().ToString(CultureInfo.InvariantCulture);
         }
 
-        /// <summary>STAGE the content stamp for <paramref name="animPath"/>: write <paramref name="hash"/> into
-        /// the <c>.anim</c>'s importer userData (the same channel as the controller srchash) and hand that
-        /// importer back WITHOUT persisting it. The caller persists — <c>SaveAndReimport</c> on the returned
-        /// importer, batched inside <c>StartAssetEditing</c>/<c>StopAssetEditing</c>, since one full import per
-        /// clip otherwise dominates a compile. Call this OUTSIDE any such batch: the importer lookup is an
-        /// AssetDatabase read, and those are unreliable while importing is paused.
-        /// <para>Null return = no importer at that path, i.e. no stamp. A caller that ignores it ships an
-        /// UNSTAMPED clip, which the divergence guard reads as hand-edited on the next compile and refuses — so
-        /// the caller must fail loud, naming the clip.</para></summary>
+        /// <summary>Write <paramref name="hash"/> into the <c>.anim</c>'s importer userData (the channel the controller
+        /// srchash uses) and return that importer unpersisted; null when there is no importer. The caller persists with
+        /// <c>SaveAndReimport</c> inside one <c>StartAssetEditing</c> batch, since one import per clip otherwise dominates
+        /// a compile, and calls this outside that batch, since AssetDatabase reads are unreliable while importing is
+        /// paused. A caller must fail loud on null: an unstamped clip reads as hand-edited on the next compile.</summary>
         public static AssetImporter StageContentStamp(string animPath, string hash)
         {
             var imp = AssetImporter.GetAtPath(animPath);
@@ -437,15 +344,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return imp;
         }
 
-        /// <summary>Read back the content stamp from the <c>.anim</c>'s importer userData; null when absent
-        /// (unstamped, hand-authored, or a missing importer).</summary>
+        /// <summary>The content stamp in the <c>.anim</c>'s importer userData; null when unstamped or no importer.</summary>
         public static string ReadContentStamp(string animPath)
         {
             var imp = AssetImporter.GetAtPath(animPath);
             return imp == null ? null : ExtractField(imp.userData, "clipcontent:");
         }
 
-        // Extract a ";"-delimited "<key><value>" field from userData (mirrors CompileController.ExtractField).
         static string ExtractField(string userData, string key)
         {
             if (string.IsNullOrEmpty(userData)) return null;
@@ -456,9 +361,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return end < 0 ? userData.Substring(i) : userData.Substring(i, end - i);
         }
 
-        // Replace `target`'s content with `built`'s, clearing residual curves/object-refs/events FIRST so a
-        // recompile of a mutated source leaves no stale binding behind. Editing IN PLACE (not a new asset) is
-        // what makes the write GUID-stable.
         static void ClearAndCopy(AnimationClip target, AnimationClip built)
         {
             target.ClearCurves();
@@ -475,8 +377,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             EditorUtility.SetDirty(target);
         }
 
-        // Route a FAIL through the house RunLog grammar (summary + RunLog + LogError). Sets result/error and
-        // returns Finish (which backfills an offender from `error` when none was named).
         static string Fail(RunLog log, string label, string msg)
         {
             log.result = "FAIL";

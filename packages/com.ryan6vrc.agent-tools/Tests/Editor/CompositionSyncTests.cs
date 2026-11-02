@@ -5,11 +5,9 @@ using Ryan6Vrc.AgentTools.Editor;
 using VRC.SDK3.Avatars.ScriptableObjects;
 
 /// <summary>
-/// The sync section publishes two built facts and refuses to manufacture either: the figure is the SDK's
-/// own cost of the built asset, and "compressed" is claimed only when VRCFury's two marks agree. The one
-/// wording rule it owns is that the ceiling is never written as <c>N/MAX</c> or <c>N of MAX</c>, because a
-/// reader shown <c>254/256</c> treats a build the compressor would absorb as a fault. Pure over a hand-built
-/// read, so no bake and no live object is needed.
+/// The sync section publishes two built facts: the figure is the SDK's own cost of the built asset, and
+/// "compressed" is claimed only when VRCFury's two marks agree. Pure over a hand-built read, so no bake and no
+/// live object is needed.
 /// </summary>
 public class CompositionSyncTests
 {
@@ -135,8 +133,6 @@ public class CompositionSyncTests
     [Test]
     public void EveryBuiltParameter_isARowUnderItsBuiltName_onEveryBranchOfTheFigure()
     {
-        // The compressor branch returns early with VRCFury's text fenced; the table must still follow it,
-        // because that is the build where a reader most needs to see which names stopped syncing.
         var compressed = new CompositionBake.SyncRead
         {
             Bits = 250, Layer = true, Component = true, ComponentText = "Old Total: 311 bits", OldTotal = 311,

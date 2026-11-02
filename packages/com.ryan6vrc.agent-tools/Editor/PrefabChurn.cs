@@ -4,13 +4,9 @@ using System.Collections.Generic;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// The one home of "this serialized field is framework or editor churn, not authoring".
-    ///
-    /// <para><see cref="OverrideTokens"/> — the set <c>ReportPrefab</c> counts under
-    /// <c>churn</c> when it classifies a prefab instance's property overrides. Matched per dot-segment of a
-    /// <c>propertyPath</c> with array indices stripped, so <c>_modularAvatarVersionTag.MinimumVersion</c>
-    /// and <c>animationHashSet.Array.data[3]</c> both hit. Report-side only: counting a family here hides its
-    /// rows behind a count, it never discards anything.</para>
+    /// The serialized fields <c>ReportPrefab</c> counts under <c>churn</c>: framework or editor stamps, not
+    /// authoring. Report-side only: counting a family here hides its rows behind a count, it never discards
+    /// anything.
     ///
     /// <para>Not here, on purpose: Modular Avatar's <c>targetObject</c> load-time stamp (the same field is a
     /// real authored override on a ShapeChanger row; the report tells the two apart by whether the source
@@ -40,7 +36,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             "m_RootOrder",
         };
 
-        /// <summary>ReportPrefab's question: does any segment of this propertyPath name a churn family?</summary>
         internal static bool IsChurn(string propertyPath)
         {
             if (string.IsNullOrEmpty(propertyPath)) return false;
@@ -52,7 +47,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return false;
         }
 
-        /// <summary>The first churn token on the path, for the per-family histogram; null when none.</summary>
         internal static string ChurnToken(string propertyPath)
         {
             if (string.IsNullOrEmpty(propertyPath)) return null;

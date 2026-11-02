@@ -8,30 +8,10 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// Closes the CleanController gap: CleanController copies the CONTROLLER (GUID-stable) but its states still reference
-    /// VENDOR clips by GUID. <see cref="OwnControllerClips"/> materializes owned <c>.anim</c> copies of the
-    /// referenced clips and RETARGETS the controller's motion refs to them — across every motion slot:
-    /// states (recursing sub-state-machines at any depth), <see cref="BlendTree"/> children (recursing
-    /// nested trees), AND synced-layer per-state override motions
-    /// (<see cref="AnimatorControllerLayer.GetOverrideMotion"/> / <c>SetOverrideMotion</c>). With
-    /// <c>scope=All</c> it also forks your OWN gimmick's clips.
-    ///
-    /// Copy is absent-only (existence via <see cref="AssetDatabase.LoadMainAssetAtPath"/>): an absent owned
-    /// copy uses <see cref="TransplantCore.CopyAssetFile"/> to mint a local asset without saving
-    /// unrelated dirty assets. An EXISTING owned copy is reused as-is and never re-copied, preserving hand
-    /// edits. Re-runs with every copy present and reference retargeted are PASS with 0 copies / 0 retargets.
-    /// After retargeting, a post-condition re-scans every motion slot and FAILs loud naming any in-scope clip
-    /// still referenced (closing the copy-set vs. retarget-walk asymmetry). This tool MUTATES the controller.
-    ///
-    /// Chains into <see cref="RepathClips"/> (UC2 = OwnControllerClips → RepathClips). Call
-    /// <see cref="Run"/> from MCP execute_code.
-    ///
-    /// <para><b>Frame boundary — the CALLER owns frame-correctness.</b> Like <see cref="RepathClips"/>, this
-    /// operates on ONE controller and knows nothing of the avatar. Copying + retargeting a controller's clip
-    /// refs is frame-agnostic (it repoints motion slots, not binding paths), but the caller composing an
-    /// avatar must still enumerate every animator itself — descriptor layers, Modular Avatar MergeAnimator
-    /// (its own <c>pathMode</c>/<c>relativePathRoot</c>), and VRCFury FullControllers (their own mount-relative
-    /// rewrite settings) — and own each one deliberately; there is no whole-avatar sweep here.</para>
+    /// Materializes owned <c>.anim</c> copies of a controller's referenced clips and retargets every motion
+    /// slot to them: the step after CleanController, whose copy still references vendor clips by GUID.
+    /// MUTATES the controller. Frame-blind: the caller owns frame-correctness.
+    /// Contract: docs/animator.md.
     /// </summary>
     [AgentTool]
     public static class OwnControllerClips
@@ -40,11 +20,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <c>All</c> = copy every referenced clip (fork-my-own-gimmick).</summary>
         public enum Scope { VendorOnly, All }
 
-        /// <summary>
-        /// Materialize owned copies of <paramref name="controller"/>'s in-scope clips under
-        /// <paramref name="outDir"/> and retarget every motion slot to them. Returns a one-line PASS/FAIL
-        /// summary ending with the RunLog path (<c>… => RESULT | log=&lt;path&gt;</c>).
-        /// </summary>
         public static string Run(AnimatorController controller, string outDir, Scope scope = Scope.VendorOnly,
                                  bool force = false, bool whatIf = false)
         {
@@ -77,8 +52,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // ── outDir ownership guard: never write owned copies into read-only territory
-                //    (Assets/Vendor or Packages) — the "never alter vendor assets" invariant ──
+                // ── outDir-writable guard ──
                 string outClean = outDir.Replace('\\', '/').TrimEnd('/');
                 if (!TransplantCore.IsWritableAsset(outClean))
                 {
@@ -93,8 +67,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // ── Deduped referenced clip set from the shared motion-slot walk (one grammar; not
-                //    animationClips — so copy-set, retarget walk, and residual scan are self-consistent) ──
                 var referenced = AnimatorClipWalk.CollectClips(controller);
                 log.Count("clipsReferenced", referenced.Count);
 
@@ -108,8 +80,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 log.Count("clipsInScope", inScope.Count);
 
-                // A clip that is a SUB-ASSET (embedded in a controller/fbx) cannot be materialized as a
-                // standalone .anim by copying its container file — fail loud rather than copy the wrong asset.
+                // CopyAssetFile copies the container file, so a sub-asset clip would materialize the wrong asset.
                 foreach (var clip in inScope)
                 {
                     if (!AssetDatabase.IsMainAsset(clip))
@@ -123,7 +94,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return TransplantCore.Finish(log, label);
                 }
 
-                // ── O4 target-path plan: leaf collision-grouped, deterministic + order-independent ──
+                // ── Target-path plan: leaf collision-grouped, deterministic + order-independent ──
                 var leafGroups = new Dictionary<string, int>(StringComparer.Ordinal);
                 foreach (var clip in inScope)
                 {
@@ -143,9 +114,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     targetPath[clip] = outClean + "/" + fname + ".anim";
                 }
 
-                // A clip already living under outDir is ALREADY owned — never re-copy or retarget it (this,
-                // not exact target-path equality, is what keeps scope=All re-runs idempotent: a re-run's
-                // recomputed collision suffix can differ from the copy's, but the copy is still under outDir).
+                // A clip already under outDir is already owned. This, not target-path equality, keeps scope=All
+                // re-runs idempotent: a re-run's recomputed collision suffix can differ from the copy's.
                 System.Func<AnimationClip, bool> alreadyOwned = (c) =>
                     AssetDatabase.GetAssetPath(c).Replace('\\', '/').StartsWith(outClean + "/", StringComparison.Ordinal);
 
@@ -198,10 +168,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     else copiesReused++;
                     var owned = AssetDatabase.LoadAssetAtPath<AnimationClip>(dst);
                     if (owned == null) { log.Offender("owned copy load failed (or wrong type): " + dst); continue; }
-                    // Blind-reuse guard: a PRE-EXISTING target with the same leaf could be a foreign clip or a
-                    // hand-edited copy of a different source. Compare binding-sets; on a structural mismatch
-                    // WARN (still PASS) and reuse the existing clip — never overwrite (idempotent; preserves
-                    // hand-edits). A structural match is a silent, expected reuse.
+                    // A pre-existing target may be a foreign clip or a hand edit: a binding-set mismatch warns
+                    // and reuses it, never overwriting.
                     if (exists && !BindingSetsMatch(clip, owned))
                         log.Warning("'" + TransplantCore.Leaf(dst) + "' already in outDir differs from source '" +
                             clip.name + "' — hand-edit or foreign collision; reusing existing (not overwritten)");
@@ -222,15 +190,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 EditorUtility.SetDirty(controller);
                 AssetDatabase.SaveAssetIfDirty(controller);
 
-                // ── Post-condition, DISK-TRUTHFUL: reimport the controller (a force-override write onto an
-                //    immutable controller silently no-ops — SaveAssetIfDirty can't persist it), then re-scan every
-                //    motion slot on the reloaded asset. FAIL naming any in-scope clip still referenced (a
-                //    residual means the walk missed a slot OR the write did not land). ──
-                // COVERAGE GAP, on the record (spike 2026-07-08, verdict controller=WRITE LANDED): the FAIL
-                // branch here is not fabricable in EditMode on this Unity/OS combo — SaveAssetIfDirty bypasses the OS
-                // read-only attribute, so no test can stage a silent no-op on an immutable .controller. The clean
-                // path is covered by OwnControllerClipsTests' happy-path/recursive tests; the FAIL branch is only
-                // ever exercised in production, against Packages/ immutables. Keep the guard.
+                // ── Post-condition, read from disk: a force-override write onto an immutable controller silently
+                //    no-ops (SaveAssetIfDirty can't persist it), so reimport and re-scan the reloaded asset. ──
+                // The FAIL branch cannot be staged in EditMode, where SaveAssetIfDirty bypasses the OS read-only
+                // attribute; only Packages/ immutables in production reach it. Keep the guard.
                 var scanTarget = controller;
                 if (!string.IsNullOrEmpty(controllerPath))
                 {
@@ -257,9 +220,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Motion-slot walk (retarget) ──────────────────────────────────────────────────────────────
 
-        /// <summary>Retarget every motion slot whose motion is a map key to its owned copy; returns the
-        /// retarget count. Walks states (recursing sub-state-machines at any depth), blend-tree children
-        /// (recursing nested trees), and synced-layer per-state override motions.</summary>
         static int RetargetAll(AnimatorController controller, Dictionary<AnimationClip, AnimationClip> map)
         {
             int[] count = new int[1];
@@ -331,8 +291,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Read-only scans ────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Count motion slots (states + blend-tree children + synced overrides) whose motion is in
-        /// <paramref name="clips"/>. Read-only; used for the whatIf would-retarget count.</summary>
         static int CountReferencingSlots(AnimatorController controller, HashSet<AnimationClip> clips)
         {
             var hits = new List<string>();
@@ -397,8 +355,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Route an argument-guard failure through the house RunLog grammar (summary + RunLog +
-        /// LogError), like the sibling transplant tools — never a bare trailer-less line.</summary>
         static string ArgFail(string label, string msg)
         {
             var log = new RunLog("own-controller-clips") { result = "FAIL", error = msg };
@@ -406,10 +362,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return TransplantCore.Finish(log, label);
         }
 
-        /// <summary>Structural binding-set equality: two clips share the same set of binding keys
-        /// (path + declaring type + property + float/PPtr discriminant), across float and objectReference
-        /// curves. Used to decide whether a pre-existing owned copy is a match for its source (silent reuse)
-        /// or a foreign/hand-edited divergence (loud warning, still reused — never overwritten).</summary>
         static bool BindingSetsMatch(AnimationClip a, AnimationClip b)
         {
             return ClipBindingKeys(a).SetEquals(ClipBindingKeys(b));

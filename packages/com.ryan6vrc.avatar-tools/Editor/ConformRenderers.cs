@@ -6,45 +6,17 @@ using Ryan6Vrc.AgentTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
-    /// <summary>
-    /// Assigns vendor materials onto our owned avatar's renderers by matching renderer
-    /// name (case-insensitive) — with an optional {ourName → sourceName} override map for meshes
-    /// we renamed during normalization — then normalizes every SkinnedMeshRenderer's local bounds
-    /// and probe-anchor toward the workspace standard: bounds are ensured >= the standard box (a
-    /// deliberately larger box is kept, never shrunk), and the probe-anchor is set to Hips only when
-    /// invalid (null or pointing outside ownedRoot) — a valid internal anchor is preserved. The
-    /// per-renderer disposition (anchors set/preserved, bounds kept larger) is reported, not silent.
-    ///
-    /// Materials are assigned by reference — no copies are created. The vendor asset GUIDs are
-    /// preserved exactly as-is.
-    ///
-    /// Call <see cref="Run"/> from MCP execute_code or a menu item.
-    /// PASS = all renderers matched, 0 null/default material slots, every SMR's bounds ensured, and the
-    ///        Hips anchor was resolved OR the target is a mergeable (no humanoid rig / no 'Hips' — the
-    ///        anchor is left as-authored and PASS carries a note, never a FAIL; G25).
-    /// </summary>
+    /// <summary>Assigns vendor materials onto an owned avatar's renderers by renderer name, then ensures
+    /// every SkinnedMeshRenderer's bounds and probe anchor meet the renderer-normalization standard.
+    /// Contract: docs/unity-tools.md.</summary>
     [AgentTool]
     public static class ConformRenderers
     {
-        // ── Public API ────────────────────────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Copy materials from <paramref name="source"/> onto <paramref name="ownedRoot"/>
-        /// by renderer name, then normalize bounds and probe-anchor on every SMR (ensure, not clobber — see the type summary).
-        /// Returns a one-line PASS/FAIL summary ending with the RunLog path (<c>… => RESULT | log=&lt;path&gt;</c>);
-        /// also Debug.Log/LogError it.
-        /// </summary>
-        /// <param name="ownedRoot">Our owned avatar root in the scene (has an Animator with a humanoid avatar).</param>
-        /// <param name="source">The vendor's dressed source to copy materials FROM (scene GO or prefab).</param>
-        /// <param name="ownedToSource">Optional <c>{ourName ⇒ sourceName}</c> overrides for renderers we renamed
-        /// during normalization (e.g. our "Body" ← vendor "Face"). Matched case-insensitively. Null/omitted ⇒
-        /// match by own name. Unmatched renderers (after overrides) still FAIL, so a missed rename surfaces loudly.
-        ///
-        /// <para><b>Keyed on OUR name — opposite to the transplant kit's <c>vendorToOwned</c>, deliberately.</b>
-        /// This tool walks our renderers and resolves into the source, so under the kit-wide invariant
-        /// (<see cref="IndexedPath.Substitute"/>) the key is ours. Two consequences a caller reusing "one map"
-        /// will hit: this one may be MANY-TO-ONE where theirs must be injective, and it matches
-        /// case-insensitively where theirs is Ordinal.</para></param>
+        /// <summary>Returns a one-line PASS/FAIL summary ending with the RunLog path
+        /// (<c>… => RESULT | log=&lt;path&gt;</c>), and also logs it.</summary>
+        /// <param name="ownedToSource">Optional <c>{ourName ⇒ sourceName}</c> overrides for renderers we renamed.
+        /// Keyed on OUR name, opposite to the transplant tools' <c>vendorToOwned</c>: this one may be many-to-one
+        /// and matches case-insensitively (<see cref="IndexedPath.Substitute"/>).</param>
         public static string Run(GameObject ownedRoot, GameObject source, IDictionary<string, string> ownedToSource = null, bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
@@ -59,8 +31,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 whatIf   = whatIf,
             };
 
-            // Execute-path Undo group: collapse the analysis+mutation into one undo step. Preview
-            // mutates nothing, so it opens no group.
             int undoGroup = -1;
             if (!whatIf)
             {
@@ -71,27 +41,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             try
             {
-                // 1. Build name → sharedMaterials map from source (+ set of ambiguous duplicate names)
                 var sourceMap = BuildSourceMap(source, out var duplicateNames);
                 data.SourceRendererCount = sourceMap.Count;
                 data.DuplicateSourceNames = duplicateNames.Count;
 
-                // 2. Assign materials to our instance's renderers by name (with optional
-                //    {ourName → sourceName} overrides for meshes we renamed during normalization)
                 var renameLower = NormalizeRenameMap(ownedToSource);
                 AssignMaterials(ownedRoot, sourceMap, duplicateNames, renameLower, data, whatIf);
 
-                // 3. Normalize bounds + probe-anchor on every SMR under ownedRoot (never-shrink bounds; repair-if-invalid anchor)
                 SetBoundsAndAnchor(ownedRoot, data, whatIf);
 
-                // The default-material gate's own coverage, reported where the verdict is read. Non-gating:
-                // the fallback identity test still answers, so this caveats the run rather than failing it.
                 if (BuiltinDefaultMaterialUnresolved)
                     data.Warning("default-material-instrument: Unity's built-in Default-Material did not resolve, "
                                + "so that gate rested on the GUID+localId fallback alone — if a slot held the "
                                + "built-in under a different localId it would not have been counted");
 
-                // 4. PASS/FAIL
                 bool pass = data.Unmatched == 0
                          && data.NullSlots == 0
                          && data.DefaultMatSlots == 0
@@ -112,22 +75,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return Finish(data, label);
         }
 
-        // ── Material assignment ───────────────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Returns a map from renderer.name.ToLowerInvariant() → a copy of sharedMaterials[].
-        /// Covers both SkinnedMeshRenderer and MeshRenderer on the source hierarchy.
-        /// When two source renderers share the same lowercased name, the first one wins (matches
-        /// vendor convention where the superset FBX is the primary source). Such names are also
-        /// collected into <paramref name="duplicateNames"/>: a first-wins match on a duplicated name
-        /// is AMBIGUOUS (could pull the wrong outfit/accessory's materials) and is flagged downstream.
-        /// </summary>
         private static Dictionary<string, Material[]> BuildSourceMap(GameObject source, out HashSet<string> duplicateNames)
         {
             var map = new Dictionary<string, Material[]>(StringComparer.Ordinal);
             duplicateNames = new HashSet<string>(StringComparer.Ordinal);
 
-            // SkinnedMeshRenderers first
             foreach (var smr in source.GetComponentsInChildren<SkinnedMeshRenderer>(true))
             {
                 var key = smr.name.ToLowerInvariant();
@@ -135,7 +87,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 else                       duplicateNames.Add(key);
             }
 
-            // MeshRenderers second (accessories / props)
             foreach (var mr in source.GetComponentsInChildren<MeshRenderer>(true))
             {
                 var key = mr.name.ToLowerInvariant();
@@ -153,15 +104,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                             RunData data,
                                             bool whatIf)
         {
-            // Walk all Renderer types (SMR + MR) on our instance
             var renderers = ownedRoot.GetComponentsInChildren<Renderer>(true);
             data.OurRendererCount = renderers.Length;
 
             foreach (var rend in renderers)
             {
                 var ourKey = rend.name.ToLowerInvariant();
-                // Resolve the SOURCE name to look up: an explicit {ourName → sourceName} override (for a
-                // mesh we renamed during normalization) wins; otherwise match by our own name.
                 string lookupKey = ourKey;
                 bool overridden = false;
                 if (renameLower != null && renameLower.TryGetValue(ourKey, out var mappedSrc))
@@ -182,8 +130,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 data.Matched++;
                 if (overridden) data.Overrides++;
 
-                // Ambiguity warning: the matched SOURCE name is duplicated in the source, so first-wins
-                // may have pulled the wrong renderer's materials. Surfaced; does not affect PASS.
                 if (duplicateNames.Contains(lookupKey))
                 {
                     data.AmbiguousMatches++;
@@ -191,7 +137,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                  lookupKey + "'; first-wins may be the wrong material set");
                 }
 
-                // Slot-count parity: source material count vs our renderer's submesh count.
                 int ourSlots = SubmeshCount(rend);
                 if (ourSlots >= 0 && sourceMats.Length != ourSlots)
                 {
@@ -200,17 +145,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                  " material(s) but our mesh has " + ourSlots + " submesh slot(s)");
                 }
 
-                // Record the change for Undo and mark dirty; do not save scene
                 if (!whatIf)
                 {
                     Undo.RecordObject(rend, "ConformRenderers: assign materials on " + rend.name);
-                    rend.sharedMaterials = sourceMats; // sourceMats is already a clone of the array; Material refs are vendor assets
+                    rend.sharedMaterials = sourceMats;
                     EditorUtility.SetDirty(rend);
                 }
 
-                // Check for null or Default-Material slots. On execute, rend.sharedMaterials IS the
-                // just-assigned sourceMats — so scanning the source array in whatIf yields the identical
-                // verdict without mutating anything.
                 var slotsToScan = whatIf ? sourceMats : rend.sharedMaterials;
                 for (int slot = 0; slot < slotsToScan.Length; slot++)
                 {
@@ -218,9 +159,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (mat == null)
                     {
                         data.NullSlots++;
-                        // Tense follows the path: on execute the slot IS null on the renderer, on whatIf it is
-                        // null in the source array we would have assigned. The verdict is the same either way,
-                        // but a preview that says "after assignment" asserts a mutation that never happened.
                         data.Offender("null-slot: renderer '" + rend.name + "' [" + slot + "] — " + (whatIf
                             ? "the source material set has a null slot; assigning it would leave this renderer with one"
                             : "null material slot after assignment"));
@@ -228,8 +166,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     else if (IsBuiltinDefaultMaterial(mat))
                     {
                         data.DefaultMatSlots++;
-                        // Slot index and asset path, not just the renderer: this offender FAILs the run on its
-                        // own, so the reader needs enough to adjudicate it rather than take the label's word.
                         data.Offender("default-material: renderer '" + rend.name + "' [" + slot +
                                       "] — slot holds Unity's built-in Default-Material (" +
                                       AssetDatabase.GetAssetPath(mat) + "); remap this material and re-run");
@@ -238,34 +174,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // ── Unity's built-in Default-Material: identity, not name ────────────────────────────────────
-
-        /// <summary>Asset path + GUID of the built-in material, quoted once here. The GUID is Unity's
-        /// well-known built-in-extra GUID; the localId is the material's slot within it.</summary>
+        /// <summary>Unity's well-known built-in-extra path and GUID; the localId is Default-Material's slot
+        /// within it.</summary>
         private const string BuiltinExtraPath = "Resources/unity_builtin_extra";
         private const string BuiltinExtraGuid = "0000000000000000f000000000000000";
         private const long   DefaultMaterialLocalId = 10303;
 
-        /// <summary>Resolved once per domain, lazily. NOT a static field initializer: the built-in resolves
-        /// through the AssetDatabase, and resolving at type-load can run before it is ready.</summary>
+        /// <summary>Resolved lazily, NOT in a static field initializer: the built-in resolves through the
+        /// AssetDatabase, and resolving at type-load can run before it is ready.</summary>
         private static Material _builtinDefaultMaterial;
         private static bool     _builtinDefaultResolved;
 
         /// <summary>
-        /// True when <paramref name="mat"/> IS Unity's built-in Default-Material.
+        /// True when <paramref name="mat"/> IS Unity's built-in Default-Material, by identity: any project
+        /// material can carry the name.
         ///
-        /// <para>This was a name compare (<c>mat.name == "Default-Material"</c>), which any project material
-        /// sharing that name satisfies — and since a nonzero <c>defaultMatSlots</c> FAILs the run on its own,
-        /// that made the gate carry a false-FAIL vector. Measured: an in-memory material named
-        /// <c>Default-Material</c> passes a name compare and fails this one.</para>
-        ///
-        /// <para>Reference compare is primary (built-in extras are session singletons, so it is exact) with a
-        /// GUID+localId fallback, because the built-in handle can fail to resolve. That fallback is the point:
-        /// comparing against a null handle would match nothing, <c>defaultMatSlots</c> would sit at 0 forever,
-        /// and a FAIL-capable gate would degrade into a silent no-op — the instrument failure
-        /// <c>docs/verify.md</c> exists to forbid. When the handle does not resolve,
-        /// <see cref="BuiltinDefaultMaterialUnresolved"/> carries that into the run's own output, so the
-        /// coverage limit is read where the verdict is.</para>
+        /// <para>Reference compare (built-in extras are session singletons, so it is exact), with a GUID+localId
+        /// fallback because the built-in handle can fail to resolve and a null handle would match nothing
+        /// (<see cref="BuiltinDefaultMaterialUnresolved"/>).</para>
         ///
         /// <para>Built-in RP only, which is all VRChat ships: under URP/HDRP the built-in still exists but is
         /// not what a new renderer receives, so this predicate would under-fire. Do not port it blind.</para>
@@ -291,22 +217,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>
         /// True when the built-in handle did not resolve, so this run's default-material coverage rests on the
         /// GUID+localId fallback alone. Read AFTER the scan, when the lazy resolve has happened.
-        ///
-        /// <para>The notice has to ride the RUN, not just the console. An agent driving this reads the returned
-        /// summary; a one-per-domain <c>Debug.LogWarning</c> is invisible to it and absent entirely on the
-        /// second call in the same domain. A PASS that could not adjudicate its own gate has to say so where
-        /// the verdict is read, or it is the silent no-op the identity fix exists to prevent.</para>
         /// </summary>
         internal static bool BuiltinDefaultMaterialUnresolved
         {
             get { return _builtinDefaultResolved && _builtinDefaultMaterial == null; }
         }
 
-        /// <summary>
-        /// Submesh count of the renderer's mesh (the natural material-slot count): sharedMesh for an
-        /// SMR, the MeshFilter's sharedMesh for a MeshRenderer. Returns -1 when no mesh is available
-        /// (parity check skipped).
-        /// </summary>
         private static int SubmeshCount(Renderer rend)
         {
             Mesh mesh = null;
@@ -319,14 +235,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return mesh != null ? mesh.subMeshCount : -1;
         }
 
-        /// <summary>
-        /// Lowercases an optional {ourName → sourceName} override map for case-insensitive matching.
-        /// Returns null when no usable entries were supplied.
-        ///
-        /// <para>Keys differing only in case fold together, last-write-wins, silently. Deliberately not
-        /// symmetric with <see cref="IndexedPath.ValidateRenameMap"/>'s loud rejection: there a collision
-        /// cannot address a unique dst sibling, here it only means two spellings of one renderer name.</para>
-        /// </summary>
+        /// <summary>Keys differing only in case fold together, last write wins, silently: here they are two
+        /// spellings of one renderer name, unlike the collisions <see cref="IndexedPath.ValidateRenameMap"/>
+        /// rejects.</summary>
         private static Dictionary<string, string> NormalizeRenameMap(IDictionary<string, string> ownedToSource)
         {
             if (ownedToSource == null || ownedToSource.Count == 0) return null;
@@ -337,15 +248,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return d.Count > 0 ? d : null;
         }
 
-        // ── Bounds + anchor ───────────────────────────────────────────────────────────────────
-
         private static void SetBoundsAndAnchor(GameObject ownedRoot, RunData data, bool whatIf)
         {
             var ourAnimator = ownedRoot.GetComponent<Animator>();
             // GetBoneTransform THROWS when the avatar is null ("Avatar is null") or not humanoid
-            // ("Avatar is not of type humanoid") — it never returns null for a Generic rig; only
-            // consult it when the rig is actually humanoid, so both non-humanoid cases fall through
-            // to the name-based scan below instead of throwing.
+            // ("Avatar is not of type humanoid"); it never returns null for a Generic rig.
             bool isHumanoid = ourAnimator != null && ourAnimator.avatar != null && ourAnimator.avatar.isHuman;
             Transform hips  = isHumanoid ? ourAnimator.GetBoneTransform(HumanBodyBones.Hips) : null;
 
@@ -353,20 +260,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (isHumanoid)
                 {
-                    // Humanoid rig whose Hips won't resolve is genuinely misconfigured — fail loud
-                    // (unchanged from the original behavior), never masked by a name match.
+                    // A humanoid rig whose Hips won't resolve is misconfigured: FAIL, never masked by a name match.
                     data.AnchorWarning = "Animator.GetBoneTransform(Hips) returned null on a humanoid rig — humanoid avatar misconfigured?";
                 }
                 else
                 {
-                    // Only a non-humanoid (Generic) or Animator-less mergeable reaches the name-based
-                    // fallback: scan under ownedRoot for a transform named "Hips" (case-insensitive,
-                    // mirroring NormalizeRenameMap's lowercasing) so the probe anchor still resolves
-                    // and the PASS gate can clear. First match in hierarchy order wins (deterministic,
-                    // matching BuildSourceMap's first-wins convention); resolving it records a
-                    // non-blocking AnchorNote (with duplicate count) rather than clearing silently. A
-                    // genuinely missing "Hips" also records a non-blocking AnchorNote (mergeable → PASS, see
-                    // the else below — G25); only a misconfigured humanoid rig sets AnchorWarning → FAIL (above).
                     var byName = FindDescendantByName(ownedRoot.transform, "hips", out int hipsCandidates);
                     string reason = ourAnimator == null ? "no Animator" : "non-humanoid rig";
                     if (byName != null)
@@ -377,12 +275,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                     else
                     {
-                        // A mergeable (hair/accessory) legitimately has neither a humanoid rig nor a 'Hips'
-                        // transform — the exact input own-mergeable prescribes ConformRenderers for. Don't FAIL
-                        // on the missing anchor (that trained workers to accept a red verdict — G25): leave every
-                        // probeAnchor as-authored (the hips==null guards below skip anchor repair) and PASS with
-                        // a note. Materials + bounds still apply. An avatar BASE never reaches here — it carries a
-                        // 'Hips' transform, so the name scan above resolves it.
+                        // A mergeable legitimately has no humanoid rig and no 'Hips', and own-mergeable prescribes
+                        // this tool for it, so the missing anchor is a note, not a FAIL.
                         data.AnchorNote = reason + " and no 'Hips' under ownedRoot — mergeable: probeAnchor left as-authored, anchor repair skipped";
                     }
                 }
@@ -391,17 +285,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var smrs = ownedRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             data.SmrTotal = smrs.Length;
 
-            var workspaceBounds = new Bounds(Vector3.zero, new Vector3(2f, 2f, 2f)); // extents = (1,1,1)
+            var workspaceBounds = new Bounds(Vector3.zero, new Vector3(2f, 2f, 2f));
 
             foreach (var smr in smrs)
             {
-                // Disposition is decided from the CURRENT (pre-write) state so preview == execute:
-                // count regardless of whatIf, apply the write only on execute.
-
-                // Bounds — ensure >= the anti-cull floor; never shrink a deliberately larger box.
+                // Disposition is decided from the pre-write state so preview == execute.
                 var ensuredBounds = smr.localBounds;
-                ensuredBounds.Encapsulate(workspaceBounds);              // union with the standard 2x2x2
-                bool boundsKeptLarger = ensuredBounds != workspaceBounds; // existing exceeded standard on some axis
+                ensuredBounds.Encapsulate(workspaceBounds);
+                bool boundsKeptLarger = ensuredBounds != workspaceBounds;
                 if (boundsKeptLarger)
                 {
                     data.BoundsKeptLarger++;
@@ -409,8 +300,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                  ensuredBounds.extents.ToString("F2") + "); kept — verify intended");
                 }
 
-                // Anchor — repair only an invalid ref (null, or points outside ownedRoot); preserve a
-                // valid internal anchor. Only meaningful once Hips resolved.
                 bool anchorInvalid = smr.probeAnchor == null
                                   || !smr.probeAnchor.IsChildOf(ownedRoot.transform);
                 if (hips != null)
@@ -418,14 +307,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (anchorInvalid)
                     {
                         data.AnchorsSet++;
-                        if (smr.probeAnchor != null)   // was non-null but external → a stale ref got repaired
+                        if (smr.probeAnchor != null)
                             data.Warning("anchor-repaired-external: renderer '" + smr.name + "' — probeAnchor '" +
                                          smr.probeAnchor.name + "' pointed outside ownedRoot; re-pointed to Hips — investigate the stale ref");
                     }
                     else
                     {
                         data.AnchorsPreserved++;
-                        if (smr.probeAnchor != hips)   // valid internal anchor that is not the avatar Hips
+                        if (smr.probeAnchor != hips)
                             data.Warning("anchor-preserved-nonhips: renderer '" + smr.name + "' — preserved internal anchor '" +
                                          smr.probeAnchor.name + "' (not Hips); verify no light/reflection-probe seam vs the body");
                     }
@@ -440,9 +329,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (hips != null)
                     {
                         if (anchorInvalid)
-                            smr.probeAnchor = hips;      // repair null/external anchor to Hips
+                            smr.probeAnchor = hips;
                         if (smr.rootBone == null)
-                            smr.rootBone = hips;         // fill rootBone only if currently unset
+                            smr.rootBone = hips;
                     }
 
                     EditorUtility.SetDirty(smr);
@@ -452,11 +341,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        /// <summary>
-        /// First transform at or under <paramref name="root"/> whose name equals <paramref name="lowerName"/>
-        /// case-insensitively, in hierarchy (depth-first) order; null if none. <paramref name="count"/>
-        /// receives the total number of matches so the caller can flag an ambiguous first-wins pick.
-        /// </summary>
         private static Transform FindDescendantByName(Transform root, string lowerName, out int count)
         {
             count = 0;
@@ -472,11 +356,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return first;
         }
 
-        // ── RunLog output ─────────────────────────────────────────────────────────────────────
-
-        /// <summary>Route an argument-guard failure through the shared envelope tail — never a bare
-        /// trailer-less line. Skips the count flush (nothing was measured; zero-counts would read as
-        /// measurements) and names the offender explicitly, like OwnMaterial's ArgFail.</summary>
+        /// <summary>Skips <see cref="Finish"/>'s count flush: nothing was measured, and zero counts would read
+        /// as measurements.</summary>
         private static string ArgFail(string label, bool whatIf, GameObject ownedRoot, GameObject source, string msg)
         {
             var data = new RunData
@@ -491,10 +372,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return TransplantCore.Finish(data, label);
         }
 
-        /// <summary>Flush the run's int counters into the envelope's ordered <c>counts</c> (core
-        /// disposition always; anomaly counters only when nonzero — the mismatch-class ones are also
-        /// named by offender/warning rows), fold the anchor verdict into offender/note grammar, then
-        /// the shared envelope tail (<see cref="TransplantCore.Finish"/>).</summary>
         private static string Finish(RunData data, string label)
         {
             data.Count("sourceRenderers", data.SourceRendererCount);
@@ -519,12 +396,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return TransplantCore.Finish(data, label);
         }
 
-        // ── Data types ────────────────────────────────────────────────────────────────────────
-
-        /// <summary>The package RunLog envelope plus this tool's run counters (flushed into
-        /// <c>counts</c> by <see cref="Finish"/> — they are incremented mid-run, which the envelope's
-        /// append-only counts list can't do). <c>AnchorWarning</c> stays a field because the PASS gate
-        /// consults it; <see cref="Finish"/> folds it into offender grammar.</summary>
+        /// <summary>Counters are fields, flushed into <c>counts</c> by <see cref="Finish"/>, because they
+        /// increment mid-run and the envelope's <c>counts</c> list only appends.</summary>
         private sealed class RunData : RunLog
         {
             public RunData() : base("conform-renderers") { }

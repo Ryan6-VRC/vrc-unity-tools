@@ -23,8 +23,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return s;
         }
 
-        /// <summary>transient | rate-limit | real. 429 is its own class (never auto-retried);
-        /// a ValidationException or any non-429 4xx is real; other 5xx / timeout is transient.</summary>
         internal static string Classify(int? httpStatus, bool isValidationException, bool isTimeout)
         {
             if (isValidationException) return "real";
@@ -46,8 +44,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal const string StateNotVisible = "not-visible";
         internal const string StateUnknown = "unknown";
 
-        /// <summary>What one read of a row's live record came back with. Factory-only so a caller cannot
-        /// build a found record with a status, or a failure with a name.</summary>
+        /// <summary>What one read of a row's live record came back with.</summary>
         internal struct RecordRead
         {
             internal bool found, pendingUpload;
@@ -73,19 +70,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             internal bool Blocks => error != null;
         }
 
-        // A local id is only as good as the record behind it. The SDK's Build Control Panel fetches the
-        // selected avatar's record, and on a 404 or another account's record it blanks the local id
-        // (VRCSdkControlPanelAvatarBuilder.ClearAvatarData, in the SDK's shipped source), so the next upload
-        // mints a new avatar under the scene name. Classifying by "holds an id" therefore promises an update
-        // that never happens.
+        // The SDK's Build Control Panel fetches the selected avatar's record, and on a 404 or another
+        // account's record it blanks the local id (VRCSdkControlPanelAvatarBuilder.ClearAvatarData, in the
+        // SDK's shipped source), so the next upload mints a new avatar under the scene name.
         internal const string NotVisibleError =
             "the local blueprint id names no record the signed-in account owns (missing, or another " +
             "account's — the API does not say which); the SDK panel clears such an id when it loads the " +
             "avatar, and an upload then mints a new avatar under the scene name — sign in as the owning " +
             "account, or clear the id yourself to upload as new";
 
-        /// <summary>Classify one row from its local id and the read of its live record.
-        /// <paramref name="read"/> is ignored when there is no local id — nothing was fetched.</summary>
         internal static RowSight Sight(string handle, bool hasLocalId, RecordRead read, string currentUserId)
         {
             var s = new RowSight { handle = handle };
@@ -123,11 +116,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return s;
         }
 
-        /// <summary>The whatIf line. <paramref name="importOffenders"/>[i] is row i's count of import
-        /// settings the SDK's validations reject, or -1 where no scan ran (a null entry, a root the scan refuses); <paramref name="rowsUnscanned"/>[i]
-        /// is how many validation rows that scan could not evaluate. An offender does not fail the verdict:
-        /// a build pass can mask one (VRCFury's texture clone masks the mip check), so it is not certain to
-        /// block the upload.</summary>
+        /// <summary>The whatIf line. An import-settings offender does not fail the verdict: a build pass can
+        /// mask one (VRCFury's texture clone masks the mip check), so it is not certain to block the upload.</summary>
         internal static string WhatIfSummary(RowSight[] sights, int[] importOffenders, int[] rowsUnscanned)
         {
             var rows = new System.Text.StringBuilder();
@@ -156,11 +146,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Login self-heal ─────────────────────────────────────────────────────────────────────
 
-        /// <summary>State of the saved-credential restore this door kicks. <c>Succeeded</c> is the TASK
-        /// having run to completion — NOT proof of a login: CAU's own VerifyCredentials conflates the two
-        /// (it returns <c>task.IsCompleted</c> for a task that completed <c>false</c>), and a restore that
-        /// returns false with no saved credentials completes just as cleanly as one that signs you in.
-        /// Whether you are logged in is only ever <c>APIUser.IsLoggedIn</c>.</summary>
+        /// <summary>State of the saved-credential restore this door kicks. <c>Succeeded</c> is the task having
+        /// run to completion, not proof of a login: a restore that returns false with no saved credentials
+        /// completes just as cleanly, and CAU's own VerifyCredentials conflates the two (it returns true for
+        /// a completed task whatever its result). Whether you are logged in is only ever
+        /// <c>APIUser.IsLoggedIn</c>.</summary>
         internal enum LoginRestore { None, InFlight, Succeeded, Failed }
 
         /// <summary>How long an unfinished restore may stay unfinished before the door stops saying
@@ -169,13 +159,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// the caller to poll forever, with no escape short of a recompile.</summary>
         internal const double RestoreDeadlineSeconds = 30.0;
 
-        /// <summary>The refusal text for a not-logged-in door, given the restore's state. Every row names
-        /// what to do next, and the rows are distinguishable on purpose: "re-run" and "re-running will not
-        /// help" are opposite instructions, so collapsing them would leave a reader unable to tell whether
-        /// the door is waiting, retrying, or stuck. <paramref name="retriesRemain"/> is what keeps the text
-        /// honest: the same state says "re-run" while an attempt is left and names the operator boundary
-        /// once they are spent. Returns the refusal; never null (the caller has already established that we
-        /// are not logged in).</summary>
+        /// <summary>The refusal text for a not-logged-in door, given the restore's state. Keep the rows
+        /// distinguishable: "re-run" and "re-running will not help" are opposite instructions.
+        /// <paramref name="retriesRemain"/> flips the same state from "re-run" to the operator's sign-in.</summary>
         internal static string LoginRefusal(LoginRestore restore, bool restoreReturnedFalse,
                                             bool deadlineExpired, bool retriesRemain, string failReason)
         {
@@ -190,9 +176,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 case LoginRestore.Succeeded:
                     if (restoreReturnedFalse)
                         return "not logged into the VRChat SDK and there are no saved credentials to restore" + signIn;
-                    // Restore claimed success, SDK says signed out. Usually the login was lost AFTER that
-                    // restore (a sign-out in the panel), which a fresh kick fixes — so retry before calling
-                    // it drift.
+                    // Usually the login was lost after that restore (a sign-out in the panel), which a fresh
+                    // kick fixes, so retry before calling it drift.
                     return retriesRemain
                         ? "the saved-credential restore reported success but the SDK is signed out — " +
                           "re-run this call to retry the restore"
@@ -206,26 +191,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        /// <summary>The not-logged-in self-heal, as a state machine over injected dependencies so it is
-        /// testable without CAU or a live SDK login — a headless venue has neither, which is why the door's
-        /// own preflight cannot cover this.
+        /// <summary>The not-logged-in self-heal, over injected dependencies so it is testable without CAU or a
+        /// live SDK login. A domain reload clears APIUser.IsLoggedIn while saved credentials survive, and
+        /// whichever SDK/CAU window repaints first may restore it, so a bare check refuses non-deterministically.
         ///
-        /// It NEVER awaits. The SDK's InitialFetchCurrentUser callback requires the editor update loop
+        /// It never awaits. The SDK's InitialFetchCurrentUser callback requires the editor update loop
         /// (measured: with the main thread blocked 3s the callback landed only ~8ms after the block
-        /// released), so blocking on the restore would hang the editor — the same hazard UploadAvatar.Run
-        /// already names for the batch itself. So the normal cost of a cold door is ONE re-run: the kick
-        /// returns WaitingForActivation (measured, from a forced-cold editor), this call refuses with
-        /// "re-run in a moment", and the next one passes.
-        ///
-        /// The re-inspect after the kick is not that path — it catches the login being restored by someone
-        /// else. The environment is genuinely racy: a domain reload clears APIUser.IsLoggedIn while saved
-        /// credentials survive, and whichever SDK/CAU window repaints first may restore it, so the state can
-        /// change under us between the entry check and the kick returning. Re-reading is free; skipping it
-        /// would refuse on a door that is already open.
-        ///
-        /// A stale restore is re-kicked while attempts remain (<see cref="MaxKicks"/> total) so one
-        /// transient fault cannot poison the door until the next recompile, bounded so a live account never
-        /// sees an unbounded retry.</summary>
+        /// released), so blocking on the restore would hang the editor. The normal cost of a cold door is one
+        /// re-run: the kick returns WaitingForActivation (measured, from a forced-cold editor), this call
+        /// refuses with "re-run in a moment", and the next one passes.</summary>
         internal sealed class LoginLatch
         {
             internal const int MaxKicks = 2;
@@ -237,9 +211,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Task<bool> _task;
             double _kickedAt;
             int _kicks;
-            // Written by Observe's continuation, which ExecuteSynchronously only HINTS will run inline —
-            // read on the main thread. volatile so a captured reason cannot be lost to a missed publication,
-            // degrading a named refusal to "no reason reported".
             volatile string _failReason;
 
             internal LoginLatch(Func<(Task<bool>, string)> kick, Func<bool> isLoggedIn, Func<double> now)
@@ -247,8 +218,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _kick = kick; _isLoggedIn = isLoggedIn; _now = now;
             }
 
-            /// <summary>Kicks spent on the current latch — read by tests to prove the door kicks once per
-            /// call-sequence rather than once per call.</summary>
             internal int Kicks => _kicks;
 
             internal LoginRestore State =>
@@ -263,14 +232,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             internal bool DeadlineExpired =>
                 _task != null && !_task.IsCompleted && _now() - _kickedAt > RestoreDeadlineSeconds;
 
-            // A spent latch is re-kicked while attempts remain. Three states qualify, for the same reason —
-            // the latch's record has gone stale relative to the SDK: a failed restore (transient); one that
-            // succeeded while we are signed out anyway (the login was lost afterwards — a sign-out in the
-            // panel — which a fresh kick fixes); and one still unfinished past the deadline, whose task CAU
-            // gave no timeout and no cancellation, so it may never complete at all. Abandoning that stale
-            // task is safe: its Observe continuation still holds it, so nothing is left unobserved.
-            // A restore that returned FALSE is not re-kicked: that is "no saved credentials", and repeating
-            // it cannot change the answer.
+            // CAU gives its restore task no timeout and no cancellation, so one past the deadline may never
+            // complete; abandoning it is safe because its Observe continuation still holds it. A restore that
+            // returned false means no saved credentials, and repeating it cannot change the answer.
             bool MayKick => _task == null ||
                             (_kicks < MaxKicks &&
                              (State == LoginRestore.Failed ||
@@ -300,16 +264,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return LoginRefusal(State, ReturnedFalse, DeadlineExpired, _kicks < MaxKicks, _failReason);
             }
 
-            /// <summary>Read the outcome AT KICK TIME, not at read time. A faulted restore that nobody
-            /// observes is finalized into TaskScheduler.UnobservedTaskException — console noise on an
-            /// unrelated GC — and clearing the latch on a later success would drop the last reference
-            /// before anything read it. Caches a redacted string so the door never touches the Task's
-            /// exception itself. Runs on whatever thread completed the task: string assignment only,
-            /// no Unity API.
-            ///
-            /// The ReferenceEquals guard keeps an ABANDONED task quiet: a re-kick replaces _task, and the
-            /// old task's continuation may land afterwards — without the guard it would overwrite the live
-            /// attempt's reason (or repopulate one the re-kick had just cleared) with a stale one.</summary>
+            /// <summary>Read the outcome at kick time: a faulted restore nobody observes is finalized into
+            /// TaskScheduler.UnobservedTaskException, console noise on an unrelated GC. Runs on whatever thread
+            /// completed the task (ExecuteSynchronously only hints inline), so string assignment only, no Unity
+            /// API. The ReferenceEquals guard stops an abandoned task's late continuation overwriting the live
+            /// attempt's reason.</summary>
             void Observe(Task<bool> task) => task.ContinueWith(t =>
             {
                 if (!ReferenceEquals(_task, t)) return;
@@ -319,8 +278,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     _failReason = "the restore was canceled";
             }, TaskContinuationOptions.ExecuteSynchronously);
 
-            /// <summary>Drop the latch once logged in, so a later sign-out (a domain reload clears the
-            /// login) starts from a full attempt budget rather than an exhausted one.</summary>
             void Clear() { _task = null; _kicks = 0; _failReason = null; _kickedAt = 0; }
         }
 

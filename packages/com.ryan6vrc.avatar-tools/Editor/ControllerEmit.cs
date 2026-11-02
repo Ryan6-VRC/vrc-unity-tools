@@ -24,36 +24,28 @@ using FtSets = VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// Codegen core: turns a parsed <see cref="AnimDocument"/> into a real Unity
-    /// <see cref="AnimatorController"/> with embedded clips + blend trees, plus a
-    /// <see cref="VRCExpressionParameters"/> asset listing the controller's OWN declared params (every
-    /// declared param except VRC built-ins and <c>scratch:</c> working params) so the merged FX stays
-    /// legible — non-synced params appear with <c>networkSynced=false</c> (free, no sync-bit cost).
+    /// Codegen core: turns a parsed <see cref="AnimDocument"/> into a persisted <see cref="AnimatorController"/>
+    /// with embedded clips and blend trees, plus in-memory <see cref="VRCExpressionParameters"/> and menu assets.
+    /// Language: docs/animator-schema.md.
     ///
-    /// PURE FUNCTION OF THE DOCUMENT. No random identity (AaC's random suffixes are deliberately
-    /// rejected): state layout is a fixed grid keyed by document order, names come straight from the
-    /// document, so recompiling the same document produces the same graph and Git sees no churn.
+    /// A pure function of the document: authored layout else a fixed grid keyed by document order, names from
+    /// the document, no random identity. Recompiling the same document gives Git no churn.
     ///
-    /// PERSISTENCE BOUNDARY: several sub-asset APIs used here — <c>AnimatorState.AddStateMachineBehaviour</c>,
-    /// embedding clips/trees as controller sub-assets — require the controller to be a persisted asset, not an
-    /// in-memory object. So Build materialises the controller at <c>&lt;outDir&gt;/&lt;name&gt;.controller</c>
-    /// and attaches everything there. The 2-arg overload defaults <c>outDir</c> to the scratch dir under
-    /// Assets/Agent/Scratch/emit/; CompileController (the write-substrate door) passes the real output dir or
-    /// a whatIf temp. Emission is GUID-STABLE + idempotent: an existing controller at the path is reset in
-    /// place, not deleted + recreated. The load-bearing guarantee is topology: the returned controller,
-    /// reloaded from disk, has the correct graph.
+    /// The controller is persisted before anything attaches to it, because
+    /// <c>AnimatorState.AddStateMachineBehaviour</c> and sub-asset embedding need a persisted asset. Reset in
+    /// place: <see cref="Build(AnimDocument, string, string, out EmitResult)"/>.
     /// </summary>
     public static class ControllerEmit
     {
-        // A duration-only clip and a Sets-only clip both need a real (non-zero) length or Unity treats
-        // the clip as zero-length. One frame at 60fps is the smallest honest floor.
+        // The floor on a key-derived clip length: one frame at the clips' 60fps. A zero-length clip gets an
+        // effective 1s state length (docs/animator-schema.md §clips).
         private const float MinClipLength = 1f / 60f;
 
         private const string ScratchRoot = "Assets/Agent/Scratch/emit";
 
-        // Tool-owned graph layout. The compiler owns EVERY node position — the state/sub-machine grid AND
-        // the four special nodes — so DecompileController has a deterministic baseline to compare against
-        // (a value Unity assigns at node creation is version-dependent). Single authority both directions read.
+        // The compiler owns every node position, the state/sub-machine grid and the four special nodes, so
+        // DecompileController has a deterministic baseline; a value Unity assigns at node creation is
+        // version-dependent.
         internal static Vector3 GridState(int i) => new Vector3(300f, 60f * i, 0f);
         internal static Vector3 GridSub(int i)   => new Vector3(600f, 60f * i, 0f);
         internal static readonly Vector3 SpecialEntry  = new Vector3(50f,   0f, 0f);
@@ -67,8 +59,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static Vector3 SpecialPos(float[] xy, Vector3 fallback)
             => xy != null ? new Vector3(xy[0], xy[1], 0f) : fallback;
 
-        // Positional default names — the single source both BuildTree (emit) and DecodeTree (decompile) use to
-        // tell an auto-generated blend-tree name from a human-authored one.
         internal static string AutoTreeName(string stateName) => stateName + "_BlendTree";
         internal static string AutoChildName(string parentAppliedName, int index) => parentAppliedName + "_" + index;
 
@@ -79,42 +69,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public List<AnimationClip> ClipList = new List<AnimationClip>();
             public List<BlendTree> Trees = new List<BlendTree>();
             public VRCExpressionParameters Params; // null only when every declared param is excluded (built-in / scratch)
-            // The root expression menu, null unless the document carries a `menu:` block. Sub-menu pages hang
-            // off it by reference and are persisted as hidden sub-assets of the same file (MenuChildren), so
-            // one menu asset holds the whole tree and a consumer references only the root by GUID.
+            // Null unless the document carries a `menu:` block. MenuChildren holds the sub-menu pages, which
+            // CompileController persists as sub-assets of the root's file (docs/animator-schema.md §menu).
             public VRCExpressionsMenu Menu;
             public List<VRCExpressionsMenu> MenuChildren = new List<VRCExpressionsMenu>();
-            // Motion refs that carried the `unresolved: true` marker and did NOT resolve — emitted as a null
-            // motion (a clean-empty state) instead of a fail-loud throw. Each entry names the owning STATE and
-            // the verbatim GUID so a compile advisory can preserve the round-trip note. A BARE broken ref (no
-            // marker) is never recorded here — it still throws EmitException.
+            // Refs marked `unresolved: true` that did not resolve: emitted as a null motion and recorded by owning
+            // state and verbatim GUID for a compile advisory. A bare broken ref throws instead.
             public List<(string state, string guid)> UnresolvedRefs = new List<(string state, string guid)>();
-            // Menu icons the compile could not adjudicate because the DOCUMENT is not in this project's
-            // AssetDatabase — emitted as a null icon instead of a fail-loud throw, and recorded here for a
-            // compile advisory. That regime is the out-of-project compile (the vrc-patterns gate compiles an
-            // entry from an arbitrary filesystem --root into a host that never loads the entry's package),
-            // where nothing here can tell a correct icon path from a wrong one; an in-project compile
-            // adjudicates and throws instead. Each entry names the control and the path tried.
+            // Menu icons emitted null because the document is outside this project's AssetDatabase, recorded for a
+            // compile advisory. Each entry names the control and the path tried. See ResolveIcon.
             public List<(string control, string path)> IconsOutsideProject = new List<(string control, string path)>();
-            // Non-null when the provenance stamp did not reach the .controller's .meta on disk. Deliberately
-            // NOT a compile failure — the controller is correctly written, and refusing would strand a
-            // half-replaced one (StampProvenance owns why) — but not a mere advisory either: the next compile
-            // of this path reads it as hand-authored and warns. CompileController surfaces it.
+            // Non-null when the provenance stamp did not reach the .controller's .meta on disk; the next compile of
+            // this path reads it as hand-authored and warns. CompileController surfaces it. StampProvenance has why
+            // this is not a compile failure.
             public string StampFailure;
 
-            /// <summary>Destroy the side assets this result still owns in memory — <see cref="Params"/>,
-            /// <see cref="Menu"/> and every <see cref="MenuChildren"/> page. The OWNER's door: the emit hands
-            /// these back unpersisted, and the caller is what has to end their life (the 2-arg
-            /// <see cref="Build(AnimDocument, out EmitResult)"/> door states that contract).
+            /// <summary>Destroy the side assets this result still owns in memory: <see cref="Params"/>,
+            /// <see cref="Menu"/> and every <see cref="MenuChildren"/> page. The emit hands them back unpersisted, so
+            /// the caller has to end their life.
             /// <para>A survivor is not inert. Leaked SDK ScriptableObjects in this assembly make
-            /// <c>AddStateMachineBehaviour</c> start returning null, failing UNRELATED suites with
-            /// NullReferenceExceptions that point at untouched production code — measured at 551/600 vs
-            /// 600/600 (<c>ControllerFixpointTests</c>'s <c>_made</c> field owns that measurement).</para>
-            /// <para>One-arg <c>DestroyImmediate</c> deliberately, and NOT guarded by an asset-path check:
-            /// these are never persisted, so if that invariant ever breaks Unity errors instead of silently
-            /// deleting a real asset. A skip-if-persisted guard would trade that tripwire for silence. The
-            /// two-arg form is for a genuine sub-asset and is not a precedent for this.</para>
-            /// Idempotent — the fields are nulled/cleared, so a second call is a no-op.</summary>
+            /// <c>AddStateMachineBehaviour</c> start returning null, failing unrelated suites with
+            /// NullReferenceExceptions that point at untouched production code (measured: 551/600 tests pass with
+            /// the leak, 600/600 without).</para>
+            /// <para>One-arg <c>DestroyImmediate</c> with no asset-path guard, on purpose: these are never persisted,
+            /// so if that ever breaks Unity errors instead of deleting a real asset.</para></summary>
             public void DestroyUnpersisted()
             {
                 if (Params != null) UnityEngine.Object.DestroyImmediate(Params);
@@ -130,34 +108,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // Fail-loud emission error, named so a coordinator/log points straight at the offending construct.
         public sealed class EmitException : Exception
         {
             public EmitException(string message) : base(message) { }
         }
 
-        /// <summary>Convenience door: emit to the scratch dir with NO provenance stamp (throwaway builds — see
-        /// the 4-arg overload's null contract below). <c>CompileController</c> uses the 4-arg overload.
-        /// <para><b>THE CALLER OWNS the result's side assets</b> — <c>Params</c>, <c>Menu</c> and every
-        /// <c>MenuChildren</c> page — and must call <see cref="EmitResult.DestroyUnpersisted"/> when done. This
-        /// door persists the CONTROLLER only; nothing takes ownership of the rest, and a survivor is not inert
-        /// (that method owns the 551/600 measurement). The 4-arg door has an owner: <c>CompileController</c>
-        /// either persists them or destroys them on every exit.</para></summary>
+        /// <summary>Emit to the scratch dir with no provenance stamp, for throwaway builds.
+        /// <para>The caller owns the result's side assets and must call
+        /// <see cref="EmitResult.DestroyUnpersisted"/> when done; this door persists only the
+        /// controller.</para></summary>
         public static void Build(AnimDocument doc, out EmitResult result)
             => Build(doc, ScratchRoot, null, out result);
 
         /// <summary>Emit <paramref name="doc"/> into <paramref name="outDir"/> (an <c>Assets/…</c>-relative
-        /// folder). <paramref name="sourceText"/>, when non-null, is the exact source-file text — its BYTES
-        /// are hashed into the controller's provenance userData so a later compile can detect an out-of-band
-        /// edit.
-        /// <para>NULL <paramref name="sourceText"/> writes NO stamp and leaves any existing one untouched, so
-        /// it is for SCRATCH / throwaway targets only — never a path <see cref="CompileController"/> will later
-        /// compile to. On such a path the stale stamp from the PREVIOUS compile survives this emit, the next
-        /// compile compares it against the unchanged source, reads stored == current, and clobbers an
-        /// out-of-band hand-edit with no warning at all.</para>
-        /// IDEMPOTENT + GUID-STABLE: an existing controller at the target path is RESET IN PLACE (its
-        /// sub-assets stripped and rebuilt) rather than deleted + recreated, so its GUID — and any external
-        /// reference to it — survives a recompile.</summary>
+        /// folder). <paramref name="sourceText"/>, when non-null, is the exact source-file text, hashed into the
+        /// controller's provenance userData so a later compile can detect an out-of-band edit.
+        /// <para>Null <paramref name="sourceText"/> writes no stamp and leaves any existing one untouched, so it is
+        /// for scratch targets only, never a path <see cref="CompileController"/> will later compile to: there the
+        /// stale stamp survives this emit, the next compile reads stored == current, and it clobbers an out-of-band
+        /// hand-edit with no warning.</para>
+        /// An existing controller at the target path is reset in place (its sub-assets stripped and rebuilt)
+        /// rather than deleted and recreated, so its GUID and any external reference to it survive a
+        /// recompile.</summary>
         public static void Build(AnimDocument doc, string outDir, string sourceText, out EmitResult result)
         {
             if (doc == null) throw new EmitException("Build: document is null");
@@ -169,15 +141,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             result = ctx.Run();
         }
 
-        // ----- detached clip content (controller-free; shared by the embedded EmitClips and a future
-        // CompileClips door that builds a clip WITHOUT a controller) -----
+        // ----- detached clip content (shared by the embedded EmitClips and CompileClips) -----
 
-        /// <summary>Author and return a DETACHED <see cref="AnimationClip"/> (curves/settings only) for
-        /// <paramref name="spec"/> — NO controller access, NO sub-asset embedding, NO hideFlags, and (for a
-        /// seconds-only clip) NO carrier-param declaration. Those are the CALLER's responsibility. The output
-        /// curves/tangents/lengths are identical to the embedded emission path.
-        /// <paramref name="paramNames"/> is the set of declared Animator parameter names — the gate that routes
-        /// a bare binding to an Animator-property curve (path="") rather than a scene binding.</summary>
+        /// <summary>Author a detached <see cref="AnimationClip"/> (curves and settings only) for
+        /// <paramref name="spec"/>. Embedding it, hiding it and declaring a seconds-only clip's carrier param are the
+        /// caller's. <paramref name="paramNames"/> is the set of declared Animator parameter names, the gate that
+        /// routes a bare binding to an Animator-property curve (path="") rather than a scene binding.</summary>
         internal static AnimationClip BuildClipContent(ClipSpec spec, HashSet<string> paramNames)
         {
             var clip = new AnimationClip { name = spec.Name, frameRate = 60f };
@@ -185,12 +154,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             if (!hasContent)
             {
-                // Seconds-only clip → inert carrier that ONLY gives the clip a genuine length. Bind a flat
-                // curve on a scratch ANIMATOR parameter (path="", typeof(Animator)) — NOT a non-existent
-                // GameObject path. An animator-property binding resolves against any avatar root (the root
-                // always carries an Animator), so CheckAnimator's broken-binding rule stays clean when the
-                // emitted controller is linted against a real avatar; a fake GO path would false-FAIL it.
-                // DECLARING the carrier param is a CONTROLLER side effect and is left to the caller.
+                // Seconds-only: a flat curve on a scratch Animator parameter gives the clip its length. An
+                // animator-property binding resolves against any avatar root, so CheckAnimator's broken-binding rule
+                // stays clean when the controller is linted against a real avatar; a fake GameObject path would
+                // false-FAIL it.
                 if (!spec.Seconds.HasValue)
                     throw new EmitException(
                         $"clip '{spec.Name}' declares no set/curves and no seconds — nothing to emit (parser/validator should have caught this)");
@@ -213,9 +180,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return clip;
         }
 
-        // `loop: true` sets the clip's own loopTime, so a state holding it replays it with no gap. A
-        // self-transition at exitTime 1 is not a substitute: it fires on the first frame past the end and the
-        // re-entered state starts at 0, so every period runs up to one frame long.
         private static void ApplyLoop(AnimationClip clip, ClipSpec spec)
         {
             if (!spec.Loop) return;
@@ -224,24 +188,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             AnimationUtility.SetAnimationClipSettings(clip, settings);
         }
 
-        // Author one keyframed curve onto `clip`.
         private static void SetKeyedCurve(AnimationClip clip, ClipSpec spec, CurveSpec cs, HashSet<string> paramNames)
         {
             var binding = ResolveBinding(cs.Binding, paramNames);
             var keys = cs.Keys.Select(k => new Keyframe(k.Time, k.Value)).ToList();
-            // Unity derives a keyframed clip's length from its last key, so an explicit `seconds:` must be
-            // stamped onto the curve too or it is silently ignored (animator-schema.md: seconds declares
-            // the length; matters for motion-time / blend-tree timing). Hold the last value out to
-            // `seconds`; refuse a `seconds` shorter than the authored content (it can't truncate a key).
-            //
-            // With no `seconds:`, hold instead to this curve's OWN last key floored at MinClipLength —
-            // per curve, never the clip-wide max, so a clip mixing a long and a short curve emits both
-            // exactly as authored. The floor is what does the work: a curve ending inside the first frame
-            // (a lone key at time 0 is the case that reaches it) would otherwise emit a ZERO-length clip,
-            // and the animator gives any non-positive state length an effective 1s, so `exitTime: 0.2`
-            // would dwell 0.2 SECONDS instead of 0.2 x 1/60 (runtime.md §Animator evaluation). It would
-            // also survive the .anim round-trip only as the floored form — decompile reads a lone constant
-            // key back as `set:` — silently retiming the document with both directions reporting OK.
+            // Unity derives a keyframed clip's length from its last key, so an explicit `seconds:` must be stamped
+            // onto the curve or it is silently ignored. With no `seconds:`, hold to this curve's own last key floored
+            // at MinClipLength: per curve, never the clip-wide max, so a clip mixing a long and a short curve emits
+            // both as authored.
             if (keys.Count > 0)
             {
                 var last = keys[0];
@@ -251,7 +205,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         $"clip '{spec.Name}': seconds={spec.Seconds.Value} is shorter than curve '{cs.Binding}' last key at {last.time}");
                 float hold = spec.Seconds ?? Mathf.Max(last.time, MinClipLength);
                 if (hold > last.time)
-                    keys.Add(new Keyframe(hold, last.value)); // hold to the declared or floored length
+                    keys.Add(new Keyframe(hold, last.value));
             }
             var animCurve = new AnimationCurve(keys.ToArray());
             var mode = cs.Tangents switch
@@ -269,10 +223,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             AnimationUtility.SetEditorCurve(clip, binding, animCurve);
         }
 
-        // The key-derived clip length, floored at one frame — the floor animator-schema.md §clips
-        // documents for any `set`/`curves` clip with no `seconds:`. It applies to a curves clip whose
-        // keys all land inside the first frame exactly as it does to a keyless one; without that, a lone
-        // key at time 0 derives length 0 and emits a zero-length clip (see SetKeyedCurve).
         private static float CurveLength(ClipSpec spec)
         {
             float max = 0f;
@@ -281,11 +231,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return Mathf.Max(max, MinClipLength);
         }
 
-        // A bare identifier naming a declared Animator parameter → an Animator-parameter curve (path="").
-        // Otherwise the general scene binding: "path/Component.property", split on the LAST '/' then
-        // the FIRST '.'. The first dot is the right split because a component type name never contains a
-        // dot, while the property CAN — `blendShape.Smile`, `material._Color` are the common cases a
-        // LastIndexOf split would fold into the type name (and then fail to resolve).
+        // A bare identifier naming a declared Animator parameter is an Animator-parameter curve (path="").
+        // Otherwise it is "path/Component.property", split on the last '/' then the first '.': a component type
+        // name never contains a dot, while a property can (`blendShape.Smile`, `material._Color`).
         private static EditorCurveBinding ResolveBinding(string target, HashSet<string> paramNames)
         {
             if (paramNames.Contains(target))
@@ -304,9 +252,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return EditorCurveBinding.FloatCurve(path, ResolveComponentType(typeName), prop);
         }
 
-        // The authored binding vocabulary (docs/animator-schema.md §clips): simple names resolve in exactly
-        // these namespaces. Namespaces, not a type list, so a pinned-SDK addition inside a covered family
-        // needs no code change — while UI / TMP / arbitrary scripts stay out of scope by construction.
+        // The authored binding vocabulary: simple names resolve in exactly these namespaces. Widen this list and
+        // docs/animator-schema.md §clips together.
         private static readonly string[] BindingNamespaces =
         {
             "UnityEngine",
@@ -316,26 +263,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             "VRC.SDK3.Dynamics.PhysBone.Components",
         };
 
-        // SCOPE (item V, revisited by C1): the original UnityEngine-only ruling is NARROWED, not overturned —
-        // resolution is still a closed, documented allowlist (of namespaces), refusing everything else
-        // fail-loud, including a non-Component type and a name matching in two namespaces (refuse, never
-        // rank). ControllerDecompile.ReconstructBindingTarget round-trips through THIS method as its oracle,
-        // so emit and decompile cannot drift; widen the list AND the schema §clips together — never one
-        // silently.
-        // Memo: emit and decompile both resolve once per binding, and the probe walks every loaded assembly
-        // per namespace — a large FX pays it hundreds of times. Successes only (a refusal aborts the compile,
-        // so its path is never hot); statics reset on domain reload, so the cache cannot outlive the assembly
-        // set it was built from.
+        // ControllerDecompile.ReconstructBindingTarget round-trips through ResolveComponentType as its oracle.
+        // Memo: the probe walks every loaded assembly per namespace. Successes only; a domain reload clears it.
         private static readonly Dictionary<string, Type> ResolveCache = new Dictionary<string, Type>();
 
         internal static Type ResolveComponentType(string typeName)
         {
             if (typeName == "GameObject") return typeof(GameObject); // animatable but not a Component
 
-            // Bare MonoBehaviour is Unity's missing-script placeholder: a deserialized curve whose script
-            // no longer resolves reads back as typeof(MonoBehaviour) (measured, 2022.3) — never a real
-            // authorable target. Resolving it would round-trip vendor junk silently; refuse by name so the
-            // decompile oracle turns a missing-script binding into a named refusal.
+            // Unity reports a curve whose script no longer resolves as typeof(MonoBehaviour) (measured). Refused by
+            // name so the decompile oracle turns a missing-script binding into a named refusal, not a silent
+            // round-trip.
             if (typeName == "MonoBehaviour")
                 throw new EmitException("clip binding component type 'MonoBehaviour' is not bindable — it is "
                     + "the placeholder Unity reports for a curve whose script cannot be resolved (missing script); "
@@ -363,7 +301,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 + ") — UI / arbitrary scripts are out of scope; check the name against the schema §clips vocabulary");
         }
 
-        // Per-build mutable state kept off the static surface so Build stays a pure entry point.
         private sealed class BuildContext
         {
             private readonly AnimDocument _doc;
@@ -372,17 +309,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private readonly EmitResult _result = new EmitResult();
             private readonly HashSet<string> _paramNames;
             private AnimatorController _controller;
-            // EVERY menu page CreateInstance'd by this build, registered at creation rather than on return.
-            // _result.MenuChildren only receives a page once BuildMenuPage RETURNS it, so a throw part-way
-            // through a page (a bad icon on control n) strands that page unreachable — and the root page is
-            // not in _result.Menu until EmitMenu's own assignment. This list is the only handle that covers
-            // the in-flight ones, and it exists for the failure path alone; success ignores it.
+            // Every menu page this build created, registered at creation so a mid-build throw can destroy pages
+            // not yet in _result. Failure path only.
             private readonly List<VRCExpressionsMenu> _menuPages = new List<VRCExpressionsMenu>();
-            // The `trees:` entries, by name, and the BlendTree each one has been built into. A shared tree is
-            // built LAZILY, on its first reference, and every later reference resolves to the same object —
-            // that identity is the construct. _sharedBuilding is the in-progress set: a shared tree reached
-            // again while its own children are still being built is a cycle, which would otherwise recurse
-            // until the stack ran out.
+            // The `trees:` entries by name and their built BlendTrees: built on first reference, and every later
+            // reference shares that object. _sharedBuilding is the in-progress set, which catches a cycle.
             private readonly Dictionary<string, BlendTreeSpec> _sharedSpecs;
             private readonly Dictionary<string, BlendTree> _sharedBuilt = new Dictionary<string, BlendTree>();
             private readonly List<string> _sharedBuilding = new List<string>();
@@ -392,9 +323,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _doc = doc;
                 _outDir = outDir;
                 _sourceText = sourceText;
-                // A clip that writes a bare parameter name (aap or not) binds it as an Animator float curve
-                // — the mechanism VRChat uses to drive any Animator parameter from a clip (AAPs are just the
-                // float-smoother case). The gate is "is this a declared Animator parameter", not the aap flag.
+                // Every declared parameter, not only `aap` ones: a clip writing a bare parameter name binds it as an
+                // Animator float curve, which is how VRChat drives any Animator parameter from a clip.
                 _paramNames = new HashSet<string>(doc.Parameters.Select(p => p.Name));
                 _sharedSpecs = new Dictionary<string, BlendTreeSpec>();
                 foreach (var t in doc.Trees) if (t != null && t.Name != null) _sharedSpecs[t.Name] = t;
@@ -405,17 +335,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string path = PathFor(_outDir, _doc.ControllerName);
                 EnsureFolder(_outDir);
 
-                // NOTE: StripSubAssets (below) empties any prior controller at `path` before the fallible emit
-                // steps run, and several of them (transition targets, behaviour kinds, clip bindings) throw
-                // AFTER the strip. That is safe here only because the CompileController door PROVES an owned
-                // overwrite (a full emit+lint into a throwaway temp) before calling Build for real; direct
-                // 2-arg callers target disposable scratch. Do not rely on Build alone to protect a prior asset.
-
-                // GUID-STABLE idempotence: reuse the controller ASSET if one already lives at the path (its
-                // GUID + any external reference survives), stripping its sub-assets so the rebuilt graph is a
-                // pure function of the document. Only when nothing (or a non-controller) sits there do we
-                // create fresh. A bare `new AnimatorController()` persists with ZERO layers — no auto "Base
-                // Layer" to orphan (CreateAnimatorControllerAtPath would add one). We own every layer below.
+                // StripSubAssets empties any prior controller at `path` before the fallible emit steps run, so Build
+                // alone does not protect a prior asset. CompileController's proof compile does; direct 2-arg callers
+                // target disposable scratch.
+                //
+                // A bare `new AnimatorController()` persists with zero layers; CreateAnimatorControllerAtPath would
+                // add a "Base Layer" to orphan.
                 _controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
                 if (_controller != null)
                 {
@@ -430,19 +355,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     AssetDatabase.CreateAsset(_controller, path);
                 }
 
-                // The side assets (Params, and every menu page) are the only things this method creates that
-                // NOTHING owns on the failure path: they are in-memory ScriptableObjects, so a throw out of
-                // Build leaves them unreachable — `result` is an out-parameter that is never assigned, and a
-                // caller's catch has no handle to them. EmitVrcParameters runs BEFORE EmitMenu, and EmitMenu
-                // throws three ways (the MAX_CONTROLS echo, a reserved-param control, a bad icon path), so
-                // this is reachable from an ordinary authoring mistake, not just a corrupt document.
-                // A leaked SDK ScriptableObject in this assembly is NOT inert — ControllerFixpointTests's
-                // `_made` field records the measurement (leak → 551/600, destroy → 600/600).
-                // The controller and its sub-assets are deliberately NOT swept: they are persisted, and the
-                // stripped-on-failure contract above already governs them.
-                // The try closes at the RETURN, not after EmitMenu: everything below is still fallible, and a
-                // throw there strands the side assets exactly as an emit throw would. StampProvenance ends in
-                // AssetImporter.SaveAndReimport — real file IO — so this is not a theoretical tail.
+                // Params and the menu pages are in-memory ScriptableObjects that a throw out of Build would strand:
+                // `result` is never assigned, so no caller has a handle. EmitResult.DestroyUnpersisted has why a leak
+                // matters. The controller and its sub-assets are persisted and are not swept.
                 try
                 {
                     EmitParameters();
@@ -456,31 +371,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                     StampProvenance(path);
 
-                    // Reload from disk so EmitResult holds the authoritative persisted objects (a reimport can
-                    // remap instances). This makes the returned graph exactly what round-trip verification sees.
-                    // The reload does NOT depend on a reimport having happened: when StampProvenance skips (the
-                    // scratch door), nothing was re-minted and these loads return the same live, persisted
-                    // instances — so it stays correct either way.
+                    // Reload from disk so EmitResult holds the persisted objects, exactly what round-trip
+                    // verification sees.
                     ReloadFromDisk(path);
                     return _result;
                 }
                 catch
                 {
-                    // Still correct this late: ReloadFromDisk rewrites only Controller/Clips/ClipList/Trees, so
-                    // Params and the pages are the same unpersisted instances they were at CreateInstance.
                     DestroyUnpersistedSideAssets();
                     throw;
                 }
             }
 
-            // Destroy the in-memory side assets this build minted. Failure path ONLY — on success these are
-            // handed to the caller inside the EmitResult, whose EmitResult.DestroyUnpersisted is the OWNER's
-            // door (CompileController routes through it; the 2-arg Build door names it in its contract).
-            //
-            // This is deliberately NOT that public door, and must not be folded into it: pages come from
-            // _menuPages, not _result.Menu/_result.MenuChildren, because those two hold only pages that were
-            // fully BUILT (see the _menuPages comment) — and this path exists precisely for a throw mid-build.
-            // Calling the result-based door here would silently leak every partially-built page.
+            // Failure path only; on success the caller owns these through EmitResult.DestroyUnpersisted. Pages come
+            // from _menuPages because _result.Menu and _result.MenuChildren hold only fully built pages, so calling
+            // the result-based door here would leak every partially built page.
             private void DestroyUnpersistedSideAssets()
             {
                 if (_result.Params != null) UnityEngine.Object.DestroyImmediate(_result.Params);
@@ -492,10 +397,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _result.MenuChildren.Clear();
             }
 
-            // Reset an existing controller for in-place rebuild: detach its layers/parameters, then destroy
-            // every animator sub-asset (+ embedded clips/trees) at the path. The top-level controller object
-            // — and its GUID — is kept. Clearing the references BEFORE destroying avoids destroying an object
-            // the controller still points at.
+            // Clear the controller's references before destroying the sub-assets they point at. The controller
+            // object and its GUID are kept.
             private void StripSubAssets(string path)
             {
                 _controller.layers = new AnimatorControllerLayer[0];
@@ -529,7 +432,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             acp.type = AnimatorControllerParameterType.Int;
                             acp.defaultInt = Mathf.RoundToInt(p.Default);
                             break;
-                        default: // Float — AAP params are ordinary Floats; the aap flag only affects binding.
+                        default: // Float; AAP params are ordinary Floats.
                             acp.type = AnimatorControllerParameterType.Float;
                             acp.defaultFloat = p.Default;
                             break;
@@ -540,36 +443,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ----- clips -----
 
-            // Embedded emission: build each clip's content (controller-free, via the shared
-            // ControllerEmit.BuildClipContent) then attach it as a hidden controller sub-asset and record it.
-            // The controller-side responsibilities stay here: declaring the carrier param for a seconds-only
-            // clip, hiding + embedding the sub-asset. BuildClipContent produces byte-identical curves.
             private void EmitClips()
             {
                 foreach (var spec in _doc.Clips)
                 {
                     bool secondsOnly = spec.Sets.Count == 0 && spec.Curves.Count == 0;
-                    if (secondsOnly) EnsureCarrierParam();               // controller declares _CompilerNull
+                    if (secondsOnly) EnsureCarrierParam();
                     var clip = ControllerEmit.BuildClipContent(spec, _paramNames);
-                    clip.hideFlags = HideFlags.HideInHierarchy;          // embedded sub-asset stays hidden
+                    clip.hideFlags = HideFlags.HideInHierarchy;
                     AssetDatabase.AddObjectToAsset(clip, _controller);
                     _result.Clips[spec.Name] = clip;
                     _result.ClipList.Add(clip);
                 }
             }
 
-            // The scratch float a seconds-only carrier animates. Declared on the controller on first use (never
-            // in doc.Parameters, so it is absent from the emitted VRCExpressionParameters), so the carrier curve
-            // targets a real, honest parameter rather than a phantom. It is NOT added to _paramNames: the name is
-            // reserved (SchemaValidation refuses a user-declared `_CompilerNull`) and must not become a resolvable
-            // bare-param target for authored clip bindings — the carrier binding is constructed directly, below.
+            // The scratch float a seconds-only carrier animates, declared on first use. Not added to _paramNames: the
+            // name is reserved and must not become a bare-param target for authored clip bindings.
             private const string CarrierParam = ReservedNames.CarrierParam;
             private bool _carrierDeclared;
             private void EnsureCarrierParam()
             {
                 if (_carrierDeclared) return;
-                // _paramNames guards the un-validated 2-arg Build path against a duplicate parameter; the door
-                // path can't reach here with `_CompilerNull` already declared (validation refuses it).
+                // Reachable only through a direct Build call, which skips SchemaValidation's refusal of a declared
+                // `_CompilerNull`.
                 if (!_paramNames.Contains(CarrierParam))
                     _controller.AddParameter(new AnimatorControllerParameter
                     {
@@ -592,12 +488,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     };
                     AssetDatabase.AddObjectToAsset(sm, _controller);
 
-                    // Pass 1: emit states + sub-machines (arbitrary depth), building the per-machine scope tree
-                    // (each scope holds only its OWN direct states + direct sub-machines; see MachineScope for
-                    // why target resolution is per-scope, not layer-global).
+                    // Two passes: a transition target may name a machine not yet emitted, so wiring waits until the
+                    // whole scope tree exists.
                     var rootScope = EmitMachine(layer, layer.Root, sm);
-                    // Pass 2: wire defaults + all transitions, resolving each target in its own machine's scope
-                    // (bare names) or by walking a slash-qualified path from the layer root (cross-machine).
                     WireMachine(layer, layer.Root, rootScope, rootScope);
 
                     var acLayer = new AnimatorControllerLayer
@@ -611,9 +504,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     };
                     if (!string.IsNullOrEmpty(layer.Mask))
                     {
-                        // Fail loud: a mask path that doesn't resolve must not silently emit an UNMASKED layer
-                        // (an unmasked gesture/additive layer animates the whole avatar) — a typo'd/moved path is
-                        // a compile error, not a shrug.
                         var mask = AssetDatabase.LoadAssetAtPath<AvatarMask>(layer.Mask);
                         if (mask == null)
                             throw new EmitException($"layer '{layer.Name}': avatarMask '{layer.Mask}' not found (path did not resolve to an AvatarMask)");
@@ -622,16 +512,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     layers.Add(acLayer);
                 }
 
-                // SHARP EDGE: controller.layers / sm.states / bt.children all return COPIES — accumulate,
-                // then write the whole array back ONCE.
+                // controller.layers, sm.states and bt.children all return copies: accumulate, then write the whole
+                // array back once.
                 _controller.layers = layers.ToArray();
             }
 
-            // One machine's resolution scope: the emitted state machine plus ONLY its direct states and direct
-            // sub-machines (each sub keeps its own MachineScope). Because Unity scopes state names per machine
-            // and the schema permits a name to recur across machines, resolution is per-scope — never a single
-            // layer-global name dictionary (that would last-write-win and silently mis-wire, e.g. GoLoco's
-            // 180 sub-machines with reused state names).
+            // One machine's resolution scope. Resolution is per machine, never a layer-global name dictionary: Unity
+            // scopes state names per machine, the schema permits a name to recur across machines, and a global
+            // dictionary would last-write-win and silently mis-wire.
             private sealed class MachineScope
             {
                 public AnimatorStateMachine Target;
@@ -639,9 +527,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 public readonly Dictionary<string, MachineScope> Subs = new Dictionary<string, MachineScope>();
             }
 
-            // Pass 1 — emit this machine's states + child sub-machines (recursing), returning its scope. NO
-            // transitions here: a target may name something in a sibling/child machine not yet emitted, so all
-            // wiring waits for pass 2 (WireMachine) once the whole scope tree exists.
             private MachineScope EmitMachine(Layer layer, StateMachine model, AnimatorStateMachine target)
             {
                 var scope = new MachineScope { Target = target };
@@ -649,7 +534,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 for (int i = 0; i < states.Count; i++)
                 {
                     var s = states[i];
-                    var pos = NodePos(model.Layout, s.Name) ?? GridState(i); // authored layout, else the grid
+                    var pos = NodePos(model.Layout, s.Name) ?? GridState(i);
                     var ast = target.AddState(s.Name, pos);
                     ast.writeDefaultValues = s.WriteDefaults ?? layer.WriteDefaults ?? _doc.Defaults.WriteDefaults;
                     ast.speed = s.Speed;
@@ -665,24 +550,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 for (int i = 0; i < machines.Count; i++)
                 {
                     var sub = machines[i];
-                    var pos = NodePos(model.Layout, sub.Name) ?? GridSub(i); // authored layout, else the grid
+                    var pos = NodePos(model.Layout, sub.Name) ?? GridSub(i);
                     var childSm = target.AddStateMachine(sub.Name, pos);
                     childSm.hideFlags = HideFlags.HideInHierarchy;
                     scope.Subs[sub.Name] = EmitMachine(layer, sub.Machine, childSm);
                 }
 
-                // Special-node positions are ALWAYS written (tool-owned): authored layout values when present,
-                // else the shared constants — so decompile has a deterministic baseline. parentStateMachinePosition
-                // on a layer-root machine is a harmless no-op (root has no up-node); kept unconditional for simplicity.
+                // Always written, so decompile has a deterministic baseline.
                 var lay = model.Layout;
                 target.entryPosition              = SpecialPos(lay?.Entry,  SpecialEntry);
                 target.anyStatePosition           = SpecialPos(lay?.Any,    SpecialAny);
                 target.exitPosition               = SpecialPos(lay?.Exit,   SpecialExit);
                 target.parentStateMachinePosition = SpecialPos(lay?.Parent, SpecialParent);
 
-                // A state and a sub-machine of the same name are both addressable by bare name, but ResolveName
-                // (and the default lookup) resolve states first — the sub-machine would be unreachable and a
-                // `default:` ambiguous. Fail loud on the ambiguous document rather than silently favour the state.
                 foreach (var subName in scope.Subs.Keys)
                     if (scope.States.ContainsKey(subName))
                         throw new EmitException($"machine '{target.name}': a state and a sub-machine are both named '{subName}' — a bare target or default can't address both (states resolve first)");
@@ -691,16 +571,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return scope;
             }
 
-            // Pass 2 — wire default + transitions for this machine (resolving in its OWN scope + qualified paths
-            // from `root`), then recurse into child sub-machines.
             private void WireMachine(Layer layer, StateMachine model, MachineScope scope, MachineScope root)
             {
                 var target = scope.Target;
 
-                // default resolves in THIS machine's LOCAL scope only — a machine's default is one of its own
-                // direct states or direct sub-machines. A state → defaultState; a sub-machine → an unconditional
-                // entry transition added AFTER the entry ladder (below) so it stays the last, catch-all entry.
-                // default is a bare LOCAL name (a direct state or sub-machine); unescape it before lookup.
+                // A state default sets defaultState; a sub-machine default becomes the unconditional entry rung added
+                // after the entry ladder below.
                 bool defaultIsState = false;
                 string defaultName = string.IsNullOrEmpty(model.DefaultState) ? null : AddressPath.UnescapeSegment(model.DefaultState);
                 if (defaultName != null)
@@ -710,28 +586,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         throw new EmitException($"machine '{target.name}': default '{model.DefaultState}' is neither a direct state nor a direct sub-machine of this machine");
                 }
 
-                // `defaultState:` — the FOREIGN default. Unity's m_DefaultState is a plain AnimatorState PPtr with
-                // no subtree constraint, so a machine can boot a state nested several machines down; the schema
-                // addresses it root-relatively (the `to:` grammar). It writes ONLY the PPtr and adds no rung, so
-                // it composes with a `default:` sub-machine rung rather than competing with it — the two facts
-                // co-exist in Unity and a decompile must be able to re-emit both.
-                //
-                // Runs after the local `default:` above so an explicit foreign default wins over the bare form if
-                // a document carries both for the same state. Safe in pass 2: EmitMachine has already recursed,
-                // so every machine and state exists, and the defaultState setter does NOT propagate to ancestors
-                // (measured), so a child's assignment here cannot rewrite one already made on its parent.
+                // `defaultState:`, the foreign default. Unity's m_DefaultState is a plain AnimatorState PPtr, so a
+                // machine can boot a state nested several machines down. It writes only the PPtr and adds no rung,
+                // so it composes with a `default:` sub-machine rung. The defaultState setter does not propagate to
+                // ancestors (measured), so a child's assignment here cannot rewrite one already made on its parent.
                 if (!string.IsNullOrEmpty(model.DefaultStatePath))
                 {
-                    // ANCHOR a single segment. `defaultState:` is root-relative by definition, but ResolveName
-                    // implements the `to:` grammar, where a lone segment resolves LOCALLY — so an unanchored
-                    // `defaultState: P` would bind this machine's own `P` while SchemaValidation checked the
-                    // ROOT's `P`, and a document with both would validate against one and bind the other in
-                    // silence. Decompile always anchors (it emits "/P"), so this only bites a hand-authored
-                    // document; anchoring here makes the two spellings mean the same thing.
+                    // Anchor a lone segment: `defaultState:` is root-relative, but ResolveName reads a lone segment
+                    // as local, which would bind this machine's own `P` after SchemaValidation checked the root's.
                     string p = model.DefaultStatePath;
                     if (p[0] != '/') p = "/" + p;
-                    // ResolveName's exceptions are worded for transition targets; catch and re-word, so a
-                    // `defaultState:` failure never reports itself as a transition the document doesn't have.
                     bool isState;
                     AnimatorState foreignState;
                     try
@@ -744,23 +608,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                     if (!isState)
                         throw new EmitException($"machine '{target.name}': defaultState '{p}' resolves to a sub-machine, but Unity's default state is a state reference — name a state, or use `default:` for a direct sub-machine");
-                    // Unity constrains a default to the machine's OWN SUBTREE: assigning a state outside it (an
-                    // ancestor's direct state, a sibling branch) is silently discarded and the previous default
-                    // stands — measured. Without this check the compile would appear to succeed while binding
-                    // nothing, which is precisely the silent class this key exists to close.
+                    // Measured: Unity silently discards an assignment outside this sub-tree and the previous
+                    // default stands.
                     if (!IsInSubtree(target, foreignState))
                         throw new EmitException($"machine '{target.name}': defaultState '{p}' names a state outside this machine's own sub-tree, which Unity silently discards — a machine's default must be one of its own states or one nested inside it");
                     target.defaultState = foreignState;
                 }
 
-                // State transition ladders (ordered per source state = first-match order). `from` is THIS
-                // machine's own emitted state, never a global lookup (a same-named state in another machine
-                // would attach the transition to the wrong node).
                 // canTransitionToSelf is set on every rung, never left to Unity: AddTransition on a state that
                 // already lives in an asset defaults it to false in a GUI Editor and true in batchmode, so the
                 // same document would build a rung to its own state live in one Editor and dead in the other.
-                // It decides only a rung whose target is its own state — one through Exit or a sub-machine
-                // re-enters either way — so `to: <own state>` means re-enter, and every other rung is off.
+                // It decides only a rung whose target is its own state; one through Exit or a sub-machine
+                // re-enters either way. So `to: <own state>` means re-enter, and every other rung is off.
                 foreach (var s in model.States)
                 {
                     var from = scope.States[s.Name];
@@ -778,7 +637,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // AnyState ladder.
                 foreach (var t in model.AnyLadder)
                 {
                     RequireTargetName(t, target.name);
@@ -788,7 +646,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     ConfigureStateTransition(atr, t);
                 }
 
-                // Entry ladder (no duration / exit-time — conditions only).
                 foreach (var t in model.EntryLadder)
                 {
                     RequireTargetName(t, target.name);
@@ -797,18 +654,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     foreach (var c in t.When) etr.AddCondition(MapCondOp(c.Op, c.Value), c.Value, c.Param);
                 }
 
-                // default → sub-machine: unconditional catch-all entry, added last so any conditional entry
-                // ladder above wins first (first-match order). NOTE: we set NO `defaultState` here — and when
-                // a machine has no direct states, Unity's AnimatorStateMachine.defaultState GETTER resolves
-                // THROUGH to the child machine's own default. So downstream lint/decompile must not read
-                // `defaultState` as a reliable "was a direct-state default set" probe; the entry transition is.
+                // Added last so any conditional entry rung above wins first. This sets no `defaultState`, and when a
+                // machine has no direct states Unity's AnimatorStateMachine.defaultState getter resolves through to
+                // the child machine's own default. So lint and decompile must probe this entry transition, not
+                // `defaultState`, for whether a direct-state default was set.
                 if (!defaultIsState && defaultName != null)
                     target.AddEntryTransition(scope.Subs[defaultName].Target);
 
-                // Sub-machine onExit ladders. These hang off THIS machine (the parent) and fire when the child
-                // reaches its Exit, so their targets resolve in this machine's scope exactly as the entry ladder's
-                // do. They are AnimatorTransitions — conditions and a target, no timing — and `to: Exit` is legal
-                // here (unlike the entry ladder), meaning "pass the exit straight up to this machine's own Exit".
+                // Sub-machine onExit ladders hang off this machine (the parent), so their targets resolve in this
+                // machine's scope. `to: Exit` is legal here, unlike the entry ladder, and passes the exit up to this
+                // machine's own Exit.
                 foreach (var sub in model.Machines)
                 {
                     var childTarget = scope.Subs[sub.Name].Target;
@@ -835,13 +690,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     throw new EmitException($"entry/any ladder transition in machine '{fromMachine}' has no target (Exit is not a valid target there)");
             }
 
-            // Resolve a transition target to a state (returns true) or a sub-machine (returns false). Three
-            // addressing forms, disjoint by shape: a BARE name (no '/') resolves ONLY in `scope` — the
-            // referencing machine's own direct states + direct sub-machines. A leading-'/' name is ABSOLUTE
-            // from the LAYER `root` (the only way to reach a TOP-LEVEL entity, whose root path is a single bare
-            // segment that would otherwise read as local). Any other slash-qualified name is a path from
-            // `root`. An unresolved target is fail-loud, naming the offender and the machine it was referenced
-            // from — NEVER a silent global fallback.
+            // Returns true for a state, false for a sub-machine. The addressing forms are
+            // docs/animator-schema.md §Cross-machine addressing.
             private bool ResolveName(string name, MachineScope scope, MachineScope root, string fromMachine,
                 out AnimatorState toState, out AnimatorStateMachine toSm)
             {
@@ -850,7 +700,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (name.Length > 0 && name[0] == '/')
                     return ResolveFromRoot(name.Substring(1), root, fromMachine, name, out toState, out toSm);
 
-                // Split on UNescaped '/' — a single segment is a bare LOCAL name (its own '/' survives as '\/').
                 var segs = AddressPath.Split(name);
                 if (segs.Count == 1)
                 {
@@ -863,8 +712,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return ResolveFromRoot(name, root, fromMachine, name, out toState, out toSm);
             }
 
-            // Is `state` this machine's own, or nested anywhere beneath it? The bound Unity enforces on a
-            // defaultState assignment (see WireMachine's defaultState branch).
             private static bool IsInSubtree(AnimatorStateMachine sm, AnimatorState state)
             {
                 if (sm == null) return false;
@@ -875,10 +722,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return false;
             }
 
-            // Resolve a root-relative path: every non-final segment is a sub-machine, the final segment a state
-            // or a sub-machine. A single segment addresses a direct child of the layer root; an empty path (bare
-            // '/') addresses the layer root itself. Segments split on UNescaped '/' then unescape ('\/'->'/',
-            // '\\'->'\'). `display` is the original authored token (may carry a leading '/') for error messages.
             private bool ResolveFromRoot(string path, MachineScope root, string fromMachine, string display,
                 out AnimatorState toState, out AnimatorStateMachine toSm)
             {
@@ -905,7 +748,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (t.ExitTime.HasValue) { tr.hasExitTime = true; tr.exitTime = t.ExitTime.Value; }
                 else { tr.hasExitTime = _doc.Defaults.TransitionHasExitTime; tr.exitTime = 0f; }
                 tr.duration = t.Duration ?? _doc.Defaults.TransitionDuration;
-                tr.offset = t.Offset ?? 0f;   // Unity's default; no doc-level default (a pose picker is per-edge)
+                tr.offset = t.Offset ?? 0f;
                 tr.hasFixedDuration = t.FixedDuration ?? true;
                 tr.interruptionSource = MapInterruption(t.Interruption ?? _doc.Defaults.Interruption);
                 tr.orderedInterruption = t.OrderedInterruption ?? true;
@@ -917,8 +760,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ----- motions / blend trees -----
 
-            // stateContext names the OWNING state (threaded down through blend-tree children too) so an
-            // unresolved-marker guid ref can be recorded against its state for the compile advisory.
             private Motion BuildMotion(MotionRef mr, string treeName, string stateContext)
             {
                 if (mr == null) return null;
@@ -939,15 +780,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var m = ResolveGuidMotion(mr.RefGuid);
                     if (m == null)
                     {
-                        // A ref flagged `unresolved: true` is a KNOWN dangling handle (e.g. an asset absent from
-                        // this project) — leave the motion slot null (a clean-empty state) and record it for the
-                        // compile advisory, preserving the verbatim GUID for the round-trip note. Only a BARE
-                        // broken ref (no marker) is a hard error.
                         if (mr.RefGuid.Unresolved)
                         {
-                            // Record the OWNING state (threaded from EmitMachine through any blend-tree nesting),
-                            // not the synthetic tree name; the child index is deliberately omitted — the verbatim
-                            // guid in the advisory already localizes which ref within the state failed.
                             _result.UnresolvedRefs.Add((stateContext, mr.RefGuid.Guid));
                             return null;
                         }
@@ -960,14 +794,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 throw new EmitException("motion ref sets none of clip/ref/tree/shared");
             }
 
-            // Resolve a `shared:` reference to the ONE BlendTree its `trees:` entry builds. First reference
-            // builds it; every later one returns the same object, so the controller carries a single sub-asset
-            // with N parent PPtrs — measured to serialize as one !u!206 document whatever the parent count.
+            // First reference builds the `trees:` entry; every later one returns the same object, so the controller
+            // carries a single sub-asset with N parent PPtrs, measured to serialize as one !u!206 document.
             //
-            // The key is passed as BuildTree's positional name, which is load-bearing: a trees: entry carries
-            // no `name:` (the key IS the name), so `spec.Name ?? name` would otherwise fall through to the
-            // caller's positional default — making the built name depend on WHICH reference site happened to
-            // populate the memo first, and giving every child a spurious explicit name: on the next decompile.
+            // The key is passed as BuildTree's positional name because a trees: entry carries no `name:`. Otherwise
+            // `spec.Name ?? name` falls through to the caller's positional default, so the built name would depend on
+            // which reference site built it first and every child would gain an explicit name: on the next decompile.
             private Motion BuildShared(string name, string stateContext)
             {
                 if (_sharedBuilt.TryGetValue(name, out var already)) return already;
@@ -989,10 +821,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 finally { _sharedBuilding.RemoveAt(_sharedBuilding.Count - 1); }
             }
 
-            // Resolve a guid[+fileID] motion ref. A non-zero fileID names a SUB-ASSET (e.g. one clip inside a
-            // multi-clip FBX) — select the Motion whose local file id matches, so the schema's fileID is not
-            // silently dropped onto the main asset. A zero fileID loads the main asset as a Motion (a plain
-            // .anim). Returns null on no match; callers name the failure.
             private static Motion ResolveGuidMotion(GuidRef g)
             {
                 string p = AssetDatabase.GUIDToAssetPath(g.Guid);
@@ -1004,7 +832,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(mo, out _, out long lfid)
                             && lfid == g.FileID)
                             return mo;
-                    return null; // fileID given but no sub-asset Motion matched
+                    return null;
                 }
                 return AssetDatabase.LoadAssetAtPath<Motion>(p);
             }
@@ -1014,21 +842,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private BlendTree BuildTree(BlendTreeSpec spec, string name, string stateContext)
             {
-                // A human-authored spec.Name overrides the positional default; children then derive from the
-                // APPLIED name, not the incoming positional one — otherwise a named parent's children would
-                // decompile as explicit gibberish (they'd carry the OLD auto default forever).
+                // Children derive from the applied name, not the incoming positional one, or a named parent's
+                // children would decompile with explicit names (ControllerDecompile.MeaningfulName compares against
+                // the default).
                 var applied = spec.Name ?? name;
                 var bt = new BlendTree { name = applied, hideFlags = HideFlags.HideInHierarchy };
                 bt.blendType = MapTreeKind(spec.Kind);
-                // A fresh 1D tree defaults to useAutomaticThresholds=true, which makes Unity OVERWRITE our
-                // explicit per-child thresholds with even spacing (0, 1/n, …). Disable it BEFORE adding children
-                // so the authored thresholds stick. The schema stores threshold VALUES (what runtime uses), so
-                // an originally-automatic tree round-trips as manual with identical values — lossless in effect.
+                // A fresh 1D tree defaults to useAutomaticThresholds=true, which makes Unity overwrite explicit
+                // per-child thresholds with even spacing. Disable it before adding children.
                 if (spec.Kind == TreeKind.OneD) bt.useAutomaticThresholds = false;
                 if (!string.IsNullOrEmpty(spec.Param)) bt.blendParameter = spec.Param;
                 if (!string.IsNullOrEmpty(spec.ParamY)) bt.blendParameterY = spec.ParamY;
-                // Direct-tree "Normalized Blend Values" — no typed API, so set the serialized field. Only when
-                // the document specifies it; otherwise leave Unity's construction default.
+                // Direct-tree "Normalized Blend Values" has no typed API.
                 if (spec.Kind == TreeKind.Direct && spec.Normalized.HasValue)
                     using (var so = new SerializedObject(bt))
                     {
@@ -1050,7 +875,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // children is a COPY — set per-child fields, then write the whole array back.
                 var kids = bt.children;
                 for (int i = 0; i < kids.Length; i++)
                 {
@@ -1065,13 +889,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return bt;
             }
 
-            // ----- behaviours (all eight VRC SMB kinds) -----
-            // One encoder per kind: materialise the concrete VRC SMB via `add(typeof(...))`, then a per-field
-            // switch that sets its fields and throws EmitException (named offender) on any unknown field.
-            // The enum-token casing is DEFINED HERE (the token→enum maps below) — camelCase (e.g. `animation`),
-            // NOT the PascalCase an enum ToString() (as in ReportController's Markdown) would give.
-            // ControllerDecompile builds its reverse (enum→token) maps from these, so this is the single source
-            // of truth for both directions.
+            // ----- behaviours -----
             private void EmitBehaviours(List<Behaviour> behaviours, Func<Type, StateMachineBehaviour> add)
             {
                 if (behaviours == null) return;
@@ -1105,8 +923,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             PopulateFaceTrackingSets((VRCAnimatorFaceTrackingBlendshapesSet)add(typeof(VRCAnimatorFaceTrackingBlendshapesSet)), b.Fields);
                             break;
 #else
-                            // The parse side is SDK-free, so a document carrying the kind reaches here on any SDK;
-                            // the component first ships in com.vrchat.avatars 3.10.6.
+                            // The parse side is SDK-free, so a document carrying the kind reaches here on any SDK.
                             throw new EmitException(FaceTrackingSetKeys.NeedsSdk);
 #endif
                         default:
@@ -1149,7 +966,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 drv.parameters = ps;
             }
 
-            // copy: { Dest: Source }  OR  copy: { Dest: { source, sourceMin, sourceMax, destMin, destMax } }
             private static Driver.Parameter BuildCopy(string dest, object value)
             {
                 var p = new Driver.Parameter { type = Driver.ChangeType.Copy, name = dest };
@@ -1172,16 +988,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return p;
             }
 
-            // random: { Name: { min, max, chance, preventRepeats } }
-            //
-            // preventRepeats is the SDK's fourth Random field and the one the schema used to have no word for.
-            // The SDK Inspector draws it for exactly one shape — Random onto an INT destination, alongside min
-            // and max (VRCAvatarParameterDriverEditor.DrawRandom); a Bool/Trigger destination draws chance
-            // instead, and a Float destination draws min/max but not preventRepeats. The field is serialized
-            // on every Parameter
-            // regardless, so it is accepted here for any Random entry rather than gated on a destination type
-            // this layer does not resolve. Left out, it defaults false — which is why omitting it from the
-            // decode side silently turned a vendor's no-repeat roll into a plain one on recompile.
             private static Driver.Parameter BuildRandom(string name, object value)
             {
                 var p = new Driver.Parameter { type = Driver.ChangeType.Random, name = name };
@@ -1200,9 +1006,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return p;
             }
 
-            // tracking: { <channel>: <state> } — channel is one of the ten VRC tracking channels, state is
-            // animation|tracking|noChange (tokens defined by TrackingTokens below). An untouched channel keeps
-            // its SDK default (NoChange).
             private static void PopulateTracking(VRCAnimatorTrackingControl tc, Dictionary<string, object> fields)
             {
                 foreach (var kv in fields)
@@ -1226,7 +1029,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // playableLayer: { layer: action|fx|gesture|additive, goalWeight: <f>, blendDuration: <f> }
             private static void PopulatePlayableLayer(VRCPlayableLayerControl c, Dictionary<string, object> fields)
             {
                 foreach (var kv in fields)
@@ -1241,7 +1043,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // locomotion: { disableLocomotion: <bool> }
             private static void PopulateLocomotion(VRCAnimatorLocomotionControl c, Dictionary<string, object> fields)
             {
                 foreach (var kv in fields)
@@ -1254,7 +1055,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // poseSpace: { enterPoseSpace: <bool>, fixedDelay: <bool>, delayTime: <f> }
             private static void PopulatePoseSpace(VRCAnimatorTemporaryPoseSpace c, Dictionary<string, object> fields)
             {
                 foreach (var kv in fields)
@@ -1269,9 +1069,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // layerControl: { playable: action|fx|gesture|additive, layer: <int index>, goalWeight: <f>, blendDuration: <f> }.
-            // NOTE the SDK asymmetry vs playableLayer: here `playable` is the target playable enum and `layer` is
-            // the integer LAYER INDEX within it.
             private static void PopulateLayerControl(VRCAnimatorLayerControl c, Dictionary<string, object> fields)
             {
                 foreach (var kv in fields)
@@ -1288,18 +1085,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
 #if VRC_FT_SETS_PRESENT
-            // faceTrackingSets: { sets: { <Blendshapes Set name>: <entry>, ... } } — one blendSets element per
-            // entry, in map order. An entry is one of four forms:
-            //   0.5                                   → type Value, weight 0.5
-            //   ParamName                             → type Parameter, sourceParameter ParamName
-            //   { weight: n, lerpSpeed: n }           → Value
-            //   { source: P, sourceMin, sourceMax, destMin, destMax, lerpSpeed } → Parameter; ANY of the four
-            //                                           range keys turns on convertRange (driver copy precedent)
-            // Every field the element's type leaves inert is written at the SDK inspector's new-element value
-            // (weight 1, ranges 0/1/0/1, empty sourceParameter), so a compiled element and an inspector-made one
-            // agree on what neither reads. The bounds are the inspector's: weight and the destination range clamp
-            // to 0..1, lerpSpeed to 0..100, and only the first 64 entries are processed (MaxBlendSetsPerBehavior)
-            // — so a value outside them is refused here rather than clamped by the first human to open it.
+            // Fields an element's type leaves inert are written at the SDK inspector's new-element values (weight 1,
+            // ranges 0/1/0/1, empty sourceParameter), so a compiled element and an inspector-made one agree on what
+            // neither reads. The bounds refused below are the inspector's clamps, and MaxEntries mirrors the SDK's
+            // MaxBlendSetsPerBehavior.
             private static void PopulateFaceTrackingSets(VRCAnimatorFaceTrackingBlendshapesSet c, Dictionary<string, object> fields)
             {
                 var list = new List<FtSets.BlendSet>();
@@ -1338,8 +1127,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         e.sourceParameter = RequireSource(src, ctx);
                         return e;
                     case bool _:
-                        // on/off/true/false infer bool: a weight is a number, and a parameter literally named like a
-                        // YAML boolean needs quoting.
                         throw new EmitException($"{ctx}: expected a weight (0..1), a parameter name, or a map, got a boolean — quote a parameter named like one");
                     case Dictionary<string, object> m:
                         return BuildBlendSetMap(e, m, ctx);
@@ -1391,8 +1178,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return src;
             }
 
-            // A float-valued entry key: a YAML boolean is refused rather than read as 0/1 (the bare form refuses it
-            // too), and so is a non-finite number — 1e100 overflows to infinity, which no SDK field can round-trip.
             private static float FtNum(object v, string ctx)
             {
                 if (v is bool) throw new EmitException($"{ctx}: expected a number, got a boolean");
@@ -1402,7 +1187,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return f;
             }
 
-            // NaN fails both comparisons, so it is refused with the out-of-range values.
             private static float Bounded(float v, float min, float max, string ctx)
             {
                 if (!(v >= min && v <= max))
@@ -1412,9 +1196,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 #endif
 
-            // playAudio: the VRCAnimatorPlayAudio serializable surface. The AudioSource is addressed by
-            // hierarchy path (sourcePath) — the SDK resolves the live Source at runtime; clips are asset paths.
-            // Volume/pitch are [min, max] ranges.
             private static void PopulatePlayAudio(VRCAnimatorPlayAudio c, Dictionary<string, object> fields)
             {
                 foreach (var kv in fields)
@@ -1442,19 +1223,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // ----- VRC expression parameters (in-memory; CompileController persists) -----
+            // ----- VRC expression parameters -----
 
-            // Emit a VRCExpressionParameters asset listing the controller's OWN declared params — for
-            // legibility, so a human inspecting the merged FX sees them like a "Parameters - …" asset — even
-            // when they are NOT synced. Excludes VRC built-ins (not ours to declare) and scratch/working
-            // params (internal residue). A non-synced param lists networkSynced=false: it costs no sync bit.
-            //
-            // Legibility is why UNSYNCED params are listed, not the asset's whole job: a consumer references
-            // the emitted asset by GUID (a VRCFury FullController names it in `prms:`), so this list IS the
-            // avatar's expression-parameter contract. The two exclusions differ in consequence — a VRC
-            // built-in is supplied by VRChat and costs nothing to omit, while a dropped CUSTOM name is simply
-            // absent from that contract. docs/animator-schema.md §The params asset owns this;
-            // ControllerFixpoint.ParamsDiff is what catches a filter change altering it silently.
+            // The params asset's contract is docs/animator-schema.md §parameters. ControllerFixpoint.ParamsDiff is
+            // what catches a filter change altering it silently.
             private void EmitVrcParameters()
             {
                 var listed = _doc.Parameters
@@ -1480,31 +1252,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _result.Params = ep;
             }
 
-            // ----- VRC expressions menu (in-memory; CompileController persists) -----
+            // ----- VRC expressions menu -----
 
-            // Build the menu tree the `menu:` block describes. The controller cannot store a menu, so this is
-            // an EMIT-ONLY surface with no decompile counterpart — the same asymmetry the params asset already
-            // has (docs/animator-schema.md §menu).
-            //
-            // THE TRAP THIS CODE EXISTS TO AVOID (docs/menus.md): VRChat's control type is written here through
-            // the typed `type` field, never through SerializedProperty.enumValueIndex. The serialized numbers
-            // (101 Button, 102 Toggle, 103 SubMenu, 203 RadialPuppet) are NOT the enum's ordinals, so assigning
-            // a serialized number to enumValueIndex is out of range and Unity DISCARDS it silently, leaving a
-            // childless Button behind. Setting the strongly-typed field cannot express that mistake.
+            // VRChat's control type is written through the typed `type` field, never through
+            // SerializedProperty.enumValueIndex. The serialized numbers (101 Button, 102 Toggle, 103 SubMenu,
+            // 203 RadialPuppet) are not the enum's ordinals, so assigning one to enumValueIndex is out of range and
+            // Unity silently discards it, leaving a childless Button (docs/menus.md).
             private void EmitMenu()
             {
                 if (_doc.Menu == null) return;
 
-                // Managed-echo check: SchemaValidation enforces the page cap without the SDK on hand, so if the
-                // SDK ever moves it, fail here rather than let validation pass a menu the SDK will truncate.
                 if (VRCExpressionsMenu.MAX_CONTROLS != MenuLimits.MaxControlsPerMenu)
                     throw new EmitException(
                         $"menu: SDK VRCExpressionsMenu.MAX_CONTROLS is {VRCExpressionsMenu.MAX_CONTROLS} but MenuLimits.MaxControlsPerMenu mirrors {MenuLimits.MaxControlsPerMenu} — update the echo in AnimatorSchema.cs");
 
-                // A control on a VRC built-in is inert for the same reason a scratch one is: EmitVrcParameters
-                // excludes both from the params asset, so VRChat never sees the name. SchemaValidation catches
-                // the scratch half but is System.*-only and cannot reach ControllerRules, so the built-in half
-                // is checked here, where the same exclusion is applied.
+                // SchemaValidation refuses a control on a scratch param but is System.*-only and cannot reach
+                // ControllerRules, so the built-in half of that exclusion is checked here.
                 RefuseReservedMenuParams(_doc.Menu, "menu");
 
                 _result.Menu = BuildMenuPage(_doc.Menu, _doc.ControllerName + "_Menu", "menu");
@@ -1525,8 +1288,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private VRCExpressionsMenu BuildMenuPage(List<MenuControl> controls, string assetName, string where)
             {
                 var menu = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
-                // Registered HERE, not at the return: everything below this line can throw, and a page that
-                // has not been returned yet is reachable from nowhere else.
                 _menuPages.Add(menu);
                 menu.name = assetName;
                 menu.controls = new List<VRCExpressionsMenu.Control>();
@@ -1537,9 +1298,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         name = c.Name,
                         type = MapControlType(c.Kind),
-                        // The SDK reads `parameter` on every kind but Radial, whose knob rides subParameters[0].
-                        // Both fields are always constructed: a null `parameter` serializes as an empty name,
-                        // which is what a bare sub-menu carries.
+                        // A null `parameter` serializes as an empty name, which is what a bare sub-menu carries.
                         parameter = new VRCExpressionsMenu.Control.Parameter { name = c.Param ?? "" },
                         subParameters = new VRCExpressionsMenu.Control.Parameter[0],
                         labels = new VRCExpressionsMenu.Control.Label[0],
@@ -1572,44 +1331,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return menu;
             }
 
-            // Resolve an authored `icon:` to a Texture2D. THREE OUTCOMES, and the middle one is the whole
-            // reason this is not a one-line LoadAssetAtPath:
-            //
-            //   1. It resolves in the AssetDatabase        → the icon is set.
-            //   2. The file is on disk but the path is not reachable as a project path → emit a NULL icon and
-            //      record it for a compile advisory. This is the OUT-OF-PROJECT COMPILE and nothing else: the
-            //      vrc-patterns gate compiles an entry's yaml from an arbitrary filesystem --root into a host
-            //      that never loads that entry's package (ControllerFixpoint.CompileToTemp; the TestEditor
-            //      payload is the SDK + a fixed community list). Failing there would make the field
-            //      unauthorable by exactly the library it exists for.
-            //   3. Nothing at that path → EmitException.
-            //
-            // The soft case is ENVIRONMENTAL, never authorial — which is why the motion-ref precedent is not
-            // the one followed here. A motion ref degrades only when the document explicitly marks it
-            // `unresolved: true`; a bare broken ref throws. There is no authoring-side marker for an icon and
-            // no reason to mint one, so a typo must throw, and the disk probe is what tells a typo apart from
-            // a compile that simply cannot see the file. A missing icon being merely cosmetic (unlike a
-            // missing `mask:`, which silently ships a layer animating the whole avatar) is what makes
-            // degrading admissible at all here.
-            // THE BRANCH IS ON WHETHER THE DOCUMENT IS IN THE ASSETDATABASE, never on how a path is spelled.
-            // Spelling cannot carry that fact. An in-project document is routinely handed to us as an
-            // ABSOLUTE path (every interactive door does: the menu door calls Path.GetFullPath), and a
-            // package's `Packages/<name>/…` names no folder on disk at all — so a `StartsWith("Assets/")`
-            // test misroutes both, and misrouting is silent: the out-of-project branch emits a NULL icon.
-            // AssetPathUtil.ToLogicalAssetPath owns the canonicalization; this method owns what follows from it.
-            //
-            // Two regimes, and the difference is what the compiler can actually know:
-            //   IN the AssetDatabase  — resolution is AUTHORITATIVE, so anything unresolved is fatal. A typo
-            //                           must not ship a silently icon-less control.
-            //   OUTSIDE it            — the compiler cannot adjudicate an icon AT ALL: it has no database to
-            //                           ask, and a correct path is indistinguishable from a wrong one. So it
-            //                           NEVER fails here; it emits a null icon and advises. This is the
-            //                           vrc-patterns gate, which compiles every entry from a filesystem
-            //                           --root into a host that does not load the entry's package. Failing
-            //                           would make the field unauthorable by the library it exists for, and
-            //                           failing only for SOME spellings would fail the gate at random.
-            // The authoring compile is what catches a typo, and it is also what generates built/ — so the
-            // regime that can adjudicate is the one every icon passes through before it is committed.
+            // Resolve an authored `icon:` to a Texture2D. Three outcomes:
+            //   1. It loads → the icon is set.
+            //   2. It does not load and the document is outside the AssetDatabase → a null icon and a compile
+            //      advisory, whether or not the file is on disk. The compiler cannot tell a correct path from a wrong
+            //      one there; this is the vrc-patterns gate (docs/animator-schema.md §menu).
+            //   3. It does not load and the document is in the AssetDatabase → EmitException.
+            // The branch is on whether the document is in the AssetDatabase, never on how a path is spelled. An
+            // in-project document routinely arrives as an absolute path, and a package's `Packages/<name>/…` names no
+            // folder on disk, so a `StartsWith("Assets/")` test misroutes both, silently, into the null icon.
+            // AssetPathUtil.ToLogicalAssetPath owns the canonicalization.
             private Texture2D ResolveIcon(string authored, string where)
             {
                 authored = authored.Replace('\\', '/');
@@ -1629,8 +1360,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return LoadIconAsset(iconPath, authored, where);
                 }
 
-                // Document outside the AssetDatabase. A project-spelled icon may still resolve (the package
-                // could be loaded here even though the document is not), so try before giving up.
                 if (projectSpelled)
                 {
                     var tex = AssetDatabase.LoadAssetAtPath<Texture2D>(CollapseDotSegments(authored));
@@ -1643,18 +1372,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     throw new EmitException(
                         $"{where}: icon '{authored}' is document-relative but this document has no source path to resolve it against — write a project path (Assets/… or Packages/…) instead");
 
-                // Report where we looked. Presence on disk does NOT make the icon valid (nothing here can
-                // check that it is even an image — see the class contract above); it only makes the advisory
-                // specific enough to act on.
                 var docDir = Path.GetDirectoryName(Path.GetFullPath(_doc.SourcePath.Replace('\\', '/'))) ?? "";
                 var abs = Path.GetFullPath(Path.Combine(docDir, authored)).Replace('\\', '/');
                 _result.IconsOutsideProject.Add((where, File.Exists(abs) ? abs : abs + " (no such file)"));
                 return null;
             }
 
-            // Load a resolved project path as a Texture2D, telling "no asset there" apart from "an asset that
-            // is not a texture" — the repairs differ, so the messages must. AssetPathToGUID, not File.Exists:
-            // a package path has no meaning to the filesystem (see ResolveIcon).
+            // AssetPathToGUID, not File.Exists: a package path has no meaning to the filesystem.
             private static Texture2D LoadIconAsset(string projectPath, string authored, string where)
             {
                 var tex = AssetDatabase.LoadAssetAtPath<Texture2D>(projectPath);
@@ -1665,8 +1389,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 throw new EmitException($"{where}: icon not found — '{authored}' resolved to '{projectPath}'");
             }
 
-            // Collapse "a/b/../c" and "a/./b" inside an ASSET path. Path.GetFullPath would do it, but only by
-            // rooting the result at the filesystem, which is the very thing a package path must not do.
+            // Path.GetFullPath would collapse these only by rooting the result at the filesystem, which a package
+            // path must not do.
             private static string CollapseDotSegments(string p)
             {
                 var outSeg = new List<string>();
@@ -1691,8 +1415,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // A sub-asset name is cosmetic (nothing addresses a page by name — the parent holds an object
-            // reference), so this only keeps the Project window readable and the name legal.
             private static string SanitizeAssetName(string name)
             {
                 var sb = new StringBuilder(name.Length);
@@ -1705,47 +1427,35 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private void StampProvenance(string path)
             {
-                // NO STAMP without source bytes, and an existing stamp is left as-is (the null contract on
-                // Build). Only the 2-arg scratch door leaves _sourceText null, and it has no provenance worth
-                // recording: the sole reader (CompileController.WarnIfOutOfBand) only ever inspects a controller
-                // a REAL compile wrote, and BOTH real doors thread the text — the compile itself and
-                // CompileController.ProofCompile's throwaway proof, which therefore stamps too.
+                // No source bytes, no stamp; see the null contract on Build.
                 if (_sourceText == null) return;
 
                 var importer = AssetImporter.GetAtPath(path);
                 if (importer == null) return;
-                // CompileController reads this userData to WARN before clobbering an out-of-band edit. The
-                // `compiled-from:` key carries NO value by design — its bare presence is the whole signal that a
-                // compile wrote this controller, and WarnIfOutOfBand reads nothing else out of it but
-                // `srchash:`. Never rename the key: every stamped controller on disk spells it this way, so a
-                // rename makes all of them read as no-provenance and fire the hand-authored warning.
+                // `compiled-from:` carries no value on purpose: its presence is the signal that a compile wrote this
+                // controller. Never rename the key: every stamped controller on disk spells it this way, so a rename
+                // makes all of them read as no-provenance and fire the hand-authored warning.
                 string hash = SourceHash(_sourceText);
                 string stamp = "compiled-from:;srchash:" + hash;
                 importer.userData = stamp;
 
-                // WRITE THE .meta, DO NOT REIMPORT. The stamp is sidecar metadata — nothing about the imported
-                // artifact changes — so SaveAndReimport buys a full synchronous import per compile for nothing.
-                // WriteImportSettingsIfDirty persists the same bytes and leaves the asset artifact-stale, which
-                // DEFERS that import to the next Refresh rather than eliminating it; the win is that deferred
-                // imports coalesce where serial reimports cannot. So this is a batch win (the vrc-patterns gate,
-                // a library regeneration — measured ~6x over ten controllers) and a wash on a single compile.
-                // ReloadFromDisk below does not depend on the reimport having happened; its own note owns that.
+                // Write the .meta, do not reimport: the stamp changes nothing about the imported artifact.
+                // WriteImportSettingsIfDirty leaves the asset artifact-stale, deferring that import to the next
+                // Refresh, where deferred imports coalesce (measured ~6x over ten controllers).
                 bool wrote = AssetDatabase.WriteImportSettingsIfDirty(path);
 
-                // VERIFY AGAINST THE .meta ON DISK, on both branches. `wrote` cannot answer this: false is the
-                // ordinary idempotent-recompile result (an unchanged stamp never dirties the importer, and the
-                // .meta is already correct), and true says only that a write was attempted. Neither can a
-                // read-back through AssetImporter.GetAtPath — it hands back the cached in-memory importer, the
-                // object assigned two lines up, which reports the intended string whether or not a byte landed.
+                // Verify against the .meta on disk. `wrote` cannot answer this: false is the ordinary
+                // idempotent-recompile result and true says only that a write was attempted. Nor can
+                // AssetImporter.GetAtPath: it returns the cached in-memory importer, which reports the intended
+                // string whether or not a byte landed.
                 string metaPath = path + ".meta";
                 if (File.Exists(metaPath) && File.ReadAllText(metaPath).Contains(stamp)) return;
 
-                // REPORT, NEVER THROW. This runs after the controller has been stripped and rebuilt, and
-                // CleanupAfterEmit restores nothing in that case — it relies on ProofCompile having made a
-                // post-strip throw unreachable, and the proof stamps a DIFFERENT path, so it cannot cover a
-                // failure at this one (a read-only .meta, a VCS lock). Throwing would return FAIL with the
-                // replaced controller already on disk, falsifying Run's "a failing overwrite therefore leaves
-                // the prior good controller untouched".
+                // Report, never throw. The controller is already stripped and rebuilt, CleanupAfterEmit restores
+                // nothing here, and ProofCompile stamps a different path so it cannot cover a failure at this one
+                // (a read-only .meta, a VCS lock). Throwing would return FAIL with the replaced controller on disk,
+                // falsifying CompileController's promise that a failing overwrite leaves the prior controller
+                // untouched.
                 _result.StampFailure = "provenance stamp not persisted to " + metaPath
                     + " (import-settings write reported " + wrote + ", and the stamp is absent from the .meta on"
                     + " disk) — the controller compiled correctly, but the NEXT compile of this path reads it as"
@@ -1767,7 +1477,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // ----- output-path logic (CompileController passes the real outDir; default is the scratch dir) -----
+        // ----- output path -----
 
         private static string PathFor(string outDir, string controllerName) => outDir + "/" + controllerName + ".controller";
 
@@ -1880,8 +1590,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 case long l: return (int)l;
                 case int i: return i;
-                // A non-integral double here is malformed input (e.g. layerControl.layer: 1.5) — fail loud
-                // rather than silently rounding it to a different layer index.
                 case double d:
                     if (d != Math.Floor(d))
                         throw new EmitException($"{ctx}: expected an integer, got non-integral {d.ToString(CultureInfo.InvariantCulture)}");
@@ -1890,7 +1598,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // A [min, max] flow list → Vector2 (VRCAnimatorPlayAudio volume/pitch ranges).
         private static Vector2 AsVector2(object v, string ctx)
         {
             if (!(v is List<object> list))
@@ -1900,8 +1607,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return new Vector2(AsFloat(list[0], ctx + "[0]"), AsFloat(list[1], ctx + "[1]"));
         }
 
-        // A list of project asset paths → AudioClip[]. A path that doesn't resolve to a clip is fail-loud
-        // (consistent with the avatarMask / motion-ref path handling).
         private static AudioClip[] AsClips(object v, string ctx)
         {
             if (!(v is List<object> list))
@@ -1917,8 +1622,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return clips;
         }
 
-        // Decode a schema token to its SDK enum via the kind's token map; an unknown token is fail-loud with
-        // the accepted set. Enum fields carry their truth in a token, not a raw number.
         private static T ParseEnumToken<T>(object v, Dictionary<string, T> map, string ctx) where T : struct
         {
             string s = AsString(v, ctx);
@@ -1928,9 +1631,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ----- schema-token → SDK-enum maps (the enum-valued behaviour fields) -----
 
-        // INTERNAL, so ControllerDecompile builds its reverse (enum→token) maps FROM these — one source of
-        // truth. A new SDK enum member added here is automatically decodable; a value present in neither
-        // direction is fail-loud on both sides (emit throws; decode refuses), never silently approximated.
+        // ControllerDecompile builds its reverse (enum→token) maps from these, so a value present in neither
+        // direction is refused on both sides.
         internal static readonly Dictionary<string, TrackingType> TrackingTokens = new Dictionary<string, TrackingType>
         {
             { "noChange", TrackingType.NoChange }, { "tracking", TrackingType.Tracking }, { "animation", TrackingType.Animation },
@@ -1956,9 +1658,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             { "alwaysApply", AudioApply.AlwaysApply }, { "applyIfStopped", AudioApply.ApplyIfStopped }, { "neverApply", AudioApply.NeverApply },
         };
 
-        // Field-name tokens for the two field-dense behaviour kinds — SHARED with ControllerDecompile so the
-        // encode case labels and the decode dictionary keys can never drift apart (a rename breaks both, and
-        // the compiler enforces it). Other kinds' field names are few + stable and stay inline.
+        // Shared with ControllerDecompile: the encode case labels and decode dictionary keys cannot drift apart.
         internal static class DriverKeys
         {
             public const string LocalOnly = "localOnly", Set = "set", Add = "add", Copy = "copy", Random = "random";
@@ -1966,9 +1666,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public const string Min = "min", Max = "max", Chance = "chance", PreventRepeats = "preventRepeats";
         }
 
-        // faceTrackingSets — the kind token and its field names, shared with ControllerDecompile. Declared outside
-        // the SDK guard so the kind is a known name on every SDK: below com.vrchat.avatars 3.10.6 emit refuses it
-        // as unsupported by the installed SDK, never as an unknown kind.
+        // Shared with ControllerDecompile. Declared outside the SDK guard so the kind is a known name on every SDK:
+        // below com.vrchat.avatars 3.10.6 emit refuses it as unsupported by the installed SDK, not as an unknown
+        // kind.
         internal static class FaceTrackingSetKeys
         {
             public const string Kind = "faceTrackingSets", Sets = "sets";
@@ -1989,9 +1689,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public const string PlayOnExit = "playOnExit", StopOnExit = "stopOnExit";
         }
 
-        /// <summary>The provenance source hash — first 8 bytes of the MD5 of <paramref name="s"/>, hex.
-        /// CompileController computes this over the current source text and compares it to the <c>srchash:</c>
-        /// stamped in a controller's userData to detect drift before overwriting.</summary>
+        /// <summary>The provenance source hash, which CompileController compares to the <c>srchash:</c> stamped
+        /// in a controller's userData to detect drift before overwriting.</summary>
         public static string SourceHash(string s)
         {
             using (var md5 = MD5.Create())

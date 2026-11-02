@@ -11,46 +11,14 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// Produces a clean controller (typically FX) keeping only the named layers (plus the base layer 0,
-    /// always retained), empty VRCExpressionParameters, and empty VRCExpressionsMenu, then
-    /// wires them into our avatar's VRCAvatarDescriptor.
-    ///
-    /// Used at the start of a new build run to discard the vendor's elaborate FX
-    /// (outfit toggles, etc.) and start fresh. Re-running is idempotent and GUID-stable:
-    /// outputs use stable, label-free names so variations of one base avatar SHARE them in a
-    /// common folder. Existing outputs are REUSED in place (preserving asset GUIDs so any
-    /// descriptor already pointing at them stays wired) — never delete-recreated:
-    ///   - empty params/menu: load the existing asset and reuse it (ensure-empty in place if
-    ///     something external wrote into it — visible RunLog note, still PASS);
-    ///   - clean controller: load the existing asset and re-run the layer-trim on it in place.
-    /// To force a fresh derive of the controller, the operator deletes the asset manually.
-    ///
-    /// Caller passes the layer names to keep (e.g. the base + Left/Right hand gesture layers);
-    /// all other layers are dropped. Layer 0 is always kept (VRChat requires a base layer).
-    /// Selection is name-based, not index-based — a requested name that is absent or matches
-    /// more than one layer FAILs loud rather than silently dropping a layer.
-    ///
-    /// Call <see cref="Run"/> from MCP execute_code.
-    /// PASS = every requested layer survives by name in the clean controller; descriptor
-    /// FX/params/menu wired and empty.
+    /// Resets an owned avatar's FX to a controller trimmed to the named layers, with empty expression
+    /// params and menu, wired into its VRCAvatarDescriptor. Contract: docs/animator.md.
+    /// A reused params or menu asset that something external wrote into is emptied in place (RunLog note,
+    /// still PASS). To force a fresh derive of the controller, the operator deletes the asset manually.
     /// </summary>
     [AgentTool]
     public static class CleanController
     {
-        // ── Public API ────────────────────────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Duplicate <paramref name="sourceFx"/>, keep only the named layers (plus base layer 0),
-        /// prune the controller's parameter list to those the kept layers reference,
-        /// create empty VRCExpressionParameters + VRCExpressionsMenu, and wire them into
-        /// <paramref name="ownedRoot"/>'s VRCAvatarDescriptor.
-        /// Returns a one-line PASS/FAIL summary ending with the RunLog path (<c>… => RESULT | log=&lt;path&gt;</c>);
-        /// also Debug.Log/LogError it.
-        /// </summary>
-        /// <param name="sourceFx">Vendor FX controller to base the clean one on.</param>
-        /// <param name="ownedRoot">Our avatar root in the scene (has VRCAvatarDescriptor).</param>
-        /// <param name="outDir">Asset folder for the outputs (e.g. "Assets/Agent/Scratch").</param>
-        /// <param name="keepLayerNames">Layer names to keep; layer 0 is always kept regardless.</param>
         public static string Run(AnimatorController sourceFx, GameObject ownedRoot, string outDir, string[] keepLayerNames, bool whatIf = false)
         {
             string label = ownedRoot != null ? TransplantCore.Sanitize(ownedRoot.name) : "null-instance";
@@ -65,15 +33,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 instance = ownedRoot.name,
                 whatIf   = whatIf,
             };
-            // Noted up front so even an early FAIL's artifact carries the output location — the
-            // failure class where a bad outDir is the likely culprit (asset copy failed).
             data.Note("outDir=" + outDir);
 
             try
             {
-                // ── whatIf: report-only preview — resolve preconditions and report the plan,
-                //    creating/modifying NO asset and touching NO descriptor. Returns before any
-                //    EnsureFolderExists/CopyAssetFile/CreateAsset/SaveAssetIfDirty/descriptor wiring. ─────
+                // whatIf: report-only preview. Its verdict must equal execute's, so every execute-time
+                // FAIL checkable without writing is mirrored in this block.
                 if (whatIf)
                 {
                     string previewSourceFxPath = AssetDatabase.GetAssetPath(sourceFx);
@@ -85,16 +50,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     string previewDestPath = outDir.TrimEnd('/') + "/" + sourceFx.name + "_Clean.controller";
                     data.CleanFxReused = AssetDatabase.LoadMainAssetAtPath(previewDestPath) != null;
                     data.CleanFxPath   = previewDestPath;
-                    // Verdict must equal execute's. Execute typed-loads a REUSED controller and FAILs if the
-                    // asset at that path is the wrong type — mirror that (a new controller is copied from the
-                    // source, always valid, so only the reuse case is checkable at preview time).
                     if (data.CleanFxReused && AssetDatabase.LoadAssetAtPath<AnimatorController>(previewDestPath) == null)
                     {
                         return Fail(data, label, "asset at " + previewDestPath + " exists but is not an AnimatorController");
                     }
 
-                    // Keep-set from the SOURCE controller's layers. The source and the would-be-copied
-                    // controller share layers, so this is exactly the set execute would keep.
+                    // Reads the SOURCE's layers where execute reads a reused clean controller's: a name an
+                    // earlier run trimmed passes here and FAILs on execute.
                     var srcLayers = sourceFx.layers;
                     var previewAllNames = new string[srcLayers.Length];
                     for (int i = 0; i < srcLayers.Length; i++) previewAllNames[i] = srcLayers[i].name;
@@ -109,10 +71,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     data.LayerCount = previewKeepIdx.Length;
                     data.LayerNames = string.Join("/", previewKeptNames);
 
-                    // Predicted parameter prune, from the same layer set the trim would keep.
                     // Counts are relative to the SOURCE controller; on a reused (already-pruned)
-                    // clean controller the execute-time drop count lands lower (whatIf predicts
-                    // the verdict, counts land on execute — the CopyDescriptor precedent).
+                    // clean controller the execute-time drop count lands lower.
                     var previewKeptLayers = new AnimatorControllerLayer[previewKeepIdx.Length];
                     for (int i = 0; i < previewKeepIdx.Length; i++) previewKeptLayers[i] = srcLayers[previewKeepIdx[i]];
                     var previewReferenced = CollectReferencedParameters(previewKeptLayers, srcLayers);
@@ -135,8 +95,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     data.MenuReused   = AssetDatabase.LoadMainAssetAtPath(previewMenuPath) != null;
                     data.MenuPath     = previewMenuPath;
                     data.MenuControls = 0;
-                    // Mirror execute's typed-load of a REUSED params/menu asset (execute FAILs on a wrong-typed
-                    // asset at the path; a fresh one is created empty and is always valid).
                     if (data.ParamsReused && AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(previewParamsPath) == null)
                     {
                         return Fail(data, label, "asset at " + previewParamsPath + " exists but is not a VRCExpressionParameters");
@@ -153,8 +111,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         return Fail(data, label, "VRCAvatarDescriptor not found on ownedRoot (" + ownedRoot.name + ")");
                     }
 
-                    // Slots we WOULD wire (reported under the (whatIf) marker): FX iff the descriptor
-                    // has a base FX anim layer; params/menu would always be wired on execute.
                     bool previewHasFxLayer = false;
                     var previewBaseLayers = previewDesc.baseAnimationLayers;
                     if (previewBaseLayers != null)
@@ -163,8 +119,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     data.FxWired     = previewHasFxLayer;
                     data.ParamsWired = true;
                     data.MenuWired   = true;
-                    // Execute gates PASS on the FX base layer being wired (fxVerified); with no base FX layer it
-                    // FAILs "descriptor FX not wired". The preview verdict must equal that, not a blanket PASS.
                     if (!previewHasFxLayer)
                     {
                         return Fail(data, label, "descriptor FX not wired to clean controller (no base FX layer to wire)");
@@ -174,15 +128,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return FinishFull(data, label);
                 }
 
-                // ── Ensure outDir exists ───────────────────────────────────────────────────
                 TransplantCore.EnsureFolderExists(outDir);
 
                 // ── Step 1: Clean FX controller → <name>_Clean.controller ─────────────────
-                // Create-if-missing / reuse-if-present (preserve GUID). If absent, copy the source
-                // and trim. If present, load the existing asset and re-trim its layers IN PLACE so
-                // its GUID is preserved (any descriptor already pointing at it stays wired) and it
-                // stays current with keepLayerNames. To force a fresh derive, the operator deletes
-                // the asset manually.
                 string sourceFxPath = AssetDatabase.GetAssetPath(sourceFx);
                 if (string.IsNullOrEmpty(sourceFxPath))
                 {
@@ -192,9 +140,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string cleanName = sourceFx.name + "_Clean.controller";
                 string destPath  = outDir.TrimEnd('/') + "/" + cleanName;
 
-                // Existence test: LoadMainAssetAtPath (not AssetPathToGUID — that returns a stale
-                // ghost GUID for a deleted-but-not-yet-reimported path, a false positive that would
-                // wrongly take the reuse branch and load null).
+                // Not AssetPathToGUID: it returns a stale ghost GUID for a deleted-but-not-yet-reimported
+                // path, which would wrongly take the reuse branch and load null.
                 bool ctrlExists = AssetDatabase.LoadMainAssetAtPath(destPath) != null;
                 if (!ctrlExists)
                 {
@@ -221,7 +168,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (keepIdx == null) return Fail(data, label, selErr);
                 var keepSet = new HashSet<int>(keepIdx);
                 for (int i = ctrl.layers.Length - 1; i >= 0; i--)
-                    if (!keepSet.Contains(i)) ctrl.RemoveLayer(i);   // descending; ctrl.layers recomputed each access
+                    if (!keepSet.Contains(i)) ctrl.RemoveLayer(i);
 
                 data.LayerCount = ctrl.layers.Length;
                 var names = new string[data.LayerCount];
@@ -230,22 +177,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 data.LayerNames = string.Join("/", names);
 
                 // ── Step 2b: prune the parameter list to kept-layer references ────────────
-                // A dropped layer's parameters otherwise survive the copy forever (vendor
-                // controllers carry dozens). Referenced = transition conditions, state
-                // speed/time/mirror/cycle-offset bindings, blend-tree params, and VRC
-                // parameter-driver reads/writes. Idempotent: a re-run drops nothing new.
                 PruneParameters(ctrl, data);
 
                 EditorUtility.SetDirty(ctrl);
 
                 // ── Step 3: Empty VRCExpressionParameters ────────────────────────────────
-                // Stable, label-free shared name + create-if-missing / reuse-if-present (preserve
-                // GUID) so variations of one base share this asset. If present, reuse it; if it has
-                // pre-existing content (something external wrote into it), ensure-empty IN PLACE —
-                // visible note, still PASS. Never delete-recreate (that churns the GUID).
                 string paramsPath = outDir.TrimEnd('/') + "/VRCExpressionParameters_Empty.asset";
-                // Existence test via LoadMainAssetAtPath (see controller note: AssetPathToGUID can
-                // return a stale ghost GUID for a deleted-but-not-reimported path).
                 bool paramsExists = AssetDatabase.LoadMainAssetAtPath(paramsPath) != null;
                 VRCExpressionParameters exprParams;
                 if (paramsExists)
@@ -308,9 +245,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 data.MenuPath     = menuPath;
                 data.MenuControls = 0;
 
-                // Persist only the copied controller and side assets. CopyAssetFile imports its filesystem
-                // copy immediately; the remaining writes use CreateAsset/SetDirty, so no project-wide refresh
-                // or save is needed.
                 AssetDatabase.SaveAssetIfDirty(ctrl);
                 AssetDatabase.SaveAssetIfDirty(exprParams);
                 AssetDatabase.SaveAssetIfDirty(exprMenu);
@@ -327,7 +261,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 desc.customizeAnimationLayers = true;
 
-                // baseAnimationLayers is a struct array — must read-modify-write each element
                 bool fxWired       = false;
                 var  baseLayers    = desc.baseAnimationLayers;
                 if (baseLayers != null)
@@ -357,7 +290,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 // Do NOT save the scene.
 
                 // ── Step 6: Verify ────────────────────────────────────────────────────────
-                // Re-read descriptor state for verification
                 bool fxVerified = false;
                 var  verifyLayers = desc.baseAnimationLayers;
                 if (verifyLayers != null)
@@ -384,7 +316,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                    && (desc.expressionsMenu.controls == null
                                        || desc.expressionsMenu.controls.Count == 0);
 
-                // Re-scan the final controller by name — every requested layer must survive (no magic count).
                 var finalNames = new HashSet<string>();
                 foreach (var l in ctrl.layers) finalNames.Add(l.name);
                 var missingRequested = new List<string>();
@@ -423,13 +354,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return FinishFull(data, label);
         }
 
-        // ── Helpers ───────────────────────────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Indices to keep: always 0 (VRChat requires a base layer) plus each requested name. Returns null +
-        /// sets <paramref name="error"/> when a requested name is absent or matches more than one layer
-        /// (Animator layer names aren't unique — an ambiguous keep can't be trusted). Pure; unit-tested.
-        /// </summary>
         public static int[] SelectLayersToKeep(string[] allLayerNames, string[] keepLayerNames, out string error)
         {
             error = null;
@@ -445,13 +369,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var arr = new int[keep.Count]; keep.CopyTo(arr); return arr;
         }
 
-        /// <summary>Append a note to a "; "-joined note string (visible reuse/clear signals).</summary>
         private static string AppendNote(string existing, string note)
         {
             return string.IsNullOrEmpty(existing) ? note : existing + "; " + note;
         }
-
-        // ── Parameter pruning ─────────────────────────────────────────────────────────────────
 
         private static void PruneParameters(AnimatorController ctrl, RunData data)
         {
@@ -469,15 +390,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             data.CtrlParamsDroppedNames = string.Join("/", dropped.ToArray());
         }
 
-        /// <summary>Every controller-parameter name the kept layers reference: transition
-        /// conditions, state speed/time/mirror/cycle-offset bindings, blend-tree blend params
-        /// (incl. direct-blend children), VRC parameter-driver reads/writes, and face-tracking Blendshapes Set
-        /// entry sources. A synced layer
-        /// (<c>syncedLayerIndex &gt;= 0</c>) has a null stateMachine — it borrows the source
-        /// layer's structure and carries per-state override motions/behaviours — so it resolves
-        /// against <paramref name="allLayers"/> (mirrors <c>AnimatorClipWalk</c>'s synced-layer
-        /// handling). Pass the array the kept layers' indices refer to: the trimmed
-        /// <c>ctrl.layers</c> on execute, the source controller's layers in the whatIf preview.</summary>
+        /// <summary>A synced layer (<c>syncedLayerIndex &gt;= 0</c>) has a null stateMachine: it borrows
+        /// the source layer's structure and carries per-state override motions and behaviours, so it
+        /// resolves against <paramref name="allLayers"/>: the trimmed <c>ctrl.layers</c> on execute, the
+        /// source controller's layers in the whatIf preview.</summary>
         internal static HashSet<string> CollectReferencedParameters(
             IEnumerable<AnimatorControllerLayer> keptLayers, AnimatorControllerLayer[] allLayers)
         {
@@ -487,9 +403,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (layer == null) continue;
                 if (layer.syncedLayerIndex >= 0)
                 {
-                    // Kept synced layer: params come from the source layer's structure plus this
-                    // layer's per-state overrides. A dropped source layer is a broken sync however
-                    // params are counted (CheckAnimator territory) — collect what still resolves.
+                    // A dropped source layer is a broken sync however params are counted; collect what
+                    // still resolves.
                     if (allLayers != null && layer.syncedLayerIndex < allLayers.Length)
                     {
                         var src = allLayers[layer.syncedLayerIndex];
@@ -578,8 +493,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var b in behaviours)
             {
 #if VRC_FT_SETS_PRESENT
-                // A face-tracking Blendshapes Set entry reads its source parameter on state entry; pruning that
-                // parameter would leave the kept behaviour naming an undeclared one.
                 if (b is VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet ft)
                 {
                     if (ft.blendSets != null)
@@ -600,8 +513,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        /// <summary>Route an argument-guard failure through the shared envelope tail — never a bare
-        /// trailer-less line: every guard failure still writes a RunLog and carries its path.</summary>
         private static string ArgFail(string label, bool whatIf, AnimatorController sourceFx, GameObject ownedRoot, string msg)
         {
             var data = new RunData
@@ -616,12 +527,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return TransplantCore.Finish(data, label);
         }
 
-        /// <summary>Early-abort tail (precondition/mid-flow FAILs, both modes): name the offender from
-        /// <c>error</c>, flush the notes already accrued — including the output-path notes, because a
-        /// mid-execute FAIL can leave a created/trimmed controller behind and the artifact must say so —
-        /// and use the STANDARD envelope summary (the bespoke wiring summary would render zero-counts as
-        /// measurements when nothing completed). <see cref="TransplantCore.Finish"/> logs exactly once
-        /// (the old double-log trap).</summary>
+        /// <summary>Early-abort tail, on the standard envelope summary: the bespoke wiring summary would
+        /// render zero counts as measurements when nothing completed.</summary>
         private static string FinishEarly(RunData data, string label)
         {
             data.Offender(data.error);
@@ -630,9 +537,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return TransplantCore.Finish(data, label);
         }
 
-        /// <summary>Mid-flow FAIL: set the verdict + error + finish in one call, so a call site can never
-        /// set <c>error</c> but forget <c>result</c> (which would ship a log whose verdict is still the
-        /// default PASS — a slip <see cref="RunLog.EnsureFailHasOffender"/> cannot catch).</summary>
         private static string Fail(RunData data, string label, string msg)
         {
             data.result = "FAIL";
@@ -640,11 +544,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return FinishEarly(data, label);
         }
 
-        /// <summary>Completed-run tail (PASS or step-6 verify FAIL, both modes): flush the run's fields
-        /// into the envelope's counts/notes, enforce offenders⇔FAIL, write the shared-envelope RunLog,
-        /// and return the tool's bespoke wiring summary (kept deliberately — the
-        /// <c>controller=…(reuse)(layers=…), …, descriptorWired=FX|params|menu</c> line reports wiring
-        /// intent better than the flat <c>k=v</c> grammar; JSON and summary convergence are separable).</summary>
         private static string FinishFull(RunData data, string label)
         {
             data.Count("layers", data.LayerCount);
@@ -665,8 +564,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return BuildSummary(data, label, logPath);
         }
 
-        /// <summary>Output-path notes with reuse tags — shared by both tails so a mid-flow FAIL's
-        /// artifact still records any asset the run created/modified before aborting.</summary>
+        /// <summary>Shared by both tails: a mid-flow FAIL can leave a created or trimmed controller behind,
+        /// and its artifact must say so.</summary>
         private static void FlushPathNotes(RunData data)
         {
             if (data.CleanFxPath != null)
@@ -686,20 +585,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static string BuildSummary(RunData data, string label, string logPath)
         {
-            // descriptorWired segment: show FX|params|menu with (MISSING) on anything unwired
             string wired = WiredString(data);
 
             string extra = data.error != null ? " error=" + data.error : "";
             if (data.ReuseNote != null) extra += " note=" + data.ReuseNote;
 
-            // reuse markers: (reuse) when we loaded an existing asset, (new) when we created it
             string ctrlTag   = data.CleanFxReused ? "(reuse)" : "(new)";
             string paramsTag = data.ParamsReused  ? "(reuse)" : "(new)";
             string menuTag   = data.MenuReused    ? "(reuse)" : "(new)";
 
-            // Tagged [clean-controller] (the envelope kind), not the old [CleanController] — the
-            // guard/early-abort paths emit the envelope's standard line, and a per-path tag fork would
-            // make transcript greps miss exactly the FAILs.
+            // The tag is the envelope kind because guard and early-abort paths emit the envelope's standard
+            // line; a per-path tag would make transcript greps miss exactly the FAILs.
             string marker = data.whatIf ? " (whatIf)" : "";
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[clean-controller]" + marker + " {0}: controller={1}{2}(layers={3}: {4}; ctrlParams kept={5} dropped={6}), exprParams={7}{8}, menu={9}{10}, descriptorWired={11}{12} => {13} | log={14}",
@@ -723,13 +619,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return summary;
         }
 
-        // ── Data type ─────────────────────────────────────────────────────────────────────────
-
-        /// <summary>The package RunLog envelope plus this tool's run fields — kept as fields (not
-        /// direct <c>Count</c>/<c>Note</c> calls) because the bespoke wiring summary renders them
-        /// structurally; <see cref="FinishFull"/> flushes them into the envelope's counts/notes.
-        /// JSON key rename vs the old bespoke writer: <c>sourceFx</c> → the envelope's
-        /// <c>source</c>.</summary>
+        /// <summary>Fields, not direct <c>Count</c>/<c>Note</c> calls, because the bespoke wiring summary
+        /// renders them structurally; <see cref="FinishFull"/> flushes them into the envelope.</summary>
         private sealed class RunData : RunLog
         {
             public RunData() : base("clean-controller") { }

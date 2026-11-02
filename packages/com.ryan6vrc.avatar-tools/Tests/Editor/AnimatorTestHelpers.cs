@@ -7,21 +7,17 @@ using UnityEditor.Animations;
 using UnityEngine;
 using VRC.SDK3.Avatars.ScriptableObjects;
 
-// Shared fixtures + TransplantCore.Finish one-line-summary parser for the mutating-tool test files
-// (RepathClips, OwnControllerClips). CleanController uses its own summary parser (different grammar) but
-// reuses the grammar-agnostic fixture plumbing here (EnsureFolder, Save, etc.).
+// Shared test fixtures, plus the parser (Count, Notes) for TransplantCore.Finish's one-line summary.
 public static class AnimatorTestHelpers
 {
-    // ---- faceTrackingSets (the Blendshapes Set state behaviour, com.vrchat.avatars >= 3.10.6) ----------------
-    // The component first ships in SDK 3.10.6, so every test that emits or decompiles one is compiled under
-    // VRC_FT_SETS_PRESENT (the avatar-tools asmdefs' versionDefine) and, below that SDK, replaced by a twin of the
-    // same name that skips with this reason — the skip is named in the run rather than the test vanishing.
+    // faceTrackingSets (the Blendshapes Set state behaviour) first ships in SDK 3.10.6, so every test that emits
+    // or decompiles one is compiled under VRC_FT_SETS_PRESENT (the avatar-tools asmdefs' versionDefine) and, below
+    // that SDK, replaced by a twin of the same name that skips with this reason, so the run names the skip.
     public const string FtSetsSkip =
         "needs com.vrchat.avatars >= 3.10.6 (VRCAnimatorFaceTrackingBlendshapesSet); TestEditor is on an older SDK";
 
     // One state carrying all four entry forms, in a deliberately non-alphabetical order so a reordering hop
-    // shows: a bare weight, a bare parameter (under a set name that needs quoting), a weight map with a lerp, and
-    // a ranged parameter map with a lerp.
+    // shows.
     public const string FtSetsDoc =
         "schema: 1\ncontroller: FtSets_Fx\nbasis: avatar-root\nrole: fx\n" +
         "parameters:\n  Gate: float\n  Lip: float\n" +
@@ -36,24 +32,13 @@ public static class AnimatorTestHelpers
         "    default: S\n";
 
     // Sweep for suites that call the 2-arg ControllerEmit.Build door directly. That overload persists the
-    // CONTROLLER only, so every call mints side assets that outlive the test — and a survivor is not inert:
-    // leaked SDK ScriptableObjects in this assembly make ControllerEmit.AddStateMachineBehaviour return null
-    // and fail UNRELATED suites with NullReferenceExceptions pointing at untouched production code
-    // (ControllerFixpointTests's `_made` field owns the measurement: leak → 551/600, destroy → 600/600).
+    // CONTROLLER only, so every call mints side assets that outlive the test, and a survivor fails unrelated
+    // suites (see EmitResult.DestroyUnpersisted).
     //
-    // BOTH side-asset types, not just params: EmitResult carries Params AND the Menu tree, and a sweep over
-    // VRCExpressionParameters alone left every menu page unswept on this door. Latent while no 2-arg fixture
-    // authored a `menu:` block — the first one that did would have reproduced the cascade with nothing
-    // catching it. A fixture's own belt-and-braces is EmitResult.DestroyUnpersisted, which is the door the
-    // CALLER is supposed to use; this stays as the net for a fixture that forgets.
-    //
-    // DELTA, not a blanket destroy of every unowned instance: the domain legitimately holds unowned instances
-    // of both types that a test did not create — the SDK's own, an open inspector's — and destroying one of
-    // those would break the editor out from under the run. Only what appeared between Begin and End is this
-    // test's to clean up.
-    //
-    // Production code destroying its own side assets is CompileController's job and is covered by
-    // SideAssetLifecycleTests; this is strictly the TEST-side half, for the door that has no owner at all.
+    // It sweeps both types EmitResult carries, Params and the Menu tree, and only the delta between Begin and
+    // End: the domain legitimately holds unowned instances of both that a test did not create (the SDK's own, an
+    // open inspector's), and destroying one of those would break the editor out from under the run.
+    // EmitResult.DestroyUnpersisted is the caller's door; this is the net for a fixture that forgets.
     public sealed class UnownedSideAssetSweep
     {
         private HashSet<int> _before;
@@ -140,9 +125,8 @@ public static class AnimatorTestHelpers
         ctrl.layers = list.ToArray();
     }
 
-    // Compile/Decompile door refusals write a RunLog/Snapshot artifact (R4) outside any TestRoot
-    // teardown — refusal-path tests call this on the returned summary so artifacts don't accumulate
-    // across runs.
+    // Compile/Decompile door refusals write a RunLog/Snapshot artifact outside any TestRoot teardown, so
+    // refusal-path tests call this on the returned summary.
     public static void DeleteRefusalArtifact(string summary)
     {
         int i = summary.IndexOf("log=", System.StringComparison.Ordinal);

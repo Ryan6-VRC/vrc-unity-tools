@@ -5,36 +5,23 @@ using UnityEditor;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
-    /// <summary>
-    /// The shared RunLog text conventions — JSON string-escape, filename sanitize, the asset-path
-    /// leaf label, the canonical output directories, and the body-agnostic artifact writer — used by
-    /// every agent-facing tool that emits a one-line summary + a RunLog/Snapshot artifact. One
-    /// implementation; sibling packages delegate here so the envelope cannot drift per package.
-    /// </summary>
+    /// <summary>The text conventions and artifact writer shared by every tool, in both packages, that
+    /// emits a one-line summary plus a RunLog or Snapshot artifact.</summary>
     public static class RunLogFormat
     {
-        /// <summary>Canonical verdict/record output directory. The single declaration of this literal;
-        /// sibling emitters reference it (kept <c>const</c> so callers can concat it into a path).</summary>
+        /// <summary>Verdict and record output directory.</summary>
         public const string RunLogDir = "Assets/Agent/RunLogs";
 
-        /// <summary>Canonical read-only-capture output directory. Single declaration of this literal.</summary>
+        /// <summary>Read-only-capture output directory.</summary>
         public const string SnapshotDir = "Assets/Agent/Snapshots";
 
         /// <summary>
-        /// Body-agnostic artifact writer the family's non-transplant emitters converge on. Writes
-        /// <paramref name="body"/> verbatim (the caller's full artifact text, markdown or JSON) to
-        /// <paramref name="dir"/> under a <see cref="Sanitize"/>d-<paramref name="label"/> + timestamp +
-        /// <paramref name="ext"/> filename; publishes just that file (<see cref="PublishArtifact"/>);
-        /// and on success returns <paramref name="summary"/> with the in-band trailer appended
-        /// (<c>summary + " | log=" + path</c>). Filename convention: <paramref name="label"/> starts
-        /// with the artifact's <c>kind</c> (e.g. <c>check-package_&lt;target&gt;</c>), so anything
-        /// globbing a tool's artifacts finds them by the same name its JSON declares — the envelope
-        /// writer (TransplantCore.WriteRunLog) enforces this mechanically; callers here pass a
-        /// kind-prefixed label. <paramref name="summary"/> is the one-line verdict WITHOUT
-        /// the trailer (ends <c>=&gt; RESULT</c>). On write failure returns a bare-FAIL summary with NO
-        /// <c>| log=</c> trailer — the schema never points at an artifact that is not on disk. Does NOT
-        /// log: the 5-param signature carries no PASS/FAIL flag, so each caller logs the returned summary
-        /// at the right severity (as ReportController/ReportClip/CheckAnimator/CheckAvatar/ReportGimmick do).
+        /// Writes <paramref name="body"/> verbatim to <paramref name="dir"/> and returns
+        /// <paramref name="summary"/> (the one-line verdict, ending <c>=&gt; RESULT</c>) with
+        /// <c> | log=path</c> appended. <paramref name="label"/> starts with the artifact's <c>kind</c>
+        /// (<c>check-package_&lt;target&gt;</c>), so a glob by kind finds it. On write failure the verdict
+        /// becomes a bare FAIL with no trailer, so the line never points at an artifact not on disk. Does
+        /// not log: each caller logs the returned line at its own severity.
         /// </summary>
         public static string WriteRunLog(string dir, string label, string summary, string body, string ext)
         {
@@ -49,9 +36,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             catch (Exception e)
             {
-                // The caller already baked its verdict into `summary` (ends "=> OK" / "=> PASS" / "=> FAIL").
-                // Replace that verdict with a single honest bare-FAIL (no `| log=` trailer) so the emitted
-                // line cannot assert both a verdict and a write failure at once.
                 int arrow = summary.LastIndexOf("=> ", StringComparison.Ordinal);
                 string head = arrow >= 0 ? summary.Substring(0, arrow) : summary + " ";
                 return head + "=> FAIL: write failed: " + e.Message;
@@ -59,17 +43,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>
-        /// Make a just-written artifact visible in the Project window. Imports ONLY that file: a
-        /// project-wide <c>AssetDatabase.Refresh()</c> here cost ~53 ms and every artifact-emitting door
-        /// paid it, which measured 389 of the 650 full refreshes in one headless suite run — the largest
-        /// single item in the suite's clock, and a tax on every live tool call too. Nothing reads an
-        /// artifact through the AssetDatabase (callers and tests alike use <c>File.ReadAllText</c>), so the
-        /// import is for the operator's Project window and nothing else.
-        ///
-        /// <paramref name="dir"/> is created with <c>Directory.CreateDirectory</c>, which leaves the
-        /// AssetDatabase blind to it — and <c>ImportAsset</c> cannot register a file inside a folder the
-        /// database has never seen. So the FIRST write under a fresh dir still pays one full refresh; every
-        /// write after it is O(1).
+        /// Makes a just-written artifact visible in the Project window by importing only that file, because
+        /// every artifact-emitting door pays this call and a project-wide <c>AssetDatabase.Refresh()</c> is
+        /// costly. <c>ImportAsset</c> cannot register a file in a folder the database has never seen, and
+        /// <c>Directory.CreateDirectory</c> leaves a new folder unseen, so the first write under a fresh
+        /// <paramref name="dir"/> still pays one full refresh.
         /// </summary>
         public static void PublishArtifact(string dir, string path)
         {
@@ -108,9 +86,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return s.Replace(' ', '_');
         }
 
-        /// <summary>Path basename. Null or empty → "". Otherwise <c>TrimEnd('/')</c> then the substring
-        /// after the last '/' (the whole trimmed string if none). The RunLog-label leaf helper the
-        /// tools converge on.</summary>
         public static string Leaf(string assetPath)
         {
             if (string.IsNullOrEmpty(assetPath)) return "";
@@ -119,15 +94,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             return i >= 0 ? p.Substring(i + 1) : p;
         }
 
-        /// <summary>Encode a dynamic value (a name, path, or property read off an asset) for one Markdown
-        /// table cell — the single hardened encoder the report tools converge on. The non-obvious parts:
-        /// backslash is escaped FIRST, because a raw '\' immediately before a pipe consumes the pipe's own
-        /// '\' escape (GFM counts the backslash run) and leaves the pipe bare, breaking the column;
-        /// U+2028/U+2029 are line separators <c>char.IsControl</c> does NOT catch; and backticks are
-        /// deliberately left alone — most call sites wrap the value in a code span, where backslash escapes
-        /// are inert, so '\`' would neither keep the span closed nor render cleanly. Structural safety rests
-        /// on the row/column handling, which holds either way; a stray backtick is cosmetic and stays inside
-        /// its own cell.</summary>
+        /// <summary>Encodes a dynamic value (a name, path, or property read off an asset) for one Markdown
+        /// table cell. Backslash needs escaping because a raw '\' immediately before a pipe consumes the
+        /// pipe's own '\' escape (GFM counts the backslash run) and leaves the pipe bare, breaking the column.
+        /// U+2028/U+2029 are line separators <c>char.IsControl</c> does not catch. Backticks stay unescaped:
+        /// backslash escapes are inert inside the code span many call sites wrap the value in, and a stray
+        /// backtick is cosmetic and stays inside its own cell.</summary>
         public static string Cell(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
@@ -145,13 +117,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return sb.ToString();
         }
 
-        /// <summary>Resolve a string asset handle — an asset path OR a GUID — to the loaded asset, or
-        /// null if it names none. The path/GUID counterpart of the report/check doors' typed-object entry
-        /// points: a door that takes an <c>AnimatorController</c>/<c>AnimationClip</c> asset exposes a
-        /// string overload that resolves through here, so an agent holding only a path/GUID need not
-        /// pre-<see cref="AssetDatabase.LoadAssetAtPath"/> at the call site. A known GUID resolves via
-        /// <see cref="AssetDatabase.GUIDToAssetPath"/>; anything else is treated as a path. One
-        /// implementation, so the two conventions cannot drift per door.</summary>
+        /// <summary>Resolves an asset path or GUID to the loaded asset, or null if it names none. A door
+        /// that takes an asset exposes its string overload through here.</summary>
         public static T LoadByPathOrGuid<T>(string handle) where T : UnityEngine.Object
         {
             if (string.IsNullOrEmpty(handle)) return null;
@@ -160,22 +127,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             return AssetDatabase.LoadAssetAtPath<T>(path);
         }
 
-        /// <summary>Does the asset behind this GUID exist? The liveness test every dangling-reference
-        /// sweep needs, and <see cref="AssetDatabase.GUIDToAssetPath"/> is NOT it: a GUID the editor has
-        /// ever known keeps resolving to its old path after the asset is deleted (measured; survives a
-        /// <c>ForceUpdate</c>), so only a NEVER-known GUID reads as dangling on the path test — which
-        /// misses the ordinary case and hits only the foreign-project one.
+        /// <summary>Does the asset behind this GUID exist? <see cref="AssetDatabase.GUIDToAssetPath"/> alone
+        /// cannot say: a GUID the editor has ever known keeps resolving to its old path after the asset is
+        /// deleted, surviving a <c>ForceUpdate</c>, so only a never-known GUID reads as dangling on the path.
         ///
-        /// TYPE-AGNOSTIC deliberately: <c>LoadAssetAtPath&lt;Motion&gt;</c> reads an FBX-embedded clip
-        /// (main asset a <c>GameObject</c>) and a controller sub-asset as dangling — both routine on
-        /// vendor avatars, so a typed probe invents broken motions on healthy rigs.
+        /// Type-agnostic, because <c>LoadAssetAtPath&lt;Motion&gt;</c> reads an FBX-embedded clip (main asset
+        /// a <c>GameObject</c>) and a controller sub-asset as dangling, and both are routine on vendor avatars.
         ///
-        /// It asks the DATABASE, not the loader. <c>LoadMainAssetAtPath</c> would materialize the whole
-        /// asset — for an FBX-embedded clip, the model hierarchy and its meshes — once per distinct GUID on
-        /// read-only lint paths, and it also answers "won't load" rather than "isn't there", so a project
-        /// mid-reimport would read as a pile of broken motions. Callers wording this for a human should say
-        /// "no longer resolves", not "was deleted": this cannot tell the two apart, and neither can the
-        /// GUID.</summary>
+        /// Asks the database, not the loader: <c>LoadMainAssetAtPath</c> would materialize an FBX's whole
+        /// model hierarchy per GUID, and answers "won't load" rather than "isn't there", so a project
+        /// mid-reimport would read as broken.</summary>
         public static bool AssetGuidResolves(string guid)
         {
             if (string.IsNullOrEmpty(guid)) return false;

@@ -9,83 +9,24 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
-    // Gate infrastructure for a directory of vrc-patterns entries — NOT an [AgentTool] and NOT a
-    // [MenuItem] (no callable door, so no TOOLS.md row). It reuses the shipped compile/decompile
-    // primitives: decode(c) = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(c).Doc), the same
+    // The vrc-patterns library gate: does committed built/ match what the compiler emits from its yaml
+    // today? Contract and passes: vrc-patterns/CONVENTIONS.md §The gate; tools/gate.ps1 there drives
+    // RunGate. decode(c) = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(c).Doc), the same
     // canonical string the fixpoint tests trust.
     //
-    // THE ONE QUESTION THIS GATE ASKS: does committed built/ match what the compiler emits from its yaml
-    // TODAY? A stale regeneration after a yaml edit is the common cause but not the only one — a change to
-    // the emitter's own filters fails a document whose yaml nobody touched, which is what the params pass
-    // below exists for. In vrc-patterns the yaml is the source of truth and built/ is a generated artifact,
-    // committed only so prefabs can resolve it by GUID and so a study entry opens in the animator window. Nobody
-    // hand-maintains it. So a field the schema does not model does not matter here — and one that DOES
-    // matter is a reason to grow the schema, never a reason to tighten this comparison. Do not add a
-    // check that guards hand-authored content in a generated directory; that category is empty by
-    // construction, and CONVENTIONS.md routes the real exception (a menu the schema cannot express)
-    // to assets/ instead.
+    // built/ is generated and nobody hand-maintains it, so a field that matters grows the schema and never
+    // tightens this comparison. Do not add a check guarding hand-authored content in built/; CONVENTIONS.md
+    // routes a menu the schema cannot express to assets/. ForeignProjectPathLines is not that exception: it
+    // reads the committed prefab, which is source.
     //
-    // Drift is decompile-equality, never a byte diff — and that is a fact about Unity, not a taste.
-    // Unity assigns .controller sub-asset fileIDs non-deterministically: two compiles of the SAME yaml
-    // in one Editor seconds apart produce byte-different files (measured across all 17 library
-    // documents — every one byte-different, every one content-identical). A byte gate would fail every
-    // entry on every run.
+    // Drift is decompile-equality, never a byte diff: Unity assigns .controller sub-asset fileIDs
+    // non-deterministically, so two compiles of one yaml differ in bytes.
     //
-    // The two flat emitted assets get their own passes, because decompile-equality cannot reach either:
-    // *_Menu.asset (MenuPresence/MenuDiff) and *_Parameters.asset (ParamsPresence/ParamsDiff). The params
-    // pass exists because the emitter filters on `!p.Scratch && !ControllerRules.IsVrcReserved(p.Name)`
-    // and the .controller carries no notion of either flag — so flipping a `scratch:` or changing the
-    // reserved-name set silently adds or drops entries in every emitted params asset while both sides of
-    // decompile-equality stay identical. What makes that worth a check rather than a warning is that the
-    // TRIGGER LIVES IN A DIFFERENT REPO FROM THE ARTIFACT IT DAMAGES — ControllerRules.VrcReservedParams
-    // here, built/*_Parameters.asset in vrc-patterns — so nothing routes the author who trips it to this
-    // comment, and ordering the two commits correctly rests on the author already knowing.
-    //
-    // Both flat passes are STRUCTURAL, not byte compares, and for one shared reason plus one that differs.
-    // Shared: the gate's failure message is its product, and a byte mismatch on a 104-parameter asset
-    // (object-sync) names no offender at all — it hands the reader back exactly the hand-diff these passes
-    // exist to retire. Differing: a *_Parameters.asset really is one flat document and WOULD compare
-    // byte-stable, so there the choice is diagnostic quality alone; a *_Menu.asset does NOT, because
-    // sub-menu pages persist as sub-assets of the one file (CompileController's AddObjectToAsset) and carry
-    // the same non-deterministic fileIDs a .controller does — see MenuDiff's own header.
-    //
-    // ENTRIES ARE FOUND AT ANY DEPTH (EnumerateEntries). The recursion is full rather than one level down,
-    // and that is worth stating before someone narrows it back: the library already nests to depth 3
-    // (compositions/object-sync-demo/object-sync/), so a widen scoped to compositions/'s immediate children
-    // would gate three of the four nested entries and re-open this hole one level lower. Every composition
-    // is a nested entry by construction — CONVENTIONS.md defines one as an arrangement of two or more
-    // entries — so this is a growing tier, not four dirs to special-case. Recursion costs tier derivation
-    // nothing: IsGuidConsumer reads its own directory only, so a parent never reads as a GUID-consumer
-    // because of a child's prefab (pinned by IsGuidConsumer_PrefabOneLevelDown_IsNotSeen — the prefab glob
-    // specifically, since that is the half this rests on).
-    //
-    // TWO PRUNES, each load-bearing. A dot-named directory is skipped AND NOT DESCENDED, checked at every
-    // segment rather than at the leaf: .git/refs/… has the leaf name "refs", so a later "simplification" to
-    // SearchOption.AllDirectories looks equivalent while walking the whole of .git. And built/ and assets/
-    // are never descended — both are reserved inside an entry (CONVENTIONS.md), so a controller.yaml under
-    // either is content, and gating one would invent a phantom Pattern (for built/, comparing a generated
-    // file against a recompile of itself). That compare is CASE-INSENSITIVE because IsGuidConsumer's
-    // Directory.Exists is: on Windows a mis-cased Assets/ is the same directory to that probe, so an ordinal
-    // compare here would read it as reserved for tier derivation and still descend into it.
-    //
-    // The prefab-integrity pass copies the WHOLE library into one scratch and checks every prefab in
-    // it. It used to copy one top-level tree at a time, each into a scratch of its own, so that no two
-    // trees' committed GUIDs ever co-imported. That isolation is what made a Prefab Variant whose base
-    // lives in a SIBLING tree load as null: the base was not in the copy. The library ships as ONE VPM
-    // package, so every tree co-imports in production regardless — the isolation modelled a
-    // configuration that never occurs. What the single copy requires is that no two committed .meta
-    // ANYWHERE in the library share a GUID, which DuplicateCommittedGuid asserts over the root in a pass
-    // of its own — strictly wider than the per-tree assertion it replaces, which is why deleting the
-    // isolation costs no coverage.
-    //
-    // A committed built .controller lives at an arbitrary --root filesystem path, not under the
-    // project, so it is copied into Assets/ (with its committed GUID) to be imported and loaded.
-    // A second RunGate pass loads each entry's prefab(s) the same way — copied into Assets/ to
-    // import — and fails any with a missing MonoBehaviour script, an anchor seam, or a committed
-    // consuming-project path (ForeignProjectPathLines); the coverage a Structural Module (a prefab, no
-    // controller.yaml) otherwise never gets. That last one is the one check here that DOES guard
-    // hand-authored content, and it is not the exception the paragraph above forbids: it reads the
-    // committed prefab, which is hand-authored source, never built/.
+    // Decompile-equality cannot reach the two flat assets, because a .controller stores no menu and neither
+    // flag the params filter reads, so each has a structural pass: *_Menu.asset (MenuPresence/MenuDiff) and
+    // *_Parameters.asset (ParamsPresence/ParamsDiff). Changing ControllerRules.VrcReservedParams here
+    // changes built/*_Parameters.asset in vrc-patterns, a different repo, and nothing routes the author to
+    // that second commit.
     public static class ControllerFixpoint
     {
         static string Decode(AnimatorController c, out string refusal)
@@ -103,13 +44,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return abs.StartsWith(proj + "/", StringComparison.Ordinal) ? abs.Substring(proj.Length + 1) : abs;
         }
 
-        // Per-call scratch cleanup: pure filesystem delete of the folder + its .meta, no AssetDatabase
-        // call. Deliberately NO DeleteAsset and NO Refresh — Check holds loaded AnimatorControllers from
-        // this scratch as live locals through the finally, and any AssetDatabase reconcile fired while
-        // those refs pin an asset whose folder just vanished makes Unity re-materialize an empty husk
-        // renamed "<name> 1", which then accumulates. Removing the bytes and leaving the stale DB entry
-        // to be reconciled later (by then the refs are out of scope) avoids the resurrection; SweepScratch
-        // at end-of-run is the authoritative backstop for anything that slips through.
+        // Filesystem delete only, no DeleteAsset and no Refresh: Check holds loaded AnimatorControllers
+        // from this scratch as live locals through the finally, and an AssetDatabase reconcile while those
+        // refs pin an asset whose folder just vanished makes Unity re-materialize an empty husk renamed
+        // "<name> 1".
         static void CleanupScratch(string scratchAssetsPath)
         {
             var full = Path.GetFullPath(scratchAssetsPath);
@@ -117,12 +55,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (File.Exists(full + ".meta")) File.Delete(full + ".meta");
         }
 
-        // Filesystem-only sweep of every scratch dir + .meta this tool creates, matching the "<name> 1"
-        // husk-rename variants via the glob. No AssetDatabase call — run it when no scratch asset is
-        // referenced (RunGate start, before any Check; and end, after every Check has returned) so no
-        // reconcile can resurrect a husk. Start-of-run self-heals scratch a crashed batchmode run (no
-        // finally) stranded; end-of-run clears the run's own residue. Serial venue — nothing live owns
-        // these prefixes.
+        // Deletes every scratch dir + .meta this tool creates, "<name> 1" husks included. Filesystem only,
+        // and called only while no scratch asset is referenced, so no reconcile can resurrect a husk.
+        // Serial venue: nothing live owns these prefixes.
         static void SweepScratch()
         {
             var assetsRoot = Path.GetFullPath("Assets");
@@ -135,7 +70,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 try { File.Delete(staleMeta); } catch { /* best-effort */ }
         }
 
-        // Compile a yaml at a filesystem path into a temp Assets/ folder and load the emitted controller.
         static AnimatorController CompileToTemp(string yamlPath, string tempAssetsDir)
         {
             Directory.CreateDirectory(Path.GetFullPath(tempAssetsDir));
@@ -150,20 +84,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return loaded;
         }
 
-        // Copy ONE committed built asset (+ its .meta) into Assets/ so the AssetDatabase imports it with the
-        // committed GUID, then load it. All three committed artifacts a Check compares — the .controller, the
-        // _Menu.asset, the _Parameters.asset — arrive through here.
+        // Copies the named file + .meta into Assets/ so it imports with its committed GUID, then loads it:
+        // LoadAssetAtPath resolves nothing at an arbitrary --root path outside the project.
         //
-        // TWO CONSTRAINTS, and each was learned at a different caller, so neither is safe to drop when reading
-        // this for one of them:
-        //
-        // Only the NAMED file is copied. A multi-artifact entry (anchor-prop ships an FX + Gesture pair and one
-        // params asset) would otherwise import every sibling's committed GUID once per checked document,
-        // colliding across scratch dirs. Assumes the package under test is NOT also loaded in this host — else
-        // the committed GUID exists twice, which is the same collision by another route.
-        //
-        // The copy is what makes the load possible at all: entry files live at an arbitrary --root filesystem
-        // path outside the project, and LoadAssetAtPath resolves nothing there.
+        // Only the named file: a multi-artifact entry's siblings would otherwise import their committed
+        // GUIDs once per checked document, colliding across scratch dirs. Assumes the package under test is
+        // not also loaded in this host, which is the same collision by another route.
         static T ImportCommittedAsset<T>(string committedPath, string destAssetsDir) where T : UnityEngine.Object
         {
             var full = Path.GetFullPath(destAssetsDir);
@@ -177,20 +103,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return AssetDatabase.LoadAssetAtPath<T>(ToAssetsRelative(Path.Combine(full, Path.GetFileName(src))));
         }
 
-        // The complaint when a committed artifact has no .meta beside it, or null when it does.
-        //
-        // A .meta-less import is the one drift this gate cannot see from its own comparisons: Unity mints a
-        // FRESH GUID on import, every structural comparison in Check still matches (they compare decoded
-        // graphs, menu trees and parameter lists — never identity), so the gate reports PASS while the
-        // consumer's prms:/menus:/controller reference, which resolves by GUID, dangles. Asserted BEFORE the
-        // copy, because after it the fresh-GUID import is indistinguishable from a correct one.
-        //
-        // Lifted out of ImportCommittedAsset as pure filesystem so it has a unit door: the importer around it
-        // is AssetDatabase-bound and untestable, and a check reachable only through a once-per-PR end-to-end
-        // gate run is a check that silently rots the day someone deletes the line.
-        //
-        // Presence only. Two committed .meta declaring the SAME guid is a different defect with its own pass
-        // (DuplicateCommittedGuid), and this deliberately does not duplicate it.
+        // The complaint when a committed artifact has no .meta beside it, or null when it does. Asserted
+        // before the copy, because afterward a fresh-GUID import is indistinguishable from a correct one.
         internal static string MissingCommittedMeta(string committedPath)
         {
             if (File.Exists(committedPath + ".meta")) return null;
@@ -201,24 +115,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 + "green on the very break it just caught.";
         }
 
-        // (ok, message). yamlPath: filesystem path to controller.yaml. builtControllerPath: filesystem
-        // path to a committed built .controller (asset-bound/module tiers), or null for a Pattern entry.
+        // yamlPath: filesystem path to a controller document. builtControllerPath: filesystem path to its
+        // committed built .controller, or null when the entry ships none.
         public static (bool ok, string msg) Check(string yamlPath, string builtControllerPath)
         {
             var scratch = "Assets/_fixpoint_" + Guid.NewGuid().ToString("N").Substring(0, 8);
             try
             {
-                // NO round-trip pass here (decode(compile(decode(compile(yaml)))) == decode(compile(yaml))).
-                // That theorem is about the COMPILER AND DECOMPILER being mutually inverse — a property of
-                // avatar-tools, not of any entry — and this package already owns it at the right door:
-                // FixpointOracle + FixpointAcceptanceTests (real-controller fixtures picked by construct
-                // census) + RoundtripStressTests (synthetic fixtures spanning the whole schema vocabulary).
-                // The acceptance suite states the remediation this gate cannot deliver: "A FIXPOINT BREAK IS
-                // A REAL BUG in decode / serialize / compile, fixed at the true site." Run here it failed an
-                // ENTRY's admission for a TOOL bug, blocking a vrc-patterns PR nobody in that repo could fix.
-                // The corpus argument for keeping it does not hold either: censused, the library exercises no
-                // construct the fixtures lack — no sub-machines, no onExit, no offset, no mute/solo, no
-                // fixedDuration, a narrower SMB set — it is larger in lines and a strict subset in vocabulary.
+                // No round-trip pass here: a compile/decompile inverse break is a tool bug no entry can
+                // fix, owned by FixpointOracle + FixpointAcceptanceTests + RoundtripStressTests.
                 var cFresh = CompileToTemp(yamlPath, scratch + "/a");
                 var yFresh = Decode(cFresh, out var r1);
                 if (yFresh == null) return (false, "fresh decompile refused: " + r1);
@@ -232,10 +137,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (yCommitted != yFresh) return (false, "committed built/ differs from compile(yaml) — regenerate built/");
                 }
 
-                // The MENU pass. Decompile-equality above cannot reach a menu: both sides of that comparison
-                // are decoded from a .controller, which stores no menu at all, so an emitted menu asset is
-                // dropped identically on both sides and drift between built/ and the yaml passes unseen.
-                // Compare the emitted menu against the committed one directly, or built/ silently rots.
+                // A .controller stores no menu, so the decompile-equality above cannot see one.
                 if (builtControllerPath != null)
                 {
                     var freshMenu = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(
@@ -254,10 +156,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // The PARAMS pass. Same blind spot as the menu's and a different cause: the params asset is
-                // emitted from flags (`scratch:`, VRC-reserved) the .controller does not carry, so both sides
-                // of decompile-equality agree while the emitted list changes underneath. Its own block rather
-                // than an extension of the menu's — that one has already bound `pass`/`presenceMsg`.
+                // The params asset is emitted from flags (`scratch:`, VRC-reserved) a .controller does not
+                // carry.
                 if (builtControllerPath != null)
                 {
                     var freshParams = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(
@@ -271,11 +171,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         var importedParams = ImportCommittedAsset<VRCExpressionParameters>(committedParamsPath, scratch + "/params");
                         if (importedParams == null) return (false, "committed params asset failed to import");
                         var pDiff = ParamsDiff(importedParams, freshParams, "params");
-                        // NOT "— regenerate built/". Regenerating is the fix for exactly one of the two causes,
-                        // and is actively wrong for the other: if the reserved-name set or a `scratch:` flag
-                        // changed, regenerating commits that change into the artifact and turns this gate green
-                        // on the regression it just caught. Same shape as ForeignProjectPathLines naming the
-                        // non-fix, and for the same reason — the obvious remedy here launders the defect.
                         if (pDiff != null)
                             return (false, "committed built/ params differ from compile(yaml): " + pDiff +
                                            " — regenerating built/ is the fix ONLY if the yaml's own parameter list " +
@@ -292,20 +187,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal enum MenuPass { Skip, Compare, Fail }
 
         // Which of the three things Check does about a menu, decided from presence alone: neither side has
-        // one (Skip), both do (Compare the trees), or exactly one does (Fail). Extracted from Check so the
-        // decision is reachable without an AssetDatabase — MenuDiff being correct is worth nothing if the
-        // caller can stop invoking it, and a comparator at full branch coverage cannot see that happen.
-        //
-        // The two refusal strings live HERE rather than at the old call site because the message is part of
-        // the decision: which of the two asymmetric cases fired is exactly what a test must be able to
-        // distinguish, and a helper returning a bare bool could not tell them apart at all.
-        //
-        // TAKES THE MENU, NOT A BOOL, and that is the whole reason for the signature. Two same-typed bool
-        // parameters would let a caller swap them: it compiles, it inverts which refusal fires — telling an
-        // author to "delete or restore" when the fix is "regenerate" — and no test here would catch it,
-        // because nothing in this file's suite invokes Check. Inline code had no argument order to get wrong,
-        // so extracting created that hazard; differing the types is what removes it, at compile time rather
-        // than by a test that does not exist.
+        // one (Skip), both do (Compare the trees), or exactly one does (Fail).
         internal static (MenuPass pass, string msg) MenuPresence(VRCExpressionsMenu freshMenu, bool committedExists)
         {
             bool freshEmits = freshMenu != null;
@@ -316,17 +198,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return (freshEmits ? MenuPass.Compare : MenuPass.Skip, null);
         }
 
-        // The menu asset CompileController writes beside a controller, by the same formula it uses:
-        // "<dir>/<name>_Menu.asset". Path arithmetic only — the file need not exist.
-        //
-        // This RE-DERIVES CompileController's formula (CompileController.cs: emitDir + "/" + name +
-        // "_Menu.asset") rather than sharing it — two copies of one convention, coupled by nothing, and this
-        // copy feeds both the File.Exists presence check and the LoadAssetAtPath above.
-        //
-        // What keeps the copies in step is the PAIR of suites, not this side alone: ControllerFixpointTests
-        // pins this formula against literals, and MenuEmitTests pins the compiler's against its own
-        // (MenuPath => OutDir + "/M_Fx_Menu.asset", asserted on the emitted asset's name). Drift in either
-        // goes red. Sharing one helper would make the second suite unnecessary; until then both are load-bearing.
+        // CompileController's "<dir>/<name>_Menu.asset" formula, re-derived rather than shared; path
+        // arithmetic only, so the file need not exist. Two suites keep the copies in step:
+        // ControllerFixpointTests pins this one and MenuEmitTests the compiler's, so drift in either goes
+        // red.
         internal static string MenuBeside(string controllerPath)
         {
             var dir = Path.GetDirectoryName(controllerPath) ?? "";
@@ -334,14 +209,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                        .Replace('\\', '/');
         }
 
-        // The params asset CompileController writes beside a controller, by the same formula it uses
-        // (CompileController.cs: emitDir + "/" + name + "_Parameters.asset"). Path arithmetic only — the
-        // file need not exist.
-        //
-        // A SECOND named helper rather than one AssetBeside(path, suffix) shared with MenuBeside, for the
-        // reason MenuBeside's header gives: each copy is kept in step with the compiler's own formula by a
-        // suite pinning it against literals. One suffix-taking helper would let a single wrong call site
-        // satisfy both pins at once.
+        // CompileController's "<dir>/<name>_Parameters.asset" formula, re-derived as MenuBeside's is. Not
+        // one AssetBeside(path, suffix) shared with MenuBeside: each formula keeps its own pin against
+        // literals.
         internal static string ParamsBeside(string controllerPath)
         {
             var dir = Path.GetDirectoryName(controllerPath) ?? "";
@@ -349,33 +219,22 @@ namespace Ryan6Vrc.AvatarTools.Editor
                        .Replace('\\', '/');
         }
 
-        // Structural comparison of two menu trees, recursing sub-menus. NOT a byte diff: the two assets
-        // carry different file GUIDs and sub-asset fileIDs by construction, which a byte compare would
-        // report as drift on every run. Returns null when equal, else the first difference, addressed by
-        // its page path so an offender in a nested page names the page it sits on.
+        // Structural comparison of two menu trees, recursing sub-menus: the two assets carry different file
+        // GUIDs and sub-asset fileIDs by construction, so a byte compare would report drift on every run.
+        // Returns null when equal, else the first difference, addressed by its page path.
         //
-        // It compares EVERY serialized field of a control — including `icon`, `style`, `labels`, and the
-        // page's own name. Not because unmodeled content in built/ is worth guarding (it is not; see the
-        // class header), but because there is no decoded intermediate to compare against for a menu, so
-        // the fields ARE the comparison. Where the controller pass compares two decoded documents, this
-        // one compares two loaded assets directly, and the cheapest complete way to do that is field by
-        // field. A committed field the schema cannot author is a file in the wrong directory rather than
-        // drift worth catching — CONVENTIONS.md routes such a menu to assets/ — but failing loud on it
-        // costs nothing here and tells its author their edit was about to be regenerated away.
+        // Every serialized field is compared because a menu has no decoded intermediate: the fields are the
+        // comparison.
         //
-        // ONE FIELD IS COMPARED BUT NOT COVERED: `icon`. It became authorable in the schema, and an entry's
-        // icon lives in that entry's assets/ — which the gate host does not load, so both sides resolve to
-        // null and any real difference between them is invisible here. Closing it means importing the entry
-        // dir before the compile pass, the way the prefab pass already does. Deliberately not done: it is a
-        // gate change, and no library entry authors an icon yet. `style` and `labels` are unreachable for a
-        // nearer reason — the schema cannot author either (animator-schema.md §menu) — so no test pins any
-        // of these three legs. `subParameters` is not among them: a radial's knob rides it, so it drifts.
+        // Three legs are compared but not covered, and no test pins them. `icon`: an entry's icon lives in
+        // that entry's assets/, which the gate host does not load, so both sides resolve to no asset;
+        // closing it means importing the entry dir before the compile pass, the way the prefab pass does.
+        // `style` and `labels`: the schema cannot author either (animator-schema.md §menu).
         //
-        // KNOWN DEFECT, inherited by ParamsDiff's defaultValue: `value` is compared with `!=`, so two NaNs
-        // report a difference between byte-identical menus that no "regenerate built/" can clear. A yaml can
-        // author `value: NaN` — nothing on AnimatorSchemaYaml's ToNumber path rejects a non-finite — and
-        // committing one makes that entry permanently unadmittable. The fix is !x.value.Equals(y.value)
-        // (RepathClips' FloatEq has the idiom), but it changes what the gate admits, so it is a gate call.
+        // Known defect, shared with ParamsDiff's defaultValue: `value` is compared with `!=`, so two NaNs
+        // report a difference no "regenerate built/" can clear, and nothing on AnimatorSchemaYaml's
+        // ToNumber path rejects `value: NaN`. The fix is !x.value.Equals(y.value) (RepathClips' FloatEq has
+        // the idiom), and it changes what the gate admits.
         internal static string MenuDiff(VRCExpressionsMenu a, VRCExpressionsMenu b, string where)
         {
             if (a.name != b.name)
@@ -396,17 +255,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return $"{w}: parameter '{x.parameter?.name}' vs '{y.parameter?.name}'";
                 if (x.value != y.value) return $"{w}: value {x.value} vs {y.value}";
                 if (x.style != y.style) return $"{w}: style {x.style} vs {y.style}";
-                // Both sides read null whenever the entry's own assets/ is absent from THIS host's
-                // AssetDatabase, which is the normal gate condition (the host never loads the package under
-                // test). So this comparison is largely vacuous at the gate and is not what keeps an authored
-                // `icon:` honest — see the class header.
                 if (AssetDatabase.GetAssetPath(x.icon) != AssetDatabase.GetAssetPath(y.icon))
                     return $"{w}: icon '{AssetDatabase.GetAssetPath(x.icon)}' vs '{AssetDatabase.GetAssetPath(y.icon)}' — regenerate built/";
 
                 var xl = x.labels ?? new VRCExpressionsMenu.Control.Label[0];
                 var yl = y.labels ?? new VRCExpressionsMenu.Control.Label[0];
                 if (xl.Length != yl.Length) return $"{w}: {xl.Length} label(s) vs {yl.Length}";
-                // Label is a STRUCT (unlike Control.Parameter, a class) — no null-conditional here.
                 for (int k = 0; k < xl.Length; k++)
                     if ((xl[k].name ?? "") != (yl[k].name ?? ""))
                         return $"{w}: label[{k}] '{xl[k].name}' vs '{yl[k].name}'";
@@ -429,13 +283,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        // The params equivalent of MenuPresence, and it takes the TYPED ASSET rather than a bool for the
-        // same reason — two same-typed bool parameters would let a caller swap them, compile, and invert
-        // which refusal fires, with nothing in this file's suite invoking Check to catch it.
-        //
-        // The Skip leg is NOT dead code: EmitVrcParameters early-returns when every declared param is
-        // scratch: or VRC-reserved, and the library exercises that today — anchor-prop/gesture.yaml declares
-        // one param, `scratch: true`, so anchor-prop ships two controllers and ONE params asset.
+        // The params equivalent of MenuPresence. The Skip leg is live: EmitVrcParameters early-returns when
+        // every declared param is scratch: or VRC-reserved (anchor-prop/gesture.yaml).
         internal static (MenuPass pass, string msg) ParamsPresence(VRCExpressionParameters fresh, bool committedExists)
         {
             bool freshEmits = fresh != null;
@@ -444,10 +293,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                        "those parameters were removed on purpose, or restore them if a `scratch:` " +
                                        "flag or the reserved-name set wrongly emptied the list");
             if (freshEmits && !committedExists)
-                // Conditional for the same reason the ParamsDiff call site is: a document that emitted nothing
-                // and now emits something is EITHER a yaml gaining its first non-scratch param (regenerate) OR
-                // a `scratch:` flipped off / a name leaving the reserved set (settle that first). Regenerating
-                // blind on the second commits the change as though it had been reviewed.
                 return (MenuPass.Fail, "yaml emits parameters but built/ has none — regenerating built/ is the " +
                                        "fix ONLY if the yaml's own parameter list changed on purpose. If a " +
                                        "`scratch:` flag or ControllerRules.VrcReservedParams changed, settle " +
@@ -455,24 +300,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return (freshEmits ? MenuPass.Compare : MenuPass.Skip, null);
         }
 
-        // Structural comparison of two emitted params assets. Flat — five scalars per entry, no recursion,
-        // no control-type variants — so unlike MenuDiff there is nothing to address by page path.
+        // Structural comparison of two emitted params assets, order-sensitive by index: EmitVrcParameters
+        // preserves the document's declaration order, so a reordering is real drift.
         //
-        // ON A COUNT MISMATCH THIS NAMES THE PARAMETERS, and that clause is the whole reason this pass beats
-        // a byte compare. The defect class it exists to catch (a `scratch:` flip, a reserved-name change)
-        // adds or drops exactly one entry, so it ALWAYS lands on the count leg and never reaches the loop
-        // below. MenuDiff returns a bare count there and is right to — a menu page holds a handful of
-        // controls — but object-sync's params asset holds 104, where two integers tell the reader nothing
-        // and send them back to the hand-diff this pass replaces. Names are capped like the prefab pass's
-        // offender list: five, then a count.
-        //
-        // DOES NOT COMPARE m_Name, and that is load-bearing rather than an oversight. MenuDiff compares the
-        // page name because CompileController syncs existingMenu.name on its reuse path; the params branch
-        // beside it never syncs m_Name (it assigns .parameters only), so a committed asset carrying a stale
-        // name from a rename would fail here for a difference the compiler will never reconcile.
-        //
-        // Order-sensitive by index, like MenuDiff: EmitVrcParameters preserves the document's declaration
-        // order, so order is a deterministic function of the yaml and a reordering is real drift.
+        // Does not compare m_Name, unlike MenuDiff's page name: CompileController's menu reuse path syncs
+        // the name and its params branch assigns .parameters only, so a stale name from a rename would fail
+        // here for a difference the compiler never reconciles.
         internal static string ParamsDiff(VRCExpressionParameters a, VRCExpressionParameters b, string where)
         {
             var ap = a.parameters ?? new VRCExpressionParameters.Parameter[0];
@@ -483,9 +316,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var bn = new HashSet<string>(bp.Select(p => p?.name ?? ""), StringComparer.Ordinal);
                 var dropped = ap.Select(p => p?.name ?? "").Where(n => !bn.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
                 var added = bp.Select(p => p?.name ?? "").Where(n => !an.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
-                // Equal name SETS at differing lengths means a duplicated name, and both lists come back empty
-                // — which would emit "dropped (none), added (none)" and name nothing at all, the byte-compare
-                // diagnostic this leg exists to beat. Say what actually differs instead.
                 if (dropped.Count == 0 && added.Count == 0)
                     return $"{where}: committed has {ap.Length} parameter(s), compiled has {bp.Length}" +
                            " — same names either side, so one of them declares a name twice";
@@ -498,26 +328,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var x = ap[i]; var y = bp[i];
                 if ((x?.name ?? "") != (y?.name ?? ""))
                     return $"{where}[{i}]: name '{x?.name}' vs '{y?.name}'";
-                // Two nulls at one index compare name-equal above and would then NRE on the field reads below,
-                // which Check's catch turns into a FAIL reading "Object reference not set" — an anonymous
-                // diagnostic, the one thing this pass must never emit. Unity's serializer does not hand back a
-                // null element, so the live route is a hand-edited committed asset.
                 if (x == null || y == null)
                     return $"{where}[{i}]: null parameter entry";
                 string w = $"{where} '{x.name}'";
                 if (x.valueType != y.valueType) return $"{w}: valueType {x.valueType} vs {y.valueType}";
                 if (x.saved != y.saved) return $"{w}: saved {x.saved} vs {y.saved}";
-                // Exact !=, deliberately no epsilon: both sides come from one emitter over one yaml literal,
-                // so any difference is an authored change and an epsilon would pass a real edit. Inherits
-                // MenuDiff's NaN behaviour — two NaN defaults report a difference no regenerate can fix.
                 if (x.defaultValue != y.defaultValue) return $"{w}: defaultValue {x.defaultValue} vs {y.defaultValue}";
                 if (x.networkSynced != y.networkSynced) return $"{w}: networkSynced {x.networkSynced} vs {y.networkSynced}";
             }
             return null;
         }
 
-        // "'A', 'B' and 2 more", or "(none)" — the count-leg name list, capped the way the prefab pass caps
-        // its offender lines so one pathological asset cannot swamp the gate's single-line FAIL.
         static string NameList(List<string> names)
         {
             if (names.Count == 0) return "(none)";
@@ -526,20 +347,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // Reads the `controller:` name off a schema document without compiling it. Null when the file
-        // carries no such key (e.g. a CompileClips document) — the caller decides what that means.
+        // carries no such key (e.g. a CompileClips document).
         //
-        // DIVERGES FROM AnimatorSchemaYaml, which binds all three lines below — so this can resolve a name
-        // the compiler never writes and then hunt a built/<name>.controller that cannot exist. Other rows
-        // diverge too (a '#' without leading space, a duplicate key, a bool-like scalar); they matter only
-        // to a GUID-consumer entry, since the name's only use is addressing built/ and a Pattern has none.
+        // Diverges from AnimatorSchemaYaml, which binds all three lines below, so this can resolve a name
+        // the compiler never writes and then hunt a built/<name>.controller that cannot exist. Other
+        // spellings diverge too (a '#' without leading space, a duplicate key, a bool-like scalar); they
+        // matter only to a GUID-consumer entry, since the name's only use is addressing built/.
         //   controller: "FX"   keeps the quotes, and '"' is illegal in a Windows path. RunGate feeds this to
         //                      Path.Combine OUTSIDE any try, so the run dies with no [gate] line at all.
         //   controller : FX    return null, so the document is SKIPped before the missing-built requirement
         //   "controller": FX   is ever applied — guidConsumer is computed earlier, but never consulted. The
         //                      orphan pass is the only remaining net, and it sees this only while the built
         //                      artifact still exists; if built/ is what went missing, nothing does.
-        // No committed entry spells any of them, so this is armed for the next one; changing it changes what
-        // the gate admits, which makes it a gate decision rather than a scanner tidy-up.
         internal static string ParseControllerName(string yamlPath)
         {
             foreach (var line in File.ReadLines(yamlPath))
@@ -554,25 +373,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        // Copy the WHOLE library into one scratch Assets/ dir as a UNIT — every file under every
-        // non-dot top-level dir, subpaths preserved — then import it and assert no prefab in it has a
-        // missing MonoBehaviour script or fails to load. Copying entire (not just *.prefab) is what lets a
-        // prefab's hard load dependencies travel with it: a Prefab Variant's base is a hard dep, and a base
-        // that lives in assets/ as a non-prefab (an .fbx the *.prefab glob would miss) makes the variant
-        // load as null otherwise — the head-proxy false-negative this dissolves. Copying every tree at
-        // once extends that to a variant whose base sits in a sibling tree, which no per-tree copy reaches.
-        // Library files live at an arbitrary --root path outside the project (the patterns package is not
-        // loaded here), so they must be brought into Assets/ to load — the same constraint
-        // ImportCommittedAsset solves for a single artifact. Only prefabs are asserted on; built/
-        // controllers, yaml, and README ride along for GUID resolution but are never load-checked (a
-        // dangling controller ref does not fail a prefab load, so widening the copy set masks nothing).
         // The anchor-seam class (CheckAvatar) over one entry prefab, instantiated so the scan walks a real
         // scene hierarchy rather than the asset. Gate tier is FAIL where CheckAvatar.Run is CLASSIFY for
-        // the same predicate, and the asymmetry is deliberate: an entry in THIS library is ours and
-        // CONVENTIONS.md forbids the shape outright, while a composed avatar carries mergeables that are not
-        // ours to rule on. An instantiation that yields nothing FAILS rather than reporting a clean prefab —
-        // an empty list is otherwise indistinguishable from "scanned, found nothing", which is exactly the
-        // silent no-op this pass exists to prevent.
+        // the same predicate: an entry in this library is ours and CONVENTIONS.md forbids the shape, while
+        // a composed avatar carries mergeables that are not ours to rule on. An instantiation that yields
+        // nothing FAILS, because an empty list reads as "scanned, found nothing".
         static System.Collections.Generic.List<string> ScanAnchorSeams(GameObject prefab)
         {
             var inst = PrefabUtility.InstantiatePrefab(prefab) as GameObject;
@@ -585,11 +390,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             finally { UnityEngine.Object.DestroyImmediate(inst); }
         }
 
-        // Every file worth importing: the non-dot top-level dirs, whole. A dot directory is skipped at
-        // EVERY depth, not just the top — .git alone would swamp the copy, and the deeper check is what
-        // keeps this copy's population identical to DuplicateCommittedGuid's, which skips a dot segment
-        // anywhere. That pass is the assertion making one shared scratch safe (class header), so a file
-        // it cannot see must not be a file this imports.
+        // Every file under the non-dot top-level dirs. A dot directory is skipped at every depth so that
+        // every file imported here is one DuplicateCommittedGuid reads: that pass is what makes one shared
+        // scratch safe.
         static System.Collections.Generic.IEnumerable<string> LibraryFiles(string root, string pattern)
         {
             var rootFull = Path.GetFullPath(root);
@@ -604,6 +407,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                 .Any(seg => seg.StartsWith(".", StringComparison.Ordinal)));
         }
 
+        // Copies the whole library into one scratch Assets/ dir as a unit, imports it, and checks every
+        // committed prefab. Copying every file rather than *.prefab lets hard load dependencies travel: a
+        // Prefab Variant whose base is an .fbx in assets/, or sits in a sibling tree, otherwise loads as
+        // null. One shared copy requires that no two committed .meta share a GUID, which
+        // DuplicateCommittedGuid asserts. Only prefabs are asserted on: the rest rides along for GUID
+        // resolution, and a dangling controller ref does not fail a prefab load, so the wider copy masks
+        // nothing.
         static (int failed, int total, string msg) CheckPrefabIntegrity(string root)
         {
             var scratch = "Assets/_prefab_" + Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -621,11 +431,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 AssetDatabase.Refresh();
 
                 int offenderCount = 0;
-                // Failing PREFABS, not failing defects: the caller subtracts this from a prefab total,
-                // and offenderCount counts defects (missing-script counts, one per seam), so 40 missing
-                // scripts in one prefab of 34 printed "-6/34 clean" on exactly the failure path a reader
-                // most needs to trust. offenderCount still drives the exit code, where a defect count is
-                // the right unit.
+                // failedPrefabs is what the caller reports and exits on; offenderCount counts defects.
                 var failedPrefabs = new System.Collections.Generic.HashSet<string>();
                 int total = 0;
                 var offenders = new System.Collections.Generic.List<string>();
@@ -635,13 +441,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var rel = Path.GetFullPath(src).Substring(rootFull.Length).TrimStart('/', '\\');
                     var label = rel.Replace('\\', '/');
 
-                    // Provenance, checked on the COMMITTED text and before the load, so a prefab that fails
-                    // to load still gets this verdict — the two defects are independent.
                     var foreign = ForeignProjectPathLines(File.ReadAllText(src));
                     if (foreign.Count > 0)
                     {
-                        // The per-line truncation bounds one line, not the join — six leaked lines was
-                        // the motivating case, and N of them still swamp a single-line FAIL. Cap the list.
                         var shown = foreign.Count > 5
                             ? string.Join("; ", foreign.GetRange(0, 5)) + $"; and {foreign.Count - 5} more"
                             : string.Join("; ", foreign);
@@ -655,8 +457,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                       "so the cached path names Packages/<this package>/…, then commit that line. " +
                                       "Blanking the path by hand is not a fix: the next inspection refills it from " +
                                       "whichever project does the inspecting");
-                        // One leaky prefab is one offender. Adding foreign.Count weighted it by line
-                        // count against every other defect here, which counts one per defect.
                         offenderCount += 1;
                         failedPrefabs.Add(label);
                     }
@@ -670,9 +470,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                     foreach (var seam in ScanAnchorSeams(go))
                     {
-                        // A scope line bounds what the scan could see; it is not a finding and must not fail
-                        // the entry, or stating a limit would be indistinguishable from breaking a rule.
-                        // It still has to reach the log, so a PASS is never read as wider than it is.
+                        // A scope line bounds what the scan could see: it logs as a warning and never fails
+                        // the entry.
                         if (seam.StartsWith(Ryan6Vrc.AgentTools.Editor.CheckAvatar.ScopePrefix, StringComparison.Ordinal))
                         {
                             Debug.LogWarning($"[gate] {label} {seam}");
@@ -683,12 +482,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         failedPrefabs.Add(label);
                     }
 
-                    // Same shape, same tiers as the seam scan above: a source slot past the constraint
-                    // list length solves in the editor and is ignored by the client, so an entry can pass
-                    // every play-mode check and ship dead. FAIL here where ReportGimmick only observes —
-                    // an entry in THIS library is ours to rule on, while a composed avatar carries vendor
-                    // mergeables that are not (the asymmetry the seam scan states above). Scanned on the
-                    // loaded asset, not an instance: the predicate reads serialized fields only.
+                    // A source slot past the constraint list length solves in the editor and is ignored by
+                    // the client. FAIL here where ReportGimmick only observes, for the reason
+                    // ScanAnchorSeams gives.
                     foreach (var slot in Ryan6Vrc.AgentTools.Editor.ReportGimmick.ScanConstraintLengths(go))
                     {
                         if (slot.StartsWith(Ryan6Vrc.AgentTools.Editor.CheckAvatar.ScopePrefix, StringComparison.Ordinal))
@@ -703,36 +499,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 return (failedPrefabs.Count, total, offenderCount == 0 ? "OK" : string.Join(", ", offenders));
             }
-            // total -1 rather than 0: the pass never enumerated, so there is no denominator to report
-            // and the caller prints the failure without a ratio.
             catch (Exception e) { return (1, -1, e.Message); }
             finally { CleanupScratch(scratch); }
         }
 
-        // Every line of a committed prefab's text carrying the substring `Assets/` — a path that can only have
-        // come from the project that last inspected the prefab, since a VPM package resolves its own content
-        // under `Packages/<name>/` and never under `Assets/`. The leak path is a cached asset reference:
-        // VRCFury stores one as `<guid>|<path>` and back-fills `path` on first inspection, so an Editor that
-        // mounts this library writable (a `file:` mount, not Library/PackageCache) writes its own project
-        // layout into tracked source, where a commit publishes it permanently.
-        //
-        // Judgment-free by construction: presence of the substring is the whole predicate — no allowlist, no
-        // knob, no attempt to tell a leaked path from an intentional one, because at gate tier there is no
-        // such thing as an intentional one. Measured over this library at the time of the change: 0 of 31
-        // committed prefabs contain `Assets/`, while 17 of 31 carry a `<guid>|<path>` pair that can acquire it
-        // — a zero false-positive surface against a live leak surface of 17.
-        //
-        // `Assets/` has to START a path segment. A bare substring test also fires on a project's own
-        // `MyAssets/` folder or a mesh named `ExtraAssets/…` — legal content, failed by a diagnostic
-        // that names the wrong defect entirely and sends the reader hunting a VRCFury back-fill that
-        // was never there. The lookbehind is the whole difference; the breadth is otherwise kept,
-        // because at gate tier there is no such thing as an intentional `Assets/` path.
+        // A committed prefab line naming `Assets/` at the start of a path segment: a VPM package resolves
+        // its own content under Packages/<name>/, so the path can only be a consuming project's. No
+        // allowlist, because at gate tier no such path is intentional. CheckPrefabIntegrity's offender
+        // message states the VRCFury back-fill behind it; the writer is an Editor mounting this library
+        // writable (a `file:` mount, not Library/PackageCache).
         private static readonly System.Text.RegularExpressions.Regex ForeignProjectPath =
             new System.Text.RegularExpressions.Regex(@"(?<![A-Za-z0-9_])Assets/",
                 System.Text.RegularExpressions.RegexOptions.Compiled);
 
-        // Returns `line <n>: <text>` handles (1-based, matching an editor's gutter), each truncated so one
-        // pathological line cannot swamp the gate's single-line FAIL message.
         internal static System.Collections.Generic.List<string> ForeignProjectPathLines(string prefabText)
         {
             var hits = new System.Collections.Generic.List<string>();
@@ -749,18 +528,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // Tier is derived from files present; a GUID-consumer shape (a prefab, a non-empty assets/, or a
-        // built/ dir) MUST ship a built .controller per document. Without this, a Module/Asset-bound entry
-        // whose built controller went missing would silently pass as a Pattern.
+        // built/ dir) MUST ship a built .controller per document, or a Module whose built controller went
+        // missing would pass as a Pattern.
         //
-        // Throws DirectoryNotFoundException on an entryDir that does not exist — RunGate only ever passes a
-        // directory it just enumerated, so the guard stays at that caller rather than being swallowed here.
-        //
-        // TWO KNOWN GAPS, neither live against the library today. assets/ is scanned TOP-LEVEL ONLY while
-        // CheckPrefabIntegrity walks the same tree with AllDirectories, so an entry shipping only
-        // assets/<subdir>/ reads as a Pattern and loses the built-controller requirement — and closing it
-        // must not widen the *.prefab glob beside it, which IsGuidConsumer_PrefabOneLevelDown_IsNotSeen pins
-        // because the recursion in EnumerateEntries rests on it. And a `built` that is a FILE switches the
-        // whole built/ regime off with no diagnostic.
+        // Two known gaps. assets/ is scanned top-level only while CheckPrefabIntegrity walks the same tree
+        // with AllDirectories, so an entry shipping only assets/<subdir>/ reads as a Pattern and loses the
+        // built-controller requirement. Closing it must not widen the *.prefab glob beside it, which
+        // IsGuidConsumer_PrefabOneLevelDown_IsNotSeen pins: a parent must not read as a GUID-consumer off a
+        // nested entry's prefab. And a `built` that is a file switches the whole built/ regime off with no
+        // diagnostic.
         internal static bool IsGuidConsumer(string entryDir)
         {
             var builtDir = Path.Combine(entryDir, "built");
@@ -771,13 +547,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         .Any(f => !f.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)));
         }
 
-        // Committed built controllers no yaml document claims. `claimed` arrives as a plain sequence and the
-        // ORDINAL comparer is applied here, not at the caller: a test that supplied its own pre-built
-        // HashSet would be asserting against its own comparer choice and would stay green if this one
-        // changed. Case matters — `Fx` does not claim `FX.controller`.
-        //
-        // Both orphan helpers throw DirectoryNotFoundException on a missing builtDir; RunGate keeps its
-        // Directory.Exists guard, since "no built/ at all" is a legal Pattern shape and not drift.
+        // Committed built controllers no yaml document claims. Case matters: `Fx` does not claim
+        // `FX.controller`.
         internal static IEnumerable<string> OrphanControllers(string builtDir, IEnumerable<string> claimed)
         {
             var set = new HashSet<string>(claimed, StringComparer.Ordinal);
@@ -785,8 +556,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 .Select(Path.GetFileNameWithoutExtension).Where(n => !set.Contains(n));
         }
 
-        // Same rule for a committed menu: it is named off its controller ("<name>_Menu.asset"), so one whose
-        // controller no document claims is the same drift.
         internal static IEnumerable<string> OrphanMenus(string builtDir, IEnumerable<string> claimed)
         {
             var set = new HashSet<string>(claimed, StringComparer.Ordinal);
@@ -795,13 +564,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 .Where(n => !set.Contains(n.Substring(0, n.Length - "_Menu".Length)));
         }
 
-        // Same rule for a committed params asset, named off its controller the way a menu is. Not subsumed by
-        // OrphanControllers, which globs *.controller only: delete a document and its built controller but
-        // leave the params asset, and this is the one pass that sees it.
-        //
-        // An entry legitimately ships fewer params assets than controllers (anchor-prop: two controllers, one
-        // asset — its Gesture document declares only a scratch: param), so this asks the one-way question, an
-        // asset whose controller nothing claims, and never that every claimed controller has one.
+        // One-way: an entry legitimately ships fewer params assets than controllers (ParamsPresence's Skip
+        // leg), so this never asks that every claimed controller has one.
         internal static IEnumerable<string> OrphanParams(string builtDir, IEnumerable<string> claimed)
         {
             var set = new HashSet<string>(claimed, StringComparer.Ordinal);
@@ -811,14 +575,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // Every entry under root, at any depth, ordinally sorted: a non-dot directory holding a
-        // controller.yaml. The class header owns why the recursion is full and why the two prunes exist;
-        // what belongs here is that the prunes SKIP AND DO NOT DESCEND, which is the whole difference from
-        // a one-level filter applied to SearchOption.AllDirectories.
-        //
-        // Sorting the absolute paths ordinally is the same order the flat enumeration produced for the
-        // top-level set, so the log's entry order is unchanged for every entry that was already gated.
-        // Nothing downstream depends on it — each entry's Check opens and cleans its own scratch in a
-        // finally — but a stable order is what makes two gate logs diffable.
+        // controller.yaml.
         internal static List<string> EnumerateEntries(string root)
         {
             var found = new List<string>();
@@ -827,31 +584,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return found;
         }
 
-        // CASE-INSENSITIVE deliberately, and the reason is a WINDOWS fact rather than a general one: there
-        // IsGuidConsumer's Directory.Exists probe is case-insensitive, so an ordinal compare here would let a
-        // mis-cased Assets/ read as reserved for tier derivation while this walk descended into it. On a
-        // case-sensitive filesystem the two are genuinely different directories and that argument does not
-        // hold — the compare stays case-insensitive there anyway, because the gate runs on Windows (gate.ps1
-        // boots Unity.exe) and one rule that is right where it runs beats two that diverge by host.
+        // Case-insensitive because IsGuidConsumer's Directory.Exists is on Windows, where the gate runs: an
+        // ordinal compare would let a mis-cased Assets/ read as reserved for tier derivation while this
+        // walk descended into it.
         static bool IsReserved(string name) =>
             string.Equals(name, "built", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(name, "assets", StringComparison.OrdinalIgnoreCase);
 
-        // An entry is descended INTO as well as recorded — that is the point, since object-sync/y/ lives
-        // inside the gated object-sync/. A walk that stopped at the first entry it found would pass every
-        // other test in this file and still miss the shape the recursion exists for.
+        // Prunes skip and do not descend. A dot-named directory: a leaf-name filter over
+        // SearchOption.AllDirectories looks equivalent and walks the whole of .git, since .git/refs has the
+        // leaf name refs. built/ and assets/: both are reserved inside an entry, so a controller.yaml under
+        // either is content and gating it would invent a phantom Pattern.
         //
-        // NO REPARSE-POINT GUARD, deliberately — this recursion cannot run away. Windows refuses to resolve
-        // any path past 63 reparse traversals (ERROR_CANT_RESOLVE_FILENAME), so a junction or symlink aimed
-        // at one of its own ancestors bounds the walk at 63x the cycle's directory count, capped again by
-        // the path-length limit. GetDirectories then throws an ordinary IOException (HResult 0x80070781),
-        // which RunGate's walk guard catches into a [gate] entry walk failed line and exit 2. There is no
-        // StackOverflowException here to escape that catch. The bound is enforced by the filesystem call
-        // itself, below any managed runtime, so it does not turn on which .NET the Editor ships.
-        //
-        // Skipping reparse points would therefore guard nothing — the ReparsePoint attribute bit IS set, so
-        // the one-line skip works, it just has no failure to prevent — while newly hiding any entry someone
-        // mounted behind a junction.
+        // No reparse-point guard: Windows refuses to resolve a path past 63 reparse traversals, so a
+        // junction aimed at its own ancestor ends in an IOException that RunGate's walk guard turns into
+        // exit 2, and a skip would only hide an entry mounted behind a junction.
         static void Descend(string dir, List<string> found)
         {
             foreach (var child in Directory.GetDirectories(dir))
@@ -864,18 +611,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // An entry's log address: its path RELATIVE TO ROOT, forward-slashed. Not the leaf name, and that is
-        // the whole reason this exists rather than a Path.GetFileName call at the caller. Two live entries
-        // are leaf-named object-sync (the top-level one and compositions/object-sync-demo/object-sync/), and
-        // FOUR entries ship a controller named ObjectSync_Fx — because, per animator.md, "the emitted
-        // .controller takes its name from the DOCUMENT, not the outDir leaf". RunGate composes its per-doc
-        // line as $"{entry}/{filename}", so a leaf-named label emits two byte-identical FAIL lines for two
-        // different entries. The class header calls the gate's failure message its product; an offender
-        // nobody can address is that product failing in exactly the defect class this walk exists to catch.
-        //
-        // FRAME: an ENTRY label is root-relative, and so are the offender labels inside a prefab-integrity
-        // failure (CheckPrefabIntegrity's own `rel`) — one frame for both, since the prefab pass copies
-        // the library whole rather than one entry at a time.
+        // An entry's log address: its path relative to root, forward-slashed. Not the leaf name, because
+        // entries share leaf names (several are named object-sync) and RunGate composes its per-doc line as
+        // $"{entry}/{filename}", so leaf labels would emit byte-identical FAIL lines for different entries.
         internal static string EntryLabel(string root, string entryDir)
         {
             var r = Path.GetFullPath(root).Replace('\\', '/').TrimEnd('/');
@@ -883,8 +621,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return e.StartsWith(r + "/", StringComparison.Ordinal) ? e.Substring(r.Length + 1) : Path.GetFileName(e);
         }
 
-        // The `guid:` line of a .meta, or null where there is none. Column-0 match, so a `guid:` nested inside
-        // an importer block (a reference to some other asset) is not mistaken for this file's own.
+        // Column-0 match, so a `guid:` nested inside an importer block (a reference to some other asset) is
+        // not mistaken for this file's own.
         static string CommittedGuid(string metaPath)
         {
             foreach (var line in File.ReadLines(metaPath))
@@ -893,33 +631,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        // Two committed .meta files ANYWHERE IN THE LIBRARY declaring the same GUID — the collision
-        // ImportCommittedAsset's header names, arriving by a second route: the prefab pass copies every tree
-        // into ONE scratch, so every .meta in the library imports alongside every other, and Unity resolves a
-        // duplicate by rewriting one .meta and leaving refs to it stale. In the gate that surfaces as a null
-        // asset load — an anonymous failure in the pass with the least legible diagnostics — and the rewrite
-        // hits the scratch copy, not the checkout, so nothing on disk tells the author afterwards. The scope
-        // widened from one tree to the root when that copy stopped being per-tree: a cross-tree collision was
-        // unreachable while each tree imported alone, and is a live import hazard now.
+        // Two committed .meta declaring one GUID, anywhere in the library. CheckPrefabIntegrity imports
+        // them all into one scratch, where Unity resolves a duplicate by rewriting one .meta and leaving
+        // refs to it stale: a null asset load, with the rewrite on the scratch copy so nothing on disk
+        // tells the author. A pass of its own because a collision between prefab-free entries fails no
+        // prefab load here yet reaches a consuming project intact.
         //
-        // A PASS OF ITS OWN, not a step inside CheckPrefabIntegrity, and the difference is coverage rather
-        // than tidiness: that pass imports what it can load, while this one reads every committed .meta in
-        // the library, prefab-free entries included. Two such entries could ship colliding GUIDs, be
-        // invisible to any import here, and still reach a consuming project — which DOES mount this
-        // library as a package — with the collision intact. The gate is the only thing standing between a
-        // copied entry and that, so it may not be conditional on a prefab.
-        //
-        // The live route is the obvious way to make a variant: copy an entry's directory, edit its
-        // generator's CONFIG, regenerate — and leave the committed .meta GUIDs untouched. Sibling-to-sibling
-        // is as likely as parent-to-child (object-sync/y_double/ reads as a copy of object-sync/y/), and
-        // cross-tree is as likely as either, so this asks the library-wide question.
-        //
-        // Dot-directories are skipped, matching EnumerateEntries and, more to the point, Unity: it never
-        // imports a hidden folder, so a stashed .built-backup/ cannot produce the collision this models, and
-        // failing on it would be a diagnostic about a hazard that does not exist.
-        //
-        // OrdinalIgnoreCase because Unity parses the field as 128-bit hex: differently-cased hex is one GUID
-        // to the importer, and only a hand-edited .meta can produce it.
+        // Dot-directories are skipped because Unity never imports a hidden folder, so a stashed
+        // .built-backup/ cannot collide. OrdinalIgnoreCase because Unity parses the field as 128-bit hex.
         internal static string DuplicateCommittedGuid(string root)
         {
             var rootFull = Path.GetFullPath(root);
@@ -940,17 +659,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        // A committed model .meta whose importer the VRChat SDK panel refuses an upload over. The panel walks
-        // every mesh on the avatar, inactive included, and errors on two ModelImporter settings: Read/Write off,
-        // and blendshape normals set to Calculate without the legacy flag. A library mesh that fails either
-        // fails the panel on every avatar carrying the entry. No consuming venue can fix that, because a VPM
-        // resolve rewrites Packages/, and `ConformImportSettings` names such an offender without writing it. So
-        // the fix belongs in this .meta, and the gate is the only place that can catch it. It reads the text,
-        // for the same reason DuplicateCommittedGuid does: it covers every committed model, prefab or not.
+        // A committed model .meta whose importer the VRChat SDK panel refuses an upload over. The panel
+        // walks every mesh on the avatar, inactive included, and errors on two ModelImporter settings:
+        // Read/Write off, and blendshape normals set to Calculate without the legacy flag. No consuming
+        // venue can fix that, because a VPM resolve rewrites Packages/ and `ConformImportSettings` names
+        // such an offender without writing it, so the fix belongs in this .meta.
         //
-        // Serialized values: `blendShapeNormalImportMode` 0 = Import, 1 = Calculate, 2 = None. Import and None
-        // pass whatever the legacy flag says. A missing field is an offender, because an unreadable setting
-        // cannot be shown to pass. Returns null for a .meta that is not a ModelImporter.
+        // Serialized `blendShapeNormalImportMode`: 0 = Import, 1 = Calculate, 2 = None.
         internal static string ModelImporterOffense(IEnumerable<string> metaLines)
         {
             bool model = false;
@@ -975,8 +690,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return why.Count == 0 ? null : string.Join("; ", why);
         }
 
-        // Every committed ModelImporter .meta in the library, dot-directories skipped (DuplicateCommittedGuid's
-        // walk and reason). One offender line per model, or null when none fails.
+        // One offender line per model. Dot-directories are skipped for DuplicateCommittedGuid's reason.
         internal static string ModelImporterOffenders(string root)
         {
             var rootFull = Path.GetFullPath(root);
@@ -995,24 +709,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                    ".meta (reimport through an Editor that mounts this checkout, then commit what it wrote)";
         }
 
-        // The gate's whole contract with gate.ps1: 0 iff nothing failed in either pass. Every FAIL this tool
-        // logs is worthless if this expression says 0 anyway, and it is the one line where a mistake makes a
-        // broken gate look like a passing one, so it is lifted out of RunGate for the same reason as the rest.
+        // The gate's contract with gate.ps1: 0 iff nothing failed in any pass (the third and fourth fold
+        // into prefabFailed).
         internal static int GateExit(int failedEntries, int prefabFailed) =>
             (failedEntries == 0 && prefabFailed == 0) ? 0 : 1;
 
-        // -executeMethod entrypoint. Args after `--`: --root <dir>. An entry is a non-dot folder under
-        // --root AT ANY DEPTH containing controller.yaml — EnumerateEntries owns the walk and its two
-        // prunes; EVERY top-level *.yaml in it with a `controller:` key is gated (a multi-controller entry
-        // ships an FX + Gesture pair), each against built/<name>.controller. A built controller no document
-        // claims is drift and fails the entry. Exits 0 iff all pass, 2 on a refusal — including a root that
-        // yields NO entry at all, which would otherwise report 0/0 and exit 0, a gate passing on nothing.
-        // A second pass copies every non-dot top-level dir into ONE scratch and asserts that every
-        // committed prefab in it — controller.yaml or not, at any depth — imports with zero missing
-        // MonoBehaviour scripts, carries no anchor seam (CheckAvatar.ScanAnchorSeams), and names no
-        // consuming project's Assets/ path (ForeignProjectPathLines). One copy rather than one per tree
-        // is what lets a Prefab Variant resolve a base in a sibling tree; the class header owns why that
-        // costs no coverage.
+        // -executeMethod entrypoint. Args: --root <dir>. In each entry (EnumerateEntries), every top-level
+        // *.yaml with a `controller:` key is gated against built/<name>.controller; a multi-controller
+        // entry ships an FX + Gesture pair. Exits 0 iff all pass, 1 on a FAIL, 2 on a refusal.
         public static void RunGate()
         {
             string root = null;
@@ -1023,10 +727,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             SweepScratch(); // self-heal any scratch a crashed prior run stranded, before we start
 
-            // The walk is guarded where the old flat enumeration did not need to be. That one could only
-            // throw on root itself, two lines after root was checked to exist; a recursive walk can hit an
-            // unreadable directory or an over-long path anywhere beneath it, and an escaping exception would
-            // leave RunGate with no [gate] line at all and an exit code that is not this tool's 2.
             List<string> entries;
             try { entries = EnumerateEntries(root); }
             catch (Exception e)
@@ -1034,9 +734,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Debug.LogError("[gate] entry walk failed under " + root + ": " + e.Message);
                 EditorApplication.Exit(2); return;
             }
-            // A root holding no entry is a mis-pointed --root, not a clean library. Without this it reports
-            // "0/0 entries passed" and exits 0 — a gate whose coverage is nothing, reporting success, which
-            // is the defect class this file exists to prevent rather than an edge case to tolerate.
+            // A root holding no entry is a mis-pointed --root, not a clean library.
             if (entries.Count == 0)
             {
                 Debug.LogError("[gate] no entry (a non-dot dir holding controller.yaml, at any depth) found " +
@@ -1060,7 +758,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var name = ParseControllerName(yaml);
                     if (name == null)
                     {
-                        // Not a controller document (a clips file has its own compile path) — named, not silent.
                         Debug.Log($"[gate] SKIP {doc}: no controller: key (not a controller document)");
                         continue;
                     }
@@ -1079,8 +776,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (!ok) entryFailed = true;
                 }
 
-                // A committed controller no document claims is drift (a renamed/deleted yaml left its
-                // built form behind) — the silent-skip this multi-yaml gate exists to prevent.
+                // Committed built artifacts no document claims are drift: a renamed or deleted yaml left
+                // them behind, and Check never ran for them.
                 if (Directory.Exists(builtDir))
                     foreach (var orphan in OrphanControllers(builtDir, claimed))
                     {
@@ -1088,9 +785,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         entryFailed = true;
                     }
 
-                // Same rule for a committed menu: it is named off its controller, so one whose controller
-                // no document claims is the same drift. Check() catches a menu the yaml stopped emitting;
-                // this catches the case where the whole document went away and took the check with it.
                 if (Directory.Exists(builtDir))
                     foreach (var orphan in OrphanMenus(builtDir, claimed))
                     {
@@ -1098,7 +792,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         entryFailed = true;
                     }
 
-                // And for a committed params asset, same rule and same reason.
                 if (Directory.Exists(builtDir))
                     foreach (var orphan in OrphanParams(builtDir, claimed))
                     {
@@ -1110,17 +803,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             Debug.Log($"[gate] {entries.Count - failedEntries}/{entries.Count} entries passed ({checkedDocs} documents)");
 
-            // Second pass: every committed prefab in the library must import with zero missing scripts.
-            // Structural Modules (a prefab, no controller.yaml) are invisible to the loop above; this
-            // pass covers them and every other entry's prefab alike — a vanished VRCFury/MA script ref
-            // is the regression it catches. It also asserts provenance on the committed text
-            // (ForeignProjectPathLines). Integrity and provenance only; behaviour still rests on the README.
+            // Second pass: every committed prefab in the library, including the Structural Modules (a
+            // prefab, no controller.yaml) the loop above never sees.
             var (prefabFailed, prefabTotal, prefabMsg) = CheckPrefabIntegrity(root);
             if (prefabFailed > 0) Debug.Log($"[gate] prefab-integrity FAIL: {prefabMsg}");
-            // PREFABS, not entries and not trees: the copy is one unit now, so a per-tree verdict no longer
-            // exists to report. The denominator differs from the entries line above and always did — that
-            // line counts entries at any depth, this one counts committed prefabs — so it says which. A
-            // negative total means the pass threw before enumerating, so there is no ratio to report.
             if (prefabTotal < 0)
             {
                 Debug.Log("[gate] prefab-integrity did not enumerate: the pass threw before counting " +
@@ -1131,16 +817,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Debug.Log($"[gate] prefab-integrity {prefabTotal - prefabFailed}/{prefabTotal} committed prefabs clean");
             }
 
-            // Third pass: no two committed .meta ANYWHERE in the library may declare the same GUID. Over the
-            // whole root, not tree by tree: the prefab pass now imports every tree into ONE scratch, so a
-            // cross-tree collision is a real import hazard rather than a hypothetical, and this is the
-            // assertion that makes deleting the per-tree isolation safe. Counted into prefabFailed so the
-            // exit expression needs no new term.
+            // Third pass. Counted into prefabFailed so the exit expression needs no new term.
             var dup = DuplicateCommittedGuid(root);
             if (dup != null) { Debug.Log($"[gate] duplicate-guid FAIL: {dup}"); prefabFailed++; }
 
-            // Fourth pass: every committed model imports with the settings the SDK panel requires
-            // (ModelImporterOffense). Folded into prefabFailed for the same reason as the third pass.
+            // Fourth pass, folded into prefabFailed the same way.
             var models = ModelImporterOffenders(root);
             if (models != null) { Debug.Log($"[gate] model-importer FAIL: {models}"); prefabFailed++; }
 

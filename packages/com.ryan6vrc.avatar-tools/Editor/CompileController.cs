@@ -13,35 +13,12 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// The animator-write-substrate DOOR: compile an animator-schema <c>.yaml</c> source into a real
-    /// <see cref="AnimatorController"/> asset. Ties the verified pipeline together —
-    /// parse (<see cref="AnimatorSchemaYaml"/>) → validate (<see cref="SchemaValidation"/>) →
-    /// emit (<see cref="ControllerEmit"/>) → graph lint (<see cref="ControllerRules"/>) → atomic persist →
-    /// RunLog. Pure PASS/FAIL contract: a real compile returns the one-line summary with the RunLog path
-    /// in-band (<c>… =&gt; OK | log=&lt;path&gt;</c>); a whatIf preview leaves NOTHING on disk and returns
-    /// <c>… =&gt; OK (whatIf) | log=&lt;path&gt;</c>; any refusal is
-    /// <c>[CompileController] &lt;source-leaf&gt;: &lt;reason / named offenders&gt; =&gt; FAIL | log=&lt;path&gt;</c>
-    /// — a RunLog artifact records the failure, and no compile output is written.
-    ///
-    /// <para>ATOMICITY: nothing reaches <c>outDir</c> unless parse + validate + emit + graph-lint all pass. Parse
-    /// or validate failure writes no asset (emission never runs). A whatIf run emits to a scratch temp, lints
-    /// there, then deletes it. A recompile OVER an existing controller resets it in place for GUID stability
-    /// (see <see cref="ControllerEmit"/>), which strips it before the fallible emit steps — so an overwrite is
-    /// first PROVEN by a full emit+lint into a throwaway temp (see <c>ProofCompile</c>); the prior controller is
-    /// touched only after that proof passes clean. A failing overwrite (bad emit or lint) therefore leaves the
-    /// prior good controller untouched. A FRESH compile has nothing to protect — its partial is just deleted.</para>
-    ///
-    /// <para>IDEMPOTENCE: recompiling the same source to the same <c>outDir</c> reuses the controller at
-    /// <c>&lt;outDir&gt;/&lt;name&gt;.controller</c> and keeps its GUID (ControllerEmit resets sub-assets in
-    /// place rather than delete + recreate). Emission is a pure function of the document, so a layer/clip
-    /// absent from a second source does not survive.</para>
-    ///
-    /// <para>The RunLog body carries the compile-only advisories — they never fail the compile: the
-    /// per-layer FRAME-LATENCY of the longest conditional-transition chain (one transition per frame — the
-    /// cost of a multi-hop codec), unresolved motion refs, unadjudicated menu icons, and OSC-unsafe parameter
-    /// names. Parameter-write defects are not advisories — a clip curve on a non-Float parameter and a driver
-    /// op on a clip-bound one are <c>ControllerRules</c> error-tier rules, so they fail the compile at the
-    /// graph-lint stage above (runtime.md §Animator has the mechanism).</para>
+    /// Compiles an animator-schema <c>.yaml</c> into an <see cref="AnimatorController"/> plus its expression-parameter
+    /// and menu side assets: parse, validate, emit, graph lint, persist. Verdicts are <c>=&gt; OK</c> and
+    /// <c>=&gt; CLASSIFY</c> (an unresolved motion ref was dropped), either with <c>(whatIf)</c>, and <c>=&gt; FAIL</c>
+    /// naming the source leaf, each ending <c>| log=&lt;path&gt;</c>. Advisories go in the RunLog body and never fail
+    /// the compile.
+    /// Contract: docs/animator.md §The compile/decompile substrate. Schema: docs/animator-schema.md.
     /// </summary>
     [AgentTool]
     public static class CompileController
@@ -52,18 +29,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// return — the outDir is never touched. Returns the one-line summary (see class docs).</summary>
         public static string Run(string sourcePath, string outDir, bool whatIf = false)
         {
-            // One refusal label per run: the source file's leaf (pre-parse stages don't know the
-            // controller name; on failure the source is the thing to name).
             string failLabel = SafeLeaf(sourcePath);
 
-            // ── 1. Read the source file ──────────────────────────────────────────────────────────────
             if (string.IsNullOrEmpty(sourcePath)) return Fail(failLabel, sourcePath, "sourcePath is empty");
             if (!File.Exists(sourcePath)) return Fail(failLabel, sourcePath, "source file not found: " + sourcePath);
             string text;
             try { text = File.ReadAllText(sourcePath); }
             catch (Exception e) { return Fail(failLabel, sourcePath, "could not read source '" + sourcePath + "': " + e.Message); }
 
-            // ── 2. Parse (throws SchemaException on malformed text — no asset written) ────────────────
             AnimDocument doc;
             try { doc = AnimatorSchemaYaml.Parse(text, sourcePath); }
             catch (SchemaException se) { return Fail(failLabel, sourcePath, "parse: " + se.Message); }
@@ -72,7 +45,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (string.IsNullOrEmpty(doc.ControllerName)) return Fail(failLabel, sourcePath, "document declares no controller name");
             if (string.IsNullOrEmpty(outDir)) return Fail(failLabel, sourcePath, "outDir is empty");
 
-            // ── 3. Document validation (named offenders → FAIL, nothing written) ─────────────────────
             var vErrors = SchemaValidation.Validate(doc);
             if (vErrors.Count > 0)
                 return Fail(failLabel, sourcePath, "validation failed (" + vErrors.Count + "): " + string.Join("  ", vErrors));
@@ -82,20 +54,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string finalPath = cleanOut + "/" + name + ".controller";
             bool controllerPreExisted = !whatIf && AssetDatabase.LoadAssetAtPath<AnimatorController>(finalPath) != null;
 
-            // ── 4a. PROOF COMPILE — the atomicity guarantee for an overwrite ─────────────────────────
-            // ControllerEmit strips a prior controller IN PLACE (for GUID stability), and several emit steps
-            // (transition targets, behaviour kinds, clip bindings) throw AFTER that strip — so a mid-emit or
-            // lint failure on a real overwrite would leave the prior good controller stripped/empty. Before
-            // touching it, run the WHOLE emit+lint pipeline against a throwaway temp; only if it passes clean
-            // do we compile for real. A fresh compile needs no proof (a partial is just deleted); whatIf already
-            // emits to a temp. Emission is a pure function of (document, AssetDatabase), so a proof that passes
-            // guarantees the real in-place emit — same inputs — cannot throw or fail lint either.
+            // Proof compile. ControllerEmit strips a prior controller in place, and several emit steps (transition
+            // targets, behaviour kinds, clip bindings) throw after that strip, so a mid-emit or lint failure would
+            // leave it stripped. Emission is a pure function of (document, AssetDatabase), so a proof that passes in a
+            // throwaway temp means the real emit over the same inputs cannot throw or fail lint either.
             if (controllerPreExisted)
             {
                 string proofDir = ScratchTemp();
                 string proofFail = ProofCompile(doc, proofDir, text);
                 AssetDatabase.DeleteAsset(proofDir);
-                if (proofFail != null) return Fail(failLabel, sourcePath, proofFail); // prior controller left untouched
+                if (proofFail != null) return Fail(failLabel, sourcePath, proofFail);
             }
 
             string tempFolder = whatIf ? ScratchTemp() : null;
@@ -103,15 +71,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string paramsPath = emitDir + "/" + name + "_Parameters.asset";
             string menuPath = emitDir + "/" + name + "_Menu.asset";
 
-            // Folders under outDir that this compile will create (emit's EnsureFolder makes them). Captured
-            // BEFORE emit so a failed FRESH compile can roll them back — the "nothing written on failure"
-            // contract covers folders too. Only ever these provably-new folders, and only when empty.
+            // Captured before emit's EnsureFolder creates them, so a failed fresh compile can roll them back.
             List<string> newFolders = whatIf ? null : NewFolders(cleanOut);
 
-            // ── Out-of-band drift warning (real compile only, when an existing compiled asset is present) ─
             if (!whatIf) WarnIfOutOfBand(finalPath, text);
 
-            // ── 4b. Emit into the target (real outDir, or the whatIf temp) ────────────────────────────
             ControllerEmit.EmitResult built;
             try { ControllerEmit.Build(doc, emitDir, text, out built); }
             catch (ControllerEmit.EmitException ee) { CleanupAfterEmit(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders); return Fail(failLabel, sourcePath, "emit: " + ee.Message); }
@@ -121,28 +85,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // UnityEngine.Object compares equal to null, so a later `built.Menu != null` would read false.
             bool emittedMenu = built.Menu != null;
 
-            // ── 5. Pre-emission graph lint (roots empty ⇒ broken-binding rule skipped: no scene) ─────
-            // BEFORE the side assets are written. A FRESH compile over a folder that already holds a params
-            // or menu asset skips ProofCompile (there is no prior controller to protect), so persisting first
-            // would let a lint failure delete or overwrite a pre-existing side asset it cannot restore —
-            // CleanupAfterLint can only remove what this run created. Nothing written on failure means nothing.
+            // Lint before the side assets persist. A fresh compile over a folder already holding a params or menu
+            // asset skips ProofCompile, and CleanupAfterLint removes only what this run created, so persisting first
+            // would let a lint failure delete or overwrite an asset it cannot restore.
             var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
             if (lint.MissingMotion > 0 || lint.UndeclaredParam > 0 || lint.NonFloatBlendParam > 0 || lint.NonFloatParamCurve > 0 || lint.DriverOnAnimatedParam > 0 || lint.EntryShadow > 0 || lint.DeadTransition > 0)
             {
                 CleanupAfterLint(whatIf, tempFolder, finalPath, controllerPreExisted, newFolders);
-                // The lint deliberately runs BEFORE any side asset is persisted (above), which is exactly what
-                // leaves them in memory and unowned on this exit.
                 built?.DestroyUnpersisted();
                 string offenders = string.Join("  ", lint.Errors.Select(o => o.Kind + " @ " + o.Where + ": " + o.Detail));
                 return Fail(failLabel, sourcePath, "post-emit graph lint (" + lint.Errors.Count + "): " + offenders);
             }
 
-            // Persist the VRCExpressionParameters side-asset (ControllerEmit builds it in-memory only). REUSE an
-            // existing asset IN PLACE — overwrite its parameters, never delete+recreate — so its GUID survives a
-            // recompile (mirroring the controller's reset-in-place: any expressionParameters reference stays
-            // valid, and an unchanged source yields no Git churn). Create only when absent; and when NO param
-            // survives (all built-in/scratch), drop any stale asset so it can't linger. In whatIf the whole
-            // emit lands in the temp folder and is swept with it.
+            // ControllerEmit builds the side assets in memory only. An existing one is overwritten in place, never
+            // deleted and recreated, so the GUID a consumer holds survives a recompile. Null Params means no parameter
+            // survived (all built-in or scratch), so a stale asset is dropped.
             var existingParams = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(paramsPath);
             if (built.Params != null)
             {
@@ -150,21 +107,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     existingParams.parameters = built.Params.parameters;
                     EditorUtility.SetDirty(existingParams);
-                    // The in-memory asset has handed off its parameter array — a managed array of plain
-                    // [Serializable] Parameter, so it outlives the destroy — and nothing reads built.Params
-                    // after this point. Drop it, for the reason the menu branch below states in full.
+                    // The handed-off array is managed, so it outlives this destroy.
                     UnityEngine.Object.DestroyImmediate(built.Params);
                 }
                 else AssetDatabase.CreateAsset(built.Params, paramsPath);
             }
             else if (existingParams != null) AssetDatabase.DeleteAsset(paramsPath);
 
-            // Persist the VRCExpressionsMenu the same way, and for the same reason: a consumer's FullController
-            // `menus:` row references this file by GUID, so the root object is overwritten IN PLACE and never
-            // deleted+recreated. Sub-menu pages are sub-assets of this one file, so the whole tree travels
-            // under one GUID and a sub-menu can never be orphaned into a loose asset nobody references.
-            // Recompile churns them wholesale: every prior page is removed and destroyed before the new ones
-            // are added, or a renamed/deleted sub-menu would linger inside the file forever.
+            // A consumer's FullController `menus:` row references this file by GUID. Sub-menu pages are sub-assets of it,
+            // so the tree travels under one GUID. Every prior page is removed first, or a renamed or deleted sub-menu
+            // would linger inside the file.
             var existingMenu = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(menuPath);
             if (built.Menu != null)
             {
@@ -177,12 +129,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         UnityEngine.Object.DestroyImmediate(sub, true);
                     }
                     existingMenu.controls = built.Menu.controls;
-                    // Sync the object name too: a main asset renamed on disk (an entry moving its menu into
-                    // built/) keeps whatever m_Name it was created with otherwise, and the in-place write is
-                    // exactly the path that skips Unity's filename-driven rename.
+                    // A main asset renamed on disk otherwise keeps its old m_Name: the in-place write skips Unity's
+                    // filename-driven rename.
                     existingMenu.name = built.Menu.name;
-                    // The in-memory root has handed off its controls (and with them the child references);
-                    // drop it so a recompile does not leave an unowned ScriptableObject behind.
+                    // Drop the in-memory root that handed off its controls, or a recompile leaves an unowned ScriptableObject.
                     UnityEngine.Object.DestroyImmediate(built.Menu);
                 }
                 else
@@ -195,32 +145,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             else if (existingMenu != null)
             {
-                // LOUD, because this is reachable without anyone intending it: DecompileController emits no
-                // `menu:` block (there is nothing in a .controller to recover one from), so recompiling a
-                // decompiled document into the folder it came from deletes the menu asset — and with it the
-                // GUID a consumer's FullController `menus:` row resolves. The gate cannot catch it either:
-                // both sides then agree the menu is absent.
+                // Reachable by accident: DecompileController emits no `menu:` block, so recompiling a decompiled document
+                // into its own folder deletes the menu asset and the GUID a consumer's FullController `menus:` row
+                // resolves. The gate cannot catch it: both sides then agree the menu is absent.
                 Debug.LogWarning("[CompileController] '" + sourcePath + "' declares no menu: block, deleting the existing '"
                     + menuPath + "'. Any FullController menus: row referencing it will dangle. If this source was "
                     + "produced by DecompileController, the block was dropped by the decompile, not by you.");
                 AssetDatabase.DeleteAsset(menuPath);
             }
 
-            // ── 6. Compile-only advisories (into the RunLog body; never fail the compile) ────────────
             var frameLatency = FrameLatencyAdvisories(doc);
             var unresolvedRefs = UnresolvedRefAdvisories(built);
             var oscUnsafeNames = OscUnsafeNameAdvisories(doc);
             var outsideIcons = IconAdvisories(built);
 
             int states = doc.Layers.Sum(l => l.Root.CountStates());
-            // A menu is reported as total controls across every page, and only when one was emitted — a
-            // document with no `menu:` block reads exactly as it did before the surface existed.
             string menuPart = !emittedMenu ? "" :
                 string.Format(CultureInfo.InvariantCulture, " menu={0}c/{1}p", CountControls(doc.Menu), built.MenuChildren.Count + 1);
-            // The null slot ControllerEmit writes is the clean-empty idiom every lint is whitelisted
-            // against, so the rebuild reports missingMotion=0 where its source reported the break, and no
-            // C# API can write the dangling ref back. The VERDICT carries it instead — CLASSIFY, a finding
-            // to route, CheckAvatar's grammar — because `=> OK` would certify a drop this door just made.
+            // CLASSIFY (CheckAvatar's verdict for a finding to route), not OK: the null slot ControllerEmit writes for an
+            // unresolved ref lints clean, so `=> OK` would certify the drop (docs/animator.md §The compile/decompile substrate).
             string verdict = unresolvedRefs.Count > 0 ? "CLASSIFY" : "OK";
             string unresolvedPart = unresolvedRefs.Count > 0
                 ? string.Format(CultureInfo.InvariantCulture, " unresolvedRefs={0}", unresolvedRefs.Count) : "";
@@ -232,7 +175,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string body = BuildBody(doc, finalPath, lint, frameLatency, unresolvedRefs, oscUnsafeNames, outsideIcons,
                 built.StampFailure, whatIf);
 
-            // ── 7/8. Finalize: whatIf sweeps the temp; a real compile saves the asset ────────────────
             if (whatIf) { if (tempFolder != null) AssetDatabase.DeleteAsset(tempFolder); }
             else
             {
@@ -248,18 +190,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return res;
         }
 
-        // ── Out-of-band edit detection ───────────────────────────────────────────────────────────────
-        // Before clobbering an EXISTING controller at the target path, WARN if it does not correspond to the
-        // source we are about to compile — the recompile strips it in place. Two clobber cases, both warned:
-        //   (a) NO provenance marker → hand-authored, or produced by another tool. The highest-value case:
-        //       there is no srchash to compare, and any overwrite discards those edits.
-        //   (b) provenance present but its srchash differs from the current source → compiled from a
-        //       different source / hand-edited out of band since.
-        // Best-effort: WARN and proceed, never block.
+        // Warns before a recompile strips a controller with no provenance or a different srchash; never blocks. The
+        // srchash covers the source text, so a hand-edit to the controller under an unchanged source does not warn.
         private static void WarnIfOutOfBand(string finalPath, string sourceText)
         {
             var existing = AssetDatabase.LoadAssetAtPath<AnimatorController>(finalPath);
-            if (existing == null) return; // fresh compile — nothing to clobber
+            if (existing == null) return;
             var importer = AssetImporter.GetAtPath(finalPath);
             string ud = importer != null ? importer.userData : null;
             if (string.IsNullOrEmpty(ud) || ud.IndexOf("compiled-from:", StringComparison.Ordinal) < 0)
@@ -286,13 +222,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return end < 0 ? userData.Substring(i) : userData.Substring(i, end - i);
         }
 
-        // ── Advisory: frame latency (longest FIRING-transition chain per layer) ───────────────────────
-        // A multi-hop chain pays latency at every hop: a conditional hop resolves a frame later, and an
-        // exit-time hop waits out its source state's clip. The binary codec walk (Start→Test0→…) advances
-        // almost entirely through exit-time hops, so BOTH edge kinds must count or the advisory reads empty on
-        // the codec chain above. Report the longest simple chain of FIRING transitions
-        // (conditional, or exit-time — explicit or via the doc default); a dead transition (no condition + no
-        // exit time) never fires and is excluded, as is to-Exit. Only genuine multi-hop chains (≥2 hops) surface.
+        // The longest simple chain of firing transitions per layer. A conditional hop resolves a frame later and an
+        // exit-time hop (explicit or via the doc default) waits out its source state's clip; a codec walk advances
+        // almost entirely through exit-time hops, so both kinds count. Dead transitions and to-Exit are excluded, and
+        // only chains of two or more hops surface.
         private static List<string> FrameLatencyAdvisories(AnimDocument doc)
         {
             var lines = new List<string>();
@@ -311,15 +244,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return lines;
         }
 
-        // Returns (longest firing chain, skipReason). A non-null skipReason means the advisory could not be
-        // computed cheaply and the caller must SURFACE that omission (fail-loud) rather than emit nothing —
-        // either bound is a fail-loud "skipped" note, never a silent empty. An empty layer is not a skip:
-        // it returns (null, null) so nothing is said. chain is meaningful only when skipReason is null.
         private static (List<string> chain, string skipReason) LongestFiringChain(Layer layer, bool defaultExitTime)
         {
             var states = new List<State>();
             layer.Root.CollectStates(states);
-            if (states.Count == 0) return (null, null);        // empty layer — nothing to advise
+            if (states.Count == 0) return (null, null);
             if (states.Count > 128)                            // node-count guard (longest-path is NP-hard)
                 return (null, "layer has " + states.Count + " states (>128) — too many to bound cheaply");
             var names = new HashSet<string>(states.Select(s => s.Name));
@@ -333,14 +262,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (t == null || t.ToExit || string.IsNullOrEmpty(t.To)) continue;
                     bool conditional = t.When != null && t.When.Count > 0;
                     bool exitTimed = t.ExitTime.HasValue || (!conditional && defaultExitTime);
-                    if (!conditional && !exitTimed) continue; // dead transition — never fires
+                    if (!conditional && !exitTimed) continue;
                     if (names.Contains(t.To)) adj[s.Name].Add(t.To);
                 }
             }
 
-            // Longest simple path is NP-hard; the node-count guard bounds nodes but not edge density, so a densely
-            // connected layer could still explode. Bound the DFS by a step budget — an advisory is never worth
-            // hanging a compile — and report over-budget rather than a truncated (wrong) chain.
+            // The node guard does not bound edge density, so a step budget caps the DFS and reports over-budget rather
+            // than a truncated chain.
             const int StepBudget = 50000;
             int steps = 0;
             bool overBudget = false;
@@ -361,10 +289,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return overBudget ? (null, "transition graph too dense to bound cheaply") : (best, null);
         }
 
-        // ── Advisory: unresolved motion refs ───────────────────────────────────────────────────────────
-        // A motion ref flagged `unresolved: true` whose GUID did not resolve in this project — ControllerEmit
-        // left the state's motion slot null rather than fail the compile (a BARE broken ref stays fatal). The
-        // verbatim GUID is preserved here so the round-trip note survives the compile.
         private static List<string> UnresolvedRefAdvisories(ControllerEmit.EmitResult built)
         {
             var lines = new List<string>();
@@ -376,12 +300,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return lines;
         }
 
-        // ── Advisory: unadjudicated menu icons ───────────────────────────────────────────────────────
-        // Reached only when the DOCUMENT is outside this project's AssetDatabase, where ControllerEmit
-        // cannot tell a correct icon path from a wrong one and so emits a null icon rather than guess in
-        // either direction (an in-project compile adjudicates and fails loud instead). That is the normal
-        // state of an out-of-project compile — the gate — so the line reports what was tried rather than
-        // asserting a defect; the path carries "(no such file)" when even the disk probe missed.
         private static List<string> IconAdvisories(ControllerEmit.EmitResult built)
         {
             var lines = new List<string>();
@@ -394,13 +312,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return lines;
         }
 
-        // ── Advisory: OSC-unsafe parameter names ─────────────────────────────────────────────────────
-        // VRChat's OSC interface replaces a space in a parameter name with '_' (a resulting collision with
-        // another param can crash the client), and "# * , ? [ ] { }" are OSC address-pattern metacharacters.
-        // Neither is schema-illegal — an Animator param name is an arbitrary string — and the compiler cannot
-        // know which params are OSC-exposed, so this only advises. Skips scratch params (compiler/animator-
-        // internal by construction — never on the OSC surface). NOT gated on the vrc: meta: a freshly-decompiled
-        // vendor FX carries none, which is exactly the case the advisory exists to catch.
+        // BuildBody's section line states the hazard. Scratch params are compiler-internal, never on the OSC surface.
+        // Not gated on the vrc: meta: a freshly decompiled vendor FX carries none, the case this advisory exists to catch.
         private const string OscPatternMetachars = "#*,?[]{}";
         private static List<string> OscUnsafeNameAdvisories(AnimDocument doc)
         {
@@ -423,7 +336,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return lines;
         }
 
-        // ── RunLog body ──────────────────────────────────────────────────────────────────────────────
         private static string BuildBody(AnimDocument doc, string finalPath, LintResult lint,
             List<string> frameLatency, List<string> unresolvedRefs,
             List<string> oscUnsafeNames, List<string> outsideIcons, string stampFailure, bool whatIf)
@@ -437,9 +349,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
               .Append(" params=").Append(doc.Parameters.Count).Append("  \n");
 
             sb.Append("\n## Post-emit graph lint\n\n");
-            // Derived, not a literal: this line reads as the lint's verdict, and the gates that make PASS
-            // true here enumerate rule counts by hand (BrokenBinding among the omissions), so a hardcoded
-            // token would state a verdict the counts printed beside it can contradict.
+            // Derived, not a literal: the gates in Run and ProofCompile enumerate rule counts by hand, so an error-tier
+            // rule they omit would reach this line with Errors non-empty.
             sb.Append("missingMotion=").Append(lint.MissingMotion)
               .Append(" undeclaredParam=").Append(lint.UndeclaredParam)
               .Append(" entryShadow=").Append(lint.EntryShadow)
@@ -462,8 +373,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (outsideIcons.Count == 0) sb.Append("_(none)_\n");
             else foreach (var l in outsideIcons) sb.Append("- ").Append(l).Append('\n');
 
-            // Its own section, deliberately NOT under "Compile advisory": an advisory costs nothing, and this
-            // costs the next compile of this path its clobber warning. Absent when the stamp landed.
             if (stampFailure != null)
                 sb.Append("\n## Provenance stamp NOT written\n\n- ").Append(stampFailure).Append('\n');
 
@@ -471,7 +380,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (oscUnsafeNames.Count == 0) sb.Append("_(none)_\n");
             else
             {
-                // The per-line class comes from the offenders; state the "why" once for the section.
                 sb.Append("VRChat's OSC interface replaces a space with `_` (a resulting collision can crash the "
                     + "client), and `# * , ? [ ] { }` are OSC pattern metacharacters — a hazard only if the param "
                     + "is OSC-exposed, which the compiler can't know (hence advisory).\n");
@@ -481,7 +389,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return sb.ToString();
         }
 
-        // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
         private static string NormalizeDir(string dir)
         {
             dir = dir.Replace('\\', '/');
@@ -491,12 +398,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static string ScratchTemp() => "Assets/Agent/Scratch/compile_tmp_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
-        // Run the full emit + graph-lint pipeline into <paramref name="dir"/> (a throwaway temp) purely to prove
-        // a real overwrite will succeed before it strips the prior controller. Returns null on success, or the
-        // FAIL reason (same shape as the real paths). Skips persisting the params side-asset — lint reads the
-        // in-memory controller, not that asset — so the caller only has to sweep <paramref name="dir"/>.
-        // Controls across the whole menu tree, sub-menus included (the sub-menu control itself counts too —
-        // it occupies a slot on its own page).
         private static int CountControls(List<MenuControl> controls)
         {
             if (controls == null) return 0;
@@ -505,6 +406,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return n;
         }
 
+        // Proves a real overwrite will succeed before it strips the prior controller. Returns null on success, or the
+        // FAIL reason. Side assets are not persisted, because lint reads the in-memory controller, so the caller only
+        // has to sweep `dir`.
         private static string ProofCompile(AnimDocument doc, string dir, string text)
         {
             ControllerEmit.EmitResult built;
@@ -512,10 +416,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             catch (ControllerEmit.EmitException ee) { return "emit: " + ee.Message; }
             catch (Exception e) { return "emit: " + e.GetType().Name + ": " + e.Message; }
 
-            // The proof's side assets — the params asset AND the menu tree — are only ever built in memory
-            // (the whole point is that nothing is persisted), so destroy them here. Their folder is swept,
-            // but these never reached it. ProofCompile runs on every overwrite compile, which makes this the
-            // most-travelled of the destroy sites.
             try
             {
                 var lint = ControllerRules.Run(built.Controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
@@ -526,18 +426,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             finally
             {
-                // ProofCompile persists NOTHING by construction, so every side asset the result carries is
-                // unpersisted on every exit here — success included. That is what makes the unguarded destroy
-                // safe at this, the most-travelled of the sites. EmitResult.DestroyUnpersisted owns the
-                // rationale (the 551/600 measurement, and why the DestroyImmediate is deliberately unguarded).
+                // Unguarded on every exit, success included: nothing here persists a side asset. See EmitResult.DestroyUnpersisted.
                 built?.DestroyUnpersisted();
             }
         }
 
-        // Emit failed before any params side-asset was written. whatIf sweeps its temp. A FRESH compile deletes
-        // the just-created partial. An overwrite never reaches here mid-strip — ProofCompile clears the emit in
-        // a temp before the prior controller is touched — so a pre-existing controller is left intact; the guard
-        // is belt-and-suspenders.
+        // An overwrite never reaches here mid-strip: ProofCompile clears the emit in a temp first, so a pre-existing
+        // controller is left intact.
         private static void CleanupAfterEmit(bool whatIf, string tempFolder, string finalPath, bool controllerPreExisted,
             List<string> newFolders)
         {
@@ -545,24 +440,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!controllerPreExisted) { AssetDatabase.DeleteAsset(finalPath); DeleteEmptyNewFolders(newFolders); }
         }
 
-        // Post-emit lint failed after a successful emit — roll back so nothing that fails lint reaches outDir.
-        // ProofCompile makes this unreachable for an overwrite (an overwrite is proven lint-clean first), but the
-        // guards make the atomicity local rather than resting on that cross-function invariant: delete ONLY a
-        // freshly-created controller / params asset, never one that pre-existed the compile.
-        // The lint now runs BEFORE any side asset is written, so there is no params/menu asset from this run
-        // to roll back — only the controller and the folders that carried it.
+        // Lint runs before any side asset is written, so only the controller and the folders that carried it roll
+        // back. ProofCompile makes this unreachable for an overwrite; the guards keep the atomicity local.
         private static void CleanupAfterLint(bool whatIf, string tempFolder, string finalPath,
             bool controllerPreExisted, List<string> newFolders)
         {
             if (whatIf) { if (tempFolder != null && AssetDatabase.IsValidFolder(tempFolder)) AssetDatabase.DeleteAsset(tempFolder); return; }
             if (!controllerPreExisted) AssetDatabase.DeleteAsset(finalPath);
-            // Roll folders back only when nothing we created pre-existed — an overwrite keeps the folder (its
-            // prior controller lives there); a fresh compile that just deleted its only assets can shed them.
             if (!controllerPreExisted) DeleteEmptyNewFolders(newFolders);
         }
 
-        // The folders under `dir` (an Assets/-relative path) that do NOT yet exist — the ones a fresh emit's
-        // EnsureFolder will create. Deepest-LAST so rollback deletes in reverse. Empty when dir already exists.
+        // Deepest last, so rollback deletes in reverse.
         private static List<string> NewFolders(string dir)
         {
             var missing = new List<string>();
@@ -576,9 +464,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return missing;
         }
 
-        // Delete the given provably-new folders (deepest-first) IFF each is empty — the rollback for a failed
-        // fresh compile. Guarded on emptiness so a folder that unexpectedly holds anything is never swept; only
-        // folders this compile created are ever passed in.
         private static void DeleteEmptyNewFolders(List<string> newFolders)
         {
             if (newFolders == null) return;
@@ -592,16 +477,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        /// <summary>Refusal tail: the house grammar — a named one-line verdict ending
-        /// <c>=&gt; FAIL | log=</c> plus a minimal RunLog artifact — replacing the old bare
-        /// trailer-less line that left failed compiles with no artifact at all (high-traffic door:
-        /// every animator build). Nothing reaches <c>outDir</c> — the artifact is the verdict
-        /// record, not a compile output. <paramref name="label"/> is the source file's leaf,
-        /// uniform across every refusal stage (pre-parse stages don't know the controller name).</summary>
+        /// <summary>Refusal tail: a named one-line verdict ending <c>=&gt; FAIL | log=</c> plus a minimal RunLog artifact;
+        /// nothing reaches <c>outDir</c>. <paramref name="label"/> is the source file's leaf because pre-parse stages
+        /// don't know the controller name.</summary>
         private static string Fail(string label, string sourcePath, string why)
         {
-            // The one-line verdict must stay one line: exception messages / asset names inside `why`
-            // can carry raw newlines. Flatten in the summary only; the artifact body keeps `why` raw.
+            // Exception messages and asset names can carry raw newlines; the artifact body keeps `why` raw.
             string oneLineWhy = why.Replace("\r", " ").Replace("\n", " ");
             string summary = "[CompileController] " + label + ": " + oneLineWhy + " => FAIL";
             string body = "# CompileController FAIL\n\n- source: " + (string.IsNullOrEmpty(sourcePath) ? "(null)" : sourcePath) + "\n- reason: " + why + "\n";
@@ -623,8 +504,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
     }
 
-    /// <summary>Menu door for <see cref="CompileController"/> — resolves a selected/prompted <c>.yaml</c> and
-    /// an output folder, then delegates. ZERO compile logic lives here (Compile logs its own result).</summary>
+    /// <summary>Menu door for <see cref="CompileController"/>: picks a <c>.yaml</c> and an output folder, then delegates.</summary>
     internal static class CompileControllerMenu
     {
         [MenuItem("Tools/Atelier/Animator/Compile Controller…")]

@@ -5,15 +5,13 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// Synthetic probes — the test assembly does not reference the VRC SDK, so graft is exercised with plain
-// MonoBehaviours carrying an intra-subtree object ref (probe → another GO in the subtree). GraftHierarchy
-// copies ALL component types wholesale, so a synthetic MonoBehaviour is a faithful stand-in for any
-// authoring-unit component; the remap path (session-map hit) is type-blind.
+// GraftHierarchy copies every component type wholesale and its session-map remap is type-blind, so a plain
+// MonoBehaviour carrying an object ref stands in for any authoring-unit component.
 namespace GraftHierarchyTests_Ns
 {
     public class GhProbe : MonoBehaviour
     {
-        public GameObject linkedGo;   // an intra-subtree ref that must rebind via the session map
+        public GameObject linkedGo;
     }
 }
 
@@ -26,11 +24,9 @@ public class GraftHierarchyTests
         return go;
     }
 
-    // (a) the full subtree structure is scaffolded under the attachment point with verbatim local TRS.
     [Test]
     public void Graft_scaffolds_full_subtree_with_verbatim_local_trs()
     {
-        // vendor: V / Menu / Tail / Leaf   (Menu is the subtree root; its vendor parent is V == reach root)
         var vendor = new GameObject("V");
         var menu = Child(vendor, "Menu");
         var tail = Child(menu, "Tail");
@@ -39,7 +35,7 @@ public class GraftHierarchyTests
         var leaf = Child(tail, "Leaf");
         leaf.transform.localPosition = new Vector3(0, 0.5f, 0);
 
-        var ours = new GameObject("V");   // bare destination — Menu absent (missing host is NORMAL for graft)
+        var ours = new GameObject("V");
 
         var summary = GraftHierarchy.Run(ours, vendor, new[] { "Menu" }, whatIf: false);
         StringAssert.Contains("=> PASS", summary);
@@ -57,7 +53,6 @@ public class GraftHierarchyTests
         Object.DestroyImmediate(ours);
     }
 
-    // (b) all components on every GO are copied; (c) an internal ref rebinds via the session map.
     [Test]
     public void Graft_copies_all_components_and_rebinds_internal_ref_via_session_map()
     {
@@ -65,7 +60,6 @@ public class GraftHierarchyTests
         var menu = Child(vendor, "Menu");
         var tail = Child(menu, "Tail");
         var leaf = Child(tail, "Leaf");
-        // probe on Tail links to Leaf (an intra-subtree ref) — must rebind to the DEST Leaf, not vendor's.
         var probe = tail.AddComponent<GraftHierarchyTests_Ns.GhProbe>();
         probe.linkedGo = leaf;
 
@@ -86,10 +80,7 @@ public class GraftHierarchyTests
         Object.DestroyImmediate(ours);
     }
 
-    // (d) idempotency: count-parity skip + reuse-by-path — re-run duplicates nothing.
-    // preSeedMenu=true is the same property reached from the other side: the destination already carries the
-    // subtree ROOT before the first run, so run 1 must reuse it and scaffold only the remainder, exactly as
-    // run 2 reuses everything. Both cases must land on one Menu, one Tail, one probe.
+    // preSeedMenu: the destination already holds the subtree root, so the first run reuses it by path.
     [TestCase(false)]
     [TestCase(true)]
     public void Graft_is_idempotent_no_duplicate_gos_or_components(bool preSeedMenu)
@@ -106,7 +97,6 @@ public class GraftHierarchyTests
         var summary2 = GraftHierarchy.Run(ours, vendor, new[] { "Menu" }, whatIf: false);
         StringAssert.Contains("=> PASS", summary2);
 
-        // Exactly one Menu, one Tail, one probe — no duplication from the second run.
         int menuCount = 0;
         for (int i = 0; i < ours.transform.childCount; i++)
             if (ours.transform.GetChild(i).name == "Menu") menuCount++;
@@ -126,7 +116,6 @@ public class GraftHierarchyTests
         Object.DestroyImmediate(ours);
     }
 
-    // (e) attachment fail-loud when a subtree root names no vendor GO.
     [Test]
     public void Graft_fails_loud_on_unresolved_subtree_root()
     {
@@ -134,21 +123,17 @@ public class GraftHierarchyTests
         Child(vendor, "Menu");
         var ours = new GameObject("V");
 
-        // The refusal's FAIL summary is emitted via Debug.LogError — expected, or the runner flags an
-        // unhandled error log.
         LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
         var summary = GraftHierarchy.Run(ours, vendor, new[] { "NoSuchSubtree" }, whatIf: false);
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("NoSuchSubtree", summary);
 
-        // Nothing scaffolded on a fail.
         Assert.IsNull(ours.transform.Find("NoSuchSubtree"));
 
         Object.DestroyImmediate(vendor);
         Object.DestroyImmediate(ours);
     }
 
-    // BuildPlan purity: whatIf mutates nothing and the plan is the same data execute replays.
     [Test]
     public void WhatIf_previews_without_mutating()
     {
@@ -166,10 +151,6 @@ public class GraftHierarchyTests
         Object.DestroyImmediate(ours);
     }
 
-    // ── renameMap (armature-root reconcile) ───────────────────────────────────────────────────────
-
-    // A grafted subtree carries an intra-avatar ref CROSSING into the armature root; under a rename it must
-    // rebind to the owned renamed armature. vendor: V/Armature/Hips + V/Menu/Tail(GhProbe.linkedGo → Hips).
     [Test]
     public void Graft_rename_rebinds_ref_crossing_renamed_armature_root()
     {
@@ -179,10 +160,10 @@ public class GraftHierarchyTests
         var vMenu = Child(vendor, "Menu");
         var vTail = Child(vMenu, "Tail");
         var probe = vTail.AddComponent<GraftHierarchyTests_Ns.GhProbe>();
-        probe.linkedGo = vHips;   // ref into the armature root, outside the grafted subtree
+        probe.linkedGo = vHips;
 
         var ours = new GameObject("V");
-        var oArm = Child(ours, "Armature.1");   // owned armature already present (renamed)
+        var oArm = Child(ours, "Armature.1");
         Child(oArm, "Hips");
 
         var map = new Dictionary<string, string> { { "Armature", "Armature.1" } };
@@ -198,8 +179,7 @@ public class GraftHierarchyTests
         Object.DestroyImmediate(ours);
     }
 
-    // Null-map unchanged: the same cross-armature ref nulls (no counterpart for the vendor 'Armature'),
-    // reported exactly as today — proving the map is the only thing that changes behavior.
+    // Twin of the rename test above: the map is the only thing that changes the outcome.
     [Test]
     public void Graft_null_map_leaves_cross_armature_ref_nulled_as_today()
     {
@@ -224,7 +204,6 @@ public class GraftHierarchyTests
         Object.DestroyImmediate(ours);
     }
 
-    // A2: a non-injective rename map is rejected at the door, before any mutation.
     [Test]
     public void Graft_rejects_non_injective_rename_map_before_mutation()
     {
@@ -233,7 +212,7 @@ public class GraftHierarchyTests
         var ours = new GameObject("V");
 
         var badMap = new Dictionary<string, string> { { "Armature", "X" }, { "Other", "X" } };
-        LogAssert.Expect(LogType.Error, new Regex("=> FAIL")); // refusal logs its FAIL summary — expected
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
         var summary = GraftHierarchy.Run(ours, vendor, new[] { "Menu" }, badMap, whatIf: false);
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("non-injective", summary);

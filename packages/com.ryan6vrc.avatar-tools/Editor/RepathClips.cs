@@ -1,11 +1,6 @@
-// RepathClips — deterministic, segment-safe repath of an AnimatorController's OWNED clip bindings.
-//
-// The stock AnimationUtility rebind idiom (read curve → clear the old binding → set binding.path →
-// write the curve on the new binding) is EXTRACTED from hfcRed/Animation-Repathing
-// (Editor/ARManual.cs — ScanInvalidPaths / RenameInvalidPaths), MIT-licensed. It is reimplemented here
-// against TransplantCore with: a SEGMENT-SAFE prefix match replacing that project's naive
-// Contains/Replace prefix mode; an owned-clips-only ownership guard; a curve-collision guard; and a
-// write-landed read-back. This file does NOT depend on or call com.hfcred.animationrepathing.
+// The AnimationUtility rebind idiom (read the curve, clear the old binding, write the curve on the new path)
+// is extracted from hfcRed/Animation-Repathing (Editor/ARManual.cs: ScanInvalidPaths, RenameInvalidPaths) and
+// reimplemented here, with a segment-safe prefix match in place of that project's Contains/Replace prefix mode.
 //
 // hfcRed/Animation-Repathing © hfcRed — MIT License (https://github.com/hfcRed/Animation-Repathing).
 
@@ -18,34 +13,11 @@ using Ryan6Vrc.AgentTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
-    /// <summary>
-    /// Repath the EditorCurveBinding paths of the clips an <see cref="AnimatorController"/> references,
-    /// applying a caller-supplied set of segment-safe <c>oldPath → newPath</c> moves. Directed (the caller
-    /// already knows the moves — this is not a discovery tool); on-disk-<c>.anim</c>-asset-only; owned-clips
-    /// -only (a read-only clip a move would touch FAILs loud unless <c>force</c>). Both float curves
-    /// (<see cref="AnimationUtility.GetCurveBindings"/>) and objectReference curves
-    /// (<see cref="AnimationUtility.GetObjectReferenceCurveBindings"/>) are rewritten. The clip set is the
-    /// shared <see cref="AnimatorClipWalk.CollectClips"/> traversal (states + nested blend trees +
-    /// sub-state-machines at any depth + synced-layer overrides; deduped).
-    ///
-    /// A clip is mutated as a shared <c>.anim</c> ASSET IN PLACE — every referrer of that clip sees the
-    /// rewrite; each mutated clip is named on the RunLog. Idempotency is PASS with 0 rewrites (a re-run
-    /// finds no matching oldPath). Call <see cref="Run(AnimatorController, Move[], bool, bool)"/> from MCP
-    /// execute_code (the flat <c>string[] oldPaths, string[] newPaths</c> overload is the ergonomic door).
-    ///
-    /// <para><b>Frame boundary — the CALLER owns frame-correctness.</b> This is a single-controller,
-    /// literal-string, FRAME-BLIND rewriter: it matches and rewrites <c>oldPath</c> as a raw string and has
-    /// no avatar root. Across a real avatar the same bone lives under DIFFERENT path frames per animator —
-    /// descriptor layers are avatar-root-relative; a Modular Avatar MergeAnimator carries its own
-    /// <c>pathMode</c> (Relative/Absolute) + <c>relativePathRoot</c>; a VRCFury FullController is
-    /// mount-relative with its own rewrite settings (<c>rootBindingsApplyToAvatar</c> / <c>removePrefixes</c>
-    /// / <c>addPrefix</c> / <c>rootObjOverride</c>), and VRCFury may even MIX absolute + relative bindings
-    /// within one controller (relative wins on ambiguity). The caller must iterate the avatar's animators and
-    /// express each controller's moves in THAT controller's frame; this tool cannot resolve
-    /// same-string-different-frame bindings and rewrites them together (the curve-collision guard fails loud
-    /// on any same-target collision, unless <c>force</c>). Driving it blindly across a multi-animator avatar assuming
-    /// avatar-root-relative paths will silently corrupt the mount-relative controllers.</para>
-    /// </summary>
+    /// <summary>Repath the binding paths of the clips a controller references
+    /// (<see cref="AnimatorClipWalk.CollectClips"/>), rewriting the shared <c>.anim</c> assets in place from
+    /// caller-supplied segment-safe moves. Frame-blind: express the moves in this controller's binding frame,
+    /// because a sweep assuming avatar-root-relative paths silently corrupts mount-relative controllers.
+    /// Contract: docs/animator.md.</summary>
     [AgentTool]
     public static class RepathClips
     {
@@ -58,12 +30,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public Move(string oldPath, string newPath) { this.oldPath = oldPath; this.newPath = newPath; }
         }
 
-        // ── Public API ────────────────────────────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Ergonomic door for execute_code (parallel arrays, fully-qualified, fail-loud — no custom-struct literals needed):
-        /// two parallel arrays zipped into <see cref="Move"/>[]. FAILs loud on a length mismatch.
-        /// </summary>
+        /// <summary>The door for execute_code: parallel arrays in place of <see cref="Move"/> literals.</summary>
         public static string Run(AnimatorController controller, string[] oldPaths, string[] newPaths, bool force = false, bool whatIf = false)
         {
             string doorLabel = controller != null ? TransplantCore.Sanitize(controller.name) : "null-controller";
@@ -75,10 +42,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return Run(controller, moves, force, whatIf);
         }
 
-        /// <summary>
-        /// The core. Returns a one-line PASS/FAIL summary ending with the RunLog path
-        /// (<c>… => RESULT | log=&lt;path&gt;</c>); also Debug.Log/LogError it.
-        /// </summary>
         public static string Run(AnimatorController controller, Move[] moves, bool force = false, bool whatIf = false)
         {
             if (controller == null) return ArgFail("null-controller", "controller is null");
@@ -95,9 +58,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             try
             {
-                // ── Precondition: empty/null/duplicate oldPath in moves[] (static, before any read).
-                //    An empty oldPath would match the path=="" muscle/root bindings (type=Animator) and
-                //    corrupt them; an empty newPath malforms paths ("/Hips"). Neither is a repath target. ──
+                // An empty oldPath would match and corrupt the path=="" muscle/root bindings (type=Animator).
                 var seenOld = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var mv in moves)
                 {
@@ -115,11 +76,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return TransplantCore.Finish(log, label);
                 }
 
-                // ── Deduped clip set from the shared motion-slot walk (one grammar with OwnControllerClips) ──
                 var clips = AnimatorClipWalk.CollectClips(controller);
                 log.Count("clipsScanned", clips.Count);
 
-                // Clips beside the controller that it does not reference are invisible to the walk above.
                 string ctrlDir = System.IO.Path.GetDirectoryName(log.source ?? "")?.Replace((char)92, '/');
                 var strays = new List<string>();
                 if (!string.IsNullOrEmpty(ctrlDir))
@@ -127,7 +86,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         string cpath = AssetDatabase.GUIDToAssetPath(guid);
                         if (!cpath.EndsWith(".anim", StringComparison.OrdinalIgnoreCase) || cpath == log.source) continue;
-                        if (System.IO.Path.GetDirectoryName(cpath).Replace((char)92, '/') != ctrlDir) continue; // direct children only
+                        if (System.IO.Path.GetDirectoryName(cpath).Replace((char)92, '/') != ctrlDir) continue;
                         var c = AssetDatabase.LoadAssetAtPath<AnimationClip>(cpath);
                         if (c != null && !clips.Contains(c)) strays.Add(TransplantCore.Leaf(cpath));
                     }
@@ -136,8 +95,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     log.Warning("clip in controller folder not referenced by the controller, not repathed: " +
                         string.Join(", ", strays.ToArray()));
 
-                // ── Build the plan: per clip, the longest-oldPath-wins rewrite of each matching binding
-                //    (matched ONCE against the ORIGINAL path — no cascade) ──
+                // Per binding the longest oldPath wins, matched once against the original path, so moves do not cascade.
                 var moveMatched = new int[moves.Length];
                 var allBindingPaths = new HashSet<string>(StringComparer.Ordinal);
                 var plan = new List<ClipPlan>();
@@ -164,7 +122,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         if (best < 0) return;
                         moveMatched[best]++;
                         string rewritten = moves[best].newPath + b.path.Substring(moves[best].oldPath.Length);
-                        if (rewritten == b.path) return; // degenerate (oldPath == newPath) — no rewrite
+                        if (rewritten == b.path) return;
                         var nb = b; nb.path = rewritten;
                         rewrites.Add(new Rewrite { oldB = b, newB = nb, isObj = isObj, moveIdx = best });
                     };
@@ -181,7 +139,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     });
                 }
 
-                // ── Ownership guard (per touched clip) ──
                 foreach (var cp in plan)
                 {
                     if (TransplantCore.IsWritableAsset(cp.path)) continue;
@@ -193,8 +150,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             "): materialize an owned copy first (OwnControllerClips), or pass force=true");
                 }
 
-                // ── Curve-collision guard (per touched clip): a rewritten target already occupied by a
-                //    curve that stays, or two moves collapsing two sources onto one target ──
                 foreach (var cp in plan)
                 {
                     string leaf = TransplantCore.Leaf(cp.path);
@@ -222,9 +177,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // ── Stale-move warnings (still PASS): a move that matched nothing AND whose newPath is
-                //    absent from the walked clips. A zero-match move whose newPath already resolves is
-                //    idempotent-satisfied → suppressed. ──
+                // A move an earlier run already applied matches nothing but finds its newPath present, so it does not warn.
                 int movesUnmatched = 0;
                 for (int i = 0; i < moves.Length; i++)
                 {
@@ -244,7 +197,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 log.Count("bindingsRewritten", bindingsRewritten);
                 log.Count("movesUnmatched", movesUnmatched);
 
-                // Per-clip audit: name every mutated clip + its segment-level rewrites (whatIf and execute).
                 foreach (var cp in plan)
                 {
                     var pairs = new List<string>();
@@ -256,7 +208,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                              " (" + cp.rewrites.Count + " binding(s))");
                 }
 
-                // ── Blocking guards FAIL the same for whatIf and execute (preview == execute verdict) ──
+                // These guards sit above the whatIf return so a preview reports the guard verdict an execute would.
                 if (log.offenders.Count > 0)
                 {
                     log.result = "FAIL";
@@ -270,8 +222,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return TransplantCore.Finish(log, label);
                 }
 
-                // ── Execute: rebind idiom, batched; capture-all → clear-all → write-all per clip so
-                //    swaps/permutations don't clobber an unread source curve ──
                 AssetDatabase.StartAssetEditing();
                 try
                 {
@@ -301,24 +251,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 foreach (var cp in plan) AssetDatabase.SaveAssetIfDirty(cp.clip);
 
-                // ── Write-landed read-back (force NEVER bypasses this): reimport each touched clip from
-                //    disk and assert the rewritten CURVE CONTENT actually landed — not just that a binding key
-                //    is present. Key-presence alone is defeated by a cyclic permutation (A↔B) forced onto an
-                //    immutable clip: every old key is also a new key and every new key pre-existed, so nothing
-                //    written still "passes." Comparing the reloaded curve to exactly what we captured/wrote is
-                //    deterministic and catches the silent no-op (Set…Curve is void and never throws on an
-                //    immutable Packages/ write). ──
-                // COVERAGE GAP, on the record (spike 2026-07-08, verdict anim=WRITE LANDED): the FAIL branch for
-                // an unwritable clip is not fabricable in EditMode on this Unity/OS combo — SaveAssetIfDirty bypasses
-                // the OS read-only attribute, so no test can stage a silent no-op on an immutable .anim. The
-                // happy path is covered by RepathClipsTests (writeLandedFailures=0 on a normal owned rewrite);
-                // the content-mismatch branch IS covered, via a forced 2-into-1 collapse
-                // (Collision_two_sources_onto_one_target_fails_unless_force). Keep the read-back unconditional.
+                // Read back under force too: Set…Curve is void, so a write forced onto an immutable clip can no-op
+                // silently. Compare reloaded curve content, because a forced swap (A↔B) leaves every expected key
+                // present with nothing written. An EditMode test cannot stage the no-op on this Unity and OS:
+                // SaveAssetIfDirty bypasses the OS read-only attribute.
                 int landedFailures = 0;
                 foreach (var cp in plan)
                 {
-                    // Reload a fresh handle from disk so the read-back is unambiguously disk-sourced (and
-                    // robust if a hard reimport re-mints the native object).
                     AssetDatabase.ImportAsset(cp.path, ImportAssetOptions.ForceUpdate);
                     var disk = AssetDatabase.LoadAssetAtPath<AnimationClip>(cp.path) ?? cp.clip;
                     var actual = new HashSet<string>(StringComparer.Ordinal);
@@ -373,12 +312,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return TransplantCore.Finish(log, label);
         }
 
-        // ── Helpers ─────────────────────────────────────────────────────────────────────────────────
-
-        /// <summary>Segment-safe prefix match: <paramref name="bindingPath"/> equals
-        /// <paramref name="oldPath"/> or is a <c><paramref name="oldPath"/>/…</c> descendant. Renaming
-        /// <c>Armature/Hips</c> matches <c>Armature/Hips</c> and <c>Armature/Hips/Spine</c>, never
-        /// <c>Armature/HipsFoo</c>.</summary>
         static bool SegmentMatch(string bindingPath, string oldPath)
         {
             if (oldPath == null || bindingPath == null) return false;
@@ -386,13 +319,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return bindingPath.StartsWith(oldPath + "/", StringComparison.Ordinal);
         }
 
-        /// <summary>Stable identity of a binding within a clip: path + declaring type + property +
-        /// float/PPtr discriminant. Two bindings collide iff their keys are equal.</summary>
+        /// <summary>Identity of a binding within a clip: two bindings collide iff their keys are equal.</summary>
         static string Key(EditorCurveBinding b)
             => b.path + "\0" + (b.type != null ? b.type.FullName : "?") + "\0" + b.propertyName + "\0" + (b.isPPtrCurve ? "1" : "0");
 
-        /// <summary>Route an argument-guard failure through the house RunLog grammar (summary + RunLog +
-        /// LogError), like the sibling transplant tools — never a bare trailer-less line.</summary>
         static string ArgFail(string label, string msg)
         {
             var log = new RunLog("repath-clips") { result = "FAIL", error = msg };
@@ -400,9 +330,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return TransplantCore.Finish(log, label);
         }
 
-        /// <summary>Deterministic equality of the reloaded float curve against exactly what we wrote:
-        /// keyframe count then each key's time/value/tangents/weights/weightedMode. Round-tripping the same
-        /// values through Unity serialization is bit-stable, so exact comparison is correct (not float-guessing).</summary>
         static bool FloatCurvesEqual(AnimationCurve a, AnimationCurve b)
         {
             if (a == null || b == null) return a == b;
@@ -420,13 +347,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
-        /// <summary>Exact equality, but NaN-tolerant (raw <c>NaN != NaN</c>) so a genuine NaN keyframe that
-        /// round-trips a landed write is not a false content-mismatch. We compare against exactly what we
-        /// wrote, so bit-exact is otherwise correct.</summary>
+        /// <summary>Exact, because Unity serialization round-trips a written float bit-stably; NaN-tolerant (raw
+        /// <c>NaN != NaN</c>) so a NaN keyframe that round-trips is not a false content mismatch.</summary>
         static bool FloatEq(float x, float y) => (float.IsNaN(x) && float.IsNaN(y)) || x == y;
 
-        /// <summary>Deterministic equality of the reloaded object-reference curve: keyframe count then each
-        /// key's time + referenced object.</summary>
         static bool ObjCurvesEqual(ObjectReferenceKeyframe[] a, ObjectReferenceKeyframe[] b)
         {
             if (a == null || b == null) return a == b;
@@ -435,8 +359,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (a[i].time != b[i].time || a[i].value != b[i].value) return false;
             return true;
         }
-
-        // ── Plan types ──────────────────────────────────────────────────────────────────────────────
 
         sealed class ClipPlan
         {

@@ -4,10 +4,6 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// R5 drift pins: CheckHumanoidRig's artifact filename matches its JSON kind (was
-// reproportion_freshness_*, inherited from the tool's reproportion-flow origin), and a FAIL exit
-// carries the | log= trailer via the shared writer (the old bespoke writer swallowed a write
-// failure into a warning and returned a trailer-less summary that still asserted its verdict).
 public class CheckHumanoidRigTests
 {
     [Test]

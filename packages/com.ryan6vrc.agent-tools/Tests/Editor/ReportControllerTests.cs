@@ -7,16 +7,12 @@ using UnityEditor.Animations;
 using UnityEngine;
 using Ryan6Vrc.AgentTools.Editor;
 
-// ReportController proof obligations. One fixture per DOOR, not per repair wave: the three files this
-// replaces each minted their own scratch folder (created and deleted per test, 9× a run) and each
-// re-declared `PathFrom`, and none of them deleted the Snapshot markdown their calls wrote.
 public class ReportControllerTests
 {
     private const string Dir = "Assets/Agent/_report_controller_test";
 
-    // Snapshots are DURABLE per docs/unity-tools.md — the operator's own pile, pruned by nothing. Record what
-    // the door wrote and delete exactly that; a glob over `controller_*.md` would also sweep snapshots the
-    // operator took by hand.
+    // Record what the door wrote and delete exactly that; a glob over `controller_*.md` would also sweep
+    // snapshots the operator took by hand.
     private static readonly List<string> Artifacts = new List<string>();
 
     private AnimatorController _ctrl;
@@ -32,13 +28,12 @@ public class ReportControllerTests
         Artifacts.Clear();
     }
 
-    // A fresh controller per test at a per-test path. Several tests rewrite the controller's YAML on disk and
-    // reimport it, so a shared asset path would carry one test's dangling guids into the next.
+    // Per-test path: several tests rewrite the controller's YAML on disk and reimport it, so a shared asset
+    // path would carry one test's dangling guids into the next.
     [SetUp]
     public void SetUp() => _ctrl = AnimatorController.CreateAnimatorControllerAtPath(
         Dir + "/" + TestContext.CurrentContext.Test.MethodName + ".controller");
 
-    // The digest body, with the Snapshot path it names recorded for teardown.
     private static string ReadReport(AnimatorController c)
     {
         string summary = ReportController.Run(c);
@@ -55,15 +50,8 @@ public class ReportControllerTests
 
     // ----- Sub-machine exit edges -------------------------------------------------------------------
     //
-    // A sub-machine's OUTGOING (on-Exit) edges are the only way out of that sub-machine, and the digest walked
-    // AnyState, Entry, and each state's ladder while never reading GetStateMachineTransitions. So a layer built
-    // around sub-machines rendered a machine with no exit and gave the reader no sign control flow was omitted —
-    // a silent gap, not a loud one, in the door an agent uses instead of opening the Animator window. Measured at
-    // 3 of 6 controllers in a real vendor prop package, which is also why the schema grew `onExit:`.
-    //
-    // These pin both that the edges appear and that their CONDITIONS and TARGET do, since a rendered edge with no
-    // condition is indistinguishable from an unconditional one — the difference between "always leaves" and
-    // "leaves when g".
+    // These pin each outgoing edge's condition and target as well as its presence: a rendered edge with no
+    // condition is indistinguishable from an unconditional one.
 
     [Test]
     public void TargetedOutgoingEdge_IsRenderedWithItsConditionAndDestination()
@@ -94,13 +82,10 @@ public class ReportControllerTests
 
         string report = ReadReport(_ctrl);
 
-        // `Contains("Exit")` was satisfied by the "onExit" label itself, so this passed while the destination
-        // rendered `(none)` — the exact defect it was written to catch. Assert the destination token.
+        // Assert the destination token: a bare `Contains("Exit")` is satisfied by the "onExit" label itself.
         StringAssert.Contains("- `Sub` (state machine) onExit → Exit [unconditional]", report);
     }
 
-    // A sub-machine with no outgoing edges must not acquire an onExit line — the row is evidence, so a
-    // fabricated one would read as an exit path that does not exist.
     [Test]
     public void SubMachineWithNoOutgoingEdges_RendersNoOnExitLine()
     {
@@ -112,12 +97,10 @@ public class ReportControllerTests
         StringAssert.DoesNotContain("onExit", report);
     }
 
-    // ----- Blend-tree child: empty vs broken (F11) --------------------------------------------------
+    // ----- Blend-tree child: empty vs broken --------------------------------------------------------
     //
-    // Before the fix, AppendBlendTree printed a bare "(empty)" for any null child motion — a dangling child
-    // (asset deleted) was indistinguishable from an intentionally-empty slot. These two tests pin both poles;
-    // the EMPTY case also guards the "m_Childs" serialized key — a wrong key nulls the child property, so the
-    // empty child would render the loud "(broken: …unreadable)" fallback instead of "(empty)".
+    // The empty case also guards the "m_Childs" serialized key: a wrong key nulls the child property, so the
+    // empty child would render the "(broken: …unreadable)" fallback instead of "(empty)".
 
     [Test]
     public void EmptyBlendTreeChild_RendersEmpty()
@@ -153,10 +136,9 @@ public class ReportControllerTests
         bt.AddChild(clip, 0f);
         EditorUtility.SetDirty(_ctrl); AssetDatabase.SaveAssets();
 
-        // Rewrite ONLY the blend-tree child's motion ref (the one pointing at the sub-asset clip) into
-        // a dangling external guid, then reimport. Targeting the clip's exact local fileID leaves the
-        // state->blendtree link intact — so the tree still expands and the CHILD path is truly
-        // exercised (a blanket m_Motion rewrite would also break the state motion and pass vacuously).
+        // Dangle only the child's motion ref, targeted by the clip's local fileID. A blanket m_Motion
+        // rewrite would also break the state->blendtree link, so the tree would not expand and the test
+        // would pass without exercising the child path.
         string path = AssetDatabase.GetAssetPath(_ctrl);
         AssetDatabase.TryGetGUIDAndLocalFileIdentifier(clip, out _, out long clipLocalId);
         string yaml = File.ReadAllText(path);
@@ -167,21 +149,14 @@ public class ReportControllerTests
         var reloaded = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
 
         string report = ReadReport(reloaded);
-        // Pin the CHILD cell directly, not merely the top-level "Broken motion GUIDs" list —
-        // RecoverDanglingMotionGuids fills that list from the raw YAML regardless of how the child
-        // renders, so asserting the guid alone is vacuous. The @0 child must render broken, not (empty).
+        // Pin the child cell: RecoverDanglingMotions fills the top-level "Broken motion GUIDs" list from
+        // the raw YAML however the child renders, so asserting the guid alone is vacuous.
         StringAssert.Contains("@0 (broken: guid=deadbeefdeadbeefdeadbeefdeadbeef)", report);
         StringAssert.DoesNotContain("@0 (empty)", report);
     }
 
-    // ----- Live-reachable vs orphan-only broken motions (F26) + per-layer states=N (F27) ------------
-    //
-    // Before F26 the header listed every dangling m_Motion guid in the controller YAML — including residue on
-    // states no live layer reaches — so a residue-heavy controller read as N broken motions. Before F27 a
-    // 0-state layer rendered as a blank section indistinguishable from a truncated report.
+    // ----- Live-reachable vs orphan-only broken motions, and per-layer states=N ---------------------
 
-    // F27: a fresh controller's single "Base Layer" has an empty state machine → states=0, not a blank
-    // section. Adding a state moves it to states=1.
     [Test]
     public void ZeroStateLayer_ReportsStatesZero_NotBlank()
     {
@@ -203,8 +178,7 @@ public class ReportControllerTests
         StringAssert.Contains("states=3", report); // A + B + C (recurses the sub-state-machine)
     }
 
-    // F26 regression: a synced layer's dangling OVERRIDE motion (stored in the controller's main-object
-    // block, not a state block) must land under live-reachable, not be mislabeled orphan residue.
+    // A synced layer's override motion is stored in the controller's main-object block, not a state block.
     [Test]
     public void BrokenMotions_SyncedLayerOverride_isLiveReachable_notOrphan()
     {
@@ -253,8 +227,8 @@ public class ReportControllerTests
             "synced-layer override break must be live-reachable, not orphan residue");
     }
 
-    // F26 regression: a dangling motion whose INNER fileID is negative (an FBX-embedded clip's hash-derived
-    // localID, referenced type: 3) must still be collected — not dropped by a \d+ that can't match the sign.
+    // A dangling motion whose inner fileID is negative (an FBX-embedded clip's hash-derived localID, referenced
+    // type: 3) must not be dropped by a \d+ that cannot match the sign.
     [Test]
     public void BrokenMotions_NegativeFileID_isCollected_notDropped()
     {
@@ -270,7 +244,6 @@ public class ReportControllerTests
         string path = AssetDatabase.GetAssetPath(_ctrl);
         AssetDatabase.TryGetGUIDAndLocalFileIdentifier(clip, out _, out long clipLocalId);
         string yaml = File.ReadAllText(path);
-        // Negative inner fileID + type: 3 — the FBX-embedded-clip dangling shape.
         yaml = Regex.Replace(yaml, @"m_Motion: \{fileID: " + clipLocalId + @"\}",
             "m_Motion: {fileID: -8823450917, guid: " + NegGuid + ", type: 3}");
         File.WriteAllText(path, yaml);
@@ -278,19 +251,15 @@ public class ReportControllerTests
         var reloaded = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
 
         string report = ReadReport(reloaded);
-        StringAssert.Contains(NegGuid, report); // pre-fix: dropped entirely (\d+ misses the '-')
+        StringAssert.Contains(NegGuid, report);
     }
 
-    // F26: one live state carries a dangling motion (guid A); an orphan AnimatorState block carrying a
-    // different dangling motion (guid B) is appended to the YAML but wired into no layer. The split must
-    // list A under live-reachable and B under orphan-only — never both under one undifferentiated count.
     [Test]
     public void BrokenMotions_SplitLiveReachableFromOrphanResidue()
     {
         const string LiveGuid   = "deadbeefdeadbeefdeadbeefdeadbeef";
         const string OrphanGuid = "0000000000000000000000000000dead";
 
-        // Live state with a real sub-asset clip motion, then dangle exactly that motion ref.
         var sm = _ctrl.layers[0].stateMachine;
         var st = sm.AddState("Live");
         var clip = new AnimationClip { name = "doomed" };
@@ -307,9 +276,9 @@ public class ReportControllerTests
         AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
         var reloaded = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
 
-        // Append an orphan AnimatorState block — a dangling motion no live layer references. NOT
-        // reimported: the in-memory controller (what the walk sees) stays clean, while RecoverDanglingMotions
-        // reads this residue off disk. Minimal block: the parser keys only on the &fileID header + m_Motion.
+        // Not reimported: the in-memory controller (what the walk sees) stays clean, while
+        // RecoverDanglingMotions reads this residue off disk. The parser keys only on the &fileID header and
+        // m_Motion, so the block can be this small.
         File.AppendAllText(path,
             "\n--- !u!1102 &9111111111\nAnimatorState:\n  m_Name: OrphanResidue\n" +
             "  m_Motion: {fileID: 7400000, guid: " + OrphanGuid + ", type: 2}\n");
@@ -324,10 +293,8 @@ public class ReportControllerTests
 
         Assert.That(liveHdr, Is.GreaterThanOrEqualTo(0), "live-reachable header missing");
         Assert.That(orphanHdr, Is.GreaterThan(liveHdr), "orphan-only header must follow live-reachable");
-        // Live guid sits in the live-reachable section (between the two headers); orphan guid after orphan header.
         Assert.That(liveGuidAt, Is.GreaterThan(liveHdr).And.LessThan(orphanHdr), "live guid not in live-reachable section");
         Assert.That(orphanGuidAt, Is.GreaterThan(orphanHdr), "orphan guid not in orphan-only section");
-        // Summary one-liner (the returned string, not the artifact body) carries the at-a-glance split.
         StringAssert.Contains("brokenMotions=1live/1orphan", summaryLine);
     }
 }

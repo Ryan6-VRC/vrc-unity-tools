@@ -7,10 +7,6 @@ using UnityEditor.Animations;
 using UnityEngine;
 using UnityEngine.TestTools;
 
-// Behavioral tests for the CompileController door. These touch the filesystem (source YAML) and the
-// AssetDatabase (the emitted .controller). Run headless via tools/run-editmode-tests.ps1 (or the Test
-// Runner window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
-// SetUp writes the debounce source; TearDown removes the whole test tree.
 public class CompileControllerTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/cc_tests";
@@ -19,8 +15,6 @@ public class CompileControllerTests
     [SetUp]
     public void SetUp()
     {
-        // EnsureFolder (AssetDatabase.CreateFolder) registers TestRoot as a valid asset folder as it creates
-        // it — what the old Directory.CreateDirectory + project-wide Refresh() pair was really buying.
         AnimatorTestHelpers.EnsureFolder(TestRoot);
         _srcPath = TestRoot + "/Debounce_Fx.yaml";
         File.WriteAllText(_srcPath, AnimatorSchemaYamlTests.DebounceDoc);
@@ -29,8 +23,6 @@ public class CompileControllerTests
     [TearDown]
     public void TearDown()
     {
-        // No trailing Refresh(): DeleteAsset already tells the AssetDatabase the folder is gone, and the raw
-        // Directory.Delete is only a fallback for a folder the AssetDatabase never adopted.
         if (AssetDatabase.IsValidFolder(TestRoot)) AssetDatabase.DeleteAsset(TestRoot);
         if (Directory.Exists(TestRoot)) Directory.Delete(TestRoot, true);
     }
@@ -52,8 +44,6 @@ public class CompileControllerTests
         File.WriteAllText(badSrc, AnimatorSchemaYamlTests.DebounceDoc.Replace("schema: 1", "schema: 2"));
 
         string outDir = TestRoot + "/out_bad";
-        // The door reports a refusal via Debug.LogError; declare it so the test framework doesn't count the
-        // intentional error log as a failure.
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*validation failed.*=> FAIL"));
         string result = CompileController.Run(badSrc, outDir, whatIf: false);
 
@@ -69,16 +59,14 @@ public class CompileControllerTests
     [Test]
     public void NonFloatParamCurve_Fails_The_Compile_Door()
     {
-        // ControllerRules owns the detection and ControllerRulesTests pins it. This test exists for the
-        // WIRING: every compile/lint verdict site enumerates the error counters BY NAME rather than testing
-        // Errors.Count, so a new rule that only populates Errors would let the door report OK. That failure
-        // is invisible to a unit test on Run — it can only be caught here, at the door.
+        // ControllerRulesTests pins the detection; this pins the wiring. Every compile/lint verdict site
+        // enumerates the error counters by name rather than testing Errors.Count, so a new rule that only
+        // populates Errors would let the door report OK.
         //
-        // The bad document must trip THIS RULE AND NOTHING ELSE, or the test stops guarding what it exists
-        // for: a second firing rule would keep the verdict FAIL, and the offender string is built from
-        // lint.Errors (populated regardless of wiring), so both assertions would still pass with this rule's
-        // counter unwired. Retyping `Level` to bool leaves the clip curve as the single defect — no driver
-        // touches Level, so the driver-on-bound-param rule stays silent.
+        // The bad document must trip this rule and nothing else: a second firing rule would keep the verdict
+        // FAIL, and the offender string is built from lint.Errors regardless of wiring, so both assertions
+        // would still pass with this rule's counter unwired. No driver touches Level, so driverOnAnimatedParam
+        // stays silent.
         string badSrc = TestRoot + "/BoolCurve.yaml";
         File.WriteAllText(badSrc, AnimatorSchemaYamlTests.DebounceDoc
             .Replace("Level: { type: float, aap: true }", "Level: bool"));
@@ -95,9 +83,8 @@ public class CompileControllerTests
     [Test]
     public void DriverOnAnimatedParam_Fails_The_Compile_Door()
     {
-        // Wiring test, as above: pointing the debounce driver at `Level` — which `hold_on` animates as a
-        // parameter curve — makes the driver write dead. The door must REFUSE it; an advisory is not enough,
-        // because a compile that returns OK is one a caller proceeds from.
+        // Wiring test, as above: pointing the debounce driver at `Level`, which `hold_on` animates as a
+        // parameter curve, makes the driver write dead.
         string badSrc = TestRoot + "/DriverOnAap.yaml";
         File.WriteAllText(badSrc, AnimatorSchemaYamlTests.DebounceDoc
             .Replace("- driver: { set: { Debounced: 1 } }", "- driver: { set: { Level: 1.0 } }"));
@@ -117,7 +104,6 @@ public class CompileControllerTests
         string outDir = TestRoot + "/out_proof";
         string path = outDir + "/Debounce_Fx.controller";
 
-        // A good compile first.
         CompileController.Run(_srcPath, outDir, whatIf: false);
         string guid1 = AssetDatabase.AssetPathToGUID(path);
         int layersBefore = AssetDatabase.LoadAssetAtPath<AnimatorController>(path).layers.Length;
@@ -132,7 +118,6 @@ public class CompileControllerTests
             "schema: 1\ncontroller: Debounce_Fx\nbasis: avatar-root\nrole: fx\n" +
             "parameters:\n  P: { type: float }\n" +
             "layers:\n  - name: L\n    states:\n      S:\n        transitions:\n          - { to: NoSuchState }\n    default: S\n");
-        // The failing recompile reports its refusal via Debug.LogError; declare it as expected.
         LogAssert.Expect(LogType.Error, new Regex(@"\[CompileController\] .*emit:.*=> FAIL"));
         string result = CompileController.Run(badSrc, outDir, whatIf: false);
 
@@ -162,15 +147,9 @@ public class CompileControllerTests
         Assert.AreEqual(guid1, guid2, "recompile reuses the controller asset (stable GUID)");
     }
 
-    // An `unresolved: true` motion ref must NOT fail the compile — it emits a null motion and the RunLog
-    // body carries an advisory naming the state + the verbatim GUID (round-trip note).
-    //
-    // But it must not report `=> OK` either. A null motion slot is the clean-empty idiom every downstream
-    // lint is whitelisted against, so the rebuilt controller reports missingMotion=0 where its source
-    // reported the break: an `OK` here certifies a drop this door just made, and the source's own FAIL
-    // stops being reachable from anything downstream. The verdict carries it instead — CLASSIFY, a finding
-    // to route, never a tool failure — plus the count on the summary line, which is the only part an agent
-    // reading one line ever sees.
+    // An `unresolved: true` motion ref emits a null motion, the clean-empty idiom every downstream lint is
+    // whitelisted against, so the rebuilt controller reports missingMotion=0 where its source reported the
+    // break. The verdict carries the drop instead.
     [Test]
     public void Compile_With_Unresolved_Ref_Classifies_And_Advises()
     {
@@ -203,8 +182,7 @@ public class CompileControllerTests
     // ── OSC-unsafe parameter names advisory ────────────────────────────────────────────────────────
     private const string OscHeader = "## Compile advisory: OSC-unsafe parameter names";
 
-    // Compile `yaml` (leaf-named source) to a scratch outDir and return the OSC-unsafe-names section of the
-    // emitted RunLog body. That section is rendered last, so header-to-end IS the whole section.
+    // The OSC-unsafe-names section is rendered last in the RunLog body, so header-to-end is the whole section.
     private string OscAdvisorySection(string yaml, string leaf)
     {
         string src = TestRoot + "/" + leaf + ".yaml";

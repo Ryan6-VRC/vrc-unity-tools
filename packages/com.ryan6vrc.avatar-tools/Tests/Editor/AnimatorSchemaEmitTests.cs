@@ -6,18 +6,14 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 
-// Generative round-trip tests for AnimatorSchemaEmit — the AnimDocument -> YAML write-back. The parser is the
-// spec: Parse(Serialize(doc)) must reproduce doc for every construct, and Serialize must be idempotent through
-// a parse (the textual fixpoint). Most tests are pure (Parse only, System.*); the emit->Walk->Serialize
-// ->Parse ones touch the AssetDatabase (they build + decompile a real controller). Run headless via
-// tools/run-editmode-tests.ps1 (or the Test Runner window / CI); not via MCP run_tests — wrong venue
-// (live editor). See docs/verify.md.
+// Round-trip tests for AnimatorSchemaEmit, the AnimDocument -> YAML write-back. The parser is the spec:
+// Parse(Serialize(doc)) must reproduce doc for every construct, and Serialize must be idempotent through a
+// parse (the textual fixpoint). Most tests are pure (Parse only, System.*); the Emit_Walk one touches the
+// AssetDatabase (it builds and decompiles a real controller).
 public class AnimatorSchemaEmitTests
 {
     private const string ScratchFolder = "Assets/Agent/Scratch/emit";
 
-    // ControllerEmit.Build's 2-arg door mints a VRCExpressionParameters nobody persists; see
-    // AnimatorTestHelpers.UnownedSideAssetSweep for why a survivor breaks unrelated suites.
     private readonly AnimatorTestHelpers.UnownedSideAssetSweep _paramSweep =
         new AnimatorTestHelpers.UnownedSideAssetSweep();
 
@@ -37,8 +33,6 @@ public class AnimatorSchemaEmitTests
         switch (o) { case float f: return f; case double d: return (float)d; case long l: return l; case int i: return i; case bool b: return b ? 1f : 0f; }
         return 0f;
     }
-
-    // ---- debounce round-trip + idempotence --------------------------------------------------------
 
     [Test]
     public void Serialize_Then_Parse_Roundtrips_Debounce()
@@ -75,7 +69,6 @@ public class AnimatorSchemaEmitTests
         Assert.AreEqual(doc.Clips.Count, back.Clips.Count);
         Assert.AreEqual(0.2f, back.Clips.First(c => c.Name == "timer").Seconds.Value, 1e-6f);
 
-        // idempotence — the fixpoint depends on it.
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "serialize is idempotent through a parse");
     }
 
@@ -94,8 +87,6 @@ public class AnimatorSchemaEmitTests
         Assert.IsTrue(back.ReservedNotes.ContainsKey("_notes"), "notes re-parse under the reserved _notes key");
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "notes rendering is idempotent (no per-pass nesting growth)");
     }
-
-    // ---- sub-machine + Entry/Any ladders + cross-machine targets ----------------------------------
 
     [Test]
     public void Serialize_Roundtrips_SubMachine_And_Ladders()
@@ -121,7 +112,6 @@ public class AnimatorSchemaEmitTests
         Assert.AreEqual("A", sub.Machine.DefaultState);
         CollectionAssert.AreEquivalent(new[] { "A", "B" }, sub.Machine.States.ConvertAll(s => s.Name));
 
-        // cross-machine (slash) vs same-machine (bare) targets survive.
         Assert.AreEqual("Sub/A", root.States.First(s => s.Name == "Idle").Transitions[0].To);
         Assert.AreEqual("B", sub.Machine.States.First(s => s.Name == "A").Transitions[0].To);
 
@@ -132,8 +122,6 @@ public class AnimatorSchemaEmitTests
 
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
     }
-
-    // ---- longform parameters + vrc: block ---------------------------------------------------------
 
     [Test]
     public void Serialize_Roundtrips_Long_Parameters_And_Vrc()
@@ -160,8 +148,8 @@ public class AnimatorSchemaEmitTests
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
     }
 
-    // ---- all seven behaviour kinds (Fields keyed by the camelCase emit tokens) --------------------
-
+    // The seven kinds other than faceTrackingSets, which has its own test below. Fields are keyed by the
+    // camelCase emit tokens.
     [Test]
     public void Serialize_Roundtrips_All_Seven_Behaviour_Kinds()
     {
@@ -200,10 +188,8 @@ public class AnimatorSchemaEmitTests
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
     }
 
-    // ---- faceTrackingSets: SDK-free, so it runs on every SDK ---------------------------------------
-    // Parse and Serialize never touch the component, so the four entry forms survive the document round trip
-    // even where the SDK lacks the type — what an older SDK refuses is the emit (ControllerEmitTests).
-
+    // Parse and Serialize never touch the component, so this runs on every SDK; what an older SDK refuses is
+    // the emit (ControllerEmitTests).
     [Test]
     public void Serialize_Roundtrips_FaceTrackingSets_Four_Entry_Forms()
     {
@@ -225,8 +211,6 @@ public class AnimatorSchemaEmitTests
 
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
     }
-
-    // ---- blend trees: nested 1d inside a direct tree, thresholds + directWeight --------------------
 
     [Test]
     public void Serialize_Roundtrips_Nested_Blend_Trees()
@@ -256,8 +240,6 @@ public class AnimatorSchemaEmitTests
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
     }
 
-    // ---- quoting traps: infer-as-nonstring scalars are quoted; a dangling guid ref ----------------
-
     [Test]
     public void Serialize_Quotes_Infer_Traps_And_Unresolved_Guid()
     {
@@ -271,8 +253,6 @@ public class AnimatorSchemaEmitTests
         var doc = AnimatorSchemaYaml.Parse(src, "test");
         string yaml = AnimatorSchemaEmit.Serialize(doc);
 
-        // A param named `on`, a state named `off`, and the all-zero GUID all read back as non-strings unless
-        // quoted — the serializer must quote them.
         StringAssert.Contains("\"on\":", yaml);
         StringAssert.Contains("\"off\"", yaml);
         StringAssert.Contains("\"00000000000000000000000000000000\"", yaml);
@@ -286,8 +266,6 @@ public class AnimatorSchemaEmitTests
 
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
     }
-
-    // ---- Decompile -> Serialize -> Parse: proves the write-back half of the fixpoint on a real graph
 
     [Test]
     public void Emit_Walk_Serialize_Parse_Roundtrips_Nested_With_Behaviour()
@@ -326,17 +304,13 @@ public class AnimatorSchemaEmitTests
         Assert.AreEqual("tracking", (string)trk["leftHand"]);
         Assert.IsFalse(trk.ContainsKey("rightHand"), "an untouched channel stays unemitted");
 
-        // The re-emitted controller graph matches (behaviour + nested machine survive the full round).
         ControllerEmit.Build(back, out var emitted2);
         var w2 = ControllerDecompile.Walk(emitted2.Controller);
         Assert.AreEqual(0, w2.Refusals.Count);
         Assert.AreEqual(walked.Doc.Layers[0].Root.States.Count, w2.Doc.Layers[0].Root.States.Count);
 
-        // Serialize is idempotent through the parse of a decoded document.
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent through a parse");
     }
-
-    // ---- 2D blend tree: paramY + children carrying x:/y: (GoLoco locomotion is 2D) ----------------
 
     [Test]
     public void Serialize_Roundtrips_2D_Blend_Tree()
@@ -364,8 +338,6 @@ public class AnimatorSchemaEmitTests
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
     }
 
-    // ---- keyframed clip: the block-form `curves:` path (GoLoco has keyframed clips) ----------------
-
     [Test]
     public void Serialize_Roundtrips_Keyframed_Curves_Clip()
     {
@@ -389,8 +361,6 @@ public class AnimatorSchemaEmitTests
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
     }
 
-    // ---- RefPath motion: the bare project-path string branch (only RefGuid was covered) -----------
-
     [Test]
     public void Serialize_Roundtrips_RefPath_Motion()
     {
@@ -410,13 +380,10 @@ public class AnimatorSchemaEmitTests
         Assert.AreEqual(yaml, AnimatorSchemaEmit.Serialize(back), "idempotent");
     }
 
-    // ---- InferScalar <-> InfersNonString divergence guard ----------------------------------------
-    // The serializer's quote decision (NeedsQuote/InfersNonString) must agree with what the parser's
-    // InferScalar actually returns for a scalar — quote iff the token would read back as a non-string.
-    // Both are private, so this observes them through the public surface: InferScalar's result via the
-    // runtime type a reserved (`_`-prefixed) key binds to, and the quote decision via whether Serialize
-    // wraps the token when it sits in a scalar value position (the controller name). Catches silent drift
-    // a comment can't (the token-map failure mode).
+    // The serializer's quote decision (NeedsQuote/InfersNonString) must agree with the parser's InferScalar
+    // across this battery: quote iff the token would read back as a non-string. Both sides are private, so this
+    // observes InferScalar through the boxed type a reserved (`_`-prefixed) top-level key binds to, and the quote
+    // decision through whether Serialize wraps the token as the controller name.
     [Test]
     public void NeedsQuote_Agrees_With_Parser_InferScalar_Across_Token_Battery()
     {
@@ -425,18 +392,15 @@ public class AnimatorSchemaEmitTests
             "on", "off", "true", "false", "3", "-2", "3.0", "1e5", "~",
             "00000000000000000000000000000000",              // all-hex GUID that reads as a number
             "deadbeefcafe0123456789abcdef0000",              // hex GUID with letters -> a string
-            "Idle", "Sub/A",                                  // plain identifiers / slash path
+            "Idle", "Sub/A",
         };
         var disagreements = new List<string>();
         foreach (var tok in battery)
         {
-            // A) what the parser's InferScalar does: a `_`-prefixed top-level key binds its value verbatim
-            // into ReservedNotes with no type-check, so the boxed runtime type IS the inference result.
             var probe = AnimatorSchemaYaml.Parse(
                 "schema: 1\ncontroller: C\nbasis: avatar-root\n_p: " + tok + "\n", "probe");
             bool infersNonString = !(probe.ReservedNotes["_p"] is string);
 
-            // B) what the serializer decides: the token in a scalar value position (controller name).
             var doc = new AnimDocument { Schema = 1, Basis = BindingBasis.AvatarRoot, ControllerName = tok };
             string y = AnimatorSchemaEmit.Serialize(doc);
             bool quoted = y.Contains("controller: \"");
@@ -449,11 +413,8 @@ public class AnimatorSchemaEmitTests
             + string.Join("; ", disagreements));
     }
 
-    // ---- condition string <-> ScalarStr agreement (the condition arm of the drift guard) -------------
-    // The whole condition string routes through ScalarStr (CondString = ScalarStr(RawCondString)), so the
-    // same NeedsQuote predicate must round-trip a condition whatever the param name carries. For each param,
-    // serialize a doc whose sole transition tests `<param> is true`, then assert the emitted YAML is a
-    // textual fixpoint (idempotent through a parse) and the parsed Condition recovers Param byte-for-byte.
+    // CondString routes the whole condition through ScalarStr, so the same NeedsQuote predicate must round-trip
+    // a condition whatever the param name carries.
     [Test]
     public void CondString_Roundtrips_Param_Across_Battery()
     {

@@ -9,9 +9,8 @@ using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// Behavioral tests for CleanController's mutation path (copy→trim→param-prune→descriptor-wire). Throwaway
-// on-disk assets under a scratch path + a scene avatar with a VRCAvatarDescriptor. Headless via
-// tools/run-editmode-tests.ps1. (SelectLayersToKeep is covered separately in CleanControllerSelectLayersTests.)
+// CleanController's mutation path (copy→trim→param-prune→descriptor-wire), on throwaway on-disk assets under a
+// scratch path and a scene avatar with a VRCAvatarDescriptor.
 public class CleanControllerMutationTests
 {
     const string Root = "Assets/Agent/Scratch/CleanTests_NUnit";
@@ -26,19 +25,9 @@ public class CleanControllerMutationTests
         AssetDatabase.DeleteAsset(Root);
     }
 
-    // Source FX: base layer + GestureLeft (an AnyState transition gated on int param "GestureLeft" into
-    // a Direct blend tree using directBlendParameter "BlendParam" + a parameter-driver writing
-    // "DriverParam") + GestureRight (transition condition on "GestureRight"). Plus "UnusedVendorParam"
-    // referenced by nothing. Keeping only GestureLeft must PRUNE GestureRight + UnusedVendorParam and
-    // KEEP GestureLeft + BlendParam + DriverParam.
-    //
-    // ADAPTED from the plan's starting code: the plan's fixture never referenced parameter "GestureLeft"
-    // anywhere (only the layer bore that name) — its own prune test then asserted the param survives,
-    // which it can't under CollectReferencedParameters' actual rules (transition conditions / blend-tree
-    // params / state bindings / driver refs only). Added a realistic AnyState transition gated on
-    // "GestureLeft" (the standard VRC gesture-select pattern) so the param has a genuine referencing path
-    // distinct from BlendParam (blend-tree) and DriverParam (driver) — this ADDS a third, more thorough
-    // prune-survival path rather than removing coverage of the two required in the task brief.
+    // The AnyState transition gives param "GestureLeft" a referencing path of its own: a layer bearing the name
+    // does not keep it (CollectReferencedParameters walks conditions, blend-tree params, state bindings and
+    // driver refs).
     AnimatorController BuildSourceFx(string path)
     {
         var c = AnimatorController.CreateAnimatorControllerAtPath(path);
@@ -58,9 +47,6 @@ public class CleanControllerMutationTests
         var blendState = left.AddState("Blend");
         blendState.motion = bt;
         var driver = blendState.AddStateMachineBehaviour<VRCAvatarParameterDriver>();
-        // driver.parameters is a List<Parameter> and is null on a fresh behaviour — must assign a new
-        // list, not append to one (confirmed against ControllerEmit.PopulateDriver, which always
-        // constructs+assigns a fresh List rather than mutating an existing one).
         driver.parameters = new List<VRC.SDKBase.VRC_AvatarParameterDriver.Parameter>
         {
             new VRC.SDKBase.VRC_AvatarParameterDriver.Parameter { name = "DriverParam", value = 1f },
@@ -177,9 +163,6 @@ public class CleanControllerMutationTests
         StringAssert.Contains("=> PASS", preview);
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<AnimatorController>(Root + "/Src_Clean.controller"), "no asset created");
         Assert.IsTrue(d.baseAnimationLayers[0].isDefault, "descriptor untouched (still default)");
-        // whatIf must create NO side-effect assets and leave the descriptor's expression wiring untouched —
-        // checking only the controller + isDefault would let a whatIf that wrongly minted the empty assets
-        // or flipped customExpressions slip through.
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<VRC.SDK3.Avatars.ScriptableObjects.VRCExpressionParameters>(Root + "/VRCExpressionParameters_Empty.asset"), "whatIf created no params asset");
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<VRC.SDK3.Avatars.ScriptableObjects.VRCExpressionsMenu>(Root + "/VRCExpressionsMenu_Empty.asset"), "whatIf created no menu asset");
         Assert.IsFalse(d.customExpressions, "whatIf must not flip customExpressions");
@@ -220,8 +203,6 @@ public class CleanControllerMutationTests
     {
         var src = BuildSourceFx(Root + "/Src.controller");
         _avatar = new GameObject("NoDesc");
-        // FinishEarly (via TransplantCore.Finish) and the Step-6-verify FAIL path (via BuildSummary)
-        // both log exactly once — one Expect.
         LogAssert.Expect(LogType.Error, new Regex("VRCAvatarDescriptor not found"));
         string s = CleanController.Run(src, _avatar, Root, new[] { "GestureLeft" });
         StringAssert.Contains("=> FAIL", s);
@@ -234,10 +215,6 @@ public class CleanControllerMutationTests
         _avatar = new GameObject("NoFx");
         var d = _avatar.AddComponent<VRCAvatarDescriptor>();
         d.baseAnimationLayers = new[] { new VRCAvatarDescriptor.CustomAnimLayer { type = VRCAvatarDescriptor.AnimLayerType.Gesture, isDefault = true } };
-        // Non-whatIf execute has no dedicated early-abort for a missing FX base layer — it proceeds
-        // through the copy/trim/prune/empty-asset steps and only FAILs at Step 6 verify, with message
-        // "descriptor FX not wired to clean controller (isDefault or wrong ref)" (source line ~447).
-        // Matches the same "FX not wired" substring the whatIf-path early-abort uses.
         LogAssert.Expect(LogType.Error, new Regex("FX not wired"));
         string s = CleanController.Run(src, _avatar, Root, new[] { "GestureLeft" });
         StringAssert.Contains("=> FAIL", s);
@@ -248,16 +225,9 @@ public class CleanControllerMutationTests
     {
         var src = BuildSourceFx(Root + "/Src.controller");
         var d = BuildAvatarWithFxSlot();
-        // ADAPTED from the plan: the plan's starting code planted the decoy at the CONTROLLER reuse path
-        // (Src_Clean.controller) and expected a "not an AnimatorController"/"not a" message. Reading
-        // CleanController.cs shows the controller-path reuse guard's FAIL message is actually
-        // "LoadAssetAtPath returned null for <path>" (line 247) — it never says "is not a…". Only the
-        // params/menu reuse paths carry that literal wording ("asset at <path> exists but is not a
-        // VRCExpressionParameters/VRCExpressionsMenu", lines 293/325). So the decoy goes at the params
-        // path instead, which is where the "wrong-typed asset FAILs loud" contract actually has that
-        // phrasing to assert against.
+        // The decoy goes at the params path: only the params and menu reuse paths FAIL with "is not a"; the
+        // controller path's guard says "LoadAssetAtPath returned null".
         AnimatorTestHelpers.MakeClip(Root + "/VRCExpressionParameters_Empty.asset");
-        // FinishEarly logs the FAIL summary exactly once (via TransplantCore.Finish) — one Expect.
         LogAssert.Expect(LogType.Error, new Regex("exists but is not a VRCExpressionParameters"));
         string s = CleanController.Run(src, _avatar, Root, new[] { "GestureLeft" });
         StringAssert.Contains("=> FAIL", s);

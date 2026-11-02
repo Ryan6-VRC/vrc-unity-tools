@@ -6,7 +6,6 @@ using Ryan6Vrc.AvatarTools.Editor;
 
 public class UploadAvatarLoopTests
 {
-    // Helper — build a GameObject with a VRC PipelineManager and set blueprintId via SerializedObject.
     static GameObject MakeAvatar(string name, string blueprint)
     {
         var go = new GameObject(name);
@@ -17,9 +16,9 @@ public class UploadAvatarLoopTests
         return go;
     }
 
-    // The local read only. Run(whatIf: true) itself is unreachable here — it refuses at
-    // CauReflect.IsAvailable (CAU is absent in this venue; Run_RefusesWhenCauAbsent below is the proof) —
-    // so what a caller reads before publishing is covered through WhatIfCore and Preflight further down.
+    // The local read only. Run(whatIf: true) refuses at CauReflect.IsAvailable because CAU is absent in
+    // this venue (Run_RefusesWhenCauAbsent), so what a caller reads before publishing is covered through
+    // WhatIfCore and Preflight.
     [Test]
     public void ClassifyAvatar_ReadsBlueprintStateAndPublishName()
     {
@@ -186,16 +185,15 @@ public class UploadAvatarLoopTests
     [Test]
     public void CauReflect_AbsentIsGracefulNotThrowing()
     {
-        // A REAL descriptor, because that is what reaches the CAU-type lookup this test is named for.
-        // Passing null short-circuits at the `desc == null` guard one line in — a different branch — leaving
-        // the absent-CAU path, the one every caller in this venue takes, entirely uncovered.
+        // A real descriptor: null short-circuits at the `desc == null` guard and never reaches the CAU-type
+        // lookup.
         var go = new GameObject("cau-probe");
         try
         {
             var desc = go.AddComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
 
-            // The assertions stay OUTSIDE DoesNotThrow: an assertion failure inside the delegate is itself an
-            // exception, so DoesNotThrow would report a wrong reason string as "an unexpected exception".
+            // The assertions stay outside DoesNotThrow: an assertion failure inside the delegate is itself an
+            // exception, which DoesNotThrow would report as "an unexpected exception".
             bool ok = false; object setting = null; string why = null;
             Assert.DoesNotThrow(() => ok = CauReflect.TryBuildSetting(desc, out setting, out why),
                 "a missing CAU must be a named false, never a class-load throw");
@@ -204,18 +202,17 @@ public class UploadAvatarLoopTests
             StringAssert.Contains("CAU not installed", why,
                 "the reason must name the missing package — it is the caller's only fix");
 
-            // The null-argument leg, whose reason must stay distinguishable from CAU's absence: they call for
-            // opposite fixes (pass a descriptor vs. install a package).
+            // The null-argument reason must stay distinguishable from CAU's absence: they call for different
+            // fixes.
             Assert.IsFalse(CauReflect.TryBuildSetting(null, out _, out var whyNull));
             StringAssert.Contains("null descriptor", whyNull);
         }
         finally { Object.DestroyImmediate(go); }
     }
 
-    // The login self-heal's reflection half. Its state machine is covered in UploadAvatarLogicTests over an
-    // injected fake; what can only be checked here is that a CAU-less venue gets a named null instead of a
-    // throw — and that the reason names CAU, since "no saved credentials, go sign in" would be a wrong and
-    // expensive instruction to give an operator whose credentials are fine.
+    // The login self-heal's reflection half; UploadAvatarLogicTests covers its state machine. The reason
+    // must name CAU, since "no saved credentials, go sign in" would misdirect an operator whose credentials
+    // are fine.
     [Test]
     public void CauReflect_LoginKickAbsentIsNamedNotThrowing()
     {
@@ -226,7 +223,7 @@ public class UploadAvatarLoopTests
         StringAssert.Contains("CAU", why, "the reason must name CAU — the caller's fix is not 'sign in'");
     }
 
-    // ── RunCore loop semantics (fake delegate — the real SDK call is live-gated to Task 8) ──────
+    // ── RunCore loop semantics (fake delegate — the real SDK call is live-only) ─────────────────
 
     [Test]
     public void Loop_StopsOnFirstFailure_AndSavesSuccesses()
@@ -243,17 +240,15 @@ public class UploadAvatarLoopTests
             () => saveCalls++).GetAwaiter().GetResult();
         Assert.AreEqual("A", report.rows[0].handle); Assert.AreEqual("uploaded", report.rows[0].result);
         Assert.AreEqual("failed", report.rows[1].result); Assert.AreEqual("transient", report.rows[1].cls);
-        // C was never attempted — the halt appends a not-attempted tail so the report is complete.
         Assert.AreEqual(3, report.rows.Count);
         Assert.AreEqual("not-attempted", report.rows[2].result);
         Assert.AreEqual(1, saveCalls);
         foreach (var g in avatars) UnityEngine.Object.DestroyImmediate(g);
     }
 
-    // The status file is the agent's ONLY channel when a modal wedges the editor mid-upload: Status() is
-    // C# invoked over MCP, and a modal blocks the main thread the poll would have to run on. Progress must
-    // therefore be announced BEFORE the upload that could wedge, naming the avatar — announcing after would
-    // leave the agent reading a stall with no idea which handle caused it.
+    // The status file is the agent's only channel when a modal wedges the editor mid-upload, because a
+    // modal blocks the main thread Status() runs on. Announcing after the attempt would leave a stall
+    // naming no handle.
     [Test]
     public void Loop_AnnouncesEachAvatarBeforeAttemptingIt()
     {
@@ -262,7 +257,6 @@ public class UploadAvatarLoopTests
         var attempted = new System.Collections.Generic.List<string>();
         var report = UploadAvatar.RunCore(avatars,
             go => { attempted.Add(go.name);
-                    // At the moment of the attempt, this handle must ALREADY have been announced.
                     Assert.AreEqual(go.name, announced[announced.Count - 1],
                         "progress must be announced before the upload that can raise a modal");
                     return System.Threading.Tasks.Task.FromResult(UploadAvatar.UploadOutcome.Uploaded()); },
@@ -274,8 +268,7 @@ public class UploadAvatarLoopTests
         foreach (var g in avatars) UnityEngine.Object.DestroyImmediate(g);
     }
 
-    // A halt must not announce the avatars it never tried — the status file would otherwise name a handle
-    // the batch never touched as the one in flight.
+    // The status file would otherwise name a handle the batch never touched as the one in flight.
     [Test]
     public void Loop_DoesNotAnnounceNotAttemptedTail()
     {
@@ -289,11 +282,8 @@ public class UploadAvatarLoopTests
         foreach (var g in avatars) UnityEngine.Object.DestroyImmediate(g);
     }
 
-    // The status file is a FIXED path, so a reader cannot tell this batch's record from the previous
-    // batch's without an identity to match. That stale read is the catastrophic one: if the editor is
-    // already wedged when Run is issued, the call times out, the agent falls back to the file, and sees
-    // the last batch's "done-pass" — concluding an upload that never started succeeded, on an operation
-    // that publishes to a live account.
+    // The status file's path is fixed, so only the batchId tells this batch's record from a stale "done-pass"
+    // that would report an upload that never started as a success.
     [Test]
     public void StatusRecord_CarriesTheBatchId()
     {
@@ -302,8 +292,8 @@ public class UploadAvatarLoopTests
             "without an id the record is indistinguishable from a stale one");
     }
 
-    // The verdict must live in `phase`, not only in the human-readable message: this file is machine-read
-    // from Bash during a wedge, so a bare "done" would make a FAILED batch look finished-and-fine.
+    // This file is machine-read from Bash during a wedge, so a bare "done" would make a failed batch look
+    // fine.
     [Test]
     public void StatusRecord_PutsTheVerdictInPhase()
     {
@@ -313,8 +303,8 @@ public class UploadAvatarLoopTests
             UploadAvatar.BuildStatusJson("b", "done-fail", "nope", -1, 1, null, "T"));
     }
 
-    // The status file is written to disk and read by an external poller — a leaked blueprint id there is
-    // as public as one in the RunLog, and message carries SDK exception text.
+    // The message carries SDK exception text, and a blueprint id in this file is as public as one in the
+    // RunLog.
     [Test]
     public void StatusRecord_RedactsIdsInTheMessage()
     {
@@ -323,8 +313,6 @@ public class UploadAvatarLoopTests
         StringAssert.DoesNotContain("avtr_00000000-1111-2222-3333-444444444444", json);
     }
 
-    // Avatar names are user data and land in a JSON field — an unescaped quote would produce a record the
-    // Bash-side reader cannot parse, exactly when it is the only channel left.
     [Test]
     public void StatusRecord_EscapesAHostileHandle()
     {
@@ -394,9 +382,8 @@ public class UploadAvatarLoopTests
         });
     }
 
-    // A fake in the SDK's ApiErrorException shape — status and server text are public FIELDS and Message is
-    // the content-free default — proving the classification path RealUploadOne's catch runs. A property-shaped
-    // fake once let a property-only reader pass here while it missed every live status.
+    // A fake in the SDK's ApiErrorException shape: status and server text are public fields and Message is
+    // the content-free default.
     class FakeApiException : System.Exception
     {
         public System.Net.HttpStatusCode StatusCode;
@@ -437,7 +424,6 @@ public class UploadAvatarLoopTests
     [Test]
     public void FailedFromException_StatusOnOuter_WrappingInner_StillClassifies()
     {
-        // The exact A bug: 429 on the outer, an inner transport cause present.
         var o = UploadAvatar.FailedFromException(new FakeApiException(429, "rate limited", new System.Exception("transport")));
         Assert.AreEqual("rate-limit", UploadAvatarLogic.Classify(o.httpStatus, o.isValidation, o.isTimeout));
     }
@@ -456,30 +442,20 @@ public class UploadAvatarLoopTests
         Assert.AreEqual("real", o.forcedClass);   // fail-safe default, not transient
     }
 
-    // ----- id-persistence verdict (F39) ---------------------------------------------------------
-    // Loop_ReservedNoBundleIsItsOwnState above proves the LOOP routes the outcome; these prove what
-    // PRODUCES it. That decision's only caller sits behind `await CauReflect.UploadOne` — a real upload
-    // to VRChat — so before extraction no test could fail on it however wrong it got.
+    // ----- id-persistence verdict ---------------------------------------------------------------
+    // Loop_ReservedNoBundleIsItsOwnState above proves the loop routes the outcome; these prove what
+    // produces it.
 
-    // The one cell that means "record reserved, no bundle landed": first-upload going in, still
-    // first-upload after SaveAssets persisted whatever CAU wrote back.
     [Test]
     public void IsReservedNoBundle_firstUploadWhoseIdNeverPersisted()
     {
         Assert.IsTrue(UploadAvatar.IsReservedNoBundle(true, "first-upload"));
     }
 
-    // Every other cell is an ordinary success. ClassifyAvatar returns THREE states, not two, so this is a
-    // 2x3 table: "unknown" is what a GameObject destroyed across the await classifies as, and it is
-    // reachable on both rows. Covering it is what rules out `wasFirstUpload && stateAfter != "update"` — a
-    // mutant that survives every other case here while reporting a destroyed first-upload as a reservation,
-    // which would halt the batch on an upload that landed.
-    //
-    // The (was-update -> reads first-upload) cell is the other one worth naming: an id that went missing
-    // locally after an upload that did land is an anomaly, not a reservation.
-    //
-    // The null cell is the caller's short-circuit — RealUploadOne re-reads the state only when
-    // wasFirstUpload, so a re-upload passes null rather than paying a second SerializedObject read.
+    // "unknown" is what a GameObject destroyed across the await classifies as. Covering it rules out the
+    // mutant `wasFirstUpload && stateAfter != "update"`, which would halt the batch on an upload that
+    // landed. The null cell is RealUploadOne's short-circuit: a re-upload passes null rather than
+    // re-reading the state.
     [TestCase(true,  "update",       TestName = "IsReservedNoBundle_firstUploadThatPersisted_isPlainUpload")]
     [TestCase(true,  "unknown",      TestName = "IsReservedNoBundle_firstUploadWhoseObjectDied_isNotAReservation")]
     [TestCase(false, "update",       TestName = "IsReservedNoBundle_ordinaryReupload_isPlainUpload")]

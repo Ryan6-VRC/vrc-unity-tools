@@ -6,29 +6,12 @@ using UnityEngine;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
-    /// <summary>
-    /// Read-only markdown digest of an <see cref="AnimationClip"/>'s authored bindings — one row per
-    /// curve, covering BOTH float curves (<see cref="AnimationUtility.GetCurveBindings"/>) and
-    /// objectReference curves (<see cref="AnimationUtility.GetObjectReferenceCurveBindings"/>).
-    ///
-    /// Speaks the substrate's handles verbatim: <see cref="EditorCurveBinding.path"/> (the animated
-    /// GameObject's hierarchy path), the declaring component <c>type</c>, the <c>propertyName</c>, and a
-    /// compact key summary. Paths are reported AS AUTHORED — a "" path (root/humanoid-muscle/root-motion
-    /// curves) is shown as <c>(root)</c> but never resolved or judged. This is a digest, not a YAML echo:
-    /// it exists to let an agent read what a clip actually drives without opening the Animation window.
-    ///
-    /// INSPECTION ONLY — never mutates the clip or project.
-    /// </summary>
+    /// <summary>Markdown digest of an <see cref="AnimationClip"/>'s authored bindings, one row per float or
+    /// objectReference curve.
+    /// Contract: docs/animator.md.</summary>
     [AgentTool]
     public static class ReportClip
     {
-        // ----- Public API ---------------------------------------------------------------------
-        // Run(clip) takes the AnimationClip asset object; Run(string) below takes its asset
-        // path/GUID (single clip — for every .anim under a folder use ReportFolder).
-
-        /// <summary>Path/GUID overload: resolve <paramref name="clipPathOrGuid"/> (an asset path or a GUID)
-        /// to the <see cref="AnimationClip"/> and digest it. A handle that names no clip is a bare
-        /// <c>[ReportClip] FAIL: …</c> echoing the handle, no trailer.</summary>
         public static string Run(string clipPathOrGuid)
         {
             var clip = RunLogFormat.LoadByPathOrGuid<AnimationClip>(clipPathOrGuid);
@@ -41,8 +24,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Run(clip);
         }
 
-        /// <summary>Digest one clip. Returns a one-line summary ending with the artifact path in-band
-        /// (<c>… => OK | log=&lt;path&gt;</c>); a null clip is a bare <c>[ReportClip] FAIL: …</c> with no trailer.</summary>
         public static string Run(AnimationClip clip)
         {
             if (clip == null)
@@ -63,10 +44,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return result;
         }
 
-        /// <summary>Digest every <c>.anim</c> under an asset folder into one artifact. Returns a one-line
-        /// summary ending with the artifact path in-band; a bad-input early return is a bare
-        /// <c>[ReportClip] FAIL: …</c> with no trailer. An empty-but-valid folder is NOT skipped — it
-        /// writes a 0-clip artifact.</summary>
         public static string ReportFolder(string assetFolderPath)
         {
             if (string.IsNullOrEmpty(assetFolderPath) || !AssetDatabase.IsValidFolder(assetFolderPath))
@@ -99,10 +76,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return result;
         }
 
-        // ----- Rendering (one grammar for single-clip and folder sections) --------------------
-
-        /// <summary>Append the binding table for one clip; returns the total binding count (float +
-        /// objectReference).</summary>
         private static int RenderClip(AnimationClip clip, StringBuilder body)
         {
             var floats = AnimationUtility.GetCurveBindings(clip);
@@ -148,12 +121,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var k in keys)
             {
                 string n = k.value != null ? k.value.name : "<none>";
-                if (names.Count == 0 || names[names.Count - 1] != n) names.Add(n); // dedupe consecutive
+                if (names.Count == 0 || names[names.Count - 1] != n) names.Add(n);
             }
             return keys.Length + " keys: " + string.Join(", ", names);
         }
-
-        // ----- Helpers ------------------------------------------------------------------------
 
         private static string Cell(string s) => RunLogFormat.Cell(s);
     }

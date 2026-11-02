@@ -4,11 +4,9 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// Exercises SetBoundsAndAnchor's bounds/anchor branches. The owned root has no humanoid Animator, so the
-// Hips anchor resolves via FindDescendantByName ("Hips") — the identical `if (hips != null)` write block
-// the humanoid path reaches, so this covers the real write logic without a humanoid avatar asset. An
-// empty source makes materials FAIL, but the bounds/anchor step (step 3) runs regardless, and these
-// assertions read renderer state + the summary disposition tokens, not the PASS verdict.
+// The owned root has no humanoid Animator, so the Hips anchor resolves by name into the same `if (hips != null)`
+// write block the humanoid path reaches. An empty source makes materials FAIL, but the bounds/anchor step runs
+// regardless, so these assertions read renderer state and the summary's disposition tokens, not the verdict.
 public class ConformRenderersBoundsAnchorTests
 {
     static GameObject Child(GameObject parent, string name)
@@ -36,8 +34,6 @@ public class ConformRenderersBoundsAnchorTests
 
     static string Conform(GameObject owned, bool whatIf = false)
     {
-        // The empty source always makes materials FAIL (see the type comment), and a FAIL summary is
-        // emitted via Debug.LogError — expected, or the runner flags an unhandled error log.
         LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
         var src = new GameObject("Src");
         var summary = ConformRenderers.Run(owned, src, null, whatIf);
@@ -124,7 +120,7 @@ public class ConformRenderersBoundsAnchorTests
         StringAssert.Contains("offenders=[", summary);
         StringAssert.Contains("unmatched: renderer 'Mesh0'", summary);
 
-        // The written RunLog is the shared envelope, not the old bespoke shape.
+        // The written RunLog is the shared envelope.
         var path = summary.Substring(summary.IndexOf("log=") + 4);
         var json = System.IO.File.ReadAllText(path);
         StringAssert.Contains("\"kind\": \"conform-renderers\"", json);
@@ -135,9 +131,8 @@ public class ConformRenderersBoundsAnchorTests
         Object.DestroyImmediate(owned);
     }
 
-    // G25: a mergeable (no humanoid rig, no 'Hips' transform) must PASS with an anchor NOTE, not FAIL on a
-    // missing anchor. Source MATCHES the one renderer with a real material so the material step passes —
-    // isolating the anchor's contribution: pre-fix this run FAILed via an AnchorWarning offender.
+    // The source matches the one renderer with a real material so the material step passes, isolating the
+    // anchor's contribution to the verdict.
     [Test]
     public void Mergeable_without_Hips_passes_with_anchor_note_not_fail()
     {

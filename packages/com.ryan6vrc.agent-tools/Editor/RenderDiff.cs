@@ -3,15 +3,11 @@ using UnityEngine;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
-    // Pure-logic pixel-buffer helpers for RenderAvatar diffing. Buffers are RGBA32 Color32[], row-major,
-    // index = y*w + x. The caller's tiles are bottom-origin, but that's irrelevant here — these functions
-    // report bounding boxes in raw buffer coords and leave origin interpretation to the caller.
-    // Compares are EXACT on R,G,B (alpha ignored — composed tiles are always a=255); no tolerance, by design:
-    // a silent tolerance would let real 1-LSB changes vanish and would turn near-colors into false matches.
+    // Pixel-buffer compare for RenderAvatar diffing. Buffers are RGBA32 Color32[], row-major, index = y*w + x.
+    // The bounding box is in raw buffer coords; the caller's tiles are bottom-origin, so the origin is the caller's
+    // to interpret. Alpha is ignored: composed tiles are always a=255.
     internal static class RenderDiff
     {
-        // EXACT per-pixel rgb compare. changed = count of pixels whose rgb differ; bbox bounds them
-        // (0,0,0,0 when none). Returns identical == (changed == 0).
         internal static bool Compare(Color32[] a, Color32[] b, int w, int h, out int changed, out RectInt bbox)
         {
             if (a == null || b == null || a.Length != b.Length || a.Length != w * h)

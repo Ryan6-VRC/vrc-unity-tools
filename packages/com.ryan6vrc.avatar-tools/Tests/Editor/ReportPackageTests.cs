@@ -4,28 +4,22 @@ using Ryan6Vrc.AvatarTools.Editor;
 using UnityEngine;
 using VRC.SDK3.Avatars.Components;
 
-// Unit tests for ReportPackage's non-SDK component census — the generic replacement for a fixed
-// three-framework detection list, which reported one framework on an avatar carrying three.
-// NonSdkKey reads only Type.Namespace/Type.Name, so plain probe classes exercise it exactly as
+// NonSdkKey reads only the Type (namespace, name, assembly), so plain probe classes exercise it exactly as
 // components do; the real Unity/VRC typeof() references cover the infrastructure side and double as
-// rename canaries against the pinned SDK. Headless via tools/run-editmode-tests.ps1.
+// rename canaries against the pinned SDK.
 
 namespace ReportPackageTests_Framework.Core.Deep
 {
     public class DeeplyNamespacedProbe { }
 }
 
-// A root that merely starts with an SDK root's text. The predicate must split on '.' rather than
-// prefix-match, or every vendor namespace beginning "Unity…" or "VRC…" silently vanishes.
+// Prefix-matching the root instead of splitting on '.' would hide every vendor namespace beginning
+// "Unity…" or "VRC…".
 namespace UnityEngineExtras
 {
     public class NearMissRootProbe { }
 }
 
-// A type SQUATTING an SDK namespace root from a non-SDK assembly — the one shape that observes
-// SdkNamespaceRoots at all. Every other probe reaches its verdict through the assembly check, so without
-// this the root list could be deleted with the whole file still green, and the deletion would silently be a
-// behavior change rather than dead-code removal.
 namespace VRC.ReportPackageTests_SquatProbe
 {
     public class SquattingRootProbe { }
@@ -52,10 +46,9 @@ public class ReportPackageTests
     }
 
     // The namespace-root check runs BEFORE the assembly check, and this is the only case where the two
-    // disagree: a type under an SDK root compiled into an assembly that is NOT the SDK's. Excluding it is the
-    // deliberate squatting bet the production docstring argues for — cheap first filter, and no installed
-    // package takes such a name. Asserting it keeps the bet a decision rather than an accident: delete the
-    // root list and this returns the namespace instead of null, which is a census behavior change.
+    // disagree: a type under an SDK root in an assembly that is NOT the SDK's. Excluding it is deliberate
+    // (SdkNamespaceRoots). Every other test stays green with the root list deleted; this one returns the
+    // namespace instead of null.
     [Test]
     public void NonSdkKey_excludes_a_squatted_sdk_root_even_from_a_non_sdk_assembly()
     {
@@ -75,16 +68,12 @@ public class ReportPackageTests
     [Test]
     public void NonSdkKey_excludes_base_library_types_the_root_list_no_longer_names()
     {
-        // "System" was dropped from the namespace roots so a project's own System.* types stay visible.
-        // Only the assembly check can still exclude the real base library, so these isolate that path.
+        // "System" is not a namespace root, so a project's own System.* types stay visible, and only the
+        // assembly check can exclude the real base library.
         Assert.IsNull(ReportPackage.NonSdkKey(typeof(int)));
         Assert.IsNull(ReportPackage.NonSdkKey(typeof(List<int>)));
     }
 
-    // The type door, both directions, with NonSdkKey held to the same verdict: whatever IsFromSdkAssembly
-    // admits must key to null, and whatever it rejects must survive to the census. Asserting the two
-    // together is what keeps them from drifting apart — NonSdkKey consults the namespace roots FIRST, so a
-    // pair that disagrees is a real defect, not a redundancy.
     [Test]
     public void IsFromSdkAssembly_admits_engine_and_sdk_rejects_ours_and_NonSdkKey_agrees()
     {
@@ -107,9 +96,8 @@ public class ReportPackageTests
     }
 
     // ── Assembly NAMES: the near-miss the type-level tests above structurally cannot reach ─────
-    // A bare "VRC" prefix classified VRCFury as SDK infrastructure — its runtime assembly is named
-    // exactly `VRCFury` — so a VRCFury-composed package censused to zero and togglesCaveat went on to
-    // claim nothing compiles toggles at build. VRCFury's components are `internal` in a
+    // VRCFury's runtime assembly is named exactly `VRCFury`, so a bare "VRC" prefix would class it as SDK
+    // infrastructure and a VRCFury-composed package would census to zero. Its components are `internal` in a
     // non-auto-referenced assembly, so no typeof() here can witness it; the string door can.
 
     [Test]
@@ -121,8 +109,6 @@ public class ReportPackageTests
         Assert.IsFalse(ReportPackage.IsSdkAssemblyName("VRCFury-Tests"));
         Assert.IsFalse(ReportPackage.IsSdkAssemblyName("com.vrcfury.api"), "lowercase: no prefix reaches it either");
 
-        // Every other framework the census exists to name, held to the same must-survive rule. VRCFury is
-        // only the collision that was actually found; a new prefix that swallows any of these is the same bug.
         foreach (var name in new[]
         {
             "nadena.dev.modular-avatar.core", "nadena.dev.ndmf", "nadena.dev.ndmf.vrchat",
@@ -132,8 +118,6 @@ public class ReportPackageTests
         })
             Assert.IsFalse(ReportPackage.IsSdkAssemblyName(name), "must survive to the census: " + name);
 
-        // No name at all is not an SDK name: a component with an unresolvable assembly must reach
-        // unresolvedScripts, never get quietly excluded as infrastructure.
         Assert.IsFalse(ReportPackage.IsSdkAssemblyName(null));
         Assert.IsFalse(ReportPackage.IsSdkAssemblyName(""));
     }
@@ -141,8 +125,8 @@ public class ReportPackageTests
     [Test]
     public void IsSdkAssemblyName_still_reaches_every_real_sdk_assembly()
     {
-        // Enumerated from the installed SDK rather than invented, so narrowing the prefixes cannot
-        // quietly drop one: com.vrchat.{avatars,base} asmdefs plus their precompiled DLLs.
+        // The VRC entries are enumerated from the com.vrchat.{avatars,base} asmdefs and precompiled DLLs, so
+        // narrowing the prefixes cannot quietly drop one.
         foreach (var name in new[]
         {
             "VRC.SDK3A", "VRC.SDK3A.Editor", "VRC.SDKBase", "VRC.SDKBase.Editor",
@@ -215,17 +199,14 @@ public class ReportPackageTests
             new[] { ranked[0].Key, ranked[1].Key, ranked[2].Key });
     }
 
-    // Both sides of the truncation boundary, plus the empty floor. FOUR entries is the case that earns its
-    // keep: "+1 more" is where an off-by-one lives (three named, one remaining), and nothing else in this
-    // file reaches it. The count always LEADS the parenthesis, so truncation can never hide the total.
     [TestCase(0, "0")]
     [TestCase(3, "3(n1, n2, n3)")]
     [TestCase(4, "4(n1, n2, n3, +1 more)")]
     [TestCase(6, "6(n1, n2, n3, +3 more)")]
     public void NonSdkSummary_leads_with_the_count_and_truncates_past_three(int entries, string expected)
     {
-        // Inserted least-present first and named so that rank order is n1, n2, n3 … — the ranking has to
-        // reorder them, so a summary that echoed insertion order would fail rather than coincide.
+        // Inserted least-present first and named so that rank order is n1, n2, n3 …, so a summary that echoed
+        // insertion order would fail rather than coincide.
         var census = new Dictionary<string, int>();
         for (int i = entries; i >= 1; i--) census["n" + i] = entries - i + 1;
 
@@ -234,11 +215,6 @@ public class ReportPackageTests
 
     // ── Viseme mesh: the lipSync mode gate ────────────────────────────────────────────────────
 
-    // The gate exists because VisemeSkinnedMesh is NOT cleared when the mode changes — the inspector only
-    // switches which fields it draws. So a descriptor sitting on JawFlapBone can still hold a live pointer to
-    // whatever face mesh was chosen before the switch, and reading it there would report a stale guess under a
-    // field that claims to be a fact. Both polarities are pinned: widening this set silently re-admits that
-    // stale read, and narrowing it silently demotes every JawFlapBlendShape avatar to the guess route.
     [TestCase(VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.VisemeBlendShape,   true)]
     [TestCase(VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.JawFlapBlendShape,  true)]
     [TestCase(VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.JawFlapBone,        false)]
@@ -252,9 +228,8 @@ public class ReportPackageTests
 
     // ── Viseme mesh: one key, basis in parens ─────────────────────────────────────────────────
 
-    // The two routes must not emit two different KEYS — a reader would then have to parse both to learn one
-    // thing. The basis rides the value instead, the same shape `toggles=` already uses. The unresolved case
-    // stays "?" so it reads as absent rather than as a mesh named "unknown".
+    // One key for both routes, with the basis in the value. The unresolved case stays "?" so it reads as absent
+    // rather than as a mesh named "unknown".
     [TestCase("Body",  "descriptor",             "Body(descriptor)")]
     [TestCase("Body",  "guess:most-blendshapes", "Body(guess:most-blendshapes)")]
     [TestCase(null,    "descriptor",             "?")]
@@ -263,8 +238,7 @@ public class ReportPackageTests
         Assert.AreEqual(expected, ReportPackage.VisemeSummary(mesh, basis));
     }
 
-    // A named mesh with no basis is a bug in the caller, not a silent "trust me": the field still says the
-    // basis is unknown rather than presenting the name bare, which would read as the descriptor route.
+    // A bare name would read as the descriptor route.
     [Test]
     public void VisemeSummary_never_presents_a_bare_name_as_if_it_were_a_fact()
     {
@@ -273,13 +247,10 @@ public class ReportPackageTests
 
     // ── The face-exclusion key for the body pick ──────────────────────────────────────────────
     //
-    // The body pick excludes the face mesh, and WHICH key it excludes on has to follow the route that
-    // answered — not whether a descriptor exists. The two come apart in a case the resolver's own docstring
-    // calls ordinary: a descriptor declares a face mesh this package's FBX inventory does not contain (an
-    // outfit or hair package pointing at a base body elsewhere). The run degrades to the guess route, but the
-    // descriptor-derived mesh is non-null — so keying the exclusion on its nullity excludes nothing at all
-    // (identity matches no renderer, which is precisely why the join failed), and the top renderer becomes
-    // both visemeMesh and bodyGuess. The report then names one mesh twice while the docs promise two.
+    // The key follows the route that answered, not whether a descriptor exists. A descriptor can declare a face
+    // mesh this package's FBX inventory lacks (an outfit or hair package pointing at a base body elsewhere): the
+    // run degrades to the guess route, an identity test matches no renderer, and the top renderer becomes both
+    // visemeMesh and bodyGuess.
     [TestCase("descriptor",             true)]
     [TestCase("guess:most-blendshapes", false)]
     public void FaceExclusionKey_followsTheRouteThatAnswered(string basis, bool identityKey)
@@ -287,8 +258,6 @@ public class ReportPackageTests
         Assert.AreEqual(identityKey, ReportPackage.ExcludesFaceByIdentity(basis));
     }
 
-    // The degraded-with-a-declared-mesh case named above, stated as its own obligation: a declared but
-    // unjoinable mesh must not switch the exclusion to an identity test that matches nothing.
     [Test]
     public void FaceExclusionKey_degradedRouteExcludesByName_evenWhenADescriptorDeclaredAMesh()
     {

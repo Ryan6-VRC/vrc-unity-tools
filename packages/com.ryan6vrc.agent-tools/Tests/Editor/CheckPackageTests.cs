@@ -6,18 +6,8 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 
-// CheckPackage proof obligations, scoped to the empty-vs-dangling verdict its PASS/FAIL rests on:
-//   • DescribeTarget(...) — the target-naming wording, pure, so all four shapes are asserted directly
-//     rather than by hunting an asset state that produces each one.
-//   • The false-alarm trap — a clean-zero slot stays EMPTY and stays PASS.
-//   • Distinct-target collapse — N slots dangling at one target report N missing, 1 target. This is the
-//     property the offender list exists to make legible; asserting the counts move independently is the
-//     only way to catch a regression that re-fuses them.
-// A dangling reference is synthesized by deleting an assigned material out from under a saved prefab,
-// which is the real-world shape (the vendor case that motivated this was a prefab variant overriding
-// material sub-objects its FBX never created). Whether the guid mapping survives that for an unloadable
-// instance id is NOT asserted — DescribeTarget reports whichever way it goes, and pinning it here would
-// bake in an assumption this suite cannot justify.
+// CheckPackage's empty-vs-dangling verdict. A dangling reference is synthesized by deleting an assigned material
+// out from under a saved prefab.
 [Category("CheckPackage")]
 public class CheckPackageTests
 {
@@ -59,7 +49,6 @@ public class CheckPackageTests
                                             assetExists: false);
         StringAssert.Contains("deadbeef", s);
         StringAssert.Contains("absent from this project", s);
-        // The remedy differs from the resolves-but-lacks-the-sub-object case, so the two must not blur.
         Assert.IsFalse(s.Contains("holds no object"), "absent-guid wording must not read as a present file: " + s);
     }
 
@@ -99,7 +88,6 @@ public class CheckPackageTests
         StringAssert.Contains("empty=1", summary);
         StringAssert.Contains("MISSING=0", summary);
         StringAssert.Contains("=> PASS", summary);
-        // The false-alarm trap: an unassigned slot must not acquire dangling-reference language.
         Assert.IsFalse(summary.Contains("dangling"), "a clean-zero slot is not a dangling reference: " + summary);
     }
 
@@ -159,16 +147,12 @@ public class CheckPackageTests
         LogAssert.Expect(LogType.Error, ErrRe);
         var summary = CheckPackage.Run(TmpDir);
 
-        // The tally spans both dangling classes, so a mesh-only break must still report a target.
         StringAssert.Contains("meshMISSING=1", summary);
         StringAssert.Contains("dangling: 1 ref(s) at 1 distinct target(s)", summary);
     }
 
     // The dangling tally spans material slots AND meshes, so nesting it inside "materials" would mislabel its
-    // scope. That is a STRUCTURAL claim and it is asserted structurally: the previous form pinned the literal
-    // `"missing": 0 }`, which proved the parent only via the brace's position in the emitted text — adding any
-    // field to the materials block broke it, and nesting danglingDistinctTargets under materials without
-    // disturbing that spacing passed it.
+    // scope.
     [Test]
     public void RunLog_carriesDistinctTargetCountsOutsideTheMaterialsObject()
     {
@@ -188,15 +172,14 @@ public class CheckPackageTests
     // ── External-material remap: the two classes, pure ────────────────────────────────────────────────
     // Both classes FAIL, but their remedies run in OPPOSITE order, so the discriminator carries the whole
     // value: telling a caller to force-reimport when the pack was never imported is a guaranteed no-op.
-    // Asserted through the pure decision + wording rather than a binary FBX fixture, matching the
-    // DescribeTarget precedent above — an importer state that produces each branch cannot be built here.
+    // Asserted through the pure decision and wording because an importer state that produces each branch
+    // cannot be built here.
 
     [Test]
     public void ClassifyRemap_noMapEntries_isSilent()
     {
-        // The predicate that replaced the dead `materialLocation == External` gate. A model with no external
-        // map says nothing about its empty slots, and empty slots alone must never become evidence — that is
-        // the false-alarm trap this whole tool is built to avoid.
+        // A model with no external map says nothing about its empty slots, and empty slots alone must never
+        // become evidence.
         Assert.AreEqual(CheckPackage.RemapVerdict.None, CheckPackage.ClassifyRemap(0, 0, 12));
     }
 
@@ -209,17 +192,14 @@ public class CheckPackageTests
     [Test]
     public void ClassifyRemap_everyEntryBoundYetSlotsEmpty_isSilent()
     {
-        // Retired class, measured before retiring: zero instances across 119 map-carrying models in three
-        // projects. Every resolvable entry landed, so the empty slots are other submeshes and a reimport is
-        // a no-op — the state ScanHierarchy still counts into `empty=`, with no verdict to carry.
+        // Every resolvable entry landed, so the empty slots are other submeshes and a reimport is a no-op:
+        // ScanHierarchy still counts them into `empty=`, with no verdict to carry.
         Assert.AreEqual(CheckPackage.RemapVerdict.None, CheckPackage.ClassifyRemap(4, 0, 3, notBoundCount: 0));
     }
 
     [Test]
     public void ClassifyRemap_someEntryLandedNowhere_isStale()
     {
-        // The surviving stale case, and the one the remedy is written for: entries resolve, some never
-        // bound, a force-reimport is what fixes it.
         Assert.AreEqual(CheckPackage.RemapVerdict.Stale, CheckPackage.ClassifyRemap(4, 0, 3, notBoundCount: 2));
     }
 
@@ -232,17 +212,17 @@ public class CheckPackageTests
     [Test]
     public void ClassifyRemap_unresolvedSurvivesAnEmptyPartition()
     {
-        // The regression guard on the partition parameter. An unresolved entry never enters the target map,
-        // so it can never populate notBound — reading that 0 as "nothing to report" would silence the class
-        // whose remedy (import the pack FIRST) is the one a reimport cannot substitute for.
+        // An unresolved entry never enters the target map, so it can never populate notBound. Reading that 0 as
+        // "nothing to report" would silence the class whose remedy (import the pack FIRST) a reimport cannot
+        // substitute for.
         Assert.AreEqual(CheckPackage.RemapVerdict.Unresolved, CheckPackage.ClassifyRemap(2, 2, 10, notBoundCount: 0));
     }
 
     [Test]
     public void ClassifyRemap_partiallyResolvedPack_isUnresolvedNotStale()
     {
-        // The case that decides which remedy the caller is handed. Force-reimport alone leaves the
-        // unresolved half exactly as it was, so a partial miss must not read as merely stale.
+        // Force-reimport alone leaves the unresolved half exactly as it was, so a partial miss must not read as
+        // merely stale.
         Assert.AreEqual(CheckPackage.RemapVerdict.Unresolved, CheckPackage.ClassifyRemap(5, 1, 2));
     }
 
@@ -253,7 +233,6 @@ public class CheckPackageTests
             mappedCount: 2, unresolved: new System.Collections.Generic.List<string> { "m_lower", "m_upper" }, emptySlots: 10);
         StringAssert.Contains("m_lower", s);
         StringAssert.Contains("m_upper", s);
-        // Order is the payload: the targets must exist BEFORE the reimport, or the reimport achieves nothing.
         int restore = s.IndexOf("restore or import", System.StringComparison.Ordinal);
         int reimport = s.IndexOf("force-reimport", System.StringComparison.Ordinal);
         Assert.That(restore, Is.GreaterThanOrEqualTo(0), "the unresolved remedy must name the missing targets: " + s);
@@ -266,7 +245,6 @@ public class CheckPackageTests
     [Test]
     public void DescribeRemap_stale_namesOnlyTheEntriesThatLandedNowhere()
     {
-        // The defect this closes: naming all four sent the reader hunting for the two that matter.
         var s = CheckPackage.DescribeRemap(CheckPackage.RemapVerdict.Stale,
             mappedCount: 4, unresolved: new System.Collections.Generic.List<string>(), emptySlots: 3,
             mapped: new System.Collections.Generic.List<string> { "m_body", "m_hair", "m_eye", "m_cloth" },
@@ -286,8 +264,6 @@ public class CheckPackageTests
     [Test]
     public void DescribeRemap_staleWithNoPartition_claimsNoPartitionItDidNotCompute()
     {
-        // The partition is optional on the signature. A caller that omits it must not be told
-        // "all N are already bound" — that is a positive reading nobody took.
         var s = CheckPackage.DescribeRemap(CheckPackage.RemapVerdict.Stale,
             mappedCount: 4, unresolved: new System.Collections.Generic.List<string>(), emptySlots: 3);
         StringAssert.Contains("not the mapped ones", s);
@@ -309,7 +285,6 @@ public class CheckPackageTests
     [Test]
     public void Summary_carriesBothRemapClassesSeparately()
     {
-        // Two counters, two names: a single fused remap number would hide which remedy applies.
         SavePrefab("empty", new Material[1]);
         var summary = CheckPackage.Run(TmpDir);
         StringAssert.Contains("remapSTALE=0", summary);
@@ -318,8 +293,8 @@ public class CheckPackageTests
 
     // ── Helpers ───────────────────────────────────────────────────────────────────────────────────────
 
-    // The "materials" object's own text, brace-balanced from its opening '{' — whitespace-independent, which
-    // is the whole point. The block holds only numbers, so no string literal can carry an unbalanced brace.
+    // Brace-balanced from the opening '{'. The block holds only numbers, so no string literal can carry an
+    // unbalanced brace.
     private static string MaterialsObject(string json)
     {
         int at = json.IndexOf("\"materials\"", System.StringComparison.Ordinal);

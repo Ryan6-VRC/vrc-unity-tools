@@ -5,17 +5,11 @@ using Ryan6Vrc.AgentTools.Editor;
 using UnityEngine;
 
 /// <summary>
-/// The geometry section makes exactly one kind of claim — this renderer carries N triangles on the built
-/// avatar, against M authored — and every reading a builder takes from it (a Delete removed geometry; a hide
-/// only NaNimated it) is arithmetic on those two numbers. So the cases below pin the arithmetic and the three
-/// states a count can be in: a number, `unreadable`, and absent. A zero where one of the other two belongs is
+/// The geometry section claims that a renderer carries N triangles on the built avatar, against M authored. A
+/// count is in one of three states: a number, `unreadable`, or absent. A zero where one of the other two belongs is
 /// the misread, because a zero reads as "the build emptied this".
 ///
-/// <c>ReadGeometry</c> takes a live root and <c>GeometrySection</c> is pure, so both are reachable without a
-/// bake; case 5 is the exception and drives <c>AvatarBakeScope</c>'s injectable callback seam.
-///
-/// Objects are left for the next test's <c>NewScene(Single)</c> to take rather than destroyed —
-/// <c>docs/verify.md</c> §Test venue forbids destroying live objects a fixture has mutated.
+/// <c>ReadGeometry</c> takes a live root and <c>GeometrySection</c> is pure, so no bake is needed.
 /// </summary>
 public class CompositionGeometryTests
 {
@@ -38,7 +32,6 @@ public class CompositionGeometryTests
 
         StringAssert.Contains("| 10 | 10 |", Row(lines, "Body"));
         StringAssert.Contains("| mesh | yes | 4 | 4 |", Row(lines, "Prop"));
-        // The line submesh's indices must not reach the count, and the row must SAY they were left out.
         StringAssert.Contains("| 6 | 6 |", Row(lines, "Mixed"));
         StringAssert.Contains("submesh 1 is Lines", Row(lines, "Mixed"));
         Assert.AreEqual("| total (all) | | | 20 | 20 | | |", Total(lines, "all"));
@@ -49,8 +42,8 @@ public class CompositionGeometryTests
     [Test]
     public void AnInactiveOrDisabledRenderer_isCountedInAllAndSkinned_butNotInActive()
     {
-        // Not a filter question: the build merges toggled-off renderers into an always-active mesh under
-        // NaNimation, so dropping them would report a merge as a deletion on every avatar with a toggle.
+        // The build merges toggled-off renderers into an always-active mesh under NaNimation, so dropping them
+        // would report a merge as a deletion on every avatar with a toggle.
         var root = new GameObject("Toggled");
         Skinned(root, "On", Tris(10));
         Skinned(root, "OffObject", Tris(5)).gameObject.SetActive(false);
@@ -88,7 +81,6 @@ public class CompositionGeometryTests
         row = Row(lines, "Locked");
         StringAssert.Contains("| unreadable | unreadable |", row);
         StringAssert.Contains("not readable", row);
-        // Unknown is not zero: neither unreadable row contributes, and the total stays the readable sum.
         Assert.AreEqual("| total (all) | | | 9 | 9 | | |", Total(lines, "all"));
         Assert.AreEqual("tris=9 trisSkinned=9 trisActive=9", keys);
     }

@@ -12,144 +12,35 @@ using UnityEngine.SceneManagement;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Isolated Scene-View render of ONE avatar subtree — the visual backstop for the spatial-judgment
-    /// steps compose-mergeable defers to the operator (mesh de-conflict, clipping/fit).
+    /// Isolated Scene-View render of ONE avatar subtree into a contact-sheet PNG, the visual backstop for the
+    /// spatial-judgment steps compose-mergeable defers to the operator. Contract: docs/unity-tools.md.
     ///
-    /// The gap this closes is <b>isolation</b>, not screenshots: MCP <c>manage_camera screenshot</c>
-    /// already auto-frames + orbits, but a framed grab still renders every avatar in the scene.
-    /// RenderAvatar drives the operator's Scene View to show the target subtree ALONE, headlight-lit on a
-    /// uniform gray background, from named world-axis angles, into one contact-sheet PNG the agent reads.
-    ///
-    /// <b>Framing is measured, not estimated.</b> It frames off the <i>drawn silhouette</i> — the actual
-    /// rendered pixels on the uniform background — via one exact orthographic correction. So a wrong
-    /// posed-mesh estimate and shader-shrunk props (a mesh whose verts span metres but renders at ~30cm)
-    /// both stop mattering: what is measured is what is drawn.
-    ///
-    /// <b>Rung — honest scope.</b> The Scene View renders NDMF preview proxies, so the grab shows
-    /// reactive-resolved fit (MA Blendshape Sync / Shape Changer applied) — a faithful fit look, still
-    /// the editor preview, NOT the baked upload clone. The NDMF test build + the operator's eye remain
-    /// the bar. Headlight lighting is truthful for geometry/silhouette/clipping/fit; matcap / rim /
-    /// fresnel / GrabPass effects are not the point — judge shading in the operator's scene view.
-    ///
-    /// <b>Isolation is proxy-aware.</b> NDMF parks its preview proxies in the hidden
-    /// <c>___NDMF Preview___</c> scene; blanket-hiding "every other root" would hide them while the
-    /// preview hook still suppresses their originals — deleting every reactive-targeted renderer (the
-    /// body, typically) from the grab. So the preview scene is exempt from root isolation; instead each
-    /// proxy-renderer GameObject (the key NDMF's proxy map uses — SMR proxies are scene roots, MeshRenderer
-    /// proxies sit under shadow-bone trees) is attributed to its original via the public
-    /// <c>NDMFPreview.GetOriginalObjectForProxy</c> and self-only hidden unless that original is drawable
-    /// under the target (foreign avatars' proxies, stale or unattributable proxies, and proxies of
-    /// hide-listed / eye-hidden / inactive originals all hide).
-    /// The summary reports <c>proxies=kept:N,hidden:M</c> whenever proxies exist; if the attribution
-    /// API drifts, proxies are left visible and the note says so — a visible foreign-geometry leak the
-    /// reader can see, never a silent body-drop it can't.
-    ///
-    /// <b>Freshness — settle-gated, horizon-swept.</b> One-sentence contract: <b>target any subtree; the
-    /// freshness gate arms at its avatar root</b> (NDMF's own outermost-root resolver — a leaf-mesh target
-    /// still reaches its whole avatar, a non-avatar prop arms nothing); <b>OK means rendered-current</b>
-    /// (<c>gate=armed</c>) <b>or nothing-to-certify</b> (<c>gate=exempt</c> — no avatar root, where MA
-    /// proxies can't exist, or previews globally disabled so originals render un-suppressed); <b>FAIL says
-    /// what to do next</b> — re-grab an unsettled preview, focus a backgrounded editor, or re-pin a drifted
-    /// NDMF handle. Mechanism: the preview rebuilds asynchronously, advanced only by editor ticks that fire
-    /// after a synchronous call returns — so a same-call edit+grab would capture the pre-edit proxy, and a
-    /// background-throttled editor stops ticking and wedges the rebuild indefinitely. Rather than return an
-    /// untrustworthy sheet, an unsettled pipeline on an armed target FAILS the grab — after kicking the
-    /// editor's main window to the OS foreground (a synthetic Alt tap first releases the Windows foreground
-    /// lock) so real frames fire between this call and the re-grab. The settle predicate alone has one blind
-    /// spot: a scripted edit (reflection write + SetDirty) publishes only a ChangeScene event, which NDMF's
-    /// ChangeStream deliberately ignores, and the PropertyMonitor fallback that would catch it parks while
-    /// the editor is unfocused — the pipeline then reads settled while its MA proxies render pre-edit
-    /// geometry, for seconds to indefinitely. The gate closes it by running one PropertyMonitor sweep itself
-    /// before probing (see SweepNdmfChangeHorizon), so a pending edit becomes a real invalidation and FAILs
-    /// the grab loudly. Protocol stays <b>edit and grab in separate calls</b>; on the settle FAIL, just
-    /// re-grab. In-call waiting for the REBUILD remains impossible by construction — no editor tick runs
-    /// while the synchronous call blocks the main thread. An editor whose foregrounding Windows keeps
-    /// refusing stays FAILed by design — the message names the operator action (focus the editor), and the
-    /// tool never trades that cliff for a sheet it can't vouch for. Mechanism and residuals →
+    /// <b>Freshness.</b> Target any subtree; the gate arms at its outermost avatar root, so a leaf-mesh target
+    /// still reaches its whole avatar and a non-avatar prop arms nothing. OK carries <c>gate=armed</c> (a
+    /// reactive avatar probed settled) or <c>gate=exempt</c> (nothing to certify: no avatar root, no reactive MA
+    /// component, play mode, or previews globally disabled). FAIL says what to do next: re-grab an unsettled
+    /// preview, focus a backgrounded editor, or re-pin a drifted NDMF handle. Three layers, each with its
+    /// mechanism at its code: the settle gate in CaptureCore with SweepNdmfChangeHorizon; the freshness canary,
+    /// which nudges a drawn blendshape and demands pixels move, skipped only in play mode and on SMR-less grabs;
+    /// and the shading guard, which compiles synchronously and FAILs on any exact <c>#00FFFF</c> in a served or
+    /// token-gating frame (CountPlaceholderPx). Freeze states, arming recipes and the live protocol:
     /// Tests/Editor/RenderAvatarFreshnessGate.md.
     ///
-    /// <b>Freshness — the outcome layer.</b> The gates above certify MECHANISMS (pipeline settled,
-    /// changes swept, skin re-bake forced), and measured editor states defeat all of them at once:
-    /// a pending script reload, a play-mode round-trip exited into an unfocused editor, an unfocused
-    /// domain reload (all 2026-07-29; the play exit also stops proxy content sync). So the grab also
-    /// certifies the OUTCOME: a cheap guard FAILs when a script reload is pending, and on every
-    /// edit-mode grab that drew a skinned mesh a post-tiles freshness canary swings a drawn original's
-    /// blendshape (largest predicted pixel amplitude; up to three tried against occlusion), re-grabs
-    /// angle 0 against a dedicated same-draw-state baseline, and demands pixels move — a dead chain
-    /// FAILs transiently and nothing is served (focus kick sent, but the measured cure is INTERACTIVE:
-    /// click in ~10 s, else one focused play round-trip — programmatic foregrounding alone does not
-    /// wake the parked scheduler). One live probe certifies the whole grab because the parking is
-    /// editor-wide, never per-renderer — the model behind the single <c>canary=live</c> token. A grab
-    /// whose drawn meshes offer no visible blendshape probe says so in-band
-    /// (<c>note=freshness canary unavailable…</c>) and never guesses. Only play mode (live player
-    /// loop) and SMR-less grabs skip it — focused editors do NOT: a kicked-but-not-interacted editor
-    /// reads focused while still parked (measured), so a focus skip would certify stale one call after
-    /// the canary's own kick.
+    /// <b>The shading guard can stall a first grab.</b> A freshly imported avatar compiles cold variants with
+    /// the editor frozen for the whole call and no progress UI possible, and a cold lilToon/Poiyomi avatar could
+    /// reach an <c>execute_code</c> timeout that presents as a hang. Read a stalled first grab as this before
+    /// diagnosing it as anything else.
     ///
-    /// <b>Freshness — the shading axis.</b> Both layers above are about DEFORM: whether the geometry drawn is
-    /// current. Shading is a third axis neither touches. Unity draws a flat <c>#00FFFF</c> placeholder for any
-    /// shader variant still compiling, and the capture's own synchronous repaint is what QUEUES that compile —
-    /// so no pre-grab probe can see it, and the layers above certify the sheet anyway (a placeholder's pixels
-    /// move under the canary's nudge exactly like a real surface's). Measured 2026-08-13: a settled,
-    /// <c>canary=live</c> grab drew a whole silhouette flat cyan on an avatar whose hair texture means
-    /// (233,226,224), and a second avatar drew 64 placeholder px on a sheet that read healthy — the corruption
-    /// is partial as often as total. This path is unusually exposed because its headlight/no-skybox framing
-    /// config requests a keyword set the operator's viewport never draws, so the capture is what warms those
-    /// variants. The grab therefore forces synchronous shader compilation for its duration (project pref,
-    /// restored in the finally), covering the canary's frames too — with async compilation live across the
-    /// canary's baseline/nudge pair, a variant finishing between them moves pixels wholesale and would certify
-    /// <c>canary=live</c> off shader completion rather than off deform.
-    /// <b>The pref is a MECHANISM, so the OUTCOME is scanned.</b> This file's history is mechanisms defeated
-    /// by editor states nobody predicted, so if the pref misses a path the sheet must not ship: every frame
-    /// served (the tiles, and a diff's frame A) and every frame that gates a token (the canary's baseline and
-    /// nudge) is counted for exact <c>#00FFFF</c> px, and any hit FAILs. The floor is 0 — measured, not tuned.
-    /// The FAIL reads <c>ShaderUtil.anythingCompiling</c> in the same call and splits on it: still compiling is
-    /// the known async-compile producer and re-grabbing clears it, quiet is an unidentified mechanism that a
-    /// re-grab may not touch. That probe used to ride as a standalone note, which was retired: it is
-    /// editor-global and unattributable, and it told readers a measurably clean sheet might carry placeholder
-    /// regions (gate doc §Shading cell, probe D). <b>Two bounds on the scan.</b> Downscale is 4-tap bilinear at
-    /// a point, so at scale &gt; 1 a region narrower than the sample spacing can be missed entirely rather than
-    /// diluted — the bound widens as <c>resolution</c> drops, until <c>tileRes</c> hits its floor. And an
-    /// unlit or emissive material could
-    /// legitimately render exact cyan, making a hit a finding to resolve by re-grab rather than proof on its
-    /// own. The live cell in Tests/Editor/RenderAvatarFreshnessGate.md is the only thing that proves the
-    /// guard holds — batchmode cannot see a rendered pixel, and that doc is canon for every measured count.
-    /// <b>The guard's cost IS the guard:</b> a first grab of a freshly imported avatar compiles cold variants
-    /// with the editor frozen for the whole call, and there is no progress bar possible (progress UI needs
-    /// the main thread, which this synchronous call holds). Measured warm at 836 ms against a ~550 ms
-    /// baseline; a cold lilToon/Poiyomi avatar is unmeasured and could be far worse, up to an
-    /// <c>execute_code</c> timeout that presents as a hang. Slow and true beats fast and false, but read a
-    /// stalled first grab as this before diagnosing it as anything else.
-    /// <b>The pref is this path's lever only.</b> A bespoke <c>Camera.Render()</c> — avatar-tools'
-    /// RenderThumbnail, or any scratch-camera readback — ignores the project pref and compiles synchronously
-    /// exactly while <c>ShaderUtil.allowAsyncCompilation</c> is false. That flag reads false at rest, which is
-    /// why an offscreen camera drew ZERO placeholder px under the arming that poisons this path (2026-08-13),
-    /// but it is not always false at the moment of a render: an edit-mode thumbnail capture has drawn a whole
-    /// hair mesh as placeholder. With the flag forced true, a cold shader drew placeholder whether the pref was
-    /// on or off (2026-09-19). So a scratch-camera path pins the flag, not the pref —
-    /// RenderThumbnailCore.Capture is the worked instance.
-    ///
-    /// <b>Angles are world axes, not the avatar's.</b> No root-finding: assumes the VRChat convention
-    /// (target upright, facing world +Z, unrotated). A target rotated in the scene shows the scene's
-    /// front — a documented limitation; the upside is it also works on a child or a non-avatar object.
-    ///
-    /// INSPECTION-class, with two declared exceptions. First, the freshness canary WRITES scene data — a
-    /// blendshape weight swing on one drawn renderer — and restores the exact prior value in the same
-    /// call; if the swing dirtied a previously-clean scene the flag is cleared best-effort (internal
-    /// API), and an in-band note says so when it could not be. Second, the shading guard flips ONE
-    /// EDITOR-GLOBAL pref (<c>EditorSettings.asyncShaderCompilation</c>) for the grab's duration — neither
-    /// scene data nor the Scene-View state below, but process-wide for those milliseconds, so any other
-    /// window compiles synchronously too. Restored in the finally BEFORE the view restores, because
-    /// <c>EditorSettings</c> is a serialized asset: a leak would persist to disk at the next save and make the
-    /// whole project compile synchronously indefinitely. Restored, the persisted content is unchanged.
-    /// Everything else mutates only transient
-    /// Scene-View state (view transform, display toggles, selection, and SceneVisibilityManager
-    /// hides) and restores it in a finally. Visibility restore is COARSE: each subtree this grab hid returns to its own self-state,
-    /// so a nested eye-hide the operator set *under* a subtree the grab hid is not preserved (the same
-    /// bound whole-scene isolation has always carried). The target subtree's own eye-hides are never
-    /// touched — they render exactly as the operator left them. To see a hidden part, un-hide it before
-    /// the grab and restore it after; the read-only tool never reveals what the operator hid. Writes the
-    /// PNG to Application.temporaryCachePath (outside Assets/).
+    /// INSPECTION-class, with two declared exceptions. The freshness canary WRITES scene data: a blendshape
+    /// weight swing on one drawn renderer, restored to the exact prior value in the same call; if the swing
+    /// dirtied a previously-clean scene the flag is cleared best-effort, with an in-band note when it could not
+    /// be. The shading guard flips the editor-global <c>EditorSettings.asyncShaderCompilation</c> for the grab's
+    /// duration, so any other window compiles synchronously too. Everything else (view transform, display
+    /// toggles, selection, SceneVisibilityManager hides, SMR re-bake flags) is transient and restored in a
+    /// finally. Visibility restore is COARSE: each subtree this grab hid returns to its own self-state, so a
+    /// nested eye-hide the operator set under a subtree the grab hid is not preserved. The target subtree's own
+    /// eye-hides are never touched and the tool never reveals what the operator hid: to see a hidden part,
+    /// un-hide it before the grab and restore it after.
     /// </summary>
     [AgentTool]
     public static class RenderAvatar
@@ -164,24 +55,14 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const int OverlayPad = 12;     // px cleared below the detected floating-overlay band
         private const int FgThreshold = 35;    // per-pixel sum |channel-bg| above which a pixel is foreground
 
-        // <png>.cam.json schema; bumped on any field rename (diff FAILs on mismatch, naming "re-grab frame A").
-        // 2: no field changed — the bump retires every frame A grabbed BEFORE the sync-compile shading guard.
-        // Such an A may be flat #00FFFF placeholder in places, which manufactures `changed` px against an
-        // honest B or hides a real change under a flat fill, so the diff COUNT is the thing in doubt and no
-        // note on B can repair it. A poisoned baseline silently corrupting every later diff is the whole
-        // reason this guard exists, so pre-guard baselines refuse rather than diff.
-        //
-        // The bump is the ONLY staleness instrument here, and deliberately so: a tool-version field cannot do
-        // this job. A Unity package assembly carries no AssemblyVersion, so Assembly.GetName().Version is
-        // 0.0.0.0 for every build, and package.json's version is a hand-maintained constant — either way an
-        // advisory "this baseline may be stale" note fires never or always, and a baseline in real doubt must
-        // REFUSE rather than carry a note the reader may discount.
+        // <png>.cam.json schema: bump on any field rename, or to make old baselines refuse (diff FAILs on a
+        // mismatch, naming "re-grab frame A"). It is the only staleness instrument: a package assembly's Version
+        // reads 0.0.0.0 and package.json's version is hand-maintained, so a tool-version field cannot do this job.
         private const int ManifestSchema = 2;
 
         // Descendants excluded from every grab, merged with the caller's `hide`. The non-destructive
-        // build adds a ~10 km "Culling" mesh (visible in play mode) that renders as a huge pale surface
-        // and would otherwise become the framed silhouette. Present only in built/play state; a no-op
-        // in edit mode, where no such object exists.
+        // build adds a ~10 km "Culling" mesh that renders as a huge pale surface and would otherwise
+        // become the framed silhouette.
         private static readonly string[] DefaultHide = { "Culling" };
 
         // Internal selection-outline/wire annotations — a lingering selection draws a wireframe into the
@@ -195,16 +76,11 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- NDMF preview settle-state (reflection) -------------------------------------------
         // The asmdef has references:[], so NDMF internal types are found by assembly-scan on the qualified
-        // name (never typeof). Every hop is null-conditional: a renamed/removed member leaves the field null
-        // → the drift note at call time, never a class-load throw. Settled predicate + mechanism:
-        // Tests/Editor/RenderAvatarFreshnessGate.md.
+        // name (never typeof). A renamed or removed member leaves its field null → Settle.Drift at call time,
+        // never a class-load throw. Settled predicate: ProbeSettle.
         private const string UnsettledNote = " | note=preview not settled (NDMF rebuild in flight) — re-grab in a separate call";
         private const string DriftNote = " | note=settle-state unknown (NDMF internals drifted)";
 
-        // Resolution routes through SafeGetProperty/SafeGetField (below) so a member lookup that THROWS
-        // (e.g. AmbiguousMatchException) at class load yields a null handle → the drift note at call time,
-        // never a TypeInitializationException from a field initializer. `?.` on the Types short-circuits a
-        // null declaring type before the call is even made.
         private static readonly Type PreviewSessionType = VendorReflect.FindType("nadena.dev.ndmf.preview.PreviewSession");
         private static readonly PropertyInfo PiCurrent = SafeGetProperty(PreviewSessionType, "Current",
             BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
@@ -222,16 +98,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
         // ----- NDMF change-horizon sweep (reflection, same drift rules) ---------------------------
-        // The settle predicate reads PIPELINE state, but a scripted edit (reflection write + SetDirty —
-        // the normal execute_code mutation path) publishes only a ChangeScene event, which NDMF's
-        // ChangeStreamMonitor deliberately ignores ("too many spurious sources"); the fallback that is
-        // supposed to catch such unreported changes — PropertyMonitor's poll loop — PARKS while the
-        // editor is unfocused (the norm in agent sessions). Until one of them runs, the pipeline reads
-        // settled while its proxies render pre-edit geometry: the gate's one blind spot, seen live as
-        // => OK on a stale sheet. Before probing, Capture therefore runs one PropertyMonitor sweep
-        // itself (NDMF's own unreported-change detector) and pumps the NDMF sync context so a pending
-        // edit lands as a real invalidation the probe can see. Drift on any handle skips the sweep and
-        // appends a note — the gate still runs exactly as before, its blind spot documented in-band.
+        // Handles for SweepNdmfChangeHorizon, which owns the blind spot they close.
         private const string HorizonDriftNote =
             " | note=change-horizon sweep unavailable (NDMF internals drifted) — a recent scripted edit may not be visible to the settle gate";
         private static readonly Type ObjectWatcherType = VendorReflect.FindType("nadena.dev.ndmf.cs.ObjectWatcher");
@@ -249,33 +116,22 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static readonly MethodInfo MiTurn = SafeGetMethodNoArgs(FiInternalContext?.FieldType, "Turn",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly Type ComputeContextType = VendorReflect.FindType("nadena.dev.ndmf.preview.ComputeContext");
-        // FlushInvalidates is overloaded — the Type.EmptyTypes lookup picks the parameterless one
-        // (a bare GetMethod would throw AmbiguousMatchException and null the handle).
         private static readonly MethodInfo MiFlushInvalidates = SafeGetMethodNoArgs(ComputeContextType,
             "FlushInvalidates", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
 
         // ----- NDMF preview-scene proxy attribution (reflection, same drift rules) ---------------
-        // Both hooks are PUBLIC NDMF API (NDMFPreviewSceneManager.IsPreviewScene, changelog-tracked
-        // NDMFPreview.GetOriginalObjectForProxy) — reflected only because this asmdef has references:[].
-        // A drift leaves the handles null → proxies stay visible + an in-band note (see class doc).
+        // Both hooks are public NDMF API, reflected only because this asmdef has references:[].
         private const string ProxyDriftNote =
             " | note=NDMF proxy attribution drifted — preview proxies left visible (possible foreign-geometry leak)";
-        // ProxyDriftNote never reaches a summary anymore: CaptureCore converts it to this error-level FAIL
-        // (a sheet with unattributed proxies can't be vouched for). internal for the headless drift test.
+        // ProxyDriftNote is a sentinel that never reaches a summary: CaptureCore converts it to this FAIL.
         internal const string ProxyDriftFailReason =
             "NDMF proxy attribution drifted — preview proxies are present but attribution is unavailable, so the "
             + "grab would render unattributed preview proxies as unflagged geometry (possible foreign-geometry "
             + "leak); re-pin GetOriginalObjectForProxy before trusting a sheet";
-        // Proxies discovered + session settled + none attribute = the attribution API silently returned null
-        // for every proxy; the grab would hide all reactive-targeted geometry and draw a bodiless sheet.
-        // internal for the headless truth-table test.
         internal const string ProxyAllNullFailReason =
             "NDMF preview proxies are present and the session is settled, but attribution returned null for "
             + "every one — the grab would hide all reactive-targeted proxies and draw a bodiless sheet; "
             + "re-pin GetOriginalObjectForProxy before trusting a sheet";
-        // NDMF installed but its avatar-root resolver drifted (handle missing OR return type changed): every
-        // target would classify as no-avatar-root → render ungated → silent OK-stale, and the return-type
-        // mode also slips past a bare-null canary. FAIL loud, symmetric with the proxy-attribution drift FAIL.
         internal const string ArmScopeResolverDriftFailReason =
             "NDMF is installed but its avatar-root resolver (RuntimeUtil.FindAvatarInParents) drifted — the "
             + "handle is missing or its return type changed, so every target would resolve to no-avatar-root "
@@ -289,9 +145,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             BindingFlags.Static | BindingFlags.Public);
 
         // ----- NDMF avatar-root resolver (reflection, same drift rules) ---------------------------
-        // RuntimeUtil.FindAvatarInParents(Transform) → the OUTERMOST avatar root at/above the target,
-        // using NDMF's own AllRootTypes (VRCAvatarDescriptor is registered by VRChatPlatform via
-        // PlatformRegistry's InitializeOnLoad). Reflected only because this asmdef has references:[].
         private static readonly Type RuntimeUtilType = VendorReflect.FindType("nadena.dev.ndmf.runtime.RuntimeUtil");
         private static readonly MethodInfo MiFindAvatarInParents = SafeGetMethod(RuntimeUtilType,
             "FindAvatarInParents", BindingFlags.Static | BindingFlags.Public);
@@ -299,14 +152,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ----- Pending-script-reload guard (reflection on pinned-Unity internals) -----------------
         // A compiled-but-unloaded script reload parks GPU skin re-baking editor-wide while the editor
         // is unfocused: proxy CONTENT keeps syncing, but every render serves the parked deform and the
-        // forcedRebake flag does nothing — measured 2026-07-29 (LockReloadAssemblies + import; a 90mm
-        // trip diffed byte-stale, gate=armed). isCompiling reads FALSE once the compile finishes, so
-        // the reload-request state is the only diagnostic. Only a REQUESTED reload arms the guard —
-        // CanReloadAssemblies=false alone is a benign lock with no pending work; it feeds the message.
-        // Unity is VRChat-pinned so these handles cannot drift in practice; the EditMode canary
-        // red-fails if they ever do, and the freshness canary below still catches the state
-        // end-to-end if this guard is unavailable — which is why a null handle here skips the guard
-        // rather than FAILing (the one drift the outcome layer covers).
+        // forcedRebake flag does nothing. isCompiling reads false once the compile finishes, so the
+        // reload-request state is the only diagnostic. Only a REQUESTED reload arms the guard;
+        // CanReloadAssemblies=false alone is a benign lock with no pending work and only feeds the message.
+        // A null handle skips the guard rather than FAILing, because the freshness canary still catches this
+        // state end-to-end; the EditMode canary red-fails on the drift.
         private static readonly MethodInfo MiIsScriptReloadRequested = SafeGetMethodNoArgs(
             typeof(UnityEditorInternal.InternalEditorUtility), "IsScriptReloadRequested",
             BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
@@ -333,17 +183,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // ----- End-to-end freshness canary ---------------------------------------------------------
-        // The forcedRebake flag defeats the multi-hour-idle freeze (2026-07-16, re-verified live
-        // 2026-07-29), but two editor states defeat the FLAG itself: the pending script reload above,
-        // and a play-mode round-trip exited into an unfocused editor (both measured 2026-07-29; the
-        // second also stops proxy content sync). Mechanisms keep multiplying, so this layer certifies
-        // the OUTCOME: after the tiles are grabbed, nudge one drawn ORIGINAL (largest-amplitude
-        // blendshape — exercising the original→proxy sync leg — else translate the target root, which
-        // moves every bone), re-grab angle 0 pinned, and demand pixels move. A dead chain FAILs
-        // transiently with a focus kick; the measured cure is ~10 s of INTERACTIVE focus (programmatic
-        // kick-focus does not wake the parked scheduler), so the message asks the human to click in.
-        // Runs on every edit-mode grab that drew an SMR — deliberately including focused editors: a
-        // kicked-but-not-interacted editor reads focused while still parked (see ShouldRunCanary).
+        // The forcedRebake flag cures only the multi-hour-idle freeze. A pending script reload and a play-mode
+        // round-trip exited into an unfocused editor (which also stops proxy content sync) defeat the flag
+        // itself, so this layer certifies the OUTCOME: after the tiles are grabbed, nudge one drawn ORIGINAL's largest-amplitude blendshape, which
+        // exercises the original→proxy sync leg, re-grab angle 0 pinned, and demand pixels move. One live probe
+        // certifies the whole grab because the parking is editor-wide, never per-renderer.
         private const int CanaryFloor = 8;          // px at TILE res; measured no-op floors 0–4, real nudges O(10^4)
         private const int CanaryMinExpectedPx = 16; // px at TILE res a candidate shape must predict, else it is skipped
         private const int CanaryMaxTries = 3;       // occlusion insurance: distinct shapes tried before FAILing
@@ -356,21 +200,12 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Shading: the outcome scan -----------------------------------------------------------
         // The capture forces synchronous shader compilation (see the config block in CaptureCore), so Unity's
-        // flat #00FFFF still-compiling placeholder should be undrawable. That is a MECHANISM, and this file's
-        // whole history is mechanisms defeated by editor states nobody predicted — so every frame this tool
-        // SERVES, and every frame that GATES a token, is scanned for the placeholder before it ships. The
-        // floor is 0: measured, not tuned.
-        // What this replaced: a note fired off ShaderUtil.anythingCompiling — editor-global, unattributable —
-        // which told the reader that a clean sheet "may carry flat #00FFFF placeholder regions". Measured
-        // 2026-08-14 (gate doc §Shading cell, probe D): compilation genuinely in flight across a grab whose
-        // tiles scanned at exactly zero. The signal could not see the outcome; this scan does, so the probe
-        // now rides the FAIL as a mechanism hint instead of standing in for a verdict.
-        // Detection bound: Downscale is 4-tap bilinear AT A POINT, not a box filter over the footprint — so
-        // an exact survivor generally needs a pure-cyan 2x2 at the sample point (a single px suffices at odd
-        // integer scale, where the taps land on a texel), and at scale>1 a region narrower than the sample
-        // spacing (side/tileRes) can fall between taps and be missed ENTIRELY rather than diluted. The bound
-        // widens as `resolution` drops until tileRes hits its MinTileRes floor. Sizes: the gate doc, canon.
-        // Alpha is not read: Sample hardcodes it to 255, so a tile carries no grab alpha to test.
+        // flat #00FFFF still-compiling placeholder should be undrawable. Every frame this tool SERVES, and every
+        // frame that GATES a token, is scanned for it anyway; the floor is 0, measured rather than tuned.
+        // Detection bound: Downscale is 4-tap bilinear AT A POINT, not a box filter over the footprint, so at
+        // scale>1 a region narrower than the sample spacing (side/tileRes) can fall between taps and be missed
+        // ENTIRELY rather than diluted, and an exact survivor generally needs a pure-cyan 2x2 at the sample
+        // point. The bound widens as `resolution` drops until tileRes hits its MinTileRes floor. Sizes: the gate doc.
         internal static int CountPlaceholderPx(Color32[] tile)
         {
             if (tile == null) return 0;
@@ -383,15 +218,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return n;
         }
 
-        // `where` names WHICH frames carried it — the served tiles or the canary's own pair — because the
-        // two mean different things about the sheet.
-        // The compile state is a HINT, never the verdict, and never the verdict CLASS: probe D measured the
-        // flag true across a grab that scanned at exactly zero, so it cannot attribute a hit to this grab in
-        // either direction. Every placeholder hit is therefore a hard FAIL; the two arms differ only in which
-        // remedy to try first. Ordering the remedies is what the flag can honestly do.
-        // Both arms end at a cure the reader can act on, including the terminal authored-cyan case — a floor
-        // of 0 with no opt-out means a genuinely cyan surface would otherwise make a target un-grabbable with
-        // nothing in the text to try.
+        // ShaderUtil.anythingCompiling is editor-global and has measured true across a grab that scanned at
+        // exactly zero, so it only orders the remedies. Every placeholder hit is a hard FAIL.
         internal static string BuildPlaceholderFailReason(
             string where, int total, string worstAngle, int worstN, bool compiling)
             => "flat #00FFFF placeholder px in " + where + " — " + total + " px, worst '" + worstAngle
@@ -410,10 +238,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                + "rule the gizmo pass in or out, then `hide` the offending renderer; a count that repeats "
                + "identically on an unchanged scene is an authored surface, not a placeholder.";
 
-        // Frame A is a PRIOR grab read off disk, so the live compile state says nothing about it and the
-        // cure is a re-grab of A, not of this call. Its damage is specific: a flat region manufactures
-        // `changed` px against an honestly-shaded B, or hides a real change under a fill, so the counts —
-        // the whole product of a diff — are what is in doubt.
         internal static string BuildFrameAPlaceholderFailReason(string aName, int total, string worstAngle, int worstN)
             => "flat #00FFFF placeholder px in frame A (" + aName + ") — " + total + " px, worst '" + worstAngle
                + "' at " + worstN + " (floor 0: a healthy sheet measures exactly zero). A placeholder region "
@@ -422,10 +246,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                + "the fresh A carries it too, that grab's own FAIL names the remedies "
                + "(Tests/Editor/RenderAvatarFreshnessGate.md §Shading cell).";
 
-        // Top-CanaryMaxTries blendshapes of a mesh by max vertex delta, cached per mesh — the delta scan
-        // is O(shapes × verts) and capture-hot. Normals/tangents are not read, so null is passed for
-        // both (same call shape as ReportShapeOverlap). Non-readable and shape-less meshes cache empty.
-        // The Dictionary holds strong Mesh keys: bounded by the meshes seen this domain, never evicted.
+        // Top-CanaryMaxTries blendshapes of a mesh by max vertex delta, cached per mesh because the scan is
+        // O(shapes × verts) and capture-hot. The Dictionary holds strong Mesh keys: bounded by the meshes seen
+        // this domain, never evicted.
         private struct CanaryShape { public int index; public float delta; }
         private static readonly Dictionary<Mesh, CanaryShape[]> CanaryShapeCache = new Dictionary<Mesh, CanaryShape[]>();
         private static CanaryShape[] CanaryShapeCandidates(Mesh mesh)
@@ -454,19 +277,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             return arr;
         }
 
-        // Pure gate pieces, extracted for the headless truth-table tests. No focus condition: a
-        // kicked-but-not-interacted editor reads FOCUSED while still parked (measured 2026-07-29 — a
-        // post-kick grab skipped the canary and certified a stale sheet), so "focused ⇒ healthy" is
-        // false exactly one call after the canary's own kick. The canary runs on every edit-mode grab
-        // that drew a skinned mesh; the extra grabs are the price of a token that can be trusted.
+        // No focus condition: a kicked-but-not-interacted editor reads FOCUSED while still parked, so a focus
+        // skip would certify a stale sheet one call after the canary's own kick.
         internal static bool ShouldRunCanary(bool isPlaying, bool anySmrDrawn)
             => !isPlaying && anySmrDrawn;
         internal static bool CanaryAlive(int changedPixels) => changedPixels > CanaryFloor;
         // Predicted TILE-resolution pixel amplitude of a nudge: worldDelta is the shape's max vertex
         // delta × the renderer's largest lossyScale axis (mesh deltas are mesh-local); the swing
-        // (w>50 ? 0 : 100) realizes at least half of it; worldPerSourcePx comes from the live canary
-        // camera (2·ortho / camH — sv.size is NOT camera ortho, the k-correction exists for a reason);
-        // side→tileRes is the downscale the compared tiles actually undergo.
+        // (w>50 ? 0 : 100) realizes at least half of it; worldPerSourcePx is 2·ortho / camH of the live
+        // canary camera; side→tileRes is the downscale the compared tiles undergo.
         internal static float CanaryExpectedTilePx(float worldDelta, float worldPerSourcePx, int side, int tileRes)
             => worldPerSourcePx <= 0f || side <= 0
                 ? 0f
@@ -483,8 +302,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                      + "re-grab; if it still FAILs, enter and exit play mode once with the editor focused (measured cure)")
                + ". If every named shape could be occluded at this angle, re-grab with a different angle first "
                + "before treating this as a freeze";
-        // A root-move nudge can dirty a scene the operator had clean (weight writes measured not to);
-        // restored best-effort via the internal API — a null handle just leaves the flag, never throws.
+        // Backstop for a canary nudge dirtying a scene the operator had clean (blendshape weight writes have
+        // measured not to). Internal API, best-effort: a null handle leaves the flag and never throws.
         private static readonly MethodInfo MiClearSceneDirtiness = SafeGetMethod(
             typeof(EditorSceneManager), "ClearSceneDirtiness", BindingFlags.Static | BindingFlags.NonPublic);
 
@@ -534,8 +353,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             string proxyInfo = (r.proxiesKept + r.proxiesHidden) > 0
                 ? " proxies=kept:" + r.proxiesKept + ",hidden:" + r.proxiesHidden : "";
             // cam=ok signals a diffable camera manifest was written beside the png — CaptureDiff's `against`.
-            // eyeHidden / hideExcluded name their REFERENT, not their unit: `proxies=…,hidden:N` on this same line
-            // counts renderers too, so a bare "hidden" never said which population it meant.
             string summary = string.Format(CultureInfo.InvariantCulture,
                 "[RenderAvatar] Capture {0} angles={1} tiles={2} res={3} margin={4} gizmos={5} eyeHidden={6} hideExcluded={7}{8} => OK gate={9}{10} cam=ok{11} | png={12}",
                 r.label, string.Join(",", r.manifest.angles), r.manifest.views.Length, r.manifest.tileRes,
@@ -547,14 +364,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // ----- Hide list: resolution, refusal, empty-entry note ---------------------------------
-        // Extracted pure because `CaptureCore` takes a SceneView at its top and is therefore unreachable in
-        // batchmode — the same reason this file's freshness predicates are extracted. The rule and both
-        // refusals are the part an agent acts on, so they are the part that has to be assertable.
 
-        /// <summary>Resolve each caller entry as a descendant of <paramref name="root"/>. `targets` feeds the
-        /// SVM hide, `unresolved` drives the refusal, and `callerEntries` keeps the caller's own entries paired
-        /// with what they resolved to — DefaultHide is added by the caller afterwards and stays out of it, since
-        /// a missing `Culling` mesh is the normal case rather than a caller error.</summary>
+        /// <summary>Resolve each caller entry as a descendant of <paramref name="root"/>. DefaultHide is added by
+        /// the caller afterwards, since a missing `Culling` mesh is the normal case rather than a caller error.</summary>
         internal static void ResolveHideList(GameObject root, string[] hide,
             out List<GameObject> targets, out List<string> unresolved,
             out List<KeyValuePair<string, GameObject>> callerEntries)
@@ -574,10 +386,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        /// <summary>The two refusals an unresolved entry earns. They differ because the list has different
-        /// authors: `Capture`'s was typed by the caller, who can fix it, while a pinned diff replays frame A's
-        /// list — where the usual reason an entry stops resolving is that the edit under test deleted that very
-        /// object, making "fix your spelling" the wrong instruction entirely.</summary>
+        /// <summary>The refusal an unresolved entry earns. A pinned diff replays frame A's list rather than one the
+        /// caller typed, so it gets its own text.</summary>
         internal static string HideRefusal(bool pinned, string label, List<string> unresolved)
         {
             string named = "'" + string.Join("', '", unresolved.ToArray()) + "'";
@@ -591,9 +401,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                   + "Entries resolve as descendants of the target: name each as a path relative to it, or as an exact child name";
         }
 
-        /// <summary>Names each resolved entry that excludes no drawable renderer. Legitimate on its own (hiding
-        /// an empty container), but also exactly what a hide list looks like once its meshes have moved out from
-        /// under it — so it is named rather than failed.</summary>
+        /// <summary>Names each resolved entry that excludes no drawable renderer.</summary>
         internal static string HideEmptyNote(List<KeyValuePair<string, GameObject>> callerEntries)
         {
             var empty = new List<string>();
@@ -665,31 +473,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                 resolvedAngles[i] = a;
             }
 
-            // ----- Pending-reload guard (edit mode; see the handles block for the measured state) --
+            // ----- Pending-reload guard (edit mode; see the handles block) ------------------------
             if (!Application.isPlaying && IsScriptReloadPending(out bool reloadLocked))
                 return CoreFailT(label, BuildReloadPendingFailReason(reloadLocked));
 
             // ----- Settle gate (reactive targets only) ----------------------------------------
-            // An unsettled NDMF preview means the frame about to be grabbed shows a stale or
-            // bodiless avatar — never return that sheet. FAIL instead, after kicking the editor
-            // to the OS foreground so the rebuild's ticks fire between this call and the re-grab
-            // (a background-throttled editor wedges the rebuild indefinitely; waiting in-call is
-            // impossible — no editor tick runs while this synchronous call blocks the main thread).
-            // The sweep first: a scripted edit NDMF hasn't noticed yet (ChangeScene-only publish +
-            // parked PropertyMonitor — see the change-horizon handles above) leaves the pipeline
-            // reading settled while its proxies are stale; the sweep surfaces it as a real
-            // invalidation so the probe below FAILs honestly instead of grabbing the stale frame.
+            // An unsettled NDMF preview means the frame about to be grabbed shows a stale or bodiless avatar,
+            // so FAIL, after kicking the editor to the OS foreground so the rebuild's ticks fire between this
+            // call and the re-grab. Waiting in-call is impossible: no editor tick runs while this synchronous
+            // call blocks the main thread. SweepNdmfChangeHorizon runs first, so an edit NDMF hasn't noticed
+            // lands as a real invalidation the probe can see.
             string horizonNote = "";
-            // Arm scope = the OUTERMOST avatar root at/above the target (NDMF's own resolver), tri-state:
-            //  Found       → arm the gate on that avatar root;
-            //  NoAvatarRoot→ a plain prop / scratch clone → not reactive → Settle.Exempt (MA proxies only
-            //               exist under an avatar root, so there is nothing to certify);
-            //  Drift       → the resolver handle is missing or its return type changed. Under installed NDMF
-            //               (NdmfInstalled — the package-registration check, NOT a reflected sentinel that
-            //               could drift in the same release) this must FAIL LOUD, not fall through to a
-            //               silent exempt — a drifted resolver would render every avatar ungated (OK-stale),
-            //               and the return-type mode also defeats a bare-null canary. Symmetric with the
-            //               attribution-drift FAIL. Absent NDMF → no proxies to certify → exempt.
             string armedBy = null;
             var scopeState = ResolveArmScope(root, out GameObject armScope);
             if (scopeState == ArmScope.Drift && NdmfInstalled)
@@ -698,17 +492,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (reactive)
             {
                 horizonNote = SweepNdmfChangeHorizon();
-                // Sweep handles drifted → the scripted-edit blind-spot scan never ran, so a settled probe
-                // below would stamp gate=armed on an uncertified frame. Drift guards FAIL-not-skip: fail loud
-                // (persistent — re-pinning the handles is the fix, not a re-grab).
                 if (horizonNote == HorizonDriftNote)
                     return CoreFail(label, "change-horizon sweep unavailable (NDMF internals drifted; the "
                         + "scripted-edit blind-spot scan never ran, so freshness can't be certified) — re-pin "
                         + "the sweep handles | armed-by=" + armedBy);
-                // A sweep that ran out of budget with the probe still reading settled certifies NOTHING —
-                // an unswept pending edit would be the exact stale-OK this gate exists to prevent. Same
-                // transient-FAIL contract as unsettled: the sweep's task keeps advancing on editor ticks
-                // between calls, so the re-grab re-sweeps against a mostly-warm scan.
+                // Transient: the sweep's task keeps advancing on editor ticks between calls, so the re-grab
+                // re-sweeps against a mostly-warm scan.
                 if (horizonNote == HorizonIncompleteNote)
                 {
                     bool kickedSweep = TryFocusKick(out string kickSweep);
@@ -719,25 +508,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                         + " | armed-by=" + armedBy);
                 }
             }
-            // The result (not just the Unsettled compare) stays in scope: the narrowed attribution guard
-            // below reuses it — no editor tick runs inside this synchronous call, so it can't go stale.
             var settle = ProbeSettle(reactive, out string pipeline);
             if (settle == Settle.Unsettled)
             {
                 bool kicked = TryFocusKick(out string kick);
-                // Transient: the verdict is still FAIL (no sheet — re-grab), but an unsettled preview is an
-                // expected retry condition, not an error, so it logs at Warning to keep console-clean gates
-                // clean (G17). Genuine failures below still log at Error.
                 return CoreFailT(label, "preview not settled (NDMF rebuild in flight; " + pipeline + ") — "
                     + (kicked
                         ? "focus kick sent (" + kick + "), the rebuild can advance now: re-grab in a separate call"
                         : "focus kick failed (" + kick + "): focus the Unity Editor window, then re-grab")
                     + " | armed-by=" + armedBy);
             }
-            // Settle probe itself drifted (NDMF internals reflection failed / threw): settled-state is
-            // unknowable, so an OK here would stamp gate=armed on a frame we can't certify. FAIL loud
-            // (persistent — re-pin the handles). This leaves only Settled / Exempt reaching the OK path, so
-            // the gate token is exactly armed|exempt (never "drift").
             if (settle == Settle.Drift)
                 return CoreFail(label, "settle-state unknown (NDMF preview internals drifted; " + pipeline
                     + ") — freshness can't be certified; re-pin the settle handles | armed-by=" + armedBy);
@@ -746,7 +526,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             ResolveHideList(root, hide, out var hideTargets, out var hideUnresolved, out var hideCaller);
             var callerHideTargets = new List<GameObject>(hideTargets); // snapshot before DefaultHide joins
             if (hideUnresolved.Count > 0) return CoreFail(label, HideRefusal(pin, label, hideUnresolved));
-            // Always drop the build-added Culling mesh (see DefaultHide); a no-op when absent.
             foreach (var tr in root.GetComponentsInChildren<Transform>(true))
                 if (Array.IndexOf(DefaultHide, tr.name) >= 0 && !hideTargets.Contains(tr.gameObject))
                     hideTargets.Add(tr.gameObject);
@@ -781,9 +560,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             bool oAsyncShaderCompile = EditorSettings.asyncShaderCompilation;
 
             var rts = new List<RenderTexture>();
-            // Freshness: SMRs whose forceMatrixRecalculationPerRender we flip true for the capture's duration
-            // so a backgrounded editor re-bakes their skinned deform each render (recorded as we set them,
-            // once `drawable` is known; restored in finally). See the freshness note below.
+            // SMRs whose forceMatrixRecalculationPerRender this grab flips (see the re-bake block below);
+            // restored in finally.
             var forcedRebake = new Dictionary<SkinnedMeshRenderer, bool>();
 
             try
@@ -814,25 +592,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                         svm.Hide(t, true);
                     }
 
-                // NDMF preview-scene proxies: exempt from the blanket root-hide above (RecordRootVisibility
-                // skips the preview scene), attributed per-proxy here — the target's own proxies must stay
-                // visible or the preview hook deletes every reactive-targeted renderer from the grab.
+                // Preview-scene proxies are exempt from the root hide above and attributed per proxy here.
                 var keptProxies = new List<Renderer>();
                 string proxyNote = IsolateNdmfProxies(root, hideTargets, cascadeHides, svm, keptProxies,
                     out int proxiesKept, out int proxiesHidden, out int proxiesDiscovered, out int proxiesAttributed);
-                // Attribution drift with proxies PRESENT is a FAIL, not a note-and-continue: the grab
-                // would render unattributed preview proxies as unflagged geometry. Error-level (not
-                // transient) — a re-grab can't fix drifted reflection handles.
                 if (IsProxyAttributionDrift(proxyNote))
                     return CoreFail(label, ProxyDriftFailReason);
-                // Attribution-integrity guard: proxies WERE discovered and the session is SETTLED, yet EVERY
-                // one attributes to null — the attribution API silently broke for all of them, so the grab
-                // would hide every reactive-targeted proxy (IsolateNdmfProxies hides a null-attributed proxy)
-                // and draw a bodiless sheet. Not a heuristic and false-FAIL-free: a healthy proxy always
-                // attributes to its original, so all-null-while-settled is a genuine drift. Distinct from the
-                // handle-drift FAIL above (that fires on a null handle / throw / non-GameObject return, never
-                // on a clean null-for-all). NOT keyed on discovered==0 (an at-rest avatar legitimately has
-                // zero proxies — the deleted presence assert's false-FAIL) nor on kept-count.
                 if (IsAttributionAllNull(settle, proxiesDiscovered, proxiesAttributed))
                     return CoreFail(label, ProxyAllNullFailReason);
 
@@ -843,18 +608,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var rend in all)
                 {
                     if (!rend.enabled || !rend.gameObject.activeInHierarchy) continue;
-                    // Counted against the CALLER's entries only: DefaultHide ("Culling") joins hideTargets
-                    // below, and folding it in would make hideExcluded nonzero on a built avatar passed no
-                    // `hide` at all — the token names its referent, so it has to mean exactly that.
                     bool inHideList = IsUnderAny(rend.transform, hideTargets);
                     if (inHideList)
                     {
                         if (IsUnderAny(rend.transform, callerHideTargets)) excludedCount++;
                         continue; // dropped by the hide list (SVM-hidden)
                     }
-                    // Honor the operator's eye-hides: a hidden child is counted and skipped, never
-                    // force-shown. To include one, the caller un-hides it before the grab (and restores it
-                    // after) — the read-only tool never mutates the target subtree's own visibility.
                     if (svm.IsHidden(rend.gameObject, false)) { hiddenCount++; continue; }
                     drawable.Add(rend);
                 }
@@ -865,15 +624,11 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 // ----- Freshness: force a synchronous skin re-bake for the capture --------------------------
                 // Two freshness layers, and the settle gate only governs one. The NDMF pipeline keeps proxy
-                // CONTENT current (weights, reactive state — the #42 sweep); proxy SKIN BAKING is a plain-SMR
-                // concern the pipeline never touches. A backgrounded editor freezes skin baking to the (parked)
-                // editor tick, so proxies render pre-edit geometry while their weights read current — measured
-                // 2026-07-16 (proxy weight synced=100, deform frozen, three settled `=> OK` captures
-                // byte-identical around a BakeMesh-verified move). On a reactive target the drawn renderers ARE
-                // the proxies (originals suppressed), so the force flag must land on the kept proxies, not just
-                // `drawable`. Restored in finally via the same dict. The flag defeats the multi-hour-idle
-                // freeze only (re-verified live 2026-07-29); the reload-pending and post-play parkings defeat
-                // the flag itself — the reload guard and the freshness canary own those.
+                // CONTENT current (weights, reactive state); proxy SKIN BAKING is a plain-SMR concern the
+                // pipeline never touches. A backgrounded editor freezes skin baking to the parked editor tick,
+                // so proxies render pre-edit geometry while their weights read current. On a reactive target
+                // the drawn renderers ARE the proxies (originals suppressed), so the force flag must land on
+                // the kept proxies, not just `drawable`.
                 foreach (var rend in drawable)
                     if (rend is SkinnedMeshRenderer smr && !forcedRebake.ContainsKey(smr))
                     {
@@ -911,18 +666,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                 // Unity draws a flat #00FFFF placeholder for any shader variant still compiling, and the
                 // capture's own RepaintImmediately is what QUEUES that compile — so nothing probed BEFORE a
                 // grab can see it, and every freshness layer above certifies the sheet regardless (the canary
-                // moves a placeholder's pixels as happily as a real surface). Measured 2026-08-13, Sandbox:
-                // a settled, canary-live grab of an avatar whose hair texture means (233,226,224) drew the
-                // whole silhouette flat cyan; a second avatar drew 64 placeholder px on a sheet that read
-                // healthy at a glance — the corruption is partial as often as total. The headlight/no-skybox
-                // config just above is why this path hits cold variants at all: it requests a keyword set the
-                // operator's own viewport never draws, so the capture warms variants nothing else does.
-                // Off for the grab's duration = the synchronous repaint compiles what it needs and draws the
-                // truth. This MUST also cover the canary's grabs below: with async compilation live across the
+                // moves a placeholder's pixels as happily as a real surface). The corruption is partial as
+                // often as total. The headlight/no-skybox config just above is why this path hits
+                // cold variants at all: it requests a keyword set the operator's own viewport never draws.
+                // This MUST also cover the canary's grabs below: with async compilation live across the
                 // baseline/nudge pair, a variant finishing between those two frames moves pixels wholesale and
                 // would certify canary=live off shader completion rather than off deform.
-                // ShaderUtil.allowAsyncCompilation is NOT the lever — it already reads false at rest and this
-                // path does not consult it (measured: armed grab still 453,750 placeholder px).
+                // ShaderUtil.allowAsyncCompilation is NOT the lever — this path does not consult it. A bespoke
+                // Camera.Render() is the inverse: it ignores this pref, so a scratch-camera path pins that flag
+                // instead (RenderThumbnailCore.Capture).
                 EditorSettings.asyncShaderCompilation = false;
 
                 // ----- Per-angle capture -----------------------------------------------------
@@ -1017,9 +769,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
 
                 // ----- Shading: scan the served tiles (see the scan block above) ---------------
-                // Before the canary, which costs 2-4 further grabs a poisoned sheet would only waste.
-                // Angles come from views[], not resolvedAngles[]: the pinned path renders
-                // opts.pinned.views[ai].angle, and views[] is the authority for what was actually drawn.
+                // Before the canary, whose further grabs a poisoned sheet would only waste. Angles come from
+                // views[], the authority for what was drawn: the pinned path renders frame A's angles.
                 {
                     int placeholderPx = 0, worstN = 0; string worstAngle = null;
                     for (int i = 0; i < tiles.Count; i++)
@@ -1029,22 +780,19 @@ namespace Ryan6Vrc.AgentTools.Editor
                         if (ph > worstN) { worstN = ph; worstAngle = views[i].angle; }
                     }
                     if (placeholderPx > 0)
-                        // Hard FAIL regardless of the compile probe — see BuildPlaceholderFailReason for why
-                        // the flag may order the remedies but not pick the verdict class.
                         return CoreFail(label, BuildPlaceholderFailReason(
                             "the served tiles", placeholderPx, worstAngle, worstN, ShaderUtil.anythingCompiling));
                 }
 
-                // ----- End-to-end freshness canary (model + measured states: the canary block above) --
+                // ----- End-to-end freshness canary (model: the canary block above) ------------------------
                 // Post-tiles so the served frames are never polluted; a FAIL discards everything. The
                 // compare pair is a dedicated unnudged baseline + the nudged grab, both taken with the
                 // IDENTICAL draw state (gizmos off, selection cleared) — never tiles[0], whose gizmos/
                 // selection under showGizmos:true would diff against a gizmo-less canary frame and
-                // certify canary=live on a stone-dead chain (council review, PR #73). Only blendshape
-                // nudges are sound probes: a transform translate moves an SMR's bones only when they
-                // happen to live under the target, and can move pixels by re-drawing a parked skin
-                // buffer under a new object matrix — so with no eligible shape the canary declares
-                // itself UNAVAILABLE in-band rather than guessing (note below), and never FAILs.
+                // certify canary=live on a stone-dead chain. Only blendshape nudges are sound probes: a
+                // transform translate moves an SMR's bones only when they happen to live under the target,
+                // and can move pixels by re-drawing a parked skin buffer under a new object matrix — so with
+                // no eligible shape the canary declares itself UNAVAILABLE in-band and never FAILs.
                 string canaryToken = "", canaryNote = "";
                 if (ShouldRunCanary(Application.isPlaying, forcedRebake.Count > 0))
                 {
@@ -1068,15 +816,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                         Selection.objects = Array.Empty<UnityEngine.Object>();
                         sv.LookAt(v0.pivot, v0.rot, v0.orthoSize, true, true);
                         var baseF = cap.Grab(2, rts);
-                        // Exact source-px scale from the live canary camera — v0.orthoSize is sv.size
-                        // units, not camera ortho (the k-correction in the framing pass exists for a
-                        // reason), so read the camera the baseline actually rendered through.
+                        // v0.orthoSize is sv.size units, not camera ortho (hence the k-correction in the
+                        // framing pass), so read the camera the baseline actually rendered through.
                         float wpp = baseF.camH > 0 ? 2f * baseF.cam.orthographicSize / baseF.camH : 0f;
                         var baseTile = Downscale(baseF.px, baseF.w, v0.cropX, v0.cropY, v0.side, tileRes);
-                        // The canary's own pair gates canary=live, so it is scanned too: a placeholder
-                        // here moves pixels under the nudge exactly like a real surface and would
-                        // fabricate the token. Baseline first, before any scene write, so this arm can
-                        // return without owing a restore.
+                        // Scanned before any scene write, so this arm can return without owing a restore.
                         int basePh = CountPlaceholderPx(baseTile);
                         if (basePh > 0)
                             return CoreFail(label, BuildPlaceholderFailReason(
@@ -1162,19 +906,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             finally
             {
-                // The async-compile pref goes FIRST, ahead of every other restore — this ordering is
-                // load-bearing, not incidental. It is the only restored state here that is PROJECT-WIDE and
-                // DURABLE: EditorSettings is a serialized asset, so a leaked `false` persists into
-                // ProjectSettings/EditorSettings.asset at the next save and makes the whole project compile
-                // synchronously forever — presenting as a hung editor on any new material, in a venue where
-                // nothing diffs it. Everything else in this finally can throw (SceneVisibilityManager calls
-                // on a destroyed object, the sceneViewState setter, the AnnotationUtility writes, Selection,
-                // and even the null-guarded re-bake loop below), and every one of those throws would skip it.
-                // Restored here, the persisted content is unchanged — the value is back before any flush.
-                // The reverse leak needs the caller to flip this mid-call: no code path in this repo does,
-                // though RepaintImmediately does enter Scene-view GUI callbacks, so it is not structurally
-                // impossible. The closing RepaintImmediately below then redraws the operator's restored view
-                // with async compilation back on, which is what they want.
+                // The async-compile pref goes FIRST: EditorSettings is a serialized asset, so a leaked `false`
+                // persists into ProjectSettings/EditorSettings.asset at the next save and makes the whole
+                // project compile synchronously forever, presenting as a hung editor on any new material.
+                // Everything else in this finally can throw, and any such throw would skip a later restore.
                 EditorSettings.asyncShaderCompilation = oAsyncShaderCompile;
 
                 // Restore the freshness re-bake flags (null-guarded — SMRs can be NDMF-owned), before the
@@ -1182,10 +917,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var kv in forcedRebake)
                     if (kv.Key != null) kv.Key.forceMatrixRecalculationPerRender = kv.Value;
 
-                // Restore visibility COARSELY: every subtree this grab hid (hide-list / DefaultHide /
-                // ancestor siblings, and the other scene roots) returns to its own recorded self-state.
-                // The CONTAINING root is skipped — it was never hidden, and cascading over it would re-show
-                // the target subtree's own operator eye-hides, which the tool never touched.
+                // The CONTAINING root is skipped: it was never hidden, and cascading over it would re-show the
+                // target subtree's own operator eye-hides.
                 foreach (var kv in cascadeHides)
                     if (kv.Key != null) { if (kv.Value) svm.Hide(kv.Key, true); else svm.Show(kv.Key, true); }
                 foreach (var kv in rootVis)
@@ -1211,11 +944,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        // Encode the composed sheet to a timestamped PNG in temporaryCachePath, write its <png>.cam.json sidecar
-        // (the framing to reproduce this grab for a diff), and prune our grabs + their sidecars as PAIRS past 30
-        // days (the sidecar glob doesn't match "*.png", so it must be deleted explicitly or it orphans).
-        // Returns the PNG path, or NULL on an IO failure (disk full, locked path) — callers turn null into a
-        // loud FAIL, never a raw throw, so this sits outside a door's FAIL boundary safely.
+        // Encode the composed sheet to a timestamped PNG in temporaryCachePath, write its <png>.cam.json sidecar,
+        // and prune old grabs. Returns the PNG path, or NULL on an IO failure, which callers turn into a FAIL.
         private static string WriteSheetAndManifest(CoreResult r)
         {
             byte[] png;
@@ -1270,10 +1000,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             string label = root != null ? root.name : target;
             if (string.IsNullOrEmpty(against))
                 return Fail(label, "against is empty — pass a prior grab's png path (its png= trailer)");
-            // Target before manifest. `root` is otherwise consulted only for the label, so a bogus target used
-            // to survive every check here and surface much later out of CaptureCore — meaning a call that got
-            // BOTH wrong reported the manifest first and sent the operator off to re-grab frame A with a target
-            // that was never going to resolve. Order the two by which one a re-grab can actually fix.
+            // Target before manifest: re-grabbing frame A cannot fix a target that does not resolve.
             if (root == null)
                 return Fail(label, handle.Refusal + " CaptureDiff diffs a LIVE scene target, grabbed now as frame B, "
                     + "against a prior grab's PNG as frame A, so the target has to be present in the active scene");
@@ -1297,11 +1024,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (!File.Exists(against))
                 return Fail(label, "frame A png missing: " + against + " — re-grab frame A");
 
-            // Decode frame A BEFORE grabbing B, not merely before writing it. A is a static file whose
-            // manifest is already validated, so everything needed to reject it is in hand — while the grab
-            // below costs a synchronous shader-compile freeze, the canary's extra grabs AND its blendshape
-            // write to the operator's scene. Paying all of that to then discard it over a defect visible
-            // up front is the same waste the tile scan is ordered before the canary to avoid.
+            // Decode frame A BEFORE grabbing B: the grab costs a shader-compile freeze, the canary's extra
+            // grabs and a blendshape write to the operator's scene, all wasted on a defect visible up front.
             var aTex = new Texture2D(2, 2, TextureFormat.RGBA32, false, false);
             Color32[] aSheet; int aW, aH;
             try
@@ -1313,10 +1037,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             finally { UnityEngine.Object.DestroyImmediate(aTex); }
 
-            // Frame A carries the shading scan too — B is scanned inside CaptureCore, and a diff whose A half
-            // is unmeasured certifies only half its input. The manifest schema bump retired PRE-guard A's; it
-            // cannot retire a guard-escape A, which is the population this scan exists for. Tile geometry
-            // comes from A's own validated manifest, which is why this runs before B exists.
+            // Frame A carries the shading scan too, since B is scanned inside CaptureCore.
             {
                 int aPh = 0, aWorstN = 0; string aWorstAngle = null;
                 for (int i = 0; i < A.views.Length; i++)
@@ -1356,16 +1077,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 parts.Add(r.manifest.views[i].angle + ":changed=" + changed + ",bbox="
                     + (changed == 0 ? "-" : "(" + bb.x + "," + bb.y + "," + bb.width + "," + bb.height + ")"));
             }
-            // Carry B's freshness/settle notes — an unsettled or horizon-incomplete B undercuts the whole
-            // "empty diff ⇒ immaterial GIVEN freshness" premise, so the caveat must ride the diff summary too.
-            // Shading no longer rides as a note on either half: B is scanned in CaptureCore and A in the
-            // loop above, and both FAIL rather than annotate, because a placeholder under a diff does not
-            // merely add uncertainty — it manufactures `changed` px against an honestly-shaded counterpart
-            // (or hides a real change under a flat fill), so the counts are the product in doubt.
+            // Carry B's settle notes: an unsettled B undercuts "empty diff ⇒ immaterial", so the caveat must
+            // ride the diff summary too.
             // The sheet is bottom-origin and RenderDiff reports raw buffer coords, so bbox y grows UPWARD from
-            // the bottom edge. Reading it as top-down inverts every localization — a reader chasing a
-            // top-of-frame change concludes "nothing there". Stated once, as its own token rather than inside
-            // `diff=[…]`, which is strictly one entry per angle and is parsed by position.
+            // the bottom edge. Stated once, as its own token rather than inside `diff=[…]`, which is strictly
+            // one entry per angle and is parsed by position.
             string originNote = identical == r.manifest.views.Length ? "" : " bboxOrigin=bottom";
             string summary = "[RenderAvatar] CaptureDiff " + label + " against=" + Path.GetFileName(against)
                 + " angles=" + string.Join(",", r.manifest.angles) + " => OK gate=" + r.gate + r.canaryToken + " diff=[" + string.Join("; ", parts) + "] identical="
@@ -1374,8 +1090,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return summary;
         }
 
-        // A relative prefix resolves under <projectRoot>/test-output/ (run output never lands in the project root);
-        // one already led by "test-output/" is taken as project-root-relative, not doubled. Absolute passes through.
         internal static string ResolveFramePrefix(string prefix, string projectRoot)
         {
             if (Path.IsPathRooted(prefix)) return prefix;
@@ -1581,12 +1295,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ===== Visibility recording ==============================================================
 
-        // Self hidden-state of every root in every loaded scene EXCEPT the NDMF preview scene, whose
-        // roots are the preview proxies — never blanket-hidden (the preview hook suppresses their
-        // originals, so hiding a proxy deletes its renderer from the grab outright). Proxies are handled
-        // per-object by IsolateNdmfProxies. Isolation hides non-target roots with includeDescendants;
-        // restore cascades each root back to this self-state (a per-object partial hide under a
-        // non-target root is not preserved — rare, and documented).
+        // Self hidden-state of every root in every loaded scene EXCEPT the NDMF preview scene (see
+        // IsolateNdmfProxies). Restore cascades each root back to this self-state, so a per-object partial
+        // hide under a non-target root is not preserved.
         private static Dictionary<GameObject, bool> RecordRootVisibility()
         {
             var svm = SceneVisibilityManager.instance;
@@ -1600,8 +1311,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return map;
         }
 
-        // Public NDMF API when resolvable; name fallback otherwise (the constant predates the API and
-        // NDMF itself falls back to it on load). Never throws.
         private static bool IsNdmfPreviewScene(Scene s)
         {
             if (MiIsPreviewScene != null)
@@ -1612,15 +1321,17 @@ namespace Ryan6Vrc.AgentTools.Editor
             return s.name == "___NDMF Preview___";
         }
 
-        // Hide every preview-scene proxy renderer whose original is NOT drawable under the target; leave
-        // the target's own proxies visible (recording prior state in cascadeHides for the shared restore).
+        // Proxies live in NDMF's hidden preview scene, where blanket-hiding them would delete every
+        // reactive-targeted renderer (typically the body) from the grab, because the preview hook still
+        // suppresses their originals. So hide only each proxy whose original is NOT drawable under the target
+        // (foreign, stale or unattributable proxies, and proxies of hide-listed, eye-hidden or inactive
+        // originals), recording prior state in cascadeHides for the shared restore.
         // Attribution is per proxy-RENDERER GameObject — NDMF's proxy map is keyed on the renderer's GO,
         // and only SkinnedMeshRenderer proxies are preview-scene roots; a MeshRenderer proxy lives UNDER a
         // shadow-bone tree, so attributing scene roots would null-attribute the bone root and hide the
         // target's own non-skinned props with it. Hides are self-only for the same reason (bones carry no
         // renderers; nothing else must cascade). Attribution drift (API handle unresolved, lookup throw, or
-        // a non-GameObject return) hides NOTHING and returns the drift note: a visible foreign-proxy leak
-        // beats a silent body-drop.
+        // a non-GameObject return) stops here and returns ProxyDriftNote, which CaptureCore FAILs on.
         private static string IsolateNdmfProxies(
             GameObject root, List<GameObject> hideTargets, Dictionary<GameObject, bool> cascadeHides,
             SceneVisibilityManager svm, List<Renderer> keptProxies,
@@ -1701,12 +1412,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return byName != null ? byName.gameObject : null;
         }
 
-        // NDMF internal types resolve through VendorReflect.FindType (references:[] rules out typeof).
-
-        // Member-handle resolution that NEVER throws — a null declaring type, a missing member, or a
-        // throwing lookup (e.g. AmbiguousMatchException) all yield null → the drift note at call time. The
-        // `?.` on the Types above already short-circuits a null type; this additionally swallows a throw
-        // from the reflection call itself, so class load can never raise TypeInitializationException.
+        // Member-handle resolution that NEVER throws, so a static field initializer can never raise
+        // TypeInitializationException: a null declaring type, a missing member or a throwing lookup all yield null.
         private static PropertyInfo SafeGetProperty(Type type, string name, BindingFlags flags)
         {
             if (type == null) return null;
@@ -1749,30 +1456,26 @@ namespace Ryan6Vrc.AgentTools.Editor
         // (IsNdmfPreviewScene), so its drift alone must not red-fail a gate that still lands the flag.
         internal static bool ProxyHandlesResolved => MiGetOriginalForProxy != null;
 
-        // Same canary contract for the avatar-root resolver handle (ResolveArmScope → gate arming): NDMF
-        // installed + this false = the resolver classifies EVERY target as no-avatar-root → every reactive
-        // avatar wrongly Settle.Exempt → silent OK-stale. No name fallback exists, so the EditMode canary
-        // must red-fail (Assert.IsTrue when NDMF is installed), never Ignore-when-unresolved. The ReturnType
-        // check is load-bearing: GetMethod resolves by name+flags alone, so a return-type-only drift
-        // (Transform → GameObject) would keep a bare != null GREEN while `raw is Transform` silently fails at
-        // runtime — the "canary green while production blind" trap. handleUsable folds both checks.
+        // Same canary contract for the avatar-root resolver handle (ResolveArmScope → gate arming). No name
+        // fallback exists, so the EditMode canary must red-fail, never Ignore-when-unresolved. The ReturnType
+        // check is load-bearing: GetMethod resolves by name+flags alone, so a return-type-only drift would keep
+        // a bare != null green while `raw is Transform` silently fails at runtime.
         internal static bool AvatarRootResolverHandleResolved =>
             MiFindAvatarInParents != null && MiFindAvatarInParents.ReturnType == typeof(Transform);
 
-        // Sentinel: the sweep ran out of in-call budget before CheckAllObjects finished, with the probe
-        // still reading settled — freshness is UNCERTIFIED and Capture must FAIL transiently, never OK.
         internal const string HorizonIncompleteNote = "__horizon-sweep-incomplete__";
 
-        // Runs NDMF's own unreported-change sweep (PropertyMonitor.CheckAllObjects) inside the NDMF sync
-        // context, then pumps that context (Turn + FlushInvalidates) so a pending scripted edit lands as a
-        // pipeline invalidation BEFORE ProbeSettle reads the gate. Bounded and self-terminating: exits the
-        // moment the probe stops reading Settled (poisoned — the gate FAILs right after), or ~50ms after
+        // Closes the settle probe's one blind spot. A scripted edit (reflection write + SetDirty, the normal
+        // execute_code mutation path) publishes only a ChangeScene event, which NDMF's ChangeStreamMonitor
+        // deliberately ignores, and PropertyMonitor's poll loop, the fallback for unreported changes, parks
+        // while the editor is unfocused (the norm in agent sessions). Until one of them runs, the pipeline reads
+        // settled while its proxies render pre-edit geometry.
+        // So this runs PropertyMonitor.CheckAllObjects inside the NDMF sync context, then pumps that context
+        // (Turn + FlushInvalidates) so a pending edit lands as a pipeline invalidation BEFORE ProbeSettle reads
+        // the gate. Exits the moment the probe stops reading Settled (the gate FAILs right after), or ~50ms after
         // the sweep completes with nothing found (grace for the invalidation's thread-pool continuation to
-        // land; measured ~20ms live). A deadline exit with the sweep still running returns
-        // HorizonIncompleteNote — the caller FAILs transiently rather than serve a sheet whose freshness
-        // the sweep never certified. Only ever called on a reactive edit-mode target. Returns "", the
-        // drift note, or the incomplete sentinel; never throws (a throw would fail a grab the old gate
-        // would have served).
+        // land). A deadline exit with the sweep still running returns HorizonIncompleteNote, and the caller FAILs
+        // transiently. Returns "", the drift note, or that sentinel; never throws.
         internal static string SweepNdmfChangeHorizon()
         {
             if (!ChangeHorizonHandlesResolved) return HorizonDriftNote;
@@ -1810,47 +1513,34 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         internal enum Settle { Exempt, Settled, Unsettled, Drift }
 
-        // The review-gate decisions, extracted pure so the headless suite can pin them — batchmode has no
-        // preview scene or session, so the full CaptureCore paths are live-gate-only (see
-        // Tests/Editor/RenderAvatarFreshnessGate.md). The attribution guard is keyed on discovery/attribution
-        // totals, NOT on kept-count: kept==0 is legitimate for a plain leaf target under a reactive avatar
-        // (its neighbor's proxies are foreign and hidden, not lost). discovered==0 is likewise NOT a fault —
-        // an at-rest avatar has zero proxies; only discovered>0 with every one attributing null while settled
-        // is the silent body-drop.
+        // Extracted pure so the headless suite can pin them: batchmode has no preview scene or session, so the
+        // full CaptureCore paths are live-gate-only (see Tests/Editor/RenderAvatarFreshnessGate.md). The
+        // attribution guard is keyed on discovery/attribution totals, NOT on kept-count: kept==0 is legitimate
+        // for a plain leaf target under a reactive avatar (its neighbor's proxies are foreign and hidden, not
+        // lost), and discovered==0 is an at-rest avatar. Only discovered>0 with every one attributing null while
+        // settled is the silent body-drop.
         internal static bool IsProxyAttributionDrift(string proxyNote) => proxyNote == ProxyDriftNote;
         internal static bool IsAttributionAllNull(Settle settle, int discovered, int attributedNonNull)
             => settle == Settle.Settled && discovered > 0 && attributedNonNull == 0;
 
-        // The OK-path gate token — armed ONLY when a reactive avatar probed settled; every other OK path
-        // (non-reactive target, previews globally disabled) is exempt. Unsettled / Drift / horizon-drift all
-        // FAIL before the OK return, so this never yields "drift": the summary token is exactly armed|exempt,
-        // matching the docs. Extracted pure so the headless test can pin that invariant.
         internal static string GateToken(bool reactive, Settle settle)
             => reactive && settle == Settle.Settled ? "armed" : "exempt";
 
-        // The one settle probe (read-only), shared by the pre-grab gate, the sweep's pump loop, and the
-        // residual note. `reactiveEditMode` is the caller's ONE precomputed !isPlaying && HasReactiveMA
-        // hierarchy scan (the probe is called per pump iteration — rescanning here would repeat it ~100×
-        // per sweep). Exempt when there is no settle risk (play mode / non-reactive target); Unsettled
-        // when a rebuild is in flight (predicate false, or any runtime hop legitimately null — no pipeline
-        // yet / between builds / absent fit); Drift when reflection itself failed (a handle didn't
-        // resolve, or a read threw). `pipeline` names the exact hop for the gate's fail-loud message. The
-        // whole body is one try/catch and it ALWAYS returns, so an exception can never escape to
-        // Capture's outer catch.
+        // The one settle probe (read-only). `reactiveEditMode` is the caller's precomputed !isPlaying &&
+        // HasReactiveMA hierarchy scan, because the sweep calls this per pump iteration. Unsettled includes a
+        // runtime hop that is legitimately null (no pipeline yet, between builds); Drift means reflection itself
+        // failed. `pipeline` names the exact hop for the gate's fail-loud message.
         private static Settle ProbeSettle(bool reactiveEditMode, out string pipeline)
         {
             pipeline = "";
             try
             {
                 if (!reactiveEditMode) return Settle.Exempt;       // play mode or no reactive fit → nothing to settle
-                // Drift: a reflection handle failed to resolve at class load.
                 if (PiCurrent == null || FiProxySession == null || FiActive == null
                     || FiNext == null || PiIsReady == null || PiIsInvalidated == null)
                 { pipeline = "NDMF internals drifted"; return Settle.Drift; }
-                // Global poll (NDMF has one preview session; single-LLM MCP → only this agent's edit unsettles it).
-                // Current is null EXACTLY when previews are globally disabled (NDMFPreview.cs: Current =
-                // !EnablePreviewsUI || _disablePreviewDepth != 0 ? null : _globalPreviewSession) — in that
-                // state originals render un-suppressed, so the sheet is trustworthy: Exempt, never a FAIL.
+                // Current is null EXACTLY when previews are globally disabled (NDMFPreview.cs); originals then
+                // render un-suppressed, so the sheet is trustworthy: Exempt, never a FAIL.
                 var current = PiCurrent.GetValue(null, null);
                 if (current == null) { pipeline = "previews disabled (sheet renders originals)"; return Settle.Exempt; }
                 var prox = FiProxySession.GetValue(current);
@@ -1871,9 +1561,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        // Residual settle-state note for the summary (see the call site for when it can still fire).
-        // Called after cap.Grab: no update tick fires inside the synchronous call, so the polled state
-        // is exactly the state that produced the frames.
         private static string SettleNote(bool reactiveEditMode)
         {
             switch (ProbeSettle(reactiveEditMode, out _))
@@ -1885,12 +1572,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // ----- Editor focus kick (Windows) --------------------------------------------------------
-        // A background-throttled editor stops painting frames, which stops the ticks that advance the
-        // NDMF rebuild — the preview wedges until the editor is foregrounded. The kick restores and
-        // foregrounds the editor's main window so frames fire again between MCP calls. Windows refuses
-        // SetForegroundWindow from a background process unless it recently sent input, so a synthetic
-        // Alt tap (down+up) goes first to release the foreground lock — the accepted user32 workaround.
-        // Only ever called on the gate's fail path, so the stray Alt lands rarely and on purpose.
+        // Foregrounds the editor's main window so frames fire again between MCP calls: a background-throttled
+        // editor stops painting frames, which stops the ticks that advance the NDMF rebuild. Windows refuses
+        // SetForegroundWindow from a background process unless it recently sent input, so on a refusal a
+        // synthetic Alt tap (down+up) releases the foreground lock, the accepted user32 workaround.
         private const int SW_RESTORE = 9;
         private const byte VK_MENU = 0x12;
         private const uint KEYEVENTF_KEYUP = 0x2;
@@ -1899,9 +1584,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
         [DllImport("user32.dll")] private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
-        // Escape hatch: a measurement session that must hold the editor backgrounded (freshness
-        // probing, focus-state matrices) sets this pref true; the FAIL message then degrades to the
-        // manual instruction. Default off — shipped kick behavior unchanged.
+        // Escape hatch: a measurement session that must hold the editor backgrounded sets this pref true; the
+        // FAIL message then degrades to the manual instruction.
         internal const string DisableFocusKickPref = "Ryan6VRC.AgentTools.RenderAvatar.DisableFocusKick";
 
         private static bool TryFocusKick(out string detail)
@@ -1922,10 +1606,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     if (hWnd == IntPtr.Zero) { detail = "editor main window handle unresolved"; return false; }
                     if (IsIconic(hWnd)) ShowWindow(hWnd, SW_RESTORE);
                     if (SetForegroundWindow(hWnd)) { detail = "editor foregrounded"; return true; }
-                    // Bare call refused (background process without recent input). The synthetic Alt tap
-                    // marks this process as input-producing, which unlocks SetForegroundWindow. Cost owned:
-                    // the tap lands on whatever app IS foreground and can toggle its menu-accelerator mode —
-                    // taken only on this already-refused path, key-up guaranteed even if the down throws.
+                    // Cost: the tap lands on whatever app IS foreground and can toggle its menu-accelerator
+                    // mode, so it is taken only on this already-refused path, key-up guaranteed.
                     try { keybd_event(VK_MENU, 0, 0, UIntPtr.Zero); }
                     finally { keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); }
                     bool ok = SetForegroundWindow(hWnd);
@@ -1941,22 +1623,17 @@ namespace Ryan6Vrc.AgentTools.Editor
         // Matched by type name (this asmdef has no MA reference — references: []), scoped to the
         // modular_avatar namespace so a same-named foreign type can't false-positive. Static components
         // (Merge Animator/Armature, Bone Proxy, Menu*, Parameters, Mesh Settings, VRChat Settings)
-        // deliberately do NOT match — they carry no preview-resolution risk. Drives SettleNote's
-        // cheap-first non-reactive short-circuit (the settle-state pre-filter).
+        // deliberately do NOT match — they carry no preview-resolution risk.
         //
-        // HAND-CURATED, necessarily — no reflectable registry of preview-participating component types exists.
-        // Curate against MA component type names, never filter/pass class names, and re-check on an MA upgrade.
-        // Canon, including what ReactiveMarkersTests can and cannot catch: Tests/Editor/ReactiveMarkers.md.
+        // Why hand-curated, and what ReactiveMarkersTests can and cannot catch: Tests/Editor/ReactiveMarkers.md.
         private static readonly string[] ReactiveMarkers =
         {
             "ShapeChanger", "BlendshapeSync", "MaterialSetter", "MaterialSwap", "ObjectToggle",
             "MeshCutter", "RemoveVertexColor", "ScaleAdjuster",
         };
 
-        // `armedBy` = hierarchy path of the FIRST matched reactive component's GameObject (null when none),
-        // threaded into the settle-FAIL messages so a re-grab loop can name what armed the gate. The gate
-        // arms on ANY match (inactive included — MA analyzes inactive reactives, so an at-rest inactive one
-        // can still drive a proxy; conservative, costs a probe).
+        // The gate arms on ANY match, inactive included: MA analyzes inactive reactives, so an at-rest inactive
+        // one can still drive a proxy.
         internal static bool HasReactiveMA(GameObject root, out string armedBy)
         {
             armedBy = null;
@@ -1975,10 +1652,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return false;
         }
 
-        // "Is NDMF installed?" — the authoritative package-registration check (the same signal the EditMode
-        // canary uses), NOT a reflected NDMF type. Gates whether a resolver Drift FAILs loud: a reflected
+        // Package registration, NOT a reflected NDMF type, gates whether a resolver Drift FAILs loud: a reflected
         // sentinel could itself drift in the same NDMF release that renamed the resolver, silently reopening
-        // the OK-stale hole (council review round 2). Computed once — install state is fixed within a domain.
+        // the OK-stale hole.
         private static readonly bool NdmfInstalled = ComputeNdmfInstalled();
         private static bool ComputeNdmfInstalled()
         {
@@ -1993,23 +1669,18 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         internal enum ArmScope { NoAvatarRoot, Found, Drift }
 
-        // Pure tri-state classifier, shared by the live resolver and the headless truth-table test.
-        // handleUsable folds BOTH the null-handle and return-type checks (a return-type drift makes the
-        // handle unusable even though GetMethod still found it). A non-null, non-Transform invoke result is
-        // a second-line catch for the same drift. Distinguishing NoAvatarRoot (a real null return — a plain
-        // prop) from Drift is the whole point: the former is a legitimate Settle.Exempt, the latter must
-        // FAIL loud so a silent OK-stale can't slip through (see the call site).
+        // NoAvatarRoot is a real null return (a plain prop, where MA proxies can't exist) and earns Settle.Exempt.
+        // Drift is an unusable handle (null or wrong return type) or a non-Transform result, and CaptureCore
+        // FAILs on it under installed NDMF so every avatar can't silently render ungated.
         internal static ArmScope ClassifyArmScope(bool handleUsable, object rawResult)
             => !handleUsable ? ArmScope.Drift
              : rawResult == null ? ArmScope.NoAvatarRoot
              : rawResult is Transform ? ArmScope.Found
              : ArmScope.Drift;
 
-        // Gate-arm scope resolution: the OUTERMOST avatar root at/above the target, via reflected NDMF
-        // RuntimeUtil.FindAvatarInParents — the semantics NDMF's preview uses to decide what to proxy. A
-        // nested descriptor can't scope the gate too narrowly (the old nearest-match bug) and a leaf-mesh
-        // target still resolves up to its whole avatar. Never throws (references:[] rules out typeof); a
-        // throw is classified Drift, not swallowed to a false NoAvatarRoot.
+        // The OUTERMOST avatar root at/above the target, via reflected NDMF RuntimeUtil.FindAvatarInParents, so
+        // a nested descriptor can't scope the gate too narrowly and a leaf-mesh target resolves up to its whole
+        // avatar. A throw is classified Drift, not swallowed to a false NoAvatarRoot.
         internal static ArmScope ResolveArmScope(GameObject root, out GameObject scope)
         {
             scope = null;
@@ -2033,7 +1704,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // Family arrow; NO `| png=` trailer — the schema never points at a PNG that isn't on disk. Genuine
-        // failures (bad input, API drift, degenerate grab) log at Error. internal for the severity-split test.
+        // failures (bad input, API drift, degenerate grab) log at Error.
         internal static string Fail(string label, string reason)
         {
             string msg = "[RenderAvatar] " + (string.IsNullOrEmpty(label) ? "?" : label) + " => FAIL: " + reason;
@@ -2041,9 +1712,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return msg;
         }
 
-        // A transient, retryable FAIL — the preview settle-gate (G17). Same "=> FAIL:" contract string as
-        // Fail (no sheet was produced; re-grab), but logs at Warning: an unsettled preview is an expected
-        // retry condition, not an error, so it doesn't pollute a console-clean gate. internal for the test.
+        // A retryable FAIL with the same "=> FAIL:" contract string as Fail, logged at Warning: an unsettled
+        // preview is an expected retry condition, so it doesn't pollute a console-clean gate.
         internal static string FailTransient(string label, string reason)
         {
             string msg = "[RenderAvatar] " + (string.IsNullOrEmpty(label) ? "?" : label) + " => FAIL: " + reason;

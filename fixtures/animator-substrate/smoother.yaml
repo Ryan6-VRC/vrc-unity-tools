@@ -1,17 +1,8 @@
-# AAP exponential smoother — worked example for the animator write substrate.
+# AAP exponential smoother — worked example for the animator write substrate; the idiom is
+# docs/gimmicks.md "AAP exponential smoother".
 #
-# A single always-on Direct blend tree that low-pass-filters `Target` into `Smoothed` (an AAP the tree
-# both reads and writes): Smoothed += (1 - lambda) * (Target - Smoothed) each frame, i.e.
-#   Smoothed_next = lambda * Smoothed + (1 - lambda) * Target
-# implemented as a Direct tree summing two weighted sub-trees — "maintain" (read Smoothed, weight
-# lambda) + "apply" (read Target, weight 1-lambda). Each sub-tree is a 1D tree mapping its param 0..1
-# onto the ±range AAP clips. (docs/gimmicks.md "AAP exponential smoother".)
-#
-# lambda is FRAMERATE-DEPENDENT: at a fixed lambda the settle time scales with fps. lambda=0.9 here
-# means ~10% of the gap closes per frame — visibly gradual, good for an emulator convergence read.
-# In production you feed a frametime compensator; for this worked example the constant is the point.
-#
-# Compiles with CompileController; CheckAnimator PASS; emulator-verified (Smoothed climbs toward Target).
+# Smoothed_next = lambda * Smoothed + (1 - lambda) * Target, per frame. lambda is FRAMERATE-DEPENDENT: at a
+# fixed lambda the settle time scales with fps. lambda=0.9 here closes ~10% of the gap per frame.
 
 schema: 1
 controller: Smoother_Fx
@@ -19,11 +10,11 @@ basis: avatar-root
 role: fx
 
 defaults:
-  writeDefaults: on          # the Direct-tree AAP feedback idiom is WD-ON (runtime.md sanctioned mix)
+  writeDefaults: on
 
 parameters:
   Target:          { type: float, default: 0.0 }   # the input to smooth (driven externally)
-  Smoothed:        { type: float, aap: true }       # the filtered output (AAP: written by the tree)
+  Smoothed:        { type: float, aap: true }       # the filtered output; the tree both reads and writes it
   SmoothFactor:    { type: float, default: 0.9 }    # lambda: fraction of the OLD value kept per frame
   SmoothFactorInv: { type: float, default: 0.1 }    # 1 - lambda: fraction of the NEW target mixed in
 
@@ -51,5 +42,5 @@ layers:
     default: Filter
 
 clips:
-  aap_min: { set: { Smoothed: 0.0 } }   # AAP endpoints: a bare param id compiles to an animator curve
+  aap_min: { set: { Smoothed: 0.0 } }
   aap_max: { set: { Smoothed: 1.0 } }

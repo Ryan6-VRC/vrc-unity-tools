@@ -16,33 +16,22 @@ using VRC.Dynamics;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// A frame-stepped play-mode recorder: declared columns, one CSV row per player frame for the local
-    /// runtime and for each of its non-local clones, under <see cref="RunLogFormat.RunLogDir"/>. The mirror
-    /// and shadow clones are not recorded. Doors: <see cref="Run"/> starts a take,
-    /// <see cref="MoveAvatar"/> scripts the local avatar root, <see cref="Mark"/> labels a phase,
-    /// <see cref="End"/> ends the take, <see cref="Status"/> reports. The meta-repo's
-    /// <c>tools/report_play.py</c> reads the file.
+    /// A play-mode recorder: declared columns, one CSV row per player frame for the local runtime and for
+    /// each of its non-local clones, under <see cref="RunLogFormat.RunLogDir"/>.
+    /// Contract: docs/unity-tools.md.
     ///
-    /// <para>The file: <c>#</c> lines open it, the call and one <c>resolve</c> line per column naming what it
+    /// <para>The file's layout, which the meta-repo's <c>tools/report_play.py</c> parses and cites as declared
+    /// here: <c>#</c> lines open it, the call and one <c>resolve</c> line per column naming what it
     /// resolved to. The header row is <c>frame,t,dt,who,root.x,root.y,root.z,root.yaw</c> and then the declared
     /// columns; <c>who</c> is <c>L</c> for the local runtime and <c>C1</c>, <c>C2</c>… for clones in order of
     /// appearance, never renumbered. Body <c>#</c> lines are events, each <c># f=&lt;frame&gt; …</c>: a clone
     /// picked up with its own <c>resolve</c> lines, a clone gone, a move, a mark, a gap, a parameter lookup
     /// that missed (its cell left empty), and the stop with its reason. Rows reach disk every frame.</para>
     ///
-    /// <para>It records and never steps: <c>GrabPhysBone.Advance</c> owns the clock. One
-    /// <c>EditorApplication.update</c> callback acts once per new <c>Time.frameCount</c>, reading every runtime
-    /// first and only then applying the scripted move and the clone-root copy, so both land in the next frame
-    /// and no read sees a moved root against pins that have not re-solved.</para>
-    ///
     /// <para>The emulator is reached by reflection only, through <c>EmulatorBinding</c>'s names, so this file
-    /// carries no hard dependency on av3emu. Emulator objects are resolved to names every
-    /// row, never cached: the emulator rebuilds its parameter entries and can rebuild its playable graph
-    /// mid-session, and a cached entry would freeze without an error. The one thing kept across rows is the
-    /// handle of the playable a <c>param</c> column was last verified against: the check that the playable
-    /// still carries the parameter allocates a managed parameter per entry per row, which on an FX controller
-    /// of some hundreds of parameters slowed a run many times over, and a rebuilt graph hands back a different
-    /// handle, so the check re-runs exactly when it can fail.</para>
+    /// carries no hard dependency on av3emu. A <c>param</c> column re-fetches the emulator's parameter entries
+    /// and playables every row and caches neither: the emulator rebuilds its entries and can rebuild its
+    /// playable graph mid-session, and a cached entry would freeze without an error.</para>
     /// </summary>
     [AgentTool]
     public static class RecordPlay
@@ -58,10 +47,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Doors ─────────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Start a take. <paramref name="file"/> is a <c>.csv</c> path relative to
-        /// <see cref="RunLogFormat.RunLogDir"/> that must not exist yet. Returns the absolute path, the handle
-        /// <c>report_play.py</c> takes, with the current frame and every column's resolution on the local
-        /// runtime.</summary>
         public static string Run(string file, string columns, bool clones = true, bool alwaysAnimate = true, bool copyRoot = true)
         {
             if (!EditorApplication.isPlaying) return Fail("play mode only: enter play, then call RecordPlay.Run");
@@ -119,9 +104,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Ok("Record", path, "frame=" + Time.frameCount + " | L: " + res);
         }
 
-        /// <summary>Move the local avatar root by a world offset and a yaw, linearly over
-        /// <paramref name="frames"/> frames. The callback logs the start pose at the next frame boundary it
-        /// sees, and the first step lands in the frame after that line.</summary>
         public static string MoveAvatar(float dx, float dz, float dyaw, int frames)
         {
             if (_take == null) return Fail("no take running: RecordPlay.Run first; a move is recorded with its take");
@@ -133,8 +115,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 + " frames from the next frame boundary");
         }
 
-        /// <summary>Write a <c>#</c> event line carrying <paramref name="text"/> at the next frame boundary,
-        /// labelling the rows that follow.</summary>
         public static string Mark(string text)
         {
             if (_take == null) return Fail("no take running: RecordPlay.Run first");
@@ -142,7 +122,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Ok("Mark", _take.Path, text);
         }
 
-        /// <summary>End the take: writes the stop line and returns the path and row counts.</summary>
         public static string End()
         {
             if (_take == null) return Fail("no take running; the last one stopped: " + _lastStop);
@@ -162,8 +141,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Ok("End", path, counts);
         }
 
-        /// <summary>Pure read: whether a take is running, its file, rows per runtime, last frame, gaps, any
-        /// move in progress, and the last stop reason.</summary>
         public static string Status()
         {
             if (_take == null) return Tag + " Status: no take running | last stop: " + _lastStop;
@@ -198,7 +175,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var m in t.Marks) sb.Append("# f=").Append(f).Append(" mark: ").Append(m).Append('\n');
                 t.Marks.Clear();
 
-                // Read every runtime before anything moves.
                 for (int i = 0; i < t.Runtimes.Count; i++)
                 {
                     var rt = t.Runtimes[i];
@@ -218,7 +194,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     t.Rows[rt.Who] = n + 1;
                 }
 
-                // Then move: these writes land in the next frame.
+                // After every read: these writes land in the next frame.
                 Transform lr = t.Local.Root;
                 if (t.PendingMove != null)
                 {
@@ -328,7 +304,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal static string ParseColumns(string spec, out List<Col> cols)
         {
             cols = new List<Col>();
-            if (string.IsNullOrWhiteSpace(spec)) return null;   // root columns only
+            if (string.IsNullOrWhiteSpace(spec)) return null;
             var aliases = new HashSet<string>(Reserved);
             foreach (var raw in spec.Split(';'))
             {
@@ -486,9 +462,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 TypeName = kind == 'f' ? "float" : kind == 'i' ? "int" : "bool" };
         }
 
-        /// <summary>The one name in <paramref name="names"/> a <c>param</c> target means: an exact name wins,
-        /// else the single name equal to it once <see cref="Strip"/>ped. None or several returns null with
-        /// the reason in <paramref name="why"/>.</summary>
         internal static string MatchName(ICollection<string> names, string target, out string why)
         {
             why = null;
@@ -562,7 +535,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Stop and plumbing ─────────────────────────────────────────────────────────────────────
 
-        /// <summary>Ends the take. Returns null, or why the stop line could not be written.</summary>
+        /// <summary>Returns null, or why the stop line could not be written.</summary>
         private static string Stop(string reason)
         {
             var t = _take;
@@ -697,7 +670,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public Motion PendingMove, Move;
         }
 
-        /// <summary>The emulator surface this door reflects, resolved up front; a miss refuses the whole Run.</summary>
+        /// <summary>The emulator surface this door reflects.</summary>
         private sealed class Emu
         {
             public Type Runtime;

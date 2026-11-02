@@ -3,13 +3,9 @@ using NUnit.Framework;
 using UnityEngine;
 using Ryan6Vrc.AgentTools.Editor;
 
-// RenderAvatar's hide list — the half that decides whether a sheet may be read as showing what was asked for.
-// An entry that resolved to nothing used to be dropped in silence, so the grab rendered the subtree the caller
-// had excluded and still returned OK: a contaminated sheet behind a clean verdict.
-//
-// CaptureCore takes a SceneView at its top, so batchmode cannot reach it (same bound as
-// RenderAvatarFreshnessTests). What is asserted here is what an agent actually acts on: the resolution rule,
-// the two refusals, and the empty-entry note — all extracted pure for exactly that reason.
+// RenderAvatar's hide list. An entry that resolves to nothing must refuse: dropped silently, the grab renders the
+// subtree the caller excluded and still returns OK. CaptureCore takes a SceneView at its top, so batchmode cannot
+// reach it; this pins the pure pieces: the resolution rule, the two refusals, and the empty-entry note.
 public class RenderAvatarHideTests
 {
     private GameObject _root;
@@ -22,7 +18,7 @@ public class RenderAvatarHideTests
         kept.AddComponent<MeshRenderer>();
         var garment = Child(_root, "Garment");
         garment.AddComponent<MeshRenderer>();
-        Child(_root, "EmptyContainer"); // resolves, holds no renderer
+        Child(_root, "EmptyContainer");
     }
 
     [TearDown]
@@ -54,7 +50,6 @@ public class RenderAvatarHideTests
     [Test]
     public void ResolveHideList_unmatchedEntry_isCapturedNotDropped()
     {
-        // The defect itself: before this, a name matching nothing left no trace anywhere.
         RenderAvatar.ResolveHideList(_root, new[] { "NoSuchThing" }, out var targets, out var unresolved, out _);
 
         Assert.AreEqual(0, targets.Count);
@@ -92,9 +87,8 @@ public class RenderAvatarHideTests
         StringAssert.DoesNotContain("re-grab frame A", s);
     }
 
-    // The regression this carve-out exists to prevent: a pinned diff replays frame A's hide list, and the object
-    // A hid is frequently the very thing the edit under test deleted. Handing that caller "fix your spelling"
-    // would be wrong, and failing it with Capture's message would send it to fix a list it never wrote.
+    // A pinned diff replays frame A's hide list, and the object A hid is frequently the very thing the edit under
+    // test deleted, so Capture's message would send this caller to fix a list it never wrote.
     [Test]
     public void HideRefusal_pinned_blamesFrameANotTheCaller()
     {
@@ -102,7 +96,7 @@ public class RenderAvatarHideTests
 
         StringAssert.Contains("frame A", s);
         // Deletion and rename need OPPOSITE actions and the manifest stores names, not identities, so the
-        // refusal must give both and say why it cannot choose — asserting a single cure would be a guess.
+        // refusal must give both and say why it cannot choose.
         StringAssert.Contains("DELETED", s);
         StringAssert.Contains("renamed or moved", s);
         StringAssert.Contains("names, not identities", s);
@@ -141,8 +135,7 @@ public class RenderAvatarHideTests
     [Test]
     public void HideEmptyNote_disabledRendererUnderTheEntry_countsAsEmpty()
     {
-        // A renderer that would not have drawn anyway excludes nothing, so the entry is as empty as a bare
-        // container — the note tracks what the grab actually dropped, not what the hierarchy contains.
+        // The note tracks what the grab actually dropped, not what the hierarchy contains.
         var garment = _root.transform.Find("Garment").gameObject;
         garment.GetComponent<MeshRenderer>().enabled = false;
         RenderAvatar.ResolveHideList(_root, new[] { "Garment" }, out _, out _, out var caller);

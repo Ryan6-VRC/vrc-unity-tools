@@ -21,24 +21,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
     /// The READ direction, inverse of <see cref="ControllerEmit"/>: a reachability walk that turns an
-    /// <see cref="AnimatorController"/> back into an <see cref="AnimDocument"/>. Re-emitting the produced
-    /// document reproduces the controller — <see cref="ControllerEmit"/> is the authoritative spec, and every
-    /// decoder here inverts one of its emit paths (parameters, clips, layers/states/transitions, motions +
-    /// blend trees, the eight behaviour encoders, sub-machines, Entry/Any ladders).
-    ///
-    /// REACHABILITY: only objects reachable from a layer's state machine become part of the Doc; unreachable
-    /// sub-assets (dead weight an owned cleaner would strip) are COUNTED in <see cref="WalkResult.OrphanCount"/>,
-    /// never emitted. A dangling motion GUID (asset gone) decodes to a <see cref="GuidRef"/> marked
-    /// <c>Unresolved</c> and is listed in <see cref="WalkResult.UnresolvedGuids"/>.
-    ///
-    /// SCOPE: produces the full document from an emitted/clean or imported controller. Import TOLERANCES —
-    /// mixed Write-Defaults hoisted to a modal layer policy + minority per-state overrides, and an
-    /// empty <c>timeParameter</c> normalized to an unbound motion time with a Note — plus the full REFUSAL
-    /// taxonomy: a construct that cannot be expressed in the schema (out-of-vocabulary or malformed input:
-    /// whitespace-colliding sibling states, a null state machine, an empty inline clip, a null playAudio clip)
-    /// is appended to <see cref="WalkResult.Refusals"/> (named + located) rather than silently approximated or
-    /// thrown. Transition durations etc. are decoded EXPLICITLY per transition (never hoisted to inherited
-    /// defaults), so the re-emit is exact even though the authoring form may have used inheritance.
+    /// <see cref="AnimatorController"/> back into an <see cref="AnimDocument"/> whose re-emit reproduces it.
+    /// <see cref="ControllerEmit"/> is the authoritative spec; every decoder here inverts one of its emit paths.
+    /// Transition durations and the like decode per transition, never hoisted to <c>defaults:</c>, so the
+    /// re-emit is exact. Contract: docs/animator-schema.md §Decompile output.
     /// </summary>
     public static class ControllerDecompile
     {
@@ -50,15 +36,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public List<string> Refusals = new List<string>();   // out-of-vocabulary constructs, named + located
             public List<string> Notes = new List<string>();      // tolerances applied, informational
             // Parallel to Refusals: the index of the layer each one belongs to, or -1 for a refusal that is
-            // not a layer's (a parameter, or the controller as a whole). Kept alongside rather than folded
-            // into the string because ~70 assertions and two callers read Refusals as plain text.
+            // not a layer's (a parameter, or the controller as a whole).
             public List<int> RefusalLayers = new List<int>();
             public int LayerCount;
         }
 
-        // stripLayout (opt-in, default off) suppresses ALL per-machine layout capture — the own-a-vendor-
-        // controller path, where the vendor's node arrangement is YAML noise ahead of a heavy rewrite. Default
-        // stays capture-on (byte-identical to before the flag).
+        // stripLayout suppresses all per-machine layout capture, for owning a vendor controller whose node
+        // arrangement is YAML noise ahead of a heavy rewrite.
         public static WalkResult Walk(AnimatorController controller, bool stripLayout = false)
         {
             var ctx = new WalkContext(controller, stripLayout);
@@ -73,51 +57,44 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private readonly WalkResult _result = new WalkResult();
             private readonly AnimDocument _doc = new AnimDocument();
 
-            // Decoded inline clips, keyed by name so a clip shared by several states is emitted once. The
-            // parallel _clipObjs holds the source AnimationClip per name so a DISTINCT clip re-using a name
-            // (which the name-keyed schema would silently collapse) is refused, not deduped as if shared.
+            // Decoded inline clips, keyed by name. _clipObjs holds each name's source clip, so a distinct clip
+            // re-using a name is refused rather than deduped as if shared.
             private readonly Dictionary<string, ClipSpec> _clips = new Dictionary<string, ClipSpec>();
             private readonly Dictionary<string, AnimationClip> _clipObjs = new Dictionary<string, AnimationClip>();
 
-            // Blend trees reached from more than one parent slot, decoded ONCE into a `trees:` entry that every
-            // reference site then names. Populated by CountTreeParents before the walk; _sharedName maps the
-            // object to the key it was given, _sharedDone marks the entry as already decoded (a shared tree is
-            // reached N times by construction, and its body must be decoded on the first visit only).
+            // Multi-parent blend trees, each decoded once into a `trees:` entry its reference sites name.
+            // CountTreeParents fills _sharedName (tree to key) before the walk; _sharedDone holds decoded entries.
             private Dictionary<BlendTree, string> _sharedName;
             private readonly Dictionary<string, BlendTreeSpec> _sharedDone = new Dictionary<string, BlendTreeSpec>();
 
-            // Per-layer addressing maps, rebuilt for each layer (state names recur across machines, so these
-            // are never layer-global lookups keyed by bare name — they are object-keyed).
+            // Per-layer addressing maps, rebuilt for each layer and keyed by object, because state names recur
+            // across machines.
             private Dictionary<AnimatorState, AnimatorStateMachine> _stateOwner;
             private Dictionary<AnimatorState, string> _statePath;
             private Dictionary<AnimatorStateMachine, string> _smPath;
             private Dictionary<AnimatorStateMachine, AnimatorStateMachine> _smParent;
-            // The layer currently being decoded, so the location labels can prefix it. Set once per layer
-            // rather than threaded through every decode call, because the walk is strictly one layer at a
-            // time. The index is the loop variable over _controller.layers, so it keeps matching the
-            // controller's own numbering even where a refused layer is never decoded.
+            // The layer being decoded, as the location labels' prefix. _layerIndex is the loop variable over
+            // _controller.layers, so it matches the controller's numbering even where a refused layer is never
+            // decoded.
             private string _currentLayer;
             // -1 whenever the walk is not inside the per-layer loop — DecodeParameters runs BEFORE it, and a
             // parameter refusal filed against layer 0 would misattribute the offender and inflate the
             // refused-layer count. The loop sets it; everything outside must leave it at -1.
             private int _layerIndex = -1;
 
-            // The one funnel every refusal goes through, so each is filed against the layer that owns it
-            // without 39 call sites having to remember.
+            // The one funnel every refusal goes through; it keeps RefusalLayers parallel to Refusals.
             private void Refuse(string text)
             {
                 _result.Refusals.Add(text);
                 _result.RefusalLayers.Add(_layerIndex);
             }
 
-            // Dangling motion GUIDs recovered from the controller YAML (assets that no longer resolve),
-            // keyed by the OWNING serialized object's local fileID so each null motion slot recovers its OWN
-            // guid. A shared FIFO mis-attributes: it dedups by unique guid (several slots → one entry) and
-            // drains in walk order, which need not match the YAML fill order.
+            // Dangling motion GUIDs recovered from the controller YAML, keyed by the owning serialized object's
+            // local fileID so each null motion slot recovers its own guid.
             private readonly Dictionary<long, Queue<string>> _danglingByOwner;
 
-            // Declared animator parameter names — the discriminator between the two path-"" Animator
-            // binding meanings (an AAP param write vs an animator/muscle property curve).
+            // Declared animator parameter names, which split the two path-"" Animator binding meanings
+            // (ReconstructBindingTarget).
             private readonly HashSet<string> _animParamNames = new HashSet<string>();
 
             public WalkContext(AnimatorController controller, bool stripLayout)
@@ -129,9 +106,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var p in controller.parameters) _animParamNames.Add(p.name);
             }
 
-            // The next dangling guid recorded against this owning object (a State or BlendTree), in the
-            // object's own serialization order. "unknown" when the controller isn't a saved asset or the
-            // owner carries no recovered dangler.
+            // The next dangling guid recorded against this owner (a State or BlendTree), or "unknown" when the
+            // controller isn't a saved asset or the owner carries no recovered dangler.
             private string NextDanglingGuid(Object owner)
             {
                 if (owner != null
@@ -147,16 +123,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _doc.ControllerName = _controller.name;
 
                 DecodeParameters();
-                // Before any motion is decoded: which blend trees have more than one parent. DecodeMotion
-                // consults this to emit a `shared:` reference instead of a copy of the body.
                 _sharedName = CountTreeParents();
                 for (_layerIndex = 0; _layerIndex < _controller.layers.Length; _layerIndex++)
                 {
                     var layer = _controller.layers[_layerIndex];
                     if (layer.syncedLayerIndex >= 0)
                     {
-                        // A synced layer re-skins another layer's states with override motions/behaviours — a
-                        // distinct construct the schema has no vocabulary for yet.
                         Refuse($"layer '{layer.name}': synced layer (syncedLayerIndex={layer.syncedLayerIndex}) is out of vocabulary");
                         continue;
                     }
@@ -187,7 +159,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case AnimatorControllerParameterType.Int:
                             spec.Type = AnimParamType.Int; spec.Default = p.defaultInt; break;
                         case AnimatorControllerParameterType.Trigger:
-                            // No schema vocabulary for a trigger param (the SDK/compiler surface is bool/int/float).
                             Refuse($"parameter '{p.name}': Trigger type is out of vocabulary");
                             continue;
                         default:
@@ -209,20 +180,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     Name = layer.name,
                     Weight = layer.defaultWeight,
                     Blend = layer.blendingMode == AnimatorLayerBlendingMode.Additive ? LayerBlend.Additive : LayerBlend.Override,
-                    WriteDefaults = null, // decoded per-state; never hoisted here
+                    WriteDefaults = null, // set from the decoded states by HoistWriteDefaults
                 };
                 if (layer.avatarMask != null) model.Mask = AssetDatabase.GetAssetPath(layer.avatarMask);
 
-                // An IK-pass layer runs a humanoid IK solve pass the schema has no vocabulary for; decoding
-                // it silently would drop the pass on recompile. Refuse (named + located).
                 if (layer.iKPass)
                     Refuse($"layer '{layer.name}': IK pass (iKPass) is out of vocabulary");
 
                 if (layer.stateMachine == null)
                 {
-                    // A malformed controller: a layer with no state machine has no reachable graph to decode.
                     Refuse($"layer '{layer.name}': has no state machine (null root) — malformed controller");
-                    return model; // empty Root, WriteDefaults left null (no states to derive a policy from)
+                    return model;
                 }
                 BuildAddressMaps(layer.stateMachine);
                 model.Root = DecodeMachine(layer.stateMachine, isRoot: true);
@@ -230,37 +198,30 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return model;
             }
 
-            // Derive the layer's Write-Defaults policy as the MODAL per-state WD value across ALL of the layer's
-            // states (root + every sub-machine), set it on the Layer, and clear the now-redundant per-state
-            // override on every majority state — leaving an explicit State.WriteDefaults only on the minority.
-            // Re-emit (s.WriteDefaults ?? layer.WriteDefaults ?? Defaults) then reproduces the SAME per-state WD
-            // mix. DETERMINISTIC: on a tie prefer true (trueCount >= falseCount). A uniform-WD layer hoists to a
-            // single policy with zero overrides — so it round-trips unchanged.
+            // Hoist the modal per-state Write Defaults across the layer's root and sub-machines to the layer, tie
+            // preferring true; only minority states keep an override, so re-emit
+            // (s.WriteDefaults ?? layer.WriteDefaults ?? Defaults) reproduces the mix.
             private void HoistWriteDefaults(Layer model)
             {
                 var states = new List<State>();
                 model.Root.CollectStates(states);
-                if (states.Count == 0) return; // nothing to derive from; leave WriteDefaults null
+                if (states.Count == 0) return;
 
                 int trueCount = 0, falseCount = 0;
                 foreach (var s in states) { if (s.WriteDefaults == true) trueCount++; else falseCount++; }
-                bool policy = trueCount >= falseCount; // tie-break: prefer true
+                bool policy = trueCount >= falseCount;
                 model.WriteDefaults = policy;
                 foreach (var s in states)
-                    if (s.WriteDefaults == policy) s.WriteDefaults = null; // majority inherits the layer policy
+                    if (s.WriteDefaults == policy) s.WriteDefaults = null;
 
-                // A genuinely mixed layer (both WD values present) had its per-state split normalized to a single
-                // modal policy + minority overrides — an applied import tolerance. Record it in _notes.tolerances,
-                // mirroring the timeParameterActive note (a uniform-WD layer applied no tolerance, so no note).
                 if (trueCount > 0 && falseCount > 0)
                     _result.Notes.Add($"layer '{model.Name}': mixed Write Defaults normalized to modal policy (writeDefaults: {(policy ? "true" : "false")})");
             }
 
-            // Map every state/sub-machine of the layer to its owning machine + path-from-root, so a transition
-            // target can be addressed exactly as ControllerEmit.ResolveName consumes it: BARE within the source
-            // machine, SLASH-QUALIFIED (from the layer root) for a nested cross-machine target, and '/'-ANCHORED
-            // (absolute from root) for a TOP-LEVEL target whose root path is a single bare segment (which would
-            // otherwise read as local).
+            // Map every state and sub-machine of the layer to its owning machine and path from root, so a target
+            // can be addressed as ControllerEmit.ResolveName consumes it: bare within the source machine,
+            // slash-qualified from the layer root for a nested cross-machine target, and '/'-anchored for a
+            // top-level target, whose single-segment path would otherwise read as local.
             private void BuildAddressMaps(AnimatorStateMachine root)
             {
                 _stateOwner = new Dictionary<AnimatorState, AnimatorStateMachine>();
@@ -304,8 +265,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var child in sm.stateMachines)
                 {
                     if (child.stateMachine == null) continue;
-                    // A sub-machine's OUTGOING transitions, fired when it reaches Exit. They hang off THIS
-                    // machine, so they decode against this machine's addressing scope like the entry ladder's do.
                     var subModel = new SubMachine { Name = child.stateMachine.name, Machine = DecodeMachine(child.stateMachine, isRoot: false) };
                     var smt = sm.GetStateMachineTransitions(child.stateMachine);
                     if (smt != null)
@@ -315,40 +274,29 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     model.Machines.Add(subModel);
                 }
 
-                // Default. Unity stores ONE m_DefaultState PPtr per machine, but it means three different things
-                // depending on what it points at, and the field is NOT self-describing:
+                // Default. Unity stores one m_DefaultState PPtr per machine, and it means one of three things:
                 //
-                //   direct state  -> the ordinary `default:` (authoritative).
-                //   foreign state -> a state nested inside a descendant machine. Legal, durable through
-                //                    serialization, and reachable from Unity's own "Set as Layer Default State"
-                //                    on a nested node. This is `defaultState:` (a root-relative address).
-                //   auto-populated -> Unity WRITES this field itself: adding a state to a descendant machine
-                //                    walks up and fills an ancestor's empty m_DefaultState. So a foreign value is
-                //                    not evidence of authorship, and neither the getter NOR a raw SerializedProperty
-                //                    read can tell the two apart (measured). What distinguishes them is the
-                //                    trailing entry rung, which is what the compiler actually emits for a
-                //                    `default:` naming a sub-machine — see ControllerEmit's note on the same field.
-                //
-                // A foreign default and a trailing unconditional rung CO-EXIST in Unity (measured), so this must
-                // not be an if/else over one key: folding the rung while dropping the PPtr silently rewrites which
-                // state the layer boots, which is exactly the loss this walk exists to refuse.
+                //   direct state   -> the ordinary `default:`.
+                //   foreign state  -> a state nested inside a descendant machine. Legal, durable through
+                //                     serialization, and reachable from Unity's "Set as Layer Default State" on a
+                //                     nested node. This is `defaultState:` (a root-relative address).
+                //   auto-populated -> adding a state to a descendant machine walks up and fills an ancestor's
+                //                     empty m_DefaultState. Neither the getter nor a raw SerializedProperty read
+                //                     can tell this from an authored foreign default (measured);
+                //                     foreignIsAutoPopulation below decides it.
                 var directStates = new HashSet<AnimatorState>(sm.states.Where(x => x.state != null).Select(x => x.state));
                 bool defaultIsDirectState = sm.defaultState != null && directStates.Contains(sm.defaultState);
                 if (defaultIsDirectState) model.DefaultState = AddressPath.EscapeSegment(sm.defaultState.name);
 
-                // A dangling default PPtr reads as null through Unity's overloaded null, so the plain null check
-                // above would drop it and let the rebuild silently boot the first-added state. Same shape as
-                // HasDanglingMotion: a live instanceID with a null managed ref.
                 if (sm.defaultState == null && HasDanglingDefaultState(sm))
                     Refuse($"{MachineLabel(sm)}: the default state reference is broken (the state it "
                         + "named no longer exists) — a decompile would drop it and the rebuild would boot a "
                         + "different state; repair or clear the default in the animator window");
 
-                // The trailing unconditional entry into a DIRECT child sub-machine is what the compiler emits for a
-                // `default:` naming a sub-machine, so it is the candidate to fold back into that key. A target
-                // deeper in the tree is a genuine cross-machine entry rung, not a default — leaving it in the
-                // ladder decodes it with a proper slash-qualified address instead of mislabeling it as a bare
-                // (direct-child) default that would fail to recompile.
+                // The trailing unconditional entry into a direct child sub-machine is what the compiler emits for
+                // a `default:` naming a sub-machine, so it is the candidate to fold back into that key. A deeper
+                // target stays a ladder rung with a slash-qualified address; as a bare default it would fail to
+                // recompile.
                 var entries = sm.entryTransitions;
                 int foldableIdx = -1;
                 AnimatorStateMachine foldTarget = null;
@@ -363,35 +311,21 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // Is a foreign PPtr merely Unity's auto-population, or an authored foreign default? The value alone
-                // cannot say — but the question that actually matters is narrower and decidable: WOULD A REBUILD
-                // RE-DERIVE THIS VALUE FOR FREE? If yes, emitting nothing is faithful and the document stays
-                // legible; if no, the PPtr must be written explicitly or it is lost.
-                //
-                // Auto-population fills an EMPTY ancestor slot at the moment a state is added, and ControllerEmit
-                // adds a machine's own direct states before recursing into its children — so the value a rebuild
-                // lands on is the FIRST STATE EMITTED ANYWHERE IN THE SUBTREE, depth-first. It is emphatically NOT
-                // the child machine's own default: a sub-machine whose states are [X, Y] with default Y hands the
-                // ancestor X, because X was added first and the later `sub.defaultState = Y` does not propagate up
-                // (both measured). Comparing against the child's default instead classified an authored default as
-                // auto-population and dropped it — the same loss this rule exists to close, one shape over.
-                //
-                // Stating the predicate exactly also collapses the two conditions that used to guard it. A machine
-                // WITH a direct state cannot qualify (FirstEmittedState returns that direct state, which by
-                // definition is not the foreign default), and a trailing entry rung is irrelevant to what Unity
-                // auto-fills — so neither `directStates.Count == 0` nor `foldTarget != null` needs restating here.
-                // Dropping the rung condition is what lets a raw VENDOR machine (no rung at all — Unity wires Entry
-                // through m_DefaultState alone) keep the bare form instead of gaining a spurious key.
+                // A foreign PPtr needs no key when a rebuild would re-derive it. ControllerEmit adds a machine's
+                // direct states before recursing into its children, so auto-population lands on the first state
+                // emitted anywhere in the subtree, depth-first, and not on the child machine's own default: a
+                // sub-machine with states [X, Y] and default Y hands the ancestor X, because the later
+                // `sub.defaultState = Y` does not propagate up (both measured). The predicate needs no entry rung,
+                // since a raw vendor machine wires Entry through m_DefaultState alone.
                 bool foreignIsAutoPopulation =
                     sm.defaultState != null && !defaultIsDirectState
                     && FirstEmittedState(sm) == sm.defaultState;
 
                 bool defaultIsForeign = sm.defaultState != null && !defaultIsDirectState && !foreignIsAutoPopulation;
 
-                // A foreign default and a trailing unconditional rung CO-EXIST in Unity (measured), so the fold is
-                // suppressed rather than competing with the PPtr: the rung stays an ordinary ladder rung and both
-                // facts survive. Folding while dropping the PPtr is precisely the silent boot-state rewrite this
-                // walk exists to refuse.
+                // A foreign default and a trailing unconditional rung co-exist in Unity (measured), so the fold is
+                // suppressed: the rung stays an ordinary ladder rung and both facts survive. Folding while dropping
+                // the PPtr would silently rewrite which state the layer boots.
                 int subDefaultIdx = -1;
                 if (foldableIdx >= 0 && !defaultIsForeign)
                 {
@@ -401,10 +335,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 if (defaultIsForeign)
                 {
-                    // Root-relative, per-segment escaped, and '/'-anchored when it is a single segment — the same
-                    // addressing StateTargetName emits for a transition target, so `to:` and `defaultState:` cannot
-                    // drift. A state outside this layer (or otherwise unreachable from its root) has no address at
-                    // all: refuse rather than index _statePath and throw, in a walk whose discipline is named refusals.
+                    // The addressing StateTargetName emits for `to:`: root-relative, per-segment escaped, and
+                    // '/'-anchored when it is a single segment.
                     if (_statePath.TryGetValue(sm.defaultState, out var dpath))
                         model.DefaultStatePath = AddressPath.Split(dpath).Count == 1 ? "/" + dpath : dpath;
                     else
@@ -417,14 +349,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     if (i == subDefaultIdx)
                     {
-                        // This rung folds into the machine's `default:` and never reaches
-                        // DecodeEntryTransition, so it needs its own copy of EVERY guarantee that method
-                        // carries — not just the dropped-name Note. `default:` is a bare target with nowhere
-                        // to put mute/solo, and the sweep is what catches a field neither of us knows about,
-                        // so without all three this is the one entry rung in the controller that decodes
-                        // unguarded. `model.DefaultState` was already set above, so a muted rung silently
-                        // recompiles as a LIVE unconditional default: a behavioural rewrite, which is exactly
-                        // the class of silent drop the rest of this walk refuses.
+                        // This rung folds into `default:` and skips DecodeEntryTransition, so it needs its own
+                        // mute/solo refusal, name Note and completeness sweep.
                         string dloc = "Entry in " + MachineLabel(sm);
                         if (entries[i].mute || entries[i].solo)
                             Refuse($"transition from {dloc}: the default sub-machine rung carries "
@@ -454,10 +380,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return model;
             }
 
-            // Positions live in the PARENT's child structs (states[i].position / stateMachines[i].position),
-            // not AnimatorState.m_Position (which emit never writes). Special-node positions are the machine's
-            // own properties. Returns null when every node sits at its tool-owned grid/constant default, so a
-            // never-arranged machine stays layout-free.
+            // Positions live in the parent's child structs (states[i].position / stateMachines[i].position),
+            // not AnimatorState.m_Position, which emit never writes.
             private static MachineLayout CaptureLayout(AnimatorStateMachine sm, bool isRoot)
             {
                 if (IsDefaultLayout(sm, isRoot)) return null;
@@ -475,13 +399,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return l;
             }
 
-            // The omit-decision compares special-node positions (entry/any/exit, and parent for sub-machines) against
-            // the tool-owned constants, so a never-arranged machine stays layout-free. This relies on opening a
-            // controller in Unity's Animator window NOT perturbing those positions off the constants — verified: an
-            // opened-but-unedited controller neither dirties nor moves them (Unity serializes node positions to persist
-            // them). If that ever regresses, the fallback is to drop the three special-node comparisons below
-            // (grid-on-states/subs only); CaptureLayout still records the special positions whenever a block is emitted
-            // for state/sub reasons.
+            // Relies on opening a controller in Unity's Animator window not moving the special nodes off the
+            // tool-owned constants (verified: an opened-but-unedited controller neither dirties nor moves them).
+            // If that regresses, drop the special-node comparisons below and compare states and sub-machines
+            // only; CaptureLayout still records the special positions whenever a block is emitted.
             private static bool IsDefaultLayout(AnimatorStateMachine sm, bool isRoot)
             {
                 int i = 0;
@@ -506,13 +427,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private static bool Approx(Vector3 a, Vector3 b)
                 => Mathf.Abs(a.x - b.x) < 0.01f && Mathf.Abs(a.y - b.y) < 0.01f;
 
-            // Two flavours of sibling name collision, each a located Refusal (never a silent collapse):
-            //   (a) EXACT raw duplicates — two states, or two sub-machines, with the identical name. They
-            //       serialize as duplicate YAML keys the parser refuses on re-parse, so a decompile that
-            //       returned OK here would hand back a non-round-trippable document.
-            //   (b) whitespace collisions — names equal once trimmed but differing raw (e.g. "S" vs "S ") —
-            //       a legibility hazard under name-keyed addressing, refused even though quoting could carry
-            //       them, because two near-identical sibling names are almost always a mistake.
+            // Sibling name collisions are located Refusals, never a silent collapse. Exact duplicates serialize as
+            // duplicate YAML keys the parser refuses on re-parse. State names equal once trimmed but differing raw
+            // ("S" vs "S ") are a legibility hazard under name-keyed addressing, refused even though quoting could
+            // carry them.
             private void DetectSiblingNameCollisions(AnimatorStateMachine sm)
             {
                 DetectExactDuplicates(sm.states.Where(x => x.state != null).Select(x => x.state.name), "state", sm);
@@ -521,9 +439,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 DetectWhitespaceCollisions(sm);
             }
 
-            // A direct state and a direct sub-machine may share a name (separate Unity collections). A bare
-            // target or `default:` addresses by name, and ResolveName resolves states before sub-machines — so
-            // a transition to the sub-machine would silently rewire to the state on recompile. Refuse (located).
+            // A direct state and a direct sub-machine may share a name (separate Unity collections). ResolveName
+            // resolves states first, so a bare target at the sub-machine would silently rewire to the state on
+            // recompile.
             private void DetectCrossKindCollisions(AnimatorStateMachine sm)
             {
                 var stateNames = new HashSet<string>(sm.states.Where(x => x.state != null).Select(x => x.state.name));
@@ -581,9 +499,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (ast.speedParameterActive) st.SpeedParam = ast.speedParameter;
                 if (ast.timeParameterActive)
                 {
-                    // Every vendor Gesture (the SDK HandsLayer2 template) ships timeParameterActive with an EMPTY
-                    // timeParameter — a no-op the runtime ignores. TOLERATE it (never a Refusal): normalize to an
-                    // unbound motion time (MotionTimeParam == null) + a Note, so re-emit does not fabricate a bind.
+                    // The SDK's HandsLayer2 Gesture template ships Idle2 states with timeParameterActive and an
+                    // empty timeParameter, a no-op the runtime ignores, so this normalizes to an unbound motion time
+                    // with a Note rather than refusing or fabricating a bind on re-emit.
                     if (string.IsNullOrEmpty(ast.timeParameter))
                         _result.Notes.Add($"{StateLabel(ast)}: timeParameterActive with an empty timeParameter — normalized to unbound motion time");
                     else
@@ -602,18 +520,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     st.Motion = new MotionRef { RefGuid = new GuidRef { Guid = guid, Unresolved = true } };
                     _result.UnresolvedGuids.Add(guid);
                 }
-                // else: a genuine clean-empty state (motion: ~) — leave Motion null.
 
                 if (ast.behaviours != null)
                     foreach (var b in ast.behaviours)
                         DecodeBehaviourInto(st.Behaviours, b, StateLabel(ast));
 
-                // A state rung's canTransitionToSelf decides only a rung whose target is its own state, and the
-                // compiler derives it from the target (on exactly there), so a rung to itself at flag 1 decodes
-                // as plain `to: <self>`. One at flag 0 never fires, and a later sibling whose condition holds
-                // at the same time still fires past it (bare Animator), so dropping it is the faithful decode —
-                // the recompile would bring it alive. Solo is the exception: a soloed rung silences its non-solo
-                // siblings whether or not it can fire, so dropping that one would wake them.
+                // The compiler sets canTransitionToSelf from the target (on exactly for a rung to its own state),
+                // so a self rung at flag 1 decodes as plain `to: <self>`. One at flag 0 never fires, and a later
+                // sibling whose condition holds at the same time still fires past it (bare Animator), so dropping
+                // it is the faithful decode; the recompile would bring it alive. A soloed one silences its non-solo
+                // siblings whether or not it can fire, so dropping that would wake them.
                 foreach (var t in ast.transitions)
                 {
                     if (t != null && !t.isExit && t.destinationState == ast && !t.canTransitionToSelf)
@@ -635,36 +551,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return st;
             }
 
-            // ----- decode completeness census (make the decoder witness its own coverage) -----
+            // ----- decode completeness census -----
             //
-            // The decoders above are a hand-maintained allowlist: a Unity field they don't explicitly bind (or
-            // refuse) is SILENTLY dropped on import — the recurring silent-loss family. The census inverts that:
-            // it sweeps every serialized property of a decoded object and REFUSES any non-default one the decode
-            // path does not account for. So a behaviour-affecting field the decoder forgot — or one a future SDK
-            // adds — fails loud until someone consciously classifies it (consume it, or list it below), instead
-            // of dropping on omission. Complex/collection properties (arrays, structs, vectors) are left to the
-            // recursive decoders; the sweep judges only the scalar leaf types it can compare to a default.
+            // The decoders are a hand-maintained allowlist, so the census sweeps every serialized property of a
+            // decoded object and refuses any non-default scalar its type's *Aware set does not name. A field the
+            // decoder forgot, or one a future SDK adds, fails loud until someone consumes it or lists it. An
+            // *Aware set names what the decode path consumes, refuses, or ignores as editor-cosmetic. Left
+            // unlisted on purpose, so refused when set: m_CycleOffset, m_IKOnFeet, m_Tag (state).
             //
-            // Each `*Aware` set names the scalar properties the decode path consumes, refuses, or deliberately
-            // ignores as editor-cosmetic. A property here is NOT swept; everything else non-default is refused.
-            // NOT listed (⇒ swept ⇒ refused when set): m_CycleOffset, m_IKOnFeet, m_Tag (state) — the three this
-            // census catches. m_TransitionOffset was a fourth until the schema grew `offset:` to bind it.
+            // Scope: the top-level scalars of AnimatorState, state/any/entry transitions, BlendTree and the eight
+            // VRC SMB kinds. Not covered, so only the hand decoders guard them: array-element structs (ChildMotion,
+            // ChildAnimatorState, ChildAnimatorStateMachine, AnimatorCondition) and AnimatorControllerLayer (a
+            // struct, not SerializedObject-sweepable).
             //
-            // SCOPE (what the census actually covers — the rest stays a hand-allowlist): the TOP-LEVEL scalar
-            // fields of AnimatorState, state/any/entry transitions, BlendTree, and the eight VRC SMB kinds.
-            // NOT covered — array-element structs (ChildMotion / ChildAnimatorState / ChildAnimatorStateMachine /
-            // AnimatorCondition at depth > 0, guarded by the recursive decoders' own explicit binding) and
-            // AnimatorControllerLayer (a struct, so not SerializedObject-sweepable).
-            //
-            // AnimatorStateMachine is NOT in that second group and the reason it stays out is different: it IS a
-            // UnityEngine.Object (a controller sub-asset with its own fileID) and sweeps fine. It is excluded
-            // because a census would be USELESS on it — its only depth-0 scalar of interest is m_DefaultState,
-            // which Unity AUTO-POPULATES (adding a state to a descendant machine fills an empty ancestor's slot),
-            // so the sweep would flag nearly every machine in every controller including this compiler's own
-            // output. It would be silenced into an Aware set within a day and catch nothing. That field's
-            // integrity is carried by the decode rule in DecodeMachine and by a graph-identity fixpoint
-            // assertion instead — a census cannot adjudicate a field whose default is not type-zero.
-            // Within scope the class is closed; outside it, the hand decoders remain the guard.
+            // AnimatorStateMachine sweeps fine but is excluded: Unity auto-populates its m_DefaultState, whose
+            // default is therefore not type-zero, so the sweep would flag nearly every machine, this compiler's
+            // own output included. The decode rule in DecodeMachine and the built-graph assertions in
+            // CrossMachineDefaultTests guard that field instead.
 
             private static readonly HashSet<string> UniversalIgnore = new HashSet<string>
             {
@@ -673,21 +576,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 "m_EditorClassIdentifier",
             };
 
-            // m_Name is listed per-type below, not here: State's name is captured via its YAML map key;
-            // BlendTree's and StateTransition's are captured via the new `name:` schema field (MeaningfulName).
-            // Entry-transition and SMB names are editor-cosmetic and are tolerated (ignored) rather than
-            // captured. Listing m_Name per-type (instead of the old blanket UniversalIgnore exemption) means a
-            // FUTURE swept type that forgets to list it is refused loud, the same guarantee the sweep gives
-            // every other field.
-            //
-            // That tolerance USED to be justified as "a live scan of vendor controllers found them always
-            // empty in practice", and the claim is false. Re-measured over 138 controllers in the two local
-            // venues: 40 of 694 AnimatorTransitions carry a non-empty m_Name (~6%), every one of them an entry
-            // rung, none a sub-machine onExit rung. (An earlier note put this at "3 of 961" — those are the
-            // AnimatorStateTransition figures, a different type, and that one IS captured.) The tolerance is
-            // kept anyway, because refusing would strand a real vendor package over a field nothing reads at
-            // runtime, but DecodeEntryTransition now emits a Note per dropped name so the loss is visible in
-            // the result rather than resting on a premise that does not hold.
+            // m_Name is listed per type rather than in UniversalIgnore, so a future swept type that forgets it is
+            // refused loud. A state's name is captured by its YAML map key, a BlendTree's and a StateTransition's
+            // by the `name:` field (MeaningfulName). An SMB's is editor-cosmetic and ignored. An entry rung's is
+            // tolerated with a Note rather than refused: vendor controllers do carry them, and nothing reads them
+            // at runtime.
             private static readonly HashSet<string> StateAware = new HashSet<string>
             {
                 "m_Speed", "m_Motion", "m_Transitions", "m_WriteDefaultValues", "m_Mirror",
@@ -711,24 +604,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
             private static readonly HashSet<string> BlendTreeAware = new HashSet<string>
             {
                 "m_BlendType", "m_BlendParameter", "m_BlendParameterY", "m_Childs", "m_Name",
-                // m_MinThreshold/m_MaxThreshold/m_UseAutomaticThresholds are inert for the round-trip (child
-                // thresholds are read/emitted explicitly). m_NormalizedBlendValues IS consumed (Direct trees,
-                // above) — kept here so the sweep doesn't double-refuse it.
+                // Inert for the round-trip (child thresholds are read and emitted explicitly), except
+                // m_NormalizedBlendValues, which DecodeTree reads for Direct trees.
                 "m_MinThreshold", "m_MaxThreshold", "m_UseAutomaticThresholds", "m_NormalizedBlendValues",
             };
 
-            // Per-SMB aware sets (VRC components are MonoBehaviours: public fields serialize under their own
-            // names, no m_ prefix; the MonoBehaviour internals — INCLUDING its UnityEngine.Object-level name,
-            // still serialized as "m_Name" even on a MonoBehaviour — are covered by UniversalIgnore except for
-            // this one). Each lists the fields its decoder consumes plus the editor-only debugString, plus
-            // m_Name — an SMB's cosmetic Inspector name is tolerated (ignored), never captured. A non-default
-            // field NOT here — one a decoder forgot, or a future SDK adds — is refused by the sweep.
-            // `parameters` names the LIST, and the sweep stops there: it walks depth-0 scalars, so nothing
-            // inside a Parameter element is checked against anything. Every field of that struct is therefore
-            // captured by hand in DecodeDriver, with no backstop — which is how preventRepeats sat undecoded
-            // (and so recompiled to the SDK default) with the sweep entirely quiet about it. A field the SDK
-            // adds INSIDE Parameter will be just as silent; when one shows up, extending the sweep one level
-            // for this component is a better answer than another hand-audit.
+            // Per-SMB aware sets. VRC components are MonoBehaviours, so public fields serialize under their own
+            // names with no m_ prefix. The Object-level name still serializes as m_Name, which UniversalIgnore does
+            // not cover, and is a cosmetic Inspector name ignored here. Each set lists the fields its decoder
+            // consumes plus the editor-only debugString.
+            //
+            // `parameters` names the list, and the sweep stops there: nothing inside a Parameter element is
+            // checked, so DecodeDriver captures every field of that struct by hand with no backstop. A field the
+            // SDK adds inside Parameter will be silent; when one shows up, extend the sweep one level for this
+            // component.
             private static readonly HashSet<string> DriverAware = new HashSet<string> { "parameters", "localOnly", "debugString", "m_Name" };
             private static readonly HashSet<string> TrackingAware = new HashSet<string>
             {
@@ -747,8 +636,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 "PlayOnEnter", "StopOnEnter", "PlayOnExit", "StopOnExit", "debugString", "m_Name",
             };
 #if VRC_FT_SETS_PRESENT
-            // `blendSets` names the LIST, so — exactly as for the driver's `parameters` — nothing inside an element
-            // is swept; DecodeFaceTrackingSets reads every element field by hand.
+            // `blendSets` names the list, so nothing inside an element is swept; DecodeFaceTrackingSets reads every
+            // element field by hand.
             private static readonly HashSet<string> FaceTrackingSetsAware = new HashSet<string> { "blendSets", "debugString", "m_Name" };
 #endif
 
@@ -760,16 +649,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var it = so.GetIterator();
                     for (bool ok = it.Next(true); ok; ok = it.Next(false)) // Next (not NextVisible) — hidden fields count too
                     {
-                        if (it.depth != 0) continue; // top-level scalars only; collections are the decoders' job
+                        if (it.depth != 0) continue;
                         string n = it.name;
                         if (UniversalIgnore.Contains(n) || aware.Contains(n)) continue;
                         if (NonDefaultScalar(it, out string shown))
-                            // Says what IS true, not what was narrowly avoided: the old tail read "(silently
-                            // dropped)", which describes the counterfactual this census exists to prevent and
-                            // lands for a beat as a report that the loss already happened. Nothing was dropped —
-                            // the run refuses and writes no yaml.
-                            // An empty `kind` means `loc` already names what it is (StateLabel's
-                            // "layer L state 'S'"), so prefixing a noun would double it.
                             Refuse($"{(kind.Length == 0 ? loc : kind + " " + loc)}: field "
                                 + $"'{Strip(n)}'{shown} is set, and no schema "
                                 + "field binds it — a decompile would lose it, so this run refuses instead");
@@ -779,14 +662,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private static string Strip(string n) => n.StartsWith("m_") ? n.Substring(2) : n;
 
-            // True when a scalar leaf property differs from TYPE-ZERO (false / 0 / "" / enum-index-0 / null);
-            // `shown` is a value hint for the refusal. Non-scalar / unknown types return false (left to the
-            // recursive decoders) so the sweep never false-positives on an array, vector, or struct it does not
-            // model. FORWARD-SAFETY: type-zero is the true default for every field currently swept. If a future
-            // SDK adds a non-aware field whose real Unity default is NON-zero (a float defaulting to 1, an enum
-            // whose default index ≠ 0), this would refuse the compiler's OWN freshly-emitted output — a global
-            // fixpoint break (louder than a per-construct miss, so still fail-loud). Fix then: add it to the
-            // type's *Aware set (if consumed/inert) or compare against a freshly-constructed instance's value.
+            // True when a scalar leaf differs from type-zero (false / 0 / "" / enum-index-0 / null); `shown` is a
+            // value hint for the refusal. Other property types return false, left to the recursive decoders.
+            // Assumes type-zero is the real default of every swept field. A future SDK field with a non-zero
+            // default (a float defaulting to 1) would refuse the compiler's own freshly emitted output everywhere;
+            // add it to the type's *Aware set if consumed or inert, or compare against a freshly constructed
+            // instance.
             private static bool NonDefaultScalar(SerializedProperty p, out string shown)
             {
                 shown = "";
@@ -804,7 +685,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case SerializedPropertyType.ObjectReference:
                         return p.objectReferenceValue != null || p.objectReferenceInstanceIDValue != 0;
                     default:
-                        return false; // vectors / generic structs / arrays — not the sweep's concern
+                        return false;
                 }
             }
 
@@ -819,10 +700,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // The state a rebuild's auto-population would land on: ControllerEmit adds a machine's own direct
-            // states in document order before recursing into its child machines, so this is the first state
-            // emitted anywhere in the subtree, depth-first. Mirrors EmitMachine's order — change one and this
-            // must follow, which is why the two carry the same note.
+            // The state a rebuild's auto-population lands on (see foreignIsAutoPopulation in DecodeMachine). Mirrors
+            // EmitMachine's order, so change one and this must follow.
             private static AnimatorState FirstEmittedState(AnimatorStateMachine sm)
             {
                 foreach (var cs in sm.states)
@@ -836,10 +715,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return null;
             }
 
-            // The default-state twin of HasDanglingMotion. `sm.defaultState == null` is Unity's OVERLOADED null,
-            // which reads true both for an unset field and for a PPtr to a destroyed state — so the caller's null
-            // check alone cannot tell "no default" from "broken default", and the second would decode to no key
-            // and rebuild booting whichever state was added first.
+            // The default-state twin of HasDanglingMotion. `sm.defaultState == null` is Unity's overloaded null,
+            // true both for an unset field and for a PPtr to a destroyed state, so the caller's null check alone
+            // cannot tell them apart, and a broken default would decode to no key and rebuild booting whichever
+            // state was added first.
             private static bool HasDanglingDefaultState(AnimatorStateMachine sm)
             {
                 using (var so = new SerializedObject(sm))
@@ -875,17 +754,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 var tr = new Transition();
                 string loc = "Entry in " + MachineLabel(srcSm);
-                // The entry ladder cannot express mute/solo (the parser refuses them there, and the emit path
-                // never reads them) — an entry transition carrying either would be a silent drop. Refuse it,
-                // the read-side mirror of the parser's entry mute/solo refusal. NOT decoded here: m_Name — a
-                // vendor entry transition's cosmetic name is tolerated (ignored, via EntryTransitionAware), not
-                // refused, unlike mute/solo which the entry rung genuinely cannot express.
+                // The read-side mirror of the parser's entry mute/solo refusal.
                 if (t.mute || t.solo)
                     Refuse($"transition from {loc}: entry transition carries mute/solo, which the entry ladder cannot express");
-                // The drop stays (see the tolerance comment above), but it stops being invisible. A Note, not a
-                // Refusal: refusing would make a legitimate vendor controller undecompilable over a field
-                // nothing reads at runtime — 40 of the 694 entry-class transitions in the local corpus carry one,
-                // all of them in a single package, so a refusal here would be a regression for real assets.
                 if (!string.IsNullOrEmpty(t.name))
                     _result.Notes.Add($"transition from {loc}: entry rung's cosmetic name '{t.name}' is not carried by the schema and will not survive a recompile");
                 SetTarget(tr, t, srcSm, loc);
@@ -894,9 +765,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return tr;
             }
 
-            // A sub-machine's outgoing (on-Exit) transition. Same AnimatorTransition type as an entry rung, so
-            // the same fields and the same mute/solo refusal apply; `srcSm` is the PARENT, which is both the
-            // machine the transition hangs off and the scope its target resolves in.
+            // A sub-machine's outgoing (on-Exit) transition, fired when it reaches Exit. Same AnimatorTransition
+            // type as an entry rung, so the same fields and mute/solo refusal apply; `parentSm` is both the machine
+            // the transition hangs off and the scope its target resolves in.
             private Transition DecodeSubMachineExitTransition(AnimatorTransition t, AnimatorStateMachine parentSm,
                                                               AnimatorStateMachine childSm)
             {
@@ -904,10 +775,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string loc = "onExit of sub-machine '" + childSm.name + "' in " + MachineLabel(parentSm);
                 if (t.mute || t.solo)
                     Refuse($"transition from {loc}: carries mute/solo, which an onExit list cannot express");
-                // The entry ladder TOLERATES a cosmetic name (ignored via EntryTransitionAware). onExit refuses
-                // one instead, because that tolerance rests on vendor entry rungs being unnamed and this
-                // construct has no such evidence behind it — a silent drop here would be new loss, not
-                // inherited. Widen to a decoded `name:` if a real controller turns out to carry one.
+                // The entry ladder tolerates a cosmetic name. onExit refuses one because no surveyed controller
+                // carries a name on this rung, so a silent drop would be new loss. Widen to a decoded `name:` if a
+                // real controller turns out to carry one.
                 if (!string.IsNullOrEmpty(t.name))
                     Refuse($"transition from {loc}: carries the name '{t.name}', which an onExit list does not yet bind");
                 SetTarget(tr, t, parentSm, loc);
@@ -916,14 +786,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return tr;
             }
 
-            // Resolve a transition's target into the schema's To/ToExit addressing.
             private void SetTarget(Transition tr, AnimatorTransitionBase t, AnimatorStateMachine srcSm, string loc)
             {
-                // isExit and a destination are mutually exclusive in anything the Inspector can author, but both
-                // setters are public, so a script (or hand-edited YAML) can set them together. Taking isExit
-                // first and returning dropped the destination without a word — a silent normalization of a
-                // contradiction this decoder cannot represent, and cannot resolve either: Unity's own precedence
-                // between the two is not something to guess at from a decompiler. Refuse and name both halves.
+                // isExit and a destination are mutually exclusive in the Inspector, but both setters are public, so
+                // a script or hand-edited YAML can set them together; Unity's precedence is not guessed at here.
                 if (t.isExit && (t.destinationState != null || t.destinationStateMachine != null))
                 {
                     Refuse($"transition from {loc}: carries isExit AND a destination "
@@ -935,12 +801,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (t.isExit) { tr.ToExit = true; return; }
                 if (t.destinationState != null) { tr.To = StateTargetName(t.destinationState, srcSm, loc); return; }
                 if (t.destinationStateMachine != null) { tr.To = SmTargetName(t.destinationStateMachine, srcSm, loc); return; }
-                // A dangling target (neither state, sub-machine, nor Exit) — cannot be addressed.
                 Refuse($"transition from {loc}: target resolves to no state/sub-machine/Exit");
             }
 
             // Every emitted target is per-segment escaped (a '/' in a name survives as '\/'), so ResolveName can
-            // split on the UNescaped separator. A single-segment path is a top-level entity, anchored with '/'.
+            // split on the unescaped separator.
             private string StateTargetName(AnimatorState dest, AnimatorStateMachine srcSm, string loc)
             {
                 if (_stateOwner.TryGetValue(dest, out var owner) && owner == srcSm) return BareTarget(dest.name, loc); // same machine ⇒ bare
@@ -950,10 +815,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return dest.name;
             }
 
-            // A bare (same-machine / direct-child) target is emitted as the escaped name. The parser reserves
-            // the exact token 'Exit' for the exit pseudo-target, so a real state/sub-machine named 'Exit'
-            // addressed bare would recompile as exit-to-nowhere — refuse it (escaping can't disambiguate: the
-            // parser strips quotes before the keyword check). Multi-segment paths never collide (only exact 'Exit').
+            // The parser reserves the exact token 'Exit' for the exit pseudo-target and strips quotes before the
+            // keyword check, so escaping can't disambiguate a real state or sub-machine named 'Exit' addressed
+            // bare. Multi-segment paths never collide.
             private string BareTarget(string name, string loc)
             {
                 string enc = AddressPath.EscapeSegment(name);
@@ -966,16 +830,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (_smParent.TryGetValue(dest, out var parent) && parent == srcSm) return BareTarget(dest.name, loc); // direct child ⇒ bare
                 if (_smPath.TryGetValue(dest, out var path))
-                    // The layer root itself (empty path) is a legal target — "re-enter the layer at its
-                    // default" — addressed by the bare '/' anchor. A top-level machine is a single segment,
-                    // anchored '/'; a multi-segment path is already root-relative.
+                    // The layer root itself (empty path) is a legal target, "re-enter the layer at its default",
+                    // addressed by the bare '/' anchor.
                     return path.Length == 0 ? "/" : (AddressPath.Split(path).Count == 1 ? "/" + path : path);
                 Refuse($"transition from {loc}: target sub-machine '{dest.name}' not found in the layer");
                 return dest.name;
             }
 
-            // Invert ControllerEmit.MapCondOp. Bool truth lives in the MODE there (If/IfNot); recover it as the
-            // canonical `Is true` / `Is false` (Op=Is, Value 1/0). Numeric ops carry the threshold as the value.
             private List<Condition> DecodeConditions(AnimatorCondition[] conds, string loc)
             {
                 var list = new List<Condition>();
@@ -992,16 +853,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case AnimatorConditionMode.Equals: cond.Op = CondOp.Equals; cond.Value = c.threshold; break;
                         case AnimatorConditionMode.NotEqual: cond.Op = CondOp.NotEqual; cond.Value = c.threshold; break;
                         default:
-                            // An unknown/future/corrupt mode — refuse rather than approximate as `Is true`
-                            // (consistent with MapTreeKind / MapInterruption, which refuse their unknowns).
                             Refuse($"transition from {loc}: condition on '{c.parameter}' has an unknown mode '{c.mode}' — out of vocabulary");
                             continue;
                     }
-                    // A condition must survive its own serialized form: render it exactly as emit will and
-                    // re-split it with the parser's grammar. A mismatch — e.g. a param with a trailing space,
-                    // which collides with the single-space separator — cannot round-trip, so refuse it here
-                    // rather than emit YAML the recompile rejects. The check IS the enforcement mechanism;
-                    // there is no character list to drift out of sync with the grammar.
+                    // Render the condition as emit will and re-split it with the parser's grammar. A mismatch (a
+                    // param with a trailing space collides with the single-space separator) cannot round-trip.
                     string bad = ConditionSelfCheckFailure(cond);
                     if (bad != null)
                         Refuse($"transition from {loc}: condition on '{cond.Param}' {bad}");
@@ -1027,10 +883,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ----- motions / blend trees -----
 
-            // A human-authored name survives decode ONLY when it differs from the positional default (the
-            // shared ControllerEmit.AutoTreeName/AutoChildName the compiler would have applied). A name the
-            // line-based YAML cannot carry (a line break) is caught by the serializer's funnel guard
-            // (AnimatorSchemaEmit.ScalarStr), which the door surfaces as a named FAIL — not here.
+            // A name survives decode only when it differs from the positional default the compiler would apply
+            // (ControllerEmit.AutoTreeName/AutoChildName). A line break in a name is caught by the serializer's
+            // guard (AnimatorSchemaEmit.ScalarStr), not here.
             private static string MeaningfulName(string actual, string autoDefault)
             {
                 if (string.IsNullOrEmpty(actual) || actual == autoDefault) return null;
@@ -1043,45 +898,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (m is AnimationClip clip)
                 {
                     string p = AssetDatabase.GetAssetPath(clip);
-                    // Inline only a clip with NO path of its own (an in-memory / embedded sub-asset) or one
-                    // whose path IS the controller's. Testing the CLIP's path (not the controller's) keeps a
-                    // standalone .anim a `ref:` even when the controller itself is unsaved.
+                    // Testing the clip's path, not the controller's, keeps a standalone .anim a `ref:` even when
+                    // the controller is unsaved.
                     if (string.IsNullOrEmpty(p) || p == _controllerPath)
                     {
-                        // Embedded controller sub-asset ⇒ inline ClipSpec.
                         RegisterInlineClip(clip, loc);
                         return new MotionRef { Clip = clip.name };
                     }
                     if (AssetDatabase.IsSubAsset(clip))
                     {
-                        // A sub-asset of ANOTHER asset (e.g. one clip inside an FBX / an SDK proxy) — address by
-                        // guid + fileID, not a re-embedded copy.
                         AssetDatabase.TryGetGUIDAndLocalFileIdentifier(clip, out string guid, out long fileId);
                         return new MotionRef { RefGuid = new GuidRef { Guid = guid, FileID = fileId } };
                     }
-                    return new MotionRef { RefPath = p }; // standalone project .anim
+                    return new MotionRef { RefPath = p };
                 }
                 if (m is BlendTree bt)
                 {
-                    // A multi-parent tree becomes one `trees:` entry the reference sites name. Decoded on the
-                    // FIRST visit only; expectedName is its own name so MeaningfulName nulls spec.Name and the
-                    // map key alone carries identity — the body must emit no `name:` (BindTrees refuses one).
+                    // A multi-parent tree becomes one `trees:` entry the reference sites name.
                     if (_sharedName != null && _sharedName.TryGetValue(bt, out var key))
                     {
                         if (!_sharedDone.ContainsKey(key))
                         {
-                            // Registered BEFORE decoding the body, so first-reference ordering survives and a
-                            // re-entrant visit terminates. No cycle guard is needed here and none is wanted:
-                            // Unity's own importer breaks a BlendTree cycle on load, nulling the offending
-                            // child and logging "BlendTree cycle detected" — measured, including with the
-                            // cycle written straight into the asset text, so the decoder cannot observe one.
-                            // UnityItselfRefusesToBuildABlendTreeCycle pins that. (The COMPILE side still
-                            // needs its guard: an authored document can express a cycle Unity never sees.)
+                            // Registered before decoding the body, so first-reference ordering survives. No cycle
+                            // guard is needed: Unity's importer breaks a BlendTree cycle on load, nulling the
+                            // offending child and logging "BlendTree cycle detected" (measured, including with the
+                            // cycle written into the asset text; UnityItselfRefusesToBuildABlendTreeCycle pins it).
                             _sharedDone[key] = null;
                             var spec = DecodeTree(bt, loc, bt.name);
-                            // DecodeTree nulled Name (actual == expected); restore it as the map KEY, which is
-                            // where BlendTreeSpec.Name lives for a trees: entry. EmitTrees suppresses the
-                            // `name:` line, so the key is written once and the body stays recompilable.
+                            // Passing bt.name as the expected name makes DecodeTree null Name. BlendTreeSpec.Name
+                            // holds the map key for a `trees:` entry, and EmitTrees suppresses the `name:` line
+                            // (BindTrees refuses one in the body).
                             spec.Name = key;
                             _sharedDone[key] = spec;
                         }
@@ -1105,15 +951,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     spec.Param = bt.blendParameter;
                     if (twoD) spec.ParamY = bt.blendParameterY;
                 }
-                // A tree CHILD can carry a dangling motion ref exactly like a state's motion slot can. The
-                // recovery regex matches ChildMotion.m_Motion lines too, so a child dangler is in the same queue
-                // — decode it HERE (mirroring the state path) or it (a) loses the `unresolved` marker
-                // ControllerEmit.BuildMotion preserves, and (b) leaves an orphan guid a later state mis-dequeues.
                 using (var btSo = new SerializedObject(bt))
                 {
-                    // Direct trees carry a behaviour-affecting "Normalized Blend Values" toggle (sum-to-1 vs
-                    // raw additive) with no typed API — read it verbatim so it round-trips (else a vendor tree
-                    // recompiles to the construction default, a silently different pose). No public property.
+                    // A Direct tree's "Normalized Blend Values" toggle (sum-to-1 vs raw additive) changes the pose
+                    // and has no public property, so read the serialized field.
                     if (direct)
                         spec.Normalized = btSo.FindProperty("m_NormalizedBlendValues").boolValue;
                     var childs = btSo.FindProperty("m_Childs");
@@ -1131,13 +972,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         if (ch.motion != null) tc.Motion = DecodeMotion(ch.motion, childLoc, ControllerEmit.AutoChildName(bt.name, i));
                         else if (ChildHasDanglingMotion(childs, i))
                         {
-                            // Owner is the blend tree itself: its m_Childs danglers drain in child order,
-                            // matching this loop, so each child recovers its OWN guid.
+                            // Decoded like a state's dangling motion, keeping the `unresolved` marker
+                            // ControllerEmit.BuildMotion preserves.
                             string guid = NextDanglingGuid(bt);
                             tc.Motion = new MotionRef { RefGuid = new GuidRef { Guid = guid, Unresolved = true } };
                             _result.UnresolvedGuids.Add(guid);
                         }
-                        // else: a genuine empty child (rare) — leave Motion null, never silently dropping a dangler.
 
                         if (direct) tc.DirectWeight = ch.directBlendParameter;
                         else if (twoD) { tc.PosX = ch.position.x; tc.PosY = ch.position.y; }
@@ -1162,9 +1002,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (_clipObjs.TryGetValue(clip.name, out var existing))
                 {
-                    // Same instance re-referenced by another state ⇒ correct dedup (emit it once). A DISTINCT
-                    // clip carrying the same name ⇒ the name-keyed clips: map would collapse them (the second's
-                    // curves lost) — refuse loudly (named + located) instead.
                     if (!ReferenceEquals(existing, clip))
                         Refuse(
                             $"inline clip name '{clip.name}' (referenced from {loc}) is shared by two DISTINCT embedded clips — " +
@@ -1180,8 +1017,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var spec = new ClipSpec { Name = clip.name, Loop = AnimationUtility.GetAnimationClipSettings(clip).loopTime };
                 var bindings = AnimationUtility.GetCurveBindings(clip);
 
-                // Seconds-only carrier: a single flat curve on the reserved _CompilerNull animator param. Its
-                // sole purpose is to give the clip an honest length — recover that as `seconds`, no sets/curves.
+                // Seconds-only carrier: one curve on the reserved carrier param, there only to give the clip a
+                // length.
                 if (bindings.Length == 1 && bindings[0].path == "" && bindings[0].type == typeof(Animator)
                     && bindings[0].propertyName == ReservedNames.CarrierParam)
                 {
@@ -1190,18 +1027,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return spec;
                 }
 
-                // PPtr (object-reference) curves — a material swap, a sprite flipbook — animate WHICH asset a
-                // slot points at. The schema's set/curves grammar can only produce float curves, so decoding
-                // around them would silently drop the swap on recompile. Refuse (named + located).
+                // PPtr curves (a material swap, a sprite flipbook) are a separate binding list the float-curve loop
+                // below never sees, and no schema form carries them.
                 var pptr = AnimationUtility.GetObjectReferenceCurveBindings(clip);
                 foreach (var b in pptr)
                     Refuse($"inline clip '{clip.name}': object-reference (PPtr) curve on "
                         + $"'{b.path}/{(b.type == null ? "<missing script>" : b.type.Name)}.{b.propertyName}' is out of "
                         + "vocabulary — no schema form animates asset references");
 
-                // A hand-authored clip with ZERO curve bindings has no animatable content — ControllerEmit.BuildClipContent
-                // would reject the resulting empty ClipSpec (no content, no seconds). Refuse loudly here instead
-                // (unless PPtr refusals above already explain the emptiness).
                 if (bindings.Length == 0)
                 {
                     if (pptr.Length == 0)
@@ -1209,13 +1042,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return spec;
                 }
 
-                // Two DISTINCT bindings can reconstruct to the same schema target string, because the param-curve
-                // form and the scene-binding form share a spelling: an animator-parameter curve on a parameter
-                // literally named "Prop/MeshRenderer.m_Enabled" and a real MeshRenderer.m_Enabled curve at path
-                // "Prop" both reconstruct to that same text. `set:`/`curves:` are keyed by that text, so the
-                // second silently overwrites the first — one clip in, one curve gone, no diagnostic. Same shape
-                // as the duplicate-clip-name refusal above: the schema keys by name, so a collision is a refusal,
-                // not something to resolve by ordering.
+                // Two distinct bindings can reconstruct to the same schema target: an animator-parameter curve on a
+                // parameter literally named "Prop/MeshRenderer.m_Enabled" and a real MeshRenderer.m_Enabled curve at
+                // path "Prop". `set:`/`curves:` are keyed by that text, so the second would overwrite the first.
                 var seenTargets = new Dictionary<string, EditorCurveBinding>();
 
                 float maxConstEnd = 0f;
@@ -1234,12 +1063,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         continue;
                     }
                     seenTargets[target] = b;
-                    // A constant-VALUE curve collapses to a Set — UNLESS its tangents are linear or stepped:
-                    // `set:` carries no tangent marker, so downgrading a constant linear/stepped curve would
-                    // silently drop the marker and break the compile↔decompile fixpoint (a valid,
-                    // BindCurve-accepted input like a two-key linear/stepped curve holding one value). Keep
-                    // any non-flat curve as a Curve. A tangent shape the classifier can't name (auto/clamped-
-                    // auto/free/mixed) is refused loudly rather than silently flattened.
+                    // A constant curve with flat tangents collapses to a Set. A linear or stepped one stays a Curve,
+                    // because `set:` carries no tangent marker.
                     var cls = ClassifyTangents(curve);
                     if (cls == null)
                     {
@@ -1262,12 +1087,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             Tangents = cls.Value,
                         });
                 }
-                // A Set curve carries no keyframes in the schema, so a Sets clip authored with an explicit
-                // `seconds:` (emitted as a constant curve stretched to that length) would otherwise re-emit at
-                // MinClipLength. Recover the declared length from the constant end whenever it exceeds what the
-                // keyframed curves already carry (their own last key) — so a MIXED set+curve clip whose sets run
-                // past the last keyframe keeps its length, not only a curves-absent clip. Floor is MinClipLength
-                // (a plain Set with no seconds sits there ⇒ leave Seconds null).
+                // A Set carries no keyframes, so recover a declared `seconds:` from the constant end when it exceeds
+                // both the keyframed curves' last key and MinClipLength, where a plain Set with no seconds sits.
                 float maxCurveEnd = 0f;
                 foreach (var cs in spec.Curves)
                     foreach (var k in cs.Keys)
@@ -1277,7 +1098,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return spec;
             }
 
-            // One frame at 60fps — ControllerEmit's honest floor for a content-only clip's derived length.
+            // Matches ControllerEmit's private MinClipLength: one frame at 60fps, the floor for a content-only
+            // clip's derived length.
             private const float MinClipLength = 1f / 60f;
 
             private static bool IsConstant(AnimationCurve curve)
@@ -1288,13 +1110,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return true;
             }
 
-            // Recover ControllerEmit's tangent marker. Mode tests BEFORE the value test: a constant-VALUED linear
-            // curve has zero-slope tangents, so a value-first flat test would mislabel it flat and re-break the
-            // fixpoint the collapse guard protects; a Constant curve's tangents read as +/-inf, caught by its mode
-            // branch before it would wrongly fall to refuse. Flat is then the honest value test (all tangents ~= 0)
-            // -- a zero-tangent Auto/ClampedAuto/Free curve interpolates identically to the emitter's default-Free
-            // flat, so folding it to flat is faithful. Non-zero custom/auto tangents, or tangents mixed across
-            // keys/sides, can't round-trip -> null (refused by the caller).
+            // Mode tests run before the value test: a constant-valued linear curve has zero-slope tangents, so a
+            // value-first flat test would mislabel it flat, and a Constant curve's tangents read as +/-inf. A
+            // zero-tangent Auto/ClampedAuto/Free curve interpolates identically to the emitter's default-Free flat,
+            // so it folds to flat. Non-zero custom/auto tangents, or tangents mixed across keys/sides, return null
+            // and the caller refuses.
             private static CurveTangent? ClassifyTangents(AnimationCurve curve)
             {
                 if (AllKeysMode(curve, AnimationUtility.TangentMode.Linear))   return CurveTangent.Linear;
@@ -1319,12 +1139,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var keys = curve.keys;   // curve.keys copies the array on every access — read it once
                 for (int i = 0; i < keys.Length; i++)
                 {
-                    // A WEIGHTED key is not emitter-flat even at zero slope: the weight sets the Bezier
-                    // handle length independent of slope, so it reshapes the segment, and the [t,v] schema
-                    // carries no weight. Folding it to flat would silently drop the weight (the exact
-                    // silent-loss this classifier exists to prevent) — refuse it. Matches the tool's own
-                    // weightedMode-significant contract (CompileClips hashes it; a weighted edit is refused,
-                    // not folded, by CompileClips' Weighted_tangent_edit_is_caught).
+                    // A weighted key is not emitter-flat even at zero slope: the weight sets the Bezier handle
+                    // length independent of slope, and the [t,v] schema carries no weight.
                     if (keys[i].weightedMode != WeightedMode.None) return false;
                     if (!Mathf.Approximately(keys[i].inTangent, 0f) || !Mathf.Approximately(keys[i].outTangent, 0f))
                         return false;
@@ -1332,24 +1148,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return true;
             }
 
-            // Invert ControllerEmit.ResolveBinding. A path-"" Animator binding has TWO meanings, split by
-            // whether the property names a declared controller parameter: a parameter write (the AAP form,
-            // emitted bare) vs an animator/humanoid-muscle property curve ("RightHand.Index.1 Stretched" —
-            // emitted "Animator.<property>", the same form the compiler's generic split accepts). The old
-            // bare-name-always emit produced yaml the compiler then refused as an undeclared binding —
-            // doomed output, the exact silent-loss class this method's refusals exist to prevent.
-            // Otherwise "path/Component.property" (empty path drops the leading slash).
-            // The emit resolver is the ORACLE: a binding whose type's simple name would not resolve back to
-            // the SAME type could never recompile, so it is refused here (named + located, null return the
-            // caller skips) instead of emitted as doomed yaml. One source of truth, both directions.
-            // Names a binding by its UNRECONSTRUCTED parts, which is the whole point at a collision: the two
-            // offenders are indistinguishable once reconstructed, so echoing the schema text twice would name
-            // neither. Says which is the animator-parameter curve and which the scene binding.
+            // Names a binding by its unreconstructed parts: at a collision the two offenders are indistinguishable
+            // once reconstructed.
             private static string DescribeBinding(EditorCurveBinding b)
                 => b.type == typeof(Animator) && b.path.Length == 0
                     ? $"an animator-parameter curve on '{b.propertyName}'"
                     : $"a scene binding at path '{b.path}' on {(b.type == null ? "<unresolved type>" : b.type.Name)}.{b.propertyName}";
 
+            // Inverts ControllerEmit.ResolveBinding. A path-"" Animator binding is a parameter write (the AAP form,
+            // emitted bare) when the property names a declared controller parameter, otherwise an animator or
+            // humanoid-muscle property curve ("RightHand.Index.1 Stretched", emitted "Animator.<property>").
+            // Everything else is "path/Component.property", with an empty path dropping the leading slash. The emit
+            // resolver is the oracle: a binding whose type's simple name would not resolve back to the same type
+            // could never recompile, so it is refused, returning a null the caller skips.
             private string ReconstructBindingTarget(EditorCurveBinding b, string clipName)
             {
                 if (b.type == typeof(Animator) && b.path == "")
@@ -1358,10 +1169,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (b.type != null)
                     try { roundtrip = ControllerEmit.ResolveComponentType(b.type.Name); }
                     catch (ControllerEmit.EmitException) { /* refused below, with the binding's location */ }
-                // The null check must come FIRST: with b.type null, `roundtrip != b.type` is null != null —
-                // false — and the refusal would be skipped straight into an NRE below. No producer of a
-                // null-typed binding is known (classID 0 reads back as UnityEngine.Object, a missing script
-                // as MonoBehaviour — both refused via the oracle), so this guard is defensive.
+                // The null check comes first: with b.type null, `roundtrip != b.type` is false and the refusal
+                // would be skipped into an NRE below.
                 if (b.type == null || roundtrip != b.type)
                 {
                     Refuse($"inline clip '{clipName}': binding "
@@ -1402,7 +1211,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 SweepSmb(smb, loc);
             }
 
-            // Census a known SMB against its per-kind aware set (unknown types are already refused above).
             private void SweepSmb(StateMachineBehaviour smb, string loc)
             {
                 HashSet<string> aware;
@@ -1418,31 +1226,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
 #if VRC_FT_SETS_PRESENT
                     case FtSets _: aware = FaceTrackingSetsAware; break;
 #endif
-                    default: return; // null or unsupported (already refused)
+                    default: return; // unsupported, already refused
                 }
                 CompletenessSweep(smb, aware, "behaviour on", loc);
             }
 
             private Behaviour DecodeDriver(VRC_AvatarParameterDriver drv, string loc)
             {
-                // Field-name tokens are shared from ControllerEmit.DriverKeys so encode/decode cannot drift.
                 var b = new Behaviour { Kind = "driver" };
-                if (drv.localOnly) b.Fields[ControllerEmit.DriverKeys.LocalOnly] = true; // default false is left implicit
+                if (drv.localOnly) b.Fields[ControllerEmit.DriverKeys.LocalOnly] = true;
                 DetectDriverOrderLoss(drv, loc);
                 var set = new Dictionary<string, object>();
                 var add = new Dictionary<string, object>();
                 var copy = new Dictionary<string, object>();
                 var random = new Dictionary<string, object>();
-                // ORDER WITHIN a bucket is load-bearing and is carried only by insertion order. Copy is the one
-                // op that READS a parameter, so `Copy B←A; Copy C←B` means something different if the two swap —
-                // and every Copy shares a bucket, which is exactly why the interleave check below cannot see it
-                // (it fires on the bucket index DECREASING, i.e. across types). Nothing here guarantees that
-                // order survives: Dictionary<K,V> enumerates in insertion order only as an implementation
-                // detail of the BCL, and the same reliance repeats on every hop — this map, the YAML writer,
-                // the YAML reader's own Dictionary, then ControllerEmit's iteration. It holds today on every
-                // runtime this ships against, and there is no corpus instance of it breaking, so this is a
-                // dependency to state rather than a bug to fix. DriverBucketOrder_survives_a_round_trip pins it,
-                // so a swap to any hash-ordered map fails a test instead of silently rewriting a driver.
+                // Order within a bucket matters because Copy reads a parameter (`Copy B←A; Copy C←B` differs if the
+                // two swap), and the interleave check cannot see it. That order rides on Dictionary insertion order
+                // through this map, the YAML writer, the YAML reader and ControllerEmit's iteration;
+                // Walk_Driver_BucketOrder_Survives_A_Round_Trip pins it.
                 if (drv.parameters != null)
                     foreach (var p in drv.parameters)
                     {
@@ -1465,15 +1266,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                 {
                                     { ControllerEmit.DriverKeys.Min, p.valueMin }, { ControllerEmit.DriverKeys.Max, p.valueMax }, { ControllerEmit.DriverKeys.Chance, p.chance },
                                 };
-                                // Written only when set: false is the SDK default, so emitting it on every roll
-                                // would churn every existing document. The SDK Inspector offers it on a
-                                // Random-onto-Int and nowhere else, so a controller carrying it is one an author
-                                // deliberately ticked — and dropping it here recompiled that choice away silently.
+                                // Written only when set. The SDK Inspector offers it on a Random-onto-Int and nowhere
+                                // else.
                                 if (p.preventRepeats) roll[ControllerEmit.DriverKeys.PreventRepeats] = true;
                                 random[p.name] = roll;
                                 break;
                             default:
-                                // An unknown/future ChangeType would be dropped from all four buckets — refuse it.
                                 Refuse($"behaviour on {loc}: driver operation on '{p.name}' has an unknown ChangeType '{p.type}' — out of vocabulary");
                                 break;
                         }
@@ -1485,29 +1283,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return b;
             }
 
-            // VRC_AvatarParameterDriver.parameters is an ORDERED list the runtime applies top-to-bottom, but the
-            // schema regroups it into name-keyed set/add/copy/random buckets re-applied in that fixed order. That
-            // is faithful ONLY when the source list is already in bucket order with no repeated (type,name). Two
-            // ways it loses information, each a located Refusal (never a silent reorder/collapse):
-            //   - INTERLEAVING: a change-type appears after a later-bucket type (e.g. Set, Copy, Set). Re-emit
-            //     hoists all Sets ahead of the Copy, changing what the Copy reads.
-            //   - DUPLICATE: the same (type, name) appears twice. The name-keyed bucket keeps only the last.
+            // VRC_AvatarParameterDriver.parameters is an ordered list the runtime applies top-to-bottom, but the
+            // schema regroups it into name-keyed set/add/copy/random buckets re-applied in that fixed order. Each
+            // way that loses information is a located Refusal:
+            //   - Interleaving: a change type after a later-bucket type (Set, Copy, Set). Re-emit hoists the Sets
+            //     ahead of the Copy, changing what the Copy reads.
+            //   - Repeat: the same (type, name) twice. The name-keyed bucket holds one entry.
             //
-            // A repeat is refused for EVERY type, including one whose later write plainly supersedes the earlier.
-            // That is deliberate, and narrower than it first looks: the schema can represent such a driver (one
-            // entry, same runtime effect), so the refusal is not about representability — it is about refusing to
-            // NORMALIZE. A recompile that silently emits a different driver than the vendor authored erodes the
-            // property that makes this substrate safe for taking ownership of someone else's controller.
-            //
-            // Two attempts at tolerating the redundant case are recorded here because both looked sound:
-            //   Gating on !interleaved does NOT bound it. `interleaved` fires only when DriverBucket DECREASES,
-            //     i.e. across change types — but Copy is the one op that READS a parameter, and every Copy sits
-            //     in the same bucket. `Copy A←B; Copy C←A; Copy A←D` is single-bucket, so nothing fires, yet the
-            //     bucket hoists the later A write ahead of the read (a Dictionary overwrite keeps the original
-            //     insertion slot) and C ends up holding D's value instead of B's.
-            //   Restricting it to Set alone survives that, since Set reads nothing. It still normalizes, and the
-            //     one corpus instance was a duplicated write in a driver that omitted a parameter its siblings
-            //     all set — so a reassuring Note would have papered over a vendor bug.
+            // A repeat is refused for every type and never normalized, even one whose later write plainly
+            // supersedes the earlier. `Copy A←B; Copy C←A; Copy A←D` is single-bucket, so the interleave check stays
+            // quiet, yet the Dictionary overwrite keeps A's original insertion slot and hoists the later write ahead
+            // of the read, so C ends up holding D's value instead of B's.
             private void DetectDriverOrderLoss(VRC_AvatarParameterDriver drv, string loc)
             {
                 if (drv.parameters == null || drv.parameters.Count == 0) return;
@@ -1521,19 +1307,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     prev = bucket;
                     if (seen.TryGetValue((p.type, p.name), out var first))
                     {
-                        // Both repeats refuse, for the one reason that holds either way: the schema keys by
-                        // (type, name), so a recompile emits a driver the vendor did not author. What differs is
-                        // what the reader should look at next, so say only what is KNOWN — the earlier message
-                        // asserted "commonly a mistyped parameter name", which is a guess about intent, and it
-                        // sent a reader hunting a typo through a driver whose two entries were byte-identical.
-                        // Say what is OBSERVABLE — the operands are equal or they differ — and stop. The runtime
-                        // consequence is NOT a property of that comparison: `Add` accumulates, so two identical
-                        // `Add X 2` entries add 4 (dropping one is not neutral) and a differing pair is not
-                        // last-write-wins either. Asserting either would be a fresh guess in place of the
-                        // "commonly a mistyped parameter name" guess this message exists to remove.
-                        // An unknown ChangeType has no operand this decoder can read, so it can claim NEITHER
-                        // "same" nor "different" — saying "DIFFERENT operands (<unknown> then <unknown>)" would
-                        // assert a difference while displaying identical text.
+                        // Say only what is observable: the operands are equal or they differ. Claim no runtime
+                        // consequence, since `Add` accumulates (two `Add X 2` add 4), and no intent. An unknown
+                        // ChangeType has no operand this decoder can read, so it claims neither.
                         string detail = !IsKnownChangeType(p.type)
                             ? "This decoder does not model that change type, so it cannot say whether the two "
                               + "entries differ; the repeat is refused on the shape alone."
@@ -1556,14 +1332,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         $"behaviour on {loc}: driver operations interleave change-types (Set/Add/Copy/Random) — the schema re-applies them grouped by type, which would change their apply order");
             }
 
-            // A driver Parameter is a UNION discriminated by `type`: the fields that carry its operand differ per
-            // change-type, and the unused ones hold stale or default junk that must not enter the comparison.
-            // Comparing `value` alone would call `Copy A←B` and `Copy A←D` identical — reporting a contradictory
-            // repeat as a harmless one, which is the same species of misleading advice this split exists to end.
-            // Mirrors DecodeDriver's own per-type field selection above, so the two read the same union.
-            // EXACT equality, not Mathf.Approximately: the message reports these as "the same operand", and two
-            // distinct serialized values a hair apart are not the same — an epsilon here would assert an equality
-            // the asset does not contain. This is a comparison of authored data, not a physics tolerance.
+            // A driver Parameter is a union discriminated by `type`: the fields carrying its operand differ per
+            // change type, and the unused ones hold stale or default junk that must not enter the comparison.
+            // Exact equality, because the message reports these as "the same operand".
             private static bool SameDriverOperand(Driver.Parameter a, Driver.Parameter b)
             {
                 switch (a.type)
@@ -1588,7 +1359,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 => t == Driver.ChangeType.Set || t == Driver.ChangeType.Add
                    || t == Driver.ChangeType.Copy || t == Driver.ChangeType.Random;
 
-            // The operand as the reader would see it in the inspector, for the differing-value message.
             private static string DriverOperand(Driver.Parameter p)
             {
                 switch (p.type)
@@ -1616,8 +1386,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case Driver.ChangeType.Add: return 1;
                     case Driver.ChangeType.Copy: return 2;
                     case Driver.ChangeType.Random: return 3;
-                    default: return 4; // an unknown ChangeType — a distinct bucket so it never conflates with Random
-                                       // for the interleave check (DecodeDriver refuses it outright regardless)
+                    default: return 4; // unknown: a distinct bucket so the interleave check never conflates it with Random
                 }
             }
 
@@ -1664,19 +1433,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
 #if VRC_FT_SETS_PRESENT
-            // Inverts ControllerEmit.PopulateFaceTrackingSets. Each element takes the SHORTEST of the four entry
-            // forms that reproduces it: a bare weight or a bare parameter name when lerpSpeed is 0 and no range is
-            // on, otherwise the map, carrying range keys only when convertRange is on and lerpSpeed only when
-            // non-zero — so an untouched element costs one token and a document never churns on a default.
-            //
-            // Every element field is read here by hand (the sweep stops at the list). Fields the element's type
-            // leaves inert — a Value element's sourceParameter/convertRange/ranges, a Parameter element's weight,
-            // and a Parameter element's ranges while convertRange is off — are TOLERATED, not refused: the SDK
-            // inspector hides them for that type and keeps whatever they held (it writes weight 1 and ranges
-            // 0/1/0/1 on every new element, and leaves the old values behind when an author flips the type), so a
-            // refusal would turn away ordinary inspector-made behaviours over fields the author cannot see. They
-            // recompile at the inspector's new-element values; when one held anything else, a tolerance note
-            // says so.
+            // Fields the element's type leaves inert (a Value element's sourceParameter/convertRange/ranges, a
+            // Parameter element's weight, a Parameter element's ranges while convertRange is off) are tolerated, not
+            // refused: the SDK inspector hides them for that type and keeps whatever they held (it writes weight 1
+            // and ranges 0/1/0/1 on every new element, and leaves the old values behind when an author flips the
+            // type), so a refusal would turn away ordinary inspector-made behaviours over fields the author cannot
+            // see. They recompile at the inspector's new-element values; a tolerance note reports any that held
+            // anything else.
             private Behaviour DecodeFaceTrackingSets(FtSets c, string loc)
             {
                 var b = new Behaviour { Kind = FtKeys.Kind };
@@ -1782,12 +1545,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             private Behaviour DecodePlayAudio(VRC_AnimatorPlayAudio c, string loc)
             {
-                // Field-name tokens shared from ControllerEmit.PlayAudioKeys so encode/decode cannot drift.
                 var b = new Behaviour { Kind = "playAudio" };
                 b.Fields[ControllerEmit.PlayAudioKeys.SourcePath] = c.SourcePath;
                 b.Fields[ControllerEmit.PlayAudioKeys.PlaybackOrder] = Token(AudioOrderRev, c.PlaybackOrder, loc + " playAudio.playbackOrder");
-                // An unset/empty audio-source parameter is meaningless; omit the key (like Clips below) so it
-                // round-trips — emitting parameter: <null> would make CompileController refuse the re-compile.
+                // Omit an empty parameter: `parameter: <null>` would make CompileController refuse the re-compile.
                 if (!string.IsNullOrEmpty(c.ParameterName))
                     b.Fields[ControllerEmit.PlayAudioKeys.Parameter] = c.ParameterName;
                 b.Fields[ControllerEmit.PlayAudioKeys.Volume] = new List<object> { c.Volume.x, c.Volume.y };
@@ -1804,8 +1565,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 b.Fields[ControllerEmit.PlayAudioKeys.StopOnExit] = c.StopOnExit;
                 if (c.Clips != null && c.Clips.Length > 0)
                 {
-                    // A null Clips[] entry (a since-deleted AudioClip) would decode to a null path that
-                    // ControllerEmit.AsClips rejects — refuse loudly (named + located), dropping the null entry.
                     var paths = new List<object>();
                     foreach (var clip in c.Clips)
                     {
@@ -1823,22 +1582,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // ----- shared blend trees: which BlendTrees have more than one parent slot -----
 
-            // Sharing is a property of the LIVE graph, so this counts parent EDGES over the same reachable set
-            // the decoder walks. Three things it deliberately does not do, each of which silently breaks the
-            // round-trip if copied from CountOrphans below:
+            // Sharing is a property of the live graph, so this counts parent edges over the reachable set the
+            // decoder walks. Do not copy CountOrphans below; each of its behaviours would silently break the
+            // round-trip here:
             //
-            //  - It does not dedupe the COUNT, only the recursion. CountOrphans opens with `!reachable.Add(m)`
-            //    and returns, which visits every node once — copy that and every tree counts 1 and nothing is
-            //    ever shared.
-            //  - It does not require a saved asset. CountOrphans bails on an empty _controllerPath; inheriting
-            //    that would make every in-memory controller take the inline path, so the tests would pass with
-            //    the feature inert.
-            //  - It does not sweep LoadAllAssetsAtPath. An ORPHAN tree referencing a live one would push that
-            //    tree to 2 parents; the recompile drops orphans, so the next decompile would see 1 and inline.
-            //    D1 != D2 — on exactly the vendor-lineage controllers this construct exists for.
+            //  - It dedupes visits (`!reachable.Add(m)`). Here only the recursion is gated, or every tree counts 1
+            //    and nothing is ever shared.
+            //  - It bails on an unsaved controller, which here would send every in-memory controller down the
+            //    inline path, so the tests would pass with the feature inert.
+            //  - It sweeps LoadAllAssetsAtPath. An orphan tree referencing a live one would push that tree to 2
+            //    parents; the recompile drops orphans, so the next decompile would see 1 and inline.
             //
-            // A tree reached twice through ONE parent (the same motion in two child slots) counts 2, which is
-            // sharing and is meant to be.
+            // A tree reached twice through one parent (the same motion in two child slots) counts 2, which is
+            // sharing.
             private Dictionary<BlendTree, string> CountTreeParents()
             {
                 var parents = new Dictionary<BlendTree, int>();
@@ -1863,11 +1619,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var layer in _controller.layers)
                     if (layer.syncedLayerIndex < 0) VisitSm(layer.stateMachine, seenSm);
 
-                // Name collisions and unnamed trees INLINE rather than refuse: both decompile cleanly today
-                // (each copy carries its own name:), "Blend Tree" is Unity's default for a UI-made tree, and a
-                // document-scoped refusal here would have a remedy — renaming — that means writing to a vendor
-                // asset. The cost is a missed dedup, and the fixpoint holds either way: an inlined copy rebuilds
-                // at one parent and inlines again.
+                // Name collisions and unnamed trees inline rather than refuse: a refusal's remedy, renaming, would
+                // mean writing to a vendor asset.
                 var byName = new Dictionary<string, int>();
                 foreach (var bt in order)
                     if (parents[bt] >= 2 && !string.IsNullOrEmpty(bt.name))
@@ -1900,7 +1653,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var reachable = new HashSet<Object>();
                 void AddMotion(Motion m)
                 {
-                    if (m == null || !reachable.Add(m)) return; // adds clip OR tree
+                    if (m == null || !reachable.Add(m)) return;
                     if (m is BlendTree bt) foreach (var ch in bt.children) AddMotion(ch.motion);
                 }
                 void AddSm(AnimatorStateMachine sm)
@@ -1940,12 +1693,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return orphans;
             }
 
-            // The two location vocabularies, both layer-qualified. Refusals and Notes are reported as ONE
-            // controller-wide list, so the layer is the only thing separating entries: a layer's root machine
-            // has an empty path and used to render as a bare "(root)", and a state used to render as
-            // "state 'S'". Two layers each raising a root-level refusal, or each carrying a state of the same
-            // name, therefore produced textually identical lines. Same-named states across layers are the
-            // ordinary case rather than a corner one — every SDK template ships an "Idle".
+            // Both labels are layer-qualified because Refusals and Notes are one controller-wide list and same-named
+            // states across layers are ordinary: every SDK template ships an "Idle".
             private string StateLabel(AnimatorState st)
             {
                 string layer = _currentLayer == null ? "" : "layer " + _currentLayer + " ";
@@ -1960,8 +1709,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return layer + "machine '" + (sm != null ? sm.name : "(null)") + "'";
             }
 
-            // TOTAL enum→token lookup: an SDK value with no schema token (a member added to the SDK but not to
-            // ControllerEmit's token map) is a located Refusal, never a silent approximation.
             private string Token<TEnum>(Dictionary<TEnum, string> rev, TEnum v, string loc)
             {
                 if (rev.TryGetValue(v, out var s)) return s;
@@ -2000,9 +1747,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // ----- Unity-enum -> schema-token reverse maps (built FROM ControllerEmit's token maps) -----
-        // Single source of truth: these invert ControllerEmit's forward (token→enum) dictionaries, so a new
-        // SDK enum member added there is automatically decodable and the two directions cannot drift.
+        // ----- Unity-enum -> schema-token reverse maps -----
 
         private static readonly Dictionary<TrackingType, string> TrackingRev = Invert(ControllerEmit.TrackingTokens);
         private static readonly Dictionary<PlayableLayer, string> PlayableLayerRev = Invert(ControllerEmit.PlayableLayerTokens);
@@ -2022,12 +1767,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ----- dangling-motion GUID recovery (mirror of the ReportController/ControllerRules YAML parse) -----
 
-        // Map each dangling motion guid to the local fileID of the serialized object that owns it (a State or a
-        // BlendTree), in that object's own serialization order. A .controller text serializes each object as a
-        // block headed "--- !u!<class> &<fileID>"; a State block holds one m_Motion, a BlendTree block holds one
-        // per m_Childs entry (in child order). Keying by owner fileID lets each null motion slot recover its OWN
-        // guid at walk time (AssetDatabase.TryGetGUIDAndLocalFileIdentifier gives the same fileID), independent
-        // of how many slots dangle or whether walk order matches file order.
+        // Map each dangling motion guid to the local fileID of the serialized object that owns it, the same fileID
+        // AssetDatabase.TryGetGUIDAndLocalFileIdentifier gives at walk time. A .controller text serializes each
+        // object as a block headed "--- !u!<class> &<fileID>"; a State block holds one m_Motion, a BlendTree
+        // block holds one per m_Childs entry, in child order.
         private static Dictionary<long, Queue<string>> RecoverDanglingMotionGuids(AnimatorController controller)
         {
             var map = new Dictionary<long, Queue<string>>();
@@ -2047,7 +1790,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         var g = m.Groups[1].Value;
                         // Not a path test: a deleted asset's GUID keeps resolving to its old path, so the path
-                        // test skips the ordinary dangling case and the slot degrades to "unknown" below.
+                        // test would skip the ordinary dangling case and the slot would degrade to "unknown".
                         if (Ryan6Vrc.AgentTools.Editor.RunLogFormat.AssetGuidResolves(g)) continue; // still resolves — not dangling
                         if (!map.TryGetValue(fileId, out var q)) { q = new Queue<string>(); map[fileId] = q; }
                         q.Enqueue(g);

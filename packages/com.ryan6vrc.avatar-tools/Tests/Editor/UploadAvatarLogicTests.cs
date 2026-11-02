@@ -22,9 +22,8 @@ public class UploadAvatarLogicTests
     [Test] public void Classify_ServerErrorIsTransient()
         => Assert.AreEqual("transient", UploadAvatarLogic.Classify(503, false, false));
     // 400, not null: with a null status the fall-through already returns "transient", so the isTimeout
-    // branch could be deleted outright and the test would stay green. A 4xx is the one input where the
-    // branch is load-bearing — it must beat the "non-429 4xx is real" rule, or a timed-out upload gets
-    // classified non-retryable.
+    // branch could be deleted and the test would stay green. At a 4xx the branch must beat the "non-429 4xx
+    // is real" rule.
     [Test] public void Classify_TimeoutIsTransient()
         => Assert.AreEqual("transient", UploadAvatarLogic.Classify(400, false, true));
     [Test] public void Classify_OtherClientErrorIsReal()
@@ -124,11 +123,8 @@ public class UploadAvatarLogicTests
 
     // ── Login self-heal ─────────────────────────────────────────────────────────────────────────
     //
-    // Two layers, and the second is the one that matters. LoginRefusal is a table, and a table test only
-    // proves the table. The self-heal CLAIM — "the door kicks the restore itself, and a REFUSE you re-run
-    // clears" — is a claim about a SEQUENCE of calls, so the LoginLatch tests below drive Evaluate() more
-    // than once against a controllable restore. That is where a real bug would live: kicking on every call
-    // (hammering a live account), never clearing the latch, or never converging.
+    // The self-heal is a claim about a sequence of calls, so the LoginLatch tests below drive Evaluate() more
+    // than once against a controllable restore; the Refusal tests only prove LoginRefusal's table.
 
     // A restore the test drives by hand, standing in for CAU's Uploader.TryLogin().
     sealed class FakeRestore
@@ -164,9 +160,9 @@ public class UploadAvatarLogicTests
         StringAssert.DoesNotContain("re-run", r);   // repeating a restore cannot invent credentials
     }
 
-    // Succeeded-but-still-signed-out and Failed are NOT interchangeable: one suspects version drift, the
-    // other reports a fault. A reader who cannot tell them apart cannot tell a stuck door from a broken
-    // login. Both are shown here in their EXHAUSTED form — the retries-remain form is asserted below.
+    // Succeeded-but-still-signed-out suspects version drift and Failed reports a fault; a reader has to
+    // tell a stuck door from a broken login. Both are in their exhausted form here; the next test has
+    // retries remaining.
     [Test] public void Refusal_SucceededButSignedOutIsNotTheFailedText()
     {
         var mismatch = UploadAvatarLogic.LoginRefusal(UploadAvatarLogic.LoginRestore.Succeeded, false, false, false, null);
@@ -176,8 +172,8 @@ public class UploadAvatarLogicTests
         Assert.AreNotEqual(mismatch, failed);
     }
 
-    // The text must not tell a caller that re-running is pointless while the latch will in fact retry on
-    // the next call — the live venue produced exactly that contradiction before retriesRemain existed.
+    // The text must not tell a caller that re-running is pointless while the latch will retry on the next
+    // call.
     [Test] public void Refusal_SameStateSaysReRunWhileAnAttemptRemains()
     {
         var willRetry = UploadAvatarLogic.LoginRefusal(UploadAvatarLogic.LoginRestore.Succeeded, false, false,
@@ -199,12 +195,10 @@ public class UploadAvatarLogicTests
         Assert.AreEqual(0, f.Kicks);
     }
 
-    // Why the re-inspect exists — and it is NOT "TryLogin usually finishes synchronously": measured from a
-    // forced-cold editor, the kick returns WaitingForActivation, so the normal cold cost is one re-run.
-    // What this covers is the racy case: the login gets restored by another editor surface while we are
-    // inside Evaluate, and re-reading is free, so the door should pass rather than refuse on an open door.
-    // Note the login must flip as the kick's side effect: pre-setting it would pass at the first check
-    // without ever kicking, testing nothing (that was this test's own first version, and it caught itself).
+    // The re-inspect is not there because TryLogin finishes synchronously: from a cold editor the kick
+    // returns WaitingForActivation, so the normal cold cost is one re-run. It covers another editor surface
+    // restoring the login while Evaluate runs. The login must flip as the kick's side effect here:
+    // pre-setting it would pass at the first check without ever kicking.
     [Test] public void Latch_LoginRestoredDuringTheKickPassesWithoutARerun()
     {
         var f = new FakeRestore();
@@ -228,8 +222,7 @@ public class UploadAvatarLogicTests
 
     // The deadline must spend the reserved attempt, not merely change the sentence. CAU's TryLogin has no
     // timeout and no cancellation, so a fetch that invokes neither callback pends forever; if the expired
-    // cell could not re-kick, the second attempt would sit unreachable and the only escape from a wedged
-    // restore would be a recompile — which is exactly what the deadline exists to avoid.
+    // cell could not re-kick, the only escape from a wedged restore would be a recompile.
     [Test] public void Latch_InFlightPastDeadlineReKicksAndCanRecover()
     {
         var f = new FakeRestore();
@@ -259,8 +252,8 @@ public class UploadAvatarLogicTests
         StringAssert.Contains("sign in", latch.Evaluate());
     }
 
-    // Bounded re-kick: a transient fault must not poison the door until the next recompile (the environment
-    // is racy by measurement), but the retry is capped so a live account never sees an unbounded loop.
+    // Bounded re-kick: a transient fault must not poison the door until the next recompile, and a live
+    // account must never see an unbounded loop.
     [Test] public void Latch_FailedRestoreIsReKickedOnce_ThenRefusesWithTheReason()
     {
         var f = new FakeRestore();
@@ -274,9 +267,8 @@ public class UploadAvatarLogicTests
         StringAssert.Contains("transient socket failure", second);
     }
 
-    // Found in the live venue, not by a fake: a login lost AFTER a successful restore leaves the latch
-    // holding a completed-true task, and the door declared CAU/SDK drift — telling the caller re-running
-    // would not help, when a fresh kick is precisely what fixes it. A stale record is re-kicked.
+    // A login lost after a successful restore leaves the latch holding a completed-true task, which a fresh
+    // kick fixes.
     [Test] public void Latch_LoginLostAfterASuccessfulRestoreIsReKickedNotDeclaredDrift()
     {
         var f = new FakeRestore();
@@ -301,8 +293,6 @@ public class UploadAvatarLogicTests
         Assert.AreEqual(2, f.Kicks, "a cleared latch must kick again rather than stay exhausted");
     }
 
-    // A CAU-less venue must never latch: the kick fails, the refusal names why, and the next call is free
-    // to try again rather than being stuck behind a spent attempt budget.
     [Test] public void Latch_KickFailureNamesTheReasonAndDoesNotLatch()
     {
         var f = new FakeRestore { Fail = () => (null, "CAU TryLogin not resolved (CAU absent, or CAU drift)") };

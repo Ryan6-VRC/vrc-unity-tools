@@ -10,29 +10,25 @@ using Object = UnityEngine.Object;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Reads a prefab instance or variant asset as the CHAIN it is — level by level up to the Model or
-    /// Regular prefab it bottoms out on — and says what each level does to its parent: objects and components
-    /// added and removed, and the property overrides sorted into tiers so framework and editor churn is
-    /// counted rather than read. Every other door sees only the flattened result.
+    /// Reads a prefab instance or variant asset as the chain it is, level by level up to the Model or Regular
+    /// prefab it bottoms out on: what each level adds, removes and overrides against its parent.
+    /// Contract: docs/unity-tools.md.
     ///
     /// <para><b>The five override lists are per file.</b> <c>PrefabUtility</c> answers
     /// <c>GetPropertyModifications</c> / <c>GetAddedGameObjects</c> / <c>GetRemovedGameObjects</c> /
     /// <c>GetAddedComponents</c> / <c>GetRemovedComponents</c> for the PrefabInstance object that lives in the
     /// file being read: from a scene, every nested root answers with the outermost instance's lists; inside a
     /// variant asset, a nested root whose PrefabInstance the file owns answers with its own. So per-level
-    /// attribution walks <c>GetCorrespondingObjectFromSource</c> from asset to asset, and each level lists only
-    /// the nested instances IT owns. All five lists read straight off <c>AssetDatabase.LoadAssetAtPath</c>: no
-    /// instantiation, no <c>LoadPrefabContents</c>.</para>
-    ///
-    /// <para>Read-only: a markdown digest under Snapshots/, a one-line summary in-band.</para>
+    /// attribution walks <c>GetCorrespondingObjectFromSource</c>, one asset level per hop, and each level lists
+    /// only the nested instances it owns.</para>
     /// </summary>
     [AgentTool]
     public static class ReportPrefab
     {
-        internal const int MaxChainDepth = 8;       // asset levels walked above level 0
-        internal const int MaxDependentsDepth = 8;  // containment tree depth in Dependents
-        internal const int MaxRows = 40;            // rows per section by default
-        internal const int MaxRowsAll = 400;        // rows per section under all:true — capped, never unbounded
+        internal const int MaxChainDepth = 8;
+        internal const int MaxDependentsDepth = 8;
+        internal const int MaxRows = 40;
+        internal const int MaxRowsAll = 400;
         internal const double Epsilon = 1e-4;       // numeric override equals its source below this
         internal const double RotationDotEpsilon = 1e-6; // |dot(q, src)| >= 1 - this ⇒ same rotation (≈0.16°; a float quaternion's own norm noise is ~1e-7)
 
@@ -49,9 +45,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Run ------------------------------------------------------------------------------------
 
-        /// <summary>Report the chain above <paramref name="handle"/> — a <c>.prefab</c> asset path, or a scene
-        /// handle (hierarchy path / instance id / name) resolving to an OUTERMOST prefab instance root. Rows are
-        /// the <c>authored</c> tier only unless <paramref name="all"/>; every tier is always counted.</summary>
+        /// <summary>Report the chain above <paramref name="handle"/>: a <c>.prefab</c> asset path, or a scene
+        /// handle resolving to an outermost prefab instance root.</summary>
         public static string Run(string handle, bool all = false)
         {
             if (string.IsNullOrEmpty(handle)) return Refuse("handle is null/empty: pass a .prefab asset path or a scene handle");
@@ -84,8 +79,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 levels.Add(new Level { Root = go, Path = HierarchyPath(go.transform), Kind = "scene instance", IsScene = true, HasParent = true });
             }
 
-            // Walk up. GetCorrespondingObjectFromSource is one asset level per hop; a Regular or Model root
-            // returns null and is the base line.
             var cur = levels[0].Root;
             while (levels.Count <= MaxChainDepth)
             {
@@ -194,10 +187,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ----- Owned nested instances ---------------------------------------------------------------------
 
         /// <summary>Instance roots under this level whose PrefabInstance this level's file owns: their own five
-        /// lists are readable here and nowhere else. Inherited nested roots share the level root's handle and
-        /// are skipped — they belong to the level that owns them. So does an instance root nested inside an
-        /// owned instance: it shares that instance's handle, every list read off it is the outer's, and the
-        /// outer's row already routes to the asset that owns it.</summary>
+        /// lists are readable here and nowhere else. An inherited nested root shares the level root's handle. An
+        /// instance root nested inside an owned instance shares that instance's handle, so every list read off it
+        /// is the outer's, and the outer's row already routes to the asset that owns it. Both are skipped.</summary>
         private static void AppendOwnedInstances(StringBuilder doc, StringBuilder summary, Level l, HashSet<GameObject> added, bool all)
         {
             var rootHandle = PrefabUtility.GetPrefabInstanceHandle(l.Root);
@@ -262,8 +254,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                         _components[c.assetComponent] = RelPath(c.containingInstanceGameObject.transform, root);
             }
 
-            /// <summary>True when <paramref name="target"/> is a removed component or on/under a removed object;
-            /// yields its instance-relative path and the removal it sits under, and counts it against that removal.</summary>
             public bool TryShadow(Object target, out string path, out string note)
             {
                 path = note = null;
@@ -307,7 +297,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 foreach (var m in mods)
                 {
-                    // m_LocalRotation is judged per target as one quaternion, after the loop.
                     if (m.target != null && m.propertyPath.StartsWith("m_LocalRotation.", StringComparison.Ordinal) && m.propertyPath.Length == 17)
                     {
                         RotationGroup g;
@@ -431,7 +420,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                         equal = SameOrCorresponds(m.objectReference, srcRef);
                         // Modular Avatar stamps its resolved AvatarObjectReference.targetObject on load: a null source
                         // filled with a live object in exactly that field on an MA component is the stamp, not authoring.
-                        // Any other MA object field filled from null is an authored override and stays one.
                         if (!equal && srcRef == null && m.objectReference != null && m.propertyPath.EndsWith(".targetObject", StringComparison.Ordinal)
                             && m.target.GetType().FullName.StartsWith("nadena.dev.modular_avatar", StringComparison.Ordinal))
                         { row.Tier = Tier.Churn; row.Note = "MA load-time stamp"; return row; }
@@ -536,7 +524,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        /// <summary>A blendshape weight row is unreadable as `data[47]`; the mesh knows the name.</summary>
         private static string BlendShapeName(Object target, string path)
         {
             var smr = target as SkinnedMeshRenderer;
@@ -594,10 +581,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Dependents -----------------------------------------------------------------------------
 
-        /// <summary>Every prefab and scene under <c>Assets/</c> that contains <paramref name="assetPath"/> — a variant of it,
-        /// a prefab nesting an instance of it, a scene placing it — walked transitively through variants and
-        /// nesters (a variant of a nester still contains it). A prefab that merely references it (a constraint
-        /// source, a mesh) is listed as <c>references</c> and not walked.</summary>
+        /// <summary>Every prefab and scene under <c>Assets/</c> that contains <paramref name="assetPath"/>, walked
+        /// transitively. Contract: docs/unity-tools.md.</summary>
         public static string Dependents(string assetPath)
         {
             if (string.IsNullOrEmpty(assetPath)) return Refuse("Dependents: assetPath is null/empty");

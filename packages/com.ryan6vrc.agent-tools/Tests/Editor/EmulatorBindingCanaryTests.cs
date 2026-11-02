@@ -3,18 +3,9 @@ using System.Reflection;
 using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 
-// Reflection canary over the whole Av3Emulator surface this workshop depends on — both the members shipped
-// tools read and the members docs/emulator.md teaches agents to drive by hand.
-//
-// The second half is the point. The pinned members already have two fail-loud runtime refusals behind them
-// (PlayGateCore's emulator-config offender, RenderThumbnailPlay.Run's drift refusal), so a rename there
-// announces itself. Nothing guards the hand-driven surface: if `CreateNonLocalClone` were renamed, no tool
-// would notice, and the first symptom would be an agent mid-task reading null while following a doc that has
-// silently gone wrong. This fixture converts that into a red suite, at a door no PR bypasses.
-//
-// Same rule as RenderAvatarFreshnessTests: package present + handle unresolved must FAIL, never skip — a skip
-// is exactly when production goes blind. Emulator absent is a legitimate Ignore (a venue may carry no
-// emulator, and PlayGateCore is required to work in one).
+// Reflection canary over the Av3Emulator surface: the members shipped tools read and the members
+// docs/emulator.md teaches agents to drive by hand, where no tool would notice a rename. Package present with
+// a handle unresolved fails rather than skips; emulator absent is an Ignore.
 public class EmulatorBindingCanaryTests
 {
     private const string EmulatorPackageId = "lyuma.av3emulator";
@@ -48,9 +39,9 @@ public class EmulatorBindingCanaryTests
                 t.Name + "." + n + " is gone (" + why + ") — the emulator moved under us");
     }
 
-    // Mirrors ReportGimmick.ReadBoolMember, which tries property THEN field: a field converted to a public
-    // auto-property keeps production working, so asserting field-only here would red on a change that broke
-    // nothing and send the reader hunting a rename that never happened.
+    // Mirrors ReportGimmick.ReadBoolMember, which binds public-only and tries property then field: a field
+    // converted to a public auto-property keeps production working, so a field-only assert would red on a
+    // change that broke nothing.
     private static void AssertBoolPropertyOrField(Type t, string[] names, string why)
     {
         foreach (var n in names)
@@ -79,9 +70,6 @@ public class EmulatorBindingCanaryTests
     [Test]
     public void PinnedEmulatorFields_StayReadableAsPublicBools()
     {
-        // Public specifically: PlayGateCore reads these through ReportGimmick.ReadBoolMember, which binds
-        // public-only, so a member that survived but went non-public would still break it. Property-or-field
-        // because that read path accepts either.
         AssertBoolPropertyOrField(RequireType(EmulatorBinding.EmulatorFullName),
             EmulatorBinding.PinnedEmulatorFields, "PlayGateCore's emulator-config rule reads it");
     }
@@ -98,8 +86,6 @@ public class EmulatorBindingCanaryTests
     [Test]
     public void PinnedRuntimeIndexMaps_AreStringToIntDictionaries()
     {
-        // The type and not only the name: RecordPlay casts each to Dictionary<string, int> and treats a
-        // failed cast as an empty mirror, so a changed type would resolve every parameter to "no such name".
         var t = RequireType(EmulatorBinding.RuntimeFullName);
         foreach (var n in EmulatorBinding.PinnedRuntimeIndexMaps)
         {
@@ -129,9 +115,7 @@ public class EmulatorBindingCanaryTests
     [Test]
     public void ContactPlayerId_IsStillNonPublic()
     {
-        // Both halves matter. Gone ⇒ verify.md's two-avatar sender-hygiene recipe is broken. Turned PUBLIC ⇒
-        // the recipe's abort-on-null guard and its NonPublic binding flags became unnecessary ceremony the
-        // doc still demands, which is its own kind of stale.
+        // The recipe this pins is docs/emulator.md §Two-avatar contact sessions.
         var t = RequireType(EmulatorBinding.RuntimeFullName);
         Assert.IsNotNull(t.GetField(EmulatorBinding.ContactPlayerId, NonPublic),
             EmulatorBinding.ContactPlayerId + " is gone — verify.md's two-avatar sender-hygiene recipe " +
@@ -155,9 +139,8 @@ public class EmulatorBindingCanaryTests
     [Test]
     public void ExpressionValue_OnFloatsButNotBools()
     {
-        // verify.md's drive rule rests on exactly this asymmetry: floats drive through `.expressionValue`
-        // (a `.value` write reverts on synced params), while "Bools have no expressionValue" and drive via
-        // `.value`. If the emulator ever adds one to bools, that instruction becomes wrong silently.
+        // Pins the drive rule in docs/emulator.md §Drive / observe: floats through `.expressionValue`, bools
+        // through `.value`.
         var t = RequireType(EmulatorBinding.RuntimeFullName);
         var floatEntry = RequireEntryType(t, "Floats");
         var boolEntry = RequireEntryType(t, "Bools");
@@ -180,9 +163,6 @@ public class EmulatorBindingCanaryTests
             "` property — RecordPlay's mirror channel reads a float through it");
     }
 
-    // Resolve one mirror list's entry type, failing with the reason rather than an NRE at the deref. The
-    // canary's whole value is a legible message at the moment of drift, so every step that can be absent
-    // says so by name.
     private static Type RequireEntryType(Type runtime, string listName)
     {
         var list = runtime.GetField(listName, Public);
@@ -194,7 +174,6 @@ public class EmulatorBindingCanaryTests
         return entry;
     }
 
-    // The element type behind a List<T> field, or null when the field is not a generic collection.
     private static Type EntryType(Type listType)
     {
         if (listType.IsGenericType)

@@ -2,12 +2,9 @@ using System.Collections.Generic;
 using NUnit.Framework;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// Behavioral tests for SchemaValidation. Pure C# over the System.*-only model — no scene, no VRC SDK.
-// Run headless via tools/run-editmode-tests.ps1 (or the Test Runner window / CI); not via MCP
-// run_tests — wrong venue (live editor). See docs/verify.md.
+// Pure C# over the System.*-only model: no scene, no VRC SDK.
 public class SchemaValidationTests
 {
-    // One layer with one state carrying one transition-condition — the minimal vehicle for op/type rules.
     private static AnimDocument DocWithCondition(string paramName, AnimParamType type, CondOp op, float value)
     {
         var doc = new AnimDocument { Schema = 1 };
@@ -33,7 +30,6 @@ public class SchemaValidationTests
         return false;
     }
 
-    // A layer with one state whose motion is the given blend tree; `declared` seeds the parameter table.
     private static AnimDocument DocWithTree(BlendTreeSpec tree, params ParamSpec[] declared)
     {
         var doc = new AnimDocument { Schema = 1 };
@@ -91,7 +87,7 @@ public class SchemaValidationTests
     [Test]
     public void Undeclared_Param_Condition_Is_Skipped()
     {
-        // Condition references a param that is NOT declared -> not this rule's concern, no crash, no error.
+        // Not this rule's concern: the controller-level undeclared-param check owns it.
         var doc = new AnimDocument { Schema = 1 };
         var layer = new Layer { Name = "L" };
         var st = new State { Name = "S" };
@@ -139,7 +135,6 @@ public class SchemaValidationTests
     [Test]
     public void Valid_Per_State_WD_Override_No_Error()
     {
-        // Layer WD on, one state WD off — a legal per-state override. Must produce NO error.
         var doc = new AnimDocument { Schema = 1 };
         var layer = new Layer { Name = "L", WriteDefaults = true };
         layer.Root.States.Add(new State { Name = "S", WriteDefaults = false });
@@ -166,10 +161,8 @@ parameters:
         StringAssert.Contains("basis", ex.Message);
     }
 
-    // A declared clip length must be positive. Unity reports a zero/negative-length clip as length 0 and
-    // the animator substitutes a 1s state length for any non-positive one, so `exitTime` silently reads
-    // as seconds. The derived path floors (the author declared nothing); a declared zero is a mistake and
-    // is refused rather than rounded up, or the mistake is hidden.
+    // A key-derived length floors (the author declared nothing); a declared zero is a mistake and is refused rather
+    // than rounded up.
     [TestCase("seconds", "0")]
     [TestCase("seconds", "-1")]
     [TestCase("length", "0")]
@@ -194,12 +187,10 @@ layers:
     }
 
     // ── blend-axis-type: a blend-tree axis must be a Float animator param ──────────────────────────
-    // Unity silently freezes a non-float axis at its first child (proven black-box), so a declared
-    // non-float axis is a fatal defect. Undeclared axes are skipped — the undeclared-param lint owns them.
+    // Undeclared axes are skipped: the undeclared-param lint owns them.
 
-    // One non-float type is enough for the 1D axis: the rule is a single `if (type != AnimParamType.Float)`,
-    // so Bool and Int enter it identically. The cases below vary the SITE (2D Y axis, Direct child weight,
-    // nested tree), which is where the rule actually has separate call paths.
+    // The cases below vary the SITE (1D, 2D Y axis, Direct child weight, nested tree), not the non-float type:
+    // the rule is one type check, but each site has its own call path.
     [Test]
     public void Int_1D_Blend_Axis_Errors()
     {
@@ -247,7 +238,6 @@ layers:
     [Test]
     public void Undeclared_Blend_Axis_Is_Skipped()
     {
-        // Axis not declared -> not this rule's concern (the undeclared-param lint owns it). No crash, no error.
         var tree = new BlendTreeSpec { Kind = TreeKind.OneD, Param = "Ghost" };
         Assert.IsEmpty(SchemaValidation.Validate(DocWithTree(tree)));
     }

@@ -9,17 +9,13 @@ using UnityEngine;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// On-demand check that MatchHumanoidRig preserves vendor muscle settings. Some vendor avatars customize
-    /// the twist/stretch distribution or per-bone muscle limits, and those changes visibly alter humanoid
-    /// animation — so this synthesizes a non-default "vendor"
-    /// (duplicates a real FBX, injects non-default global muscle fields + a non-default Hips limit), rigs a
-    /// SECOND copy against it, and asserts the muscle settings + Chest mapping survived on our model.
-    /// PASS/FAIL + RunLog like the tools.
+    /// On-demand check that MatchHumanoidRig preserves vendor muscle settings: synthesizes a non-default
+    /// "vendor" from a real FBX, rigs a second copy against it, and asserts the muscle settings and Chest
+    /// mapping survived on our model.
     ///
-    /// Scope: this proves the MUSCLE-copy and mapping-survival behavior. It does NOT prove the
-    /// skeleton[]-from-our-model reproportion-safety — hips limits and the global muscle fields round-trip
-    /// regardless of skeleton[], so this test would pass even on skeleton-less code. The skeleton[] /
-    /// reproportion behavior is verified by CheckHumanoidRig (the live re-instance skeleton-freshness verification).
+    /// It does NOT prove the skeleton[]-from-our-model reproportion-safety: hips limits and the global muscle
+    /// fields round-trip regardless of skeleton[], so this passes even on skeleton-less code. CheckHumanoidRig
+    /// verifies that behavior.
     /// </summary>
     public static class MatchHumanoidRigVerify
     {
@@ -56,10 +52,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var vGo = AssetDatabase.LoadAssetAtPath<GameObject>(vendorPath);
                 var vhd = vimp.humanDescription;
                 var human = new List<HumanBone>(vhd.human ?? new HumanBone[0]);
-                // ensure Chest is present in the synthetic vendor mapping (auto-map drops it on this rig);
-                // chestExpected is false when the source rig has no transform we can map as Chest.
                 bool chestExpected = EnsureChest(human, vGo);
-                // inject a non-default Hips limit
                 for (int i = 0; i < human.Count; i++)
                 {
                     if (human[i].humanName == "Hips")
@@ -82,17 +75,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 vimp.SaveAndReimport();
                 vimp = (ModelImporter)AssetImporter.GetAtPath(vendorPath);
 
-                // Re-resolve vGo: the reimport above can destroy the GameObject loaded before it (the same
-                // staleness MatchHumanoidRig guards against). A destroyed reference satisfies == null, which
-                // would silently trip Run's null-vendor guard. Re-load and fail loudly if it's gone.
+                // Re-resolve vGo: the reimport above can destroy the GameObject loaded before it, and a
+                // destroyed reference satisfies == null, which would trip Run's null-vendor guard.
                 vGo = AssetDatabase.LoadAssetAtPath<GameObject>(vendorPath);
                 if (vGo == null)
                     return Done(Leaf(sourceFbxPath), "FAIL", "synthetic vendor missing after reimport: " + vendorPath);
 
-                // ── Rig our copy against the synthetic vendor ──
                 var summary = MatchHumanoidRig.Run(ourPath, vGo);
 
-                // ── Assert the muscle settings + Chest survived on OUR model ──
                 var oimp = (ModelImporter)AssetImporter.GetAtPath(ourPath);
                 var ohd = oimp.humanDescription;
                 var fails = new List<string>();
@@ -123,8 +113,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (o is UnityEngine.Avatar) { av = (UnityEngine.Avatar)o; break; }
                 if (av == null || !av.isHuman || !av.isValid) fails.Add("avatar invalid");
 
-                // Gate on the inner rig's own verdict too: muscle fields can round-trip even when the inner
-                // rig FAILs on a bone-diff or validity issue, so don't let a buried inner FAIL report PASS.
                 if (summary.IndexOf("=> PASS", StringComparison.Ordinal) < 0)
                     fails.Add("inner rig not PASS");
 
@@ -160,10 +148,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return list.ToArray();
         }
 
-        // Ensure the synthetic vendor carries a Chest the inner rig must preserve. Returns true if Chest is
-        // already mapped or we could synthesize it; false if the source rig has no transform literally named
-        // "Chest" (a differently-named chest bone, e.g. UpperChest/Spine1) — the caller then skips the Chest
-        // assertion rather than failing for a reason unrelated to the code under test.
+        // Auto-map can drop Chest, so ensure the synthetic vendor carries one the inner rig must preserve.
+        // Returns false if the source rig has no transform literally named "Chest" (e.g. UpperChest/Spine1);
+        // the caller then skips the Chest assertion rather than failing for a reason unrelated to the code
+        // under test.
         private static bool EnsureChest(List<HumanBone> human, GameObject go)
         {
             foreach (var hb in human) if (hb.humanName == "Chest") return true;
@@ -177,7 +165,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
-        // Canonical leaf mechanics; only the "(none)" display sentinel for a missing path is local.
         private static string Leaf(string p)
         {
             var leaf = Ryan6Vrc.AgentTools.Editor.RunLogFormat.Leaf(p);

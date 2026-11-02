@@ -2,27 +2,9 @@ using System.Collections.Generic;
 using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 
-// GrabPhysBone's testable core. NUnit cannot enter play mode, so nothing here claims a behavioural result —
-// the grab arc itself is proven by execute_code in a real play session (docs/verify.md §Test venue). What is
-// asserted is exactly the logic that was FACTORED OUT to be assertable, because each piece fails in a way a
-// live run cannot reliably provoke or would not survive to report:
-//
-//   • the SessionState restore-record codec — its writer and reader sit a DOMAIN RELOAD apart, so no live
-//     test can cross that boundary; a disagreement between them looks like "no record survived", whose end
-//     state is a permanently mutated Time.fixedDeltaTime silently rescaling every later timing claim;
-//   • the pump policy — play-mode exit, a manual un-pause, a stalled player loop and the arm-time off-by-one
-//     are lifecycle hazards a live run provokes only by accident;
-//   • the ownership rule — its failure releases the OPERATOR'S mouse grab, which a headless run has none of;
-//   • the handle codec — a real ChainId half runs close to long.MaxValue, so a long.Parse would throw on a
-//     legitimate id and there is no small-value test that would notice.
-//
-// There is deliberately NO SDK binding canary here. VRC.Dynamics.dll is a precompiled auto-referenced plugin
-// and GrabPhysBone compiles against it directly with no reflection, so an SDK rename or overload change is a
-// compile error — the compile IS the canary, for BINDING. (EmulatorBindingCanaryTests exists because av3emu
-// is reached reflectively; that reasoning does not transfer.) It guards none of the measured SEMANTICS the
-// tool rests on — grabberId inertness, LocalOffset as the seed convention, a stepped frame's dt following
-// fixedDeltaTime — each of which an SDK update can change while still compiling. Those are re-measured, not
-// asserted here, and no green run below should be read as covering them.
+// GrabPhysBone's testable core: the restore-record codec, pump policy, ownership rule and handle codec,
+// factored out because a live run cannot reliably provoke their failures. The grab arc needs play mode, so it
+// is proven by execute_code in a real play session (docs/verify.md §Test venue).
 public class GrabPhysBoneTests
 {
     // ── Handle codec ──────────────────────────────────────────────────────────────────────────────
@@ -39,8 +21,8 @@ public class GrabPhysBoneTests
         Assert.AreEqual(0UL, b);
     }
 
-    // The measured id above already sits within a factor of ~3 of long.MaxValue, so ids past it are ordinary
-    // rather than adversarial. A long.Parse implementation throws here on a perfectly legitimate handle.
+    // A ChainId half is a ulong and the id above already sits within a factor of 2 of long.MaxValue, so a
+    // long.Parse implementation would throw on a legitimate handle.
     [Test]
     public void Handle_parsesUlongAboveLongMaxValue()
     {
@@ -94,8 +76,6 @@ public class GrabPhysBoneTests
         CollectionAssert.AreEqual(written.Owned, read.Owned);
     }
 
-    // Half a restore is worse than none: restoring pause while leaving the timestep pinned leaves the editor
-    // looking healthy and running at the wrong dt. So a malformed record is rejected whole.
     [Test]
     public void RestoreRecord_rejectsMalformedWhole()
     {
@@ -111,8 +91,7 @@ public class GrabPhysBoneTests
         Assert.IsFalse(r.DtPinned);
         Assert.IsNull(r.Owned);
 
-        // An empty ownership field is a well-formed record, not a malformed one — every door but a grab
-        // writes it that way.
+        // A record written with no grab held has an empty ownership field, so it is well formed.
         Assert.IsTrue(GrabPhysBone.TryParseRestoreRecord("v2|1|0|0|0.02|0|", out r));
         CollectionAssert.IsEmpty(r.Owned);
     }
@@ -137,7 +116,7 @@ public class GrabPhysBoneTests
     }
 
     // Arming is racy: the frame in progress when pause was requested still completes, so a baseline latched
-    // on the first tick is one or two frames short — fatal for a door whose only promise is an exact count.
+    // on the first tick is one or two frames short.
     [Test]
     public void Decide_waitsForFrameCountToSettleBeforeLatching()
     {
@@ -159,9 +138,8 @@ public class GrabPhysBoneTests
             "no baseline is trustworthy until the editor is actually paused");
     }
 
-    // Step() is asynchronous, so a second Step issued before the first lands would advance the frame count
-    // by less than the calls issued — which is exactly why frames are counted from Time.frameCount and a
-    // step is only issued once the previous one has landed.
+    // EditorApplication.Step() is asynchronous: a second Step issued before the first lands advances the frame
+    // count by less than the calls issued.
     [Test]
     public void Decide_stepsOnlyAfterThePreviousStepLanded()
     {
@@ -186,8 +164,6 @@ public class GrabPhysBoneTests
             GrabPhysBone.Decide(Obs(106, 100, 5, 104), out why), "overshoot still finishes, never loops");
     }
 
-    // The single-frame case, which `Run`'s own not-registered-yet refusal prescribes ("Advance(1) then
-    // retry") — so it is the most-called shape and the one an off-by-one would break first.
     [Test]
     public void Decide_advanceOfOneFrameFinishesAfterExactlyOneFrame()
     {
@@ -210,7 +186,7 @@ public class GrabPhysBoneTests
     }
 
     // A manual un-pause mid-pump means frames ran uncounted at wall-clock dt, so the frame count the door
-    // reports would be a fiction. Abort loudly rather than finish on a number nobody can trust.
+    // reports would be a fiction.
     [Test]
     public void Decide_abortsWhenUnpausedAfterTheBaselineLatched()
     {
@@ -220,8 +196,6 @@ public class GrabPhysBoneTests
         StringAssert.Contains("un-paused", why);
     }
 
-    // Without this the pump spins forever on a blocked main thread, and since a second Advance is refused
-    // while one is in flight, a single stall bricks every door for the rest of the session.
     [Test]
     public void Decide_abortsOnAStalledPlayerLoop()
     {
@@ -235,8 +209,7 @@ public class GrabPhysBoneTests
     public void Decide_stallBeatsEveryOtherOutcome()
     {
         string why;
-        // Even at the target count, a pump that has not seen a frame for 20s is reporting about a player
-        // loop that stopped — the honest end state is the abort, not a Finish on a stale frame number.
+        // Even at the target count, a stalled pump aborts rather than finishing on a stale frame number.
         Assert.AreEqual(GrabPhysBone.PumpAction.Abort,
             GrabPhysBone.Decide(Obs(105, 100, 5, 104, sinceProgress: 60.0), out why));
     }
@@ -287,8 +260,6 @@ public class GrabPhysBoneTests
         CollectionAssert.IsEmpty(release, "a refusal releases nothing at all");
     }
 
-    // A recompile re-registers chains and mints new ids, so a handle from before it names nothing — the
-    // commonest stale case, and the refusal has to say so rather than reading as "already released".
     [Test]
     public void Select_refusesAHandleThatNamesNoLiveGrab()
     {

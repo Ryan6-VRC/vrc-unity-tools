@@ -13,12 +13,10 @@ using VRC.SDK3.Avatars.Components;
 using nadena.dev.modular_avatar.core;
 using Ryan6Vrc.AgentTools.Editor;
 
-// Task 8 (spec 2026-07-11-testeditor-compose-coverage): exercise CheckSeam's REAL reflection collectors
-// against live MA/VRCFury components — the paths the injected-seam CheckSeamTests deliberately cannot run.
-// Inject ResolveHumanoid (cheap map) but leave ResolveSeam at default so CollectMaPairs / CollectVrcfPairs
-// actually run. Fixtures sit under a VRCAvatarDescriptor (MA's mergeTarget.Get needs a registered avatar
-// root) with DISTINCT base positions and each merge bone overlaid on its intended partner, so a PASS proves
-// the correct pairs were collected, not merely that >=2 were.
+// CheckSeam's REAL reflection collectors against live MA/VRCFury components, the paths the injected-seam
+// CheckSeamTests cannot run: ResolveHumanoid is injected and ResolveSeam stays default, so CollectMaPairs /
+// CollectVrcfPairs actually run. Fixtures use DISTINCT base positions with each merge bone overlaid on its
+// intended partner, so a PASS proves the correct pairs were collected, not merely that >=2 were.
 [Category("CheckSeamLive")]
 public partial class CheckSeamLiveTests
 {
@@ -127,7 +125,7 @@ public partial class CheckSeamLiveTests
     public void MaMergeArmature_offset_notPass()
     {
         BuildMaFixture(out var baseGO, out var mergeGO, out var mHips, out _);
-        mHips.localPosition += new Vector3(0.01f, 0f, 0f); // 10mm >> eps=0.7mm ⇒ one offender
+        mHips.localPosition += new Vector3(0.01f, 0f, 0f); // 10mm >> eps ⇒ one offender
         var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r);
         StringAssert.Contains("offenders=1", r);
@@ -135,10 +133,8 @@ public partial class CheckSeamLiveTests
         StringAssert.Contains("Hips", body); // bone name is in the RunLog body, not the one-line summary
     }
 
-    // GetBonesMapping returns NULL (not an empty list) when mergeTarget resolves nothing — there is no base
-    // armature to match against. Collapsing that into the zero-match branch would prescribe a bone-naming
-    // repair for a component whose merge target is the thing that is wrong. Only the live collector can
-    // produce this: the injected-seam fixture hands CheckSeam a SeamResolution and never calls MA at all.
+    // GetBonesMapping returns NULL, not an empty list, when mergeTarget resolves nothing. Only the live
+    // collector can produce this: the injected-seam fixture hands CheckSeam a SeamResolution and never calls MA.
     [Test]
     public void MaMergeArmature_unresolvedMergeTarget_abstainsOnTheTarget_notTheBoneNames()
     {
@@ -169,10 +165,9 @@ public partial class CheckSeamLiveTests
         f.SetValue(o, v);
     }
 
-    // VRCFury is internal → reflection. Distinguish "package absent" (Ignore) from "package present but its
-    // types didn't resolve" — the latter is real collector DRIFT (e.g. a package-side type rename) and MUST
-    // fail, not skip, or the loudest drift this suite exists to catch would pass green. VRCF_PRESENT keys on
-    // the package name (stable across type reshapes), unlike the reflected type string.
+    // VRCFury is internal, so reflection. A package present whose types did not resolve is collector DRIFT and
+    // MUST fail, not skip, or the drift this suite exists to catch would pass green. VRCF_PRESENT keys on the
+    // package name, stable across type reshapes, unlike the reflected type string.
     private void BuildVrcfOrGate(out GameObject baseGO, out GameObject mergeGO, out Transform mHips, bool forceScale)
     {
         if (BuildVrcfFixture(out baseGO, out mergeGO, out mHips, forceScale)) return;
@@ -183,9 +178,8 @@ public partial class CheckSeamLiveTests
 #endif
     }
 
-    // Attach a real VRCFury component carrying an object-mode, recursive ArmatureLink linking merge→base.
-    // Object-mode (useObj) skips VRCFury's humanoid-Hips lookup (which would need a real Animator); recursive
-    // makes GetLinks walk the >=2 name-matched children. Returns false if VRCFury isn't installed.
+    // Object-mode (useObj) skips VRCFury's humanoid-Hips lookup, which would need a real Animator; recursive
+    // makes GetLinks walk the >=2 name-matched children.
     private bool AttachVrcfArmatureLink(GameObject mergeArm, GameObject baseArm, GameObject propRoot, bool forceScale)
     {
         var vrcfType = FindType("VF.Model.VRCFury");
@@ -232,9 +226,7 @@ public partial class CheckSeamLiveTests
     // VRCFury seam check REFUSE at error severity, intermittently, blaming a vendor drift that never happened.
     // This asserts the pin landed on a USABLE operator, which is the half that arity/parameter checks miss.
     //
-    // Deliberately no AddComponent and no SerializedObject write on the round-trip subject: verify.md's
-    // EditMode rule (a mutation on a live object later destroyed corrupts Unity's object registry) means the
-    // fixture is a bare GameObject and nothing else.
+    // The round-trip subject stays a bare GameObject, per verify.md §Test venue.
     [Test]
     public void VrcfConverterPins_resolveToUsableOperators()
     {
@@ -275,7 +267,7 @@ public partial class CheckSeamLiveTests
         mHips.localPosition += new Vector3(0.01f, 0f, 0f); // 10mm ⇒ offender
         var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r);
-        StringAssert.Contains("offenders=1", r);   // N2: parity with the MA twin
+        StringAssert.Contains("offenders=1", r);
         var body = ReadLog(r);
         StringAssert.Contains("Hips", body); // bone names appear in the RunLog BODY, not the one-liner
     }

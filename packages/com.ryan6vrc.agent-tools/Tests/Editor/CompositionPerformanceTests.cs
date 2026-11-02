@@ -7,15 +7,10 @@ using VRC.SDKBase.Validation.Performance;
 using VRC.SDKBase.Validation.Performance.Stats;
 
 /// <summary>
-/// The performance section republishes the SDK's own scan, so what it must never do is disagree with it: every
-/// rating is the one the SDK computed, the summary's <c>rank=</c> is the SDK's Overall, and the physbone census
-/// sums to the SDK's <c>transformCount</c>. A scan that threw publishes no figure at all, and an unreadable chain
-/// is named rather than counted as zero. That the census sums to the SDK's figure on a real chain needs physbones
-/// added to live objects, which <c>docs/verify.md</c> §Test venue keeps out of NUnit; it is checked by running
-/// the bake on a real avatar.
-///
-/// Objects are left for the next test's <c>NewScene(Single)</c> to take rather than destroyed —
-/// <c>docs/verify.md</c> §Test venue forbids destroying live objects a fixture has mutated.
+/// The performance section republishes the SDK's own scan: every rating is the one the SDK computed, and the
+/// summary's <c>rank=</c> is the SDK's Overall. That the physbone census sums to the SDK's <c>transformCount</c> on
+/// a real chain needs physbones added to live objects, which <c>docs/verify.md</c> §Test venue keeps out of NUnit;
+/// it is checked by running the bake on a real avatar.
 /// </summary>
 public class CompositionPerformanceTests
 {

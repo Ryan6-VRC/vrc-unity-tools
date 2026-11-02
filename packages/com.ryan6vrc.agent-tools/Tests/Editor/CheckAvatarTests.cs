@@ -14,9 +14,8 @@ using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 using VRC.SDK3.Avatars.Components;
 
-// Plumbing shared by the two CheckAvatar fixtures in this file. Deliberately NOT a base class: NUnit runs an
-// inherited [SetUp] ahead of each derived one, and the split below exists precisely because the two fixtures
-// need different setup.
+// Plumbing shared by this file's two fixtures. Not a base class: NUnit runs an inherited [SetUp] ahead of each
+// derived one, and the two fixtures need different setup.
 internal static class CheckAvatarFixture
 {
     internal static GameObject Child(GameObject parent, string name)
@@ -33,9 +32,6 @@ internal static class CheckAvatarFixture
         return go;
     }
 
-    // Seams live on CheckAvatar (its own merge seams), VendorReflect (the shared AOR boxing/pin seams),
-    // or MergeSurfaces (the shared surface enumeration's) — one lookup covers every home so a test names
-    // the seam, not the type that holds it, and lifting code into shared use is not a test edit.
     private static FieldInfo SeamField(string field) =>
         typeof(CheckAvatar).GetField(field, BindingFlags.NonPublic | BindingFlags.Static)
         ?? typeof(VendorReflect).GetField(field, BindingFlags.NonPublic | BindingFlags.Static)
@@ -45,8 +41,6 @@ internal static class CheckAvatarFixture
 
     internal static object GetSeam(string field) => SeamField(field).GetValue(null);
 
-    // The artifact path off a summary's `| log=` trailer; null when the summary carries none (a bad-input
-    // refusal must not point at an artifact — that is itself asserted below).
     internal static string LogPath(string result)
     {
         const string marker = "| log=";
@@ -55,18 +49,9 @@ internal static class CheckAvatarFixture
     }
 }
 
-// CheckAvatar proof obligations (spec 2026-07-07-avatarlint-design.md, Acceptance criteria) — the surface that
-// needs real assets: saved clips, saved controllers, and the MA/VRCFury frames that carry them.
-//
-// CheckAvatar.Run resolves scene paths against the ACTIVE scene (its local FindByHierarchyPath), so —
-// like CheckAnimatorRefactorTests — fixtures live in the active scene and are torn down in place. Nothing is
-// saved into TmpDir that must outlive a test: the temp controllers/clips + the emitted RunLog go in TearDown's
-// one batched delete, and the real scene file is never written. MA/VRCFury are the REAL installed types
-// (reflection AddComponent), the same path the tool detects them on. The internal test seams are flipped via
-// reflection (Tests is a separate assembly), which is also how they are exercised live via execute_code.
-//
-// The merge-conflict grouping core needs NONE of this scaffolding (no clip, no controller, no asset at all) and
-// lives in CheckAvatarMergeConflictTests below, on a scene built once.
+// CheckAvatar on the surface that needs real assets: saved clips, saved controllers, and the real installed
+// MA/VRCFury components that carry them. CheckAvatar.Run resolves its root through SceneHandle.Resolve, over the
+// ACTIVE scene, so fixtures live there.
 public class CheckAvatarTests
 {
     private const string TmpDir = "Assets/AgentCheckAvatarTmp";
@@ -81,10 +66,8 @@ public class CheckAvatarTests
     public void SetUp()
     {
         LogAssert.ignoreFailingMessages = true; // CLASSIFY logs a warning; degrade paths log warnings — expected
-        // B4: build fixtures in a Single throwaway scene, never a real saved scene (same pattern as
-        // CheckSeamTests): NewScene(Additive) throws whenever the active scene is untitled AND dirty — the
-        // batchmode boot state once any earlier test has touched it — so additive is order-dependent.
-        // Capture the seam delegates so TearDown restores the real behaviour.
+        // A Single throwaway scene, because NewScene(Additive) throws whenever the active scene is untitled AND
+        // dirty, the batchmode boot state once any earlier test has touched it.
         EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", "AgentCheckAvatarTmp");
         _origBoxed = GetSeam("GetBoxedValue");
@@ -100,9 +83,6 @@ public class CheckAvatarTests
     {
         _avatar = null; // owned by the throwaway scene; the next Single NewScene discards it
         ResetSeams();
-        // ONE batched AssetDatabase mutation, not three: this runs per test, and each separate DeleteAsset is
-        // an import. There is no second NewScene here either — the only test that saved a scene saves it
-        // OUTSIDE TmpDir and cleans up after itself, so nothing deleted below can be the loaded active scene.
         var doomed = new List<string>();
         if (!string.IsNullOrEmpty(_logPath)) doomed.Add(_logPath);
         if (AssetDatabase.IsValidFolder(TmpDir)) doomed.Add(TmpDir);
@@ -144,7 +124,6 @@ public class CheckAvatarTests
 
     private GameObject NewChild(GameObject parent, string name) => CheckAvatarFixture.Child(parent, name);
 
-    // A saved .anim with one float binding per path (SetEditorCurve, not SetCurve, so paths don't expand).
     private AnimationClip NewClip(string dir, string name, params string[] paths)
     {
         var clip = new AnimationClip { name = name };
@@ -177,9 +156,8 @@ public class CheckAvatarTests
     private Component AddMaMergeAnimator(GameObject go, AnimatorController ctrl)
         => AddMaMergeAnimator(go, ctrl, null, null);
 
-    // Relative MergeAnimator. refPath/targetGO set the relativePathRoot's two halves INDEPENDENTLY (a null
-    // refPath leaves both untouched) — the frame walk's whole contract is which half wins when, so the
-    // fixture must be able to write the inconsistent combinations a real scene can carry.
+    // refPath and targetGO write relativePathRoot's two halves independently, so a test can build the
+    // inconsistent combinations a real scene carries. A null refPath leaves both untouched.
     private Component AddMaMergeAnimator(GameObject go, AnimatorController ctrl, string refPath, GameObject targetGO)
     {
         var t = Resolve("nadena.dev.modular_avatar.core.ModularAvatarMergeAnimator");
@@ -198,7 +176,7 @@ public class CheckAvatarTests
         return c;
     }
 
-    // ObjectToggle with one entry; refPath is avatar-root-relative; targetGO optional (targetObject-wins).
+    // refPath is avatar-root-relative.
     private Component AddMaObjectToggle(GameObject go, string refPath, GameObject targetGO)
     {
         var t = Resolve("nadena.dev.modular_avatar.core.ModularAvatarObjectToggle");
@@ -235,7 +213,6 @@ public class CheckAvatarTests
         return c;
     }
 
-    // Set the FullController "Path Rewrite Rules" (content.rewriteBindings) on an existing VRCF component.
     private void SetVrcfRewriteBindings(Component c, params (string from, string to, bool delete)[] rules)
     {
         var so = new SerializedObject(c);
@@ -251,7 +228,6 @@ public class CheckAvatarTests
         so.ApplyModifiedPropertiesWithoutUndo();
     }
 
-    // A FullController with an empty (present) controllers array — the B1 not-drift boundary.
     private Component AddVrcfFullControllerNoControllers(GameObject go, GameObject rootOverride)
     {
         var vt = Resolve("VF.Model.VRCFury");
@@ -287,9 +263,8 @@ public class CheckAvatarTests
     }
 
     // ── The intentional-empty exemption is BOTH halves, not the path alone ────────────────────────────
-    // An empty referencePath carrying a live targetObject is the silent no-op nondestructive.md names: the
-    // inspector's resolver checks targetObject first and shows it resolved, while the Get(Component) the
-    // build takes returns null on the empty path. Exempting on the path alone made the scan blind to it.
+    // An empty referencePath carrying a live targetObject is the silent no-op nondestructive.md §Reference
+    // hardening names.
 
     [Test]
     public void EmptyPath_withLiveTargetObject_isAnOffender()
@@ -315,7 +290,7 @@ public class CheckAvatarTests
         StringAssert.Contains("maSceneRef=0", r, "a genuinely unset ref is not an offender: " + r);
     }
 
-    // ── Proof A + Proof B coexist ─────────────────────────────────────────────────────────────────────
+    // ── A renamed base surfaces (Proof A), a present to-be-merged bone does not (Proof B) ─────────────
 
     [Test]
     public void ProofA_break_and_ProofB_noFalseAbort_coexist()
@@ -347,7 +322,7 @@ public class CheckAvatarTests
         Assert.IsFalse(log.Contains("path=`Bone_Present`"), "Proof B: the present to-be-merged bone must not be an offender: " + log);
     }
 
-    // ── VRCF ancestor walk (D-A) ──────────────────────────────────────────────────────────────────────
+    // ── VRCF ancestor walk ────────────────────────────────────────────────────────────────────────────
 
     [Test]
     public void Vrcf_avatarLevelObject_resolvesUpward_renamedBase_failsAllLevels()
@@ -367,7 +342,7 @@ public class CheckAvatarTests
         Assert.IsFalse(log.Contains("path=`AvatarLevelThing`"), "D-A: an avatar-level object resolves upward and must not surface: " + log);
     }
 
-    // ── VRCF rewriteBindings (D-A step 1) — the carried-doll downward-relocation case ──────────────────
+    // ── VRCF rewriteBindings ───────────────────────────────────────────────────────────────────────────
 
     // A prop's clips address a bone by a base-rooted path (Armature/Bone) but the bone is mounted DOWNWARD
     // (Prop/Nested/Armature/Bone). The upward strip alone can't reach it; the FullController's own
@@ -393,10 +368,8 @@ public class CheckAvatarTests
         StringAssert.Contains("path=`Ghost/Missing`", log, log);
     }
 
-    // A rewrite rule whose `to` starts with `/` emits VRCFury's absolute form: the build
-    // (AnimationBindingUtils.ResolveTarget) resolves it from the avatar root with no ancestor walk. The
-    // checker must do the same — probing the literal `/`-prefixed path against the walk roots resolves
-    // nowhere and manufactures a false clip-binding offender on a build that works.
+    // A rewrite rule whose `to` starts with `/` emits VRCFury's absolute form, which the build
+    // (AnimationBindingUtils.ResolveTarget) resolves from the avatar root with no ancestor walk.
     [Test]
     public void Vrcf_rewriteBindings_absoluteRule_resolvesFromAvatarRoot()
     {
@@ -413,9 +386,6 @@ public class CheckAvatarTests
             "an absolute (leading-/) rewrite must resolve against the avatar root, not read as a break: " + r);
     }
 
-    // The absolute form needs no rewrite rule: a clip AUTHORED with a leading `/` under a rule-less
-    // FullController resolves from the avatar root at build. Fails against a walk that honours the form
-    // only when a rewriter exists.
     [Test]
     public void Vrcf_authoredAbsoluteBinding_noRules_resolvesFromAvatarRoot()
     {
@@ -429,8 +399,8 @@ public class CheckAvatarTests
             "an authored leading-/ binding under a rule-less FullController resolves from the avatar root: " + r);
     }
 
-    // Absolute means the avatar root ONLY — no ancestor walk. `Local` sits under the mount, where the
-    // walk-up form would find it, and nowhere under the avatar root, so the build drops `/Local`.
+    // `Local` sits under the mount, where the walk-up form would find it, and nowhere under the avatar root,
+    // so the build drops `/Local`.
     [Test]
     public void Vrcf_authoredAbsoluteBinding_absentUnderAvatarRoot_isReported()
     {
@@ -444,8 +414,6 @@ public class CheckAvatarTests
             "a leading-/ binding is probed at the avatar root only, never up the mount's ancestor chain: " + r);
     }
 
-    // The absolute form is VRCFury's. Under an MA MergeAnimator a leading `/` has no special meaning, so
-    // the literal path stays a break even though the trimmed one exists under the avatar root.
     [Test]
     public void Ma_leadingSlashBinding_isNotAbsolute()
     {
@@ -491,7 +459,6 @@ public class CheckAvatarTests
             "a leading-/ binding is probed at the avatar root, never at the mount: " + r);
     }
 
-    // A matched delete rule drops the binding at build — it must not surface as a break.
     [Test]
     public void Vrcf_rewriteBindings_deleteRule_dropsBinding()
     {
@@ -505,7 +472,7 @@ public class CheckAvatarTests
         StringAssert.Contains("clipBinding=0 anchorSeam=0 mergeConflict=0 blendshapeAction=0 => PASS", r, "a delete-ruled binding is not a break: " + r);
     }
 
-    // ── clipAssetPath routing (R-E) ───────────────────────────────────────────────────────────────────
+    // ── clipAssetPath routing ─────────────────────────────────────────────────────────────────────────
 
     [Test]
     public void ClipAssetPath_distinguishesVendorFromOwned()
@@ -546,7 +513,7 @@ public class CheckAvatarTests
         StringAssert.Contains("maSceneRef=0", r, r);
     }
 
-    // ── Never throws: boxedValue throws (R-J) ─────────────────────────────────────────────────────────
+    // ── Never throws: boxedValue throws ───────────────────────────────────────────────────────────────
 
     [Test]
     public void BoxedValueThrows_isCaught_andCompletes()
@@ -555,7 +522,7 @@ public class CheckAvatarTests
         var outfit = NewChild(a, "Outfit");
         AddMaObjectToggle(outfit, "Body_base", null); // unresolvable via path; self-resolve → still null → offender
 
-        SetSeam("GetBoxedValue", (Func<SerializedProperty, object>)(p => throw new Exception("forced boxedValue throw"))); // R-J
+        SetSeam("GetBoxedValue", (Func<SerializedProperty, object>)(p => throw new Exception("forced boxedValue throw")));
         Assert.DoesNotThrow(() =>
         {
             var r = Inspect("LintBoxThrow");
@@ -564,7 +531,7 @@ public class CheckAvatarTests
         });
     }
 
-    // ── Fail-loud frame reads (R-H) ───────────────────────────────────────────────────────────────────
+    // ── Fail-loud frame reads ─────────────────────────────────────────────────────────────────────────
 
     [Test]
     public void UnreflectedFrameField_isSurfaced_notDropped()
@@ -583,7 +550,6 @@ public class CheckAvatarTests
         StringAssert.Contains(CheckAvatar.FailLoudNotePrefix, log, "the unreflected anchor is surfaced in Notes: " + log);
     }
 
-    // R-H symmetric on the VRCF side (B1): a drifted VRCF frame surfaces loud + the controller is not dropped.
     [Test]
     public void UnreflectedFrameField_VRCF_isSurfaced_notDropped()
     {
@@ -601,7 +567,6 @@ public class CheckAvatarTests
         StringAssert.Contains(CheckAvatar.FailLoudNotePrefix, log, "the unreflected anchor is surfaced in Notes: " + log);
     }
 
-    // B1 boundary: an empty-but-present FullController controllers array is NOT drift (must stay quiet — no anchor).
     [Test]
     public void TryVrcfFrame_emptyControllersList_isNotDrift()
     {
@@ -618,7 +583,6 @@ public class CheckAvatarTests
         Assert.IsNull(anchor, "an empty-but-present controllers array must NOT be treated as drift");
     }
 
-    // B2 boundary: a present-but-null MA animator is an intentional empty, not drift — TryMaFrame stays quiet.
     [Test]
     public void TryMaFrame_presentButNullAnimator_staysQuiet()
     {
@@ -637,15 +601,13 @@ public class CheckAvatarTests
         Assert.IsFalse(ok, "a present-but-null animator is an intentional empty, not drift — stays quiet");
     }
 
-    // ── W12/A1: the frame walk resolves relativePathRoot the way the BUILD does ───────────────────────
+    // ── The frame walk resolves relativePathRoot the way the BUILD does ───────────────────────────────
     //
     // MergeAnimatorProcessor calls relativePathRoot.Get(avatarRootTransform) and falls back to
-    // merge.gameObject on null. Since A1, TryMaFrame INVOKES that same Get(Component) rather than mirroring
-    // its order (W12's hand-copy was wrong on the day it landed — the drift class invoking closes), so these
-    // tests now pin the invoke wiring end-to-end against MA's real resolution: empty path first, then an
-    // IN-AVATAR targetObject, then the AVATAR_ROOT sentinel, then the path. Each fails against the pre-W12 walk.
+    // merge.gameObject on null. TryMaFrame invokes that same Get(Component), so these tests pin MA's real
+    // order end-to-end: empty path first, then an in-avatar targetObject, then the AVATAR_ROOT sentinel,
+    // then the path.
 
-    // The frame root TryMaFrame computes for c, via the same reflective call the B2 test above uses.
     private GameObject MaFrameRoot(Component c, GameObject avatarGO)
     {
         var args = new object[] { c, avatarGO, null, null };
@@ -656,8 +618,6 @@ public class CheckAvatarTests
         return (GameObject)frame.GetType().GetField("Root").GetValue(frame);
     }
 
-    // Empty referencePath ⇒ Get(Component) returns null BEFORE reading targetObject ⇒ build mounts at the
-    // component's own GameObject. Pre-W12 this returned the targetObject: the wrong-frame report W12 names.
     [Test]
     public void TryMaFrame_emptyPathLiveTarget_usesOwnGameObject()
     {
@@ -665,14 +625,13 @@ public class CheckAvatarTests
         var outfit = NewChild(a, "Outfit");
         var decoy = NewChild(a, "Decoy");
         var c = AddMaMergeAnimator(outfit, NewController("MaEmptyCtrl", NewClip(TmpDir, "MaEmptyClip", "Bone")),
-            "", decoy); // targetObject set, referencePath left empty — the shape W9's scan started flagging
+            "", decoy); // targetObject set, referencePath left empty
 
         Assert.AreSame(outfit, MaFrameRoot(c, a),
             "an empty referencePath resolves to null whatever targetObject holds, so the build mounts at the own GameObject");
     }
 
-    // Both MA Get overloads gate targetObject on IsChildOf(avatarRoot) — one pointing outside the avatar
-    // resolves to nothing, and the non-empty path decides the frame instead.
+    // Both MA Get overloads gate targetObject on IsChildOf(avatarRoot).
     [Test]
     public void TryMaFrame_targetObjectOutsideAvatar_isIgnored()
     {
@@ -691,9 +650,7 @@ public class CheckAvatarTests
         finally { UnityEngine.Object.DestroyImmediate(outsider); }
     }
 
-    // referencePath == AvatarObjectReference.AVATAR_ROOT is a sentinel, not a hierarchy path: Get(Component)
-    // returns the avatar root for it. Pre-W12 the walk fed it to Transform.Find, got null, and fell back to
-    // the own GameObject — a Relative merge silently reported at the wrong depth.
+    // `$$$AVATAR_ROOT$$$` is AvatarObjectReference.AVATAR_ROOT, a sentinel rather than a hierarchy path.
     [Test]
     public void TryMaFrame_avatarRootSentinel_mountsAtAvatarRoot()
     {
@@ -706,10 +663,10 @@ public class CheckAvatarTests
     }
 
     // Get(Component) redirects a path landing on a CHILDLESS "Armature" to the same-named sibling that has
-    // children (MA issue #308 — avatars carrying a decoy armature to move the VRChat eye position). Skipping
+    // children (MA issue #308: avatars carrying a decoy armature to move the VRChat eye position). Skipping
     // that swap is silent: TryResolveSceneRef invokes MA's real Get, so it sees the swapped object and emits
-    // neither a scene-ref offender nor an R-K caveat, while the frame walk mounts at the childless decoy and
-    // every binding under it fails. Asserted BOTH ways round, because the offender flood is the visible half.
+    // neither a scene-ref offender nor a frame-uncertainty note, while the frame walk mounts at the childless
+    // decoy and every binding under it fails.
     [Test]
     public void TryMaFrame_childlessArmatureDecoy_takesThePopulatedSibling()
     {
@@ -733,8 +690,6 @@ public class CheckAvatarTests
             "mounting at the decoy would fail EVERY binding under it, with no offender or caveat to say why: " + r);
     }
 
-    // Precedence pair nothing else pins: the sentinel loses to a live in-avatar targetObject, because
-    // Get(Component) tests targetObject BEFORE it tests AVATAR_ROOT.
     [Test]
     public void TryMaFrame_sentinelWithLiveTarget_prefersTheTarget()
     {
@@ -747,9 +702,8 @@ public class CheckAvatarTests
         Assert.AreSame(mount, MaFrameRoot(c, a), "targetObject is tested before the AVATAR_ROOT sentinel");
     }
 
-    // No avatar root above the merge site: the build's FindAvatarTransformInParents misses, Get(Component)
-    // returns null, and the merge lands on its own GameObject — even with a live targetObject. DetectAuto
-    // surfaces the missing descriptor separately, so the frame staying honest here is not a silent fallback.
+    // A null avatarGO stands for the build's FindAvatarTransformInParents miss: no Get invoke, and the merge
+    // lands on its own GameObject even with a live targetObject. DetectAuto notes the missing descriptor.
     [Test]
     public void TryMaFrame_noAvatarRoot_usesOwnGameObject()
     {
@@ -763,13 +717,10 @@ public class CheckAvatarTests
             "with no avatar root to resolve against, nothing resolves and the build mounts at the own GameObject");
     }
 
-    // ── A1: the frame walk INVOKES Get(Component), and the hand-walk survives only as the drift fallback ─
+    // ── The frame walk invokes Get(Component); the hand-walk is only the drift fallback ──────────────────
 
-    // Get re-derives the avatar root internally, and FindAvatarTransformInParents walks to the OUTERMOST
-    // descriptor — so a nested descriptor above the merge site no longer skews the frame the way the
-    // nearest-descriptor avatarGO DetectAuto hands in could. The referencePath is stored relative to the
-    // root the BUILD uses (the outermost), so resolving it against the nearest one reported a frame the
-    // build never mounts. Fails against the pre-A1 hand-walk, which did Find(path) on avatarGO directly.
+    // DetectAuto hands in the nearest descriptor, while Get re-derives the root through
+    // FindAvatarTransformInParents, which walks to the OUTERMOST.
     [Test]
     public void TryMaFrame_nestedDescriptor_resolvesAgainstOutermostRoot()
     {
@@ -785,10 +736,8 @@ public class CheckAvatarTests
             "Get walks to the outermost root, so the outermost-relative referencePath resolves even when the caller hands in the nearest descriptor");
     }
 
-    // The invoke tier unreachable (MA API drift) ⇒ the hand-walk fallback resolves in Get's order, LOUD
-    // both out-of-band (console) and in-band (the MA.Get(Component) anchor — the degrade can diverge from
-    // the build under a nested descriptor, so the frame must carry its own caveat) — and still applies the
-    // childless-"Armature" decoy swap the pre-W12 copy shed.
+    // The hand-walk can diverge from the build under a nested descriptor, so the degraded frame carries an
+    // anchor beside the console line.
     [Test]
     public void TryMaFrame_getUnreachable_fallsBackLoud_withDecoySwap()
     {
@@ -814,9 +763,6 @@ public class CheckAvatarTests
             "the degraded frame carries an in-band caveat, not just a console line");
     }
 
-    // The one anchor that can ride a frame carrying OUR controller must surface on CheckAnimator's own
-    // door: rules present + RewritePath unreachable ⇒ a Notes line, so the (possibly inflated)
-    // brokenBinding count is never presented uncaveated.
     [Test]
     public void Lint_rewriteRulesWithUnreachableRewritePath_notesTheInflationRisk()
     {
@@ -834,9 +780,6 @@ public class CheckAvatarTests
             "the un-applied rewrite rules must be named beside the count they may inflate: " + log);
     }
 
-    // A1 (C3): rewrite rules present but VRCFury's RewritePath unreachable ⇒ the frame carries the
-    // VRCF.RewritePath anchor (R-H rail) and NO rewriter — never a silent identity that would fabricate
-    // plausible-but-false binding results. Fails against the pre-A1 replication, which rewrote regardless.
     [Test]
     public void TryVrcfFrame_rewriteRulesWithUnreachableRewritePath_anchorsTheFrame()
     {
@@ -858,9 +801,7 @@ public class CheckAvatarTests
             "no rewriter is handed out when the vendor method is unreachable — the anchor says why");
     }
 
-    // Rider 1 (R-K symmetry): post-W9 the generic scan emits an MA-scene-ref offender for the
-    // targetObject-only shape, but MaFrameUncertaintyNote returned null for it — an offender with no frame
-    // line beside it, which reads as a dropped ref rather than a relocated frame. Both must be present.
+    // An offender with no frame line beside it reads as a dropped ref rather than a relocated frame.
     [Test]
     public void Inspect_emptyPathLiveTarget_notesTheFrameBesideTheOffender()
     {
@@ -877,10 +818,9 @@ public class CheckAvatarTests
             "the offender must carry its frame caption — the frame is the own GameObject, the REF is what is broken: " + log);
     }
 
-    // The other side of rider 1, and the one that keeps the caption honest: a WHOLLY empty relativePathRoot
-    // (both halves) is the intentional-empty ScanSceneRefs exempts, so there is no offender — and a caption
-    // with no offender beside it is the same asymmetry rider 1 fixes, pointing the other way. The two
-    // predicates are coupled across the two methods; move either and this goes red.
+    // A wholly empty relativePathRoot is the intentional-empty ScanSceneRefs exempts, so a caption here would
+    // have no offender beside it. The predicates in ScanSceneRefs and MaFrameUncertaintyNote are coupled; move
+    // either and this goes red.
     [Test]
     public void Inspect_whollyEmptyRelativePathRoot_getsNeitherOffenderNorCaption()
     {
@@ -895,8 +835,6 @@ public class CheckAvatarTests
         StringAssert.DoesNotContain("frame-certain", log, "no offender to caption ⇒ no caption: " + log);
     }
 
-    // Rider 2: the degraded self-resolve (MA API drift) accepted ANY live targetObject, skipping the
-    // IsChildOf gate both real overloads apply — a false negative on the one path that exists to survive drift.
     [Test]
     public void SelfResolve_targetObjectOutsideAvatar_isNotResolved()
     {
@@ -927,10 +865,8 @@ public class CheckAvatarTests
         var clip = NewClip(TmpDir, "NoDirtyClip", "Body_base");
         SetBaseLayers(a, (VRCAvatarDescriptor.AnimLayerType.FX, NewController("NoDirtyCtrl", clip)));
 
-        // B4: save the temp scene so the baseline is genuinely CLEAN — otherwise the fixture build leaves it
-        // dirty and the assertion would only prove Inspect preserves an already-dirty scene. Saved OUTSIDE
-        // TmpDir and cleaned up here: when it lived inside TmpDir, TearDown was deleting the LOADED active
-        // scene, which is why every one of this fixture's tests used to pay a second NewScene.
+        // Saved so the baseline is genuinely CLEAN: the fixture build leaves it dirty, and the assertion would
+        // only prove Inspect preserves an already-dirty scene. Saved OUTSIDE TmpDir, which TearDown deletes.
         const string scenePath = "Assets/AgentCheckAvatarNoDirtyScene.unity";
         var scene = EditorSceneManager.GetActiveScene();
         EditorSceneManager.SaveScene(scene, scenePath);
@@ -948,8 +884,6 @@ public class CheckAvatarTests
         EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         AssetDatabase.DeleteAsset(scenePath);
     }
-
-    // ── Bad input → bare FAIL, no trailer ─────────────────────────────────────────────────────────────
 
     // ── Real dynamics reflection: type/getter canary + null-root extraction ───────────────────────────
 
@@ -987,16 +921,10 @@ public class CheckAvatarTests
 
     // ── anchor-seam ─────────────────────────────────────────────────────────────────────────────────
     //
-    // WHAT THESE PROVE, AND WHAT THEY DO NOT. Every test below exercises the WALK — the carrier and
-    // relocator sets, the mount boundary, the declared-parameter match, the degraded rail. None of them
-    // proves the underlying claim that a parameter-carrying component an MA relocator moves out of its
-    // FullController keeps the bare name at bake: a fixture asserting "the predicate fires on a shape I
-    // believe breaks" passes whether or not the belief is true. The oracle for the claim is external: the
-    // pre-fix `selective-animation` entry (vrc-patterns @ a62924f^), whose two VRCRaycasts under the
-    // BoneProxy'd `Aim` bake still writing `SelectiveAnimation/Ray` and `SelectiveAnimation/Wall` while the
-    // built FX reads only the prefixed names, and whose 28 clip bindings through that same `Aim` all
-    // survive — which is why a clip binding is no longer this class's. Treat a green run here as "the walk
-    // still walks", never as "the break is real".
+    // Every test below exercises the WALK: the carrier and relocator sets, the mount boundary, the
+    // declared-parameter match, the degraded rail. None proves the bake claim behind the class
+    // (nondestructive.md §Choosing a framework rule 1), which only a bake can show. Read a green run as "the
+    // walk still walks", never as "the break is real".
 
     private Component AddMaRelocator(GameObject go, string shortName)
     {
@@ -1005,7 +933,6 @@ public class CheckAvatarTests
         return go.AddComponent(t);
     }
 
-    // VRCFury ArmatureLink on a node: the sanctioned anchor, which must never be an offender.
     private Component AddVrcfArmatureLink(GameObject go, GameObject propBone)
     {
         var vt = Resolve("VF.Model.VRCFury");
@@ -1035,7 +962,6 @@ public class CheckAvatarTests
 
     private const string Receiver = "VRC.SDK3.Dynamics.Contact.Components.VRCContactReceiver";
 
-    // A controller declaring the given float parameters and animating nothing.
     private AnimatorController NewParamController(string name, params string[] parameters)
     {
         var c = AnimatorController.CreateAnimatorControllerAtPath(TmpDir + "/" + name + ".controller");
@@ -1043,7 +969,6 @@ public class CheckAvatarTests
         return c;
     }
 
-    // Point the FullController's first params entry at a saved asset declaring `parameters`.
     private void SetVrcfParams(Component vrcf, string assetName, params string[] parameters)
     {
         var ep = ScriptableObject.CreateInstance<VRC.SDK3.Avatars.ScriptableObjects.VRCExpressionParameters>();
@@ -1060,7 +985,7 @@ public class CheckAvatarTests
     }
 
     // The rig every test below varies: avatar → Prop (the FullController mount) → Aim → Sensor, plus
-    // Payload as a genuine sibling of Aim. It is the pre-fix selective-animation shape, reduced.
+    // Payload as a genuine sibling of Aim.
     private GameObject NewSeamRig(string name, out GameObject aim, out GameObject sensor, out GameObject payload)
     {
         var a = NewAvatar(name);
@@ -1071,7 +996,6 @@ public class CheckAvatarTests
         return prop;
     }
 
-    // The RunLog body for a fresh Inspect of the fixture avatar.
     private string SeamLog() => ReadLog(Inspect(_avatar.name));
 
     private static int SeamCount(string log)
@@ -1274,8 +1198,7 @@ public class CheckAvatarTests
         Assert.AreEqual(0, SeamCount(SeamLog()));
     }
 
-    // The retired shape: a FullController clip binding through a relocated node survives the build, so it
-    // must not come back as an offender. Fires if a clip walk is ever reinstated here.
+    // A FullController clip binding through a relocated node survives the build, so it is not an offender.
     [Test]
     public void AnchorSeam_ClipBindingThroughRelocator_NotFlagged()
     {
@@ -1316,7 +1239,6 @@ public class CheckAvatarTests
     // empty clip, its not-found warning commented out. The fixtures are the REAL VRCFury model types, reached by
     // name the way the walk reads them: a feature on `content`, a BlendShapeAction in one of its State lists.
 
-    // A SkinnedMeshRenderer on a new child whose in-memory mesh carries the given shapes.
     private SkinnedMeshRenderer NewSkin(GameObject parent, string name, params string[] shapes)
     {
         var mesh = new Mesh { vertices = new[] { Vector3.zero, Vector3.right, Vector3.up }, triangles = new[] { 0, 1, 2 } };
@@ -1326,7 +1248,6 @@ public class CheckAvatarTests
         return smr;
     }
 
-    // A VRCFury component whose `feature` carries one BlendShape action in the State at `stateField`.
     private Component AddVrcfBlendShapeAction(GameObject go, string feature, string stateField, string shape, bool allRenderers, Renderer renderer)
     {
         var vt = Resolve("VF.Model.VRCFury");
@@ -1444,7 +1365,6 @@ public class CheckAvatarTests
         Assert.AreEqual(1, BlendshapeCount(ReadLog(Inspect("BS7"))));
     }
 
-    // The loud degrade: a VRCFury component whose feature type does not decode is named, never read as clean.
     [Test]
     public void BlendshapeAction_UndecodableFeature_DegradesLoud()
     {
@@ -1548,13 +1468,8 @@ public class CheckAvatarTests
     }
 }
 
-// The merge-conflict grouping core. Each test injects fake merge→base pairs + fake dynamics targets via the
-// two seams, so it proves the pure grouping/resolution logic on synthetic transforms — a child GameObject's
-// .transform is a fine stand-in for a dynamics Component host.
-//
-// Its own fixture because it needs NONE of CheckAvatarTests' scaffolding: no clip, no controller, no scratch
-// folder, no saved scene. One scene for the whole fixture; per-test cleanup is a DestroyImmediate plus a seam
-// restore (both free), and the RunLogs are removed in one batch at the end.
+// The merge-conflict grouping core, on merge→base pairs and dynamics targets injected through the two seams. It
+// needs no clip, controller, scratch folder or saved scene, so one scene serves the whole fixture.
 public class CheckAvatarMergeConflictTests
 {
     private GameObject _root;
@@ -1592,7 +1507,6 @@ public class CheckAvatarMergeConflictTests
     private GameObject NewAvatar(string name) => _root = CheckAvatarFixture.Avatar(name);
     private static GameObject NewChild(GameObject parent, string name) => CheckAvatarFixture.Child(parent, name);
 
-    // The RunLog body for a fresh Inspect of the fixture root, with the artifact recorded for teardown.
     private string InspectLog()
     {
         var path = CheckAvatarFixture.LogPath(CheckAvatar.Run(_root.name));
@@ -1608,7 +1522,7 @@ public class CheckAvatarMergeConflictTests
         params (Component host, Transform target, string category, string detail)[] t)
         => _ => t.Select(x => (x.host, x.target, x.category, x.detail)).ToList();
 
-    // Avatar-root-relative path of a named child, matching CheckAvatar.PathOf output (Root/Child).
+    // Matches CheckAvatar.PathOf output (Root/Child).
     private static string PathOf(GameObject root, string childName) => root.name + "/" + childName;
 
     [Test]
@@ -1657,10 +1571,7 @@ public class CheckAvatarMergeConflictTests
 
     // A base bone carrying a per-range variant set reads as N components fighting unless each offender says
     // whether it is running: the group a mergeable joins is then 1 real conflict + N intentional variants,
-    // and de-conflicting against a not-live member is silent. Both markers are spelled in ONE report here —
-    // the strongest form of "an all-live report is distinguishable from one produced before liveness was
-    // evaluated at all". The note fires once and only for a mixed-live PHYSBONE group, and none of it touches
-    // the ≥2-with-a-mergeable predicate.
+    // and de-conflicting against a not-live member is silent.
     [Test]
     public void MergeConflict_MixedLivePhysboneGroup_IsMarkedAndNoted()
     {
@@ -1679,8 +1590,8 @@ public class CheckAvatarMergeConflictTests
         StringAssert.Contains("[not-live] " + root.name + "/VariantOff", log);
         StringAssert.Contains("[live] " + root.name + "/MergeBone", log);
         StringAssert.Contains("[live] " + root.name + "/BaseBone", log);
-        // The GATE is the contract, not the wording — assert the canon's own constant so a prose pass over
-        // CheckAvatar's Notes cannot red this test (and its three negatives) for no behaviour change.
+        // The GATE is the contract, not the wording: assert the constant, so a prose pass over CheckAvatar's
+        // Notes cannot red this test.
         StringAssert.Contains(CheckAvatar.VariantSetNoteLine, log);
     }
 
@@ -1722,7 +1633,6 @@ public class CheckAvatarMergeConflictTests
         return c;
     }
 
-    // An avatar with a base bone and a merge bone the injected merge pair folds onto it.
     private (GameObject root, Transform baseBone, Transform mergeBone) ColliderScene(string name)
     {
         var root = NewAvatar(name);
@@ -1736,7 +1646,6 @@ public class CheckAvatarMergeConflictTests
         params VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider[] cols)
         => _ => cols.Select(c => ((Component)c, c.rootTransform, "collider", "")).ToList();
 
-    // The case that must never go quiet: one shape stacked twice on a bone.
     [Test]
     public void MergeConflict_IdenticalColliders_AreFlagged()
     {
@@ -1751,7 +1660,7 @@ public class CheckAvatarMergeConflictTests
         StringAssert.Contains(root.name + "/MergeBone/MergeCol", log);
     }
 
-    // Distinct shapes sharing a bone are an authored composite, not a conflict (Shinano_Belliluna's legs).
+    // Distinct shapes sharing a bone are an authored composite, not a conflict.
     [Test]
     public void MergeConflict_DistinctColliderShapes_AreQuiet()
     {
@@ -1870,7 +1779,6 @@ public class CheckAvatarMergeConflictTests
         StringAssert.Contains("mergeConflict=1", InspectLog());
     }
 
-    // In a mixed group only the matching pair is an offender; the distinct member is not named.
     [Test]
     public void MergeConflict_MixedColliderGroup_FlagsOnlyTheMatchingPair()
     {
@@ -2018,8 +1926,7 @@ public class CheckAvatarMergeConflictTests
         StringAssert.Contains("final=`" + PathOf(root, "B1") + "`", log);
     }
 
-    // The empty fixture: no pairs, no targets. Also the PASS floor — the seam's partial-map note rides on the
-    // same run, so one test covers both (an "empty everything is PASS" twin asserted strictly less).
+    // The empty fixture, also the PASS floor: the seam's partial-map note rides on the same run.
     [Test]
     public void MergeConflict_PartialMapNote_Surfaces()
     {

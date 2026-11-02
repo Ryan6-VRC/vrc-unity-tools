@@ -3,26 +3,15 @@ using Ryan6Vrc.AgentTools.Editor;
 using UnityEngine;
 using UnityEngine.TestTools;
 
-// ReportConsole exists because the MCP read_console door returns only an entry's first line. These pin
-// the properties that make it a fix rather than a second opinion:
-//
-//   1. THE WHOLE ENTRY COMES BACK, multi-line payload included, read live from the Editor console.
-//   2. THE BODY/STACK SPLIT IS UNITY'S, not a guess. `callstackTextStartUTF16` is an index Unity
-//      computed; a missing or out-of-range one keeps the whole message as body, which is the safe
-//      direction. No line is ever discarded for looking like a stack frame.
-//   3. TYPE COMES FROM mode BITS, with error beating warning.
-//   4. NOTHING IS DROPPED SILENTLY — withheld frames and stripped entries are counted, and a bad
-//      filter fails loud.
-//
 // Two hazards for anyone adding a case here. This fixture must not assert on console CLEANLINESS:
-// ReportConsole writes nothing to the console, but the tests around it log freely. And it must not
-// assert on entry TEXT under a large `count` — in a full suite run the console carries enough
-// entries to push the digest past the inline budget, where the return value is a summary plus a
-// Snapshot path and the text is on disk. Keep `count` small when asserting on text; a case that
-// passes filtered and fails in the suite is this, not a real defect.
+// the tests around it log freely. And it must not assert on entry TEXT under a large `count`: in a
+// full suite run the console carries enough entries to push the digest past the inline budget,
+// where the return value is a summary plus a Snapshot path and the text is on disk. Keep `count`
+// small when asserting on text; a case that passes filtered and fails in the suite is this, not a
+// real defect.
 public class ReportConsoleTests
 {
-    // ----- 1. The defect: every line of a multi-line entry survives the live read -------------
+    // ----- Every line of a multi-line entry survives the live read ---------------------------
 
     [Test]
     public void Report_returnsEveryLineOfAMultiLineEntry()
@@ -39,9 +28,6 @@ public class ReportConsoleTests
         StringAssert.Contains("=> OK", result);
     }
 
-    // The shape this tool was built for: a header plus a list payload, logged through Debug so the
-    // entry carries a real callstack after it. Every payload line must land in the BODY, above the
-    // "--- stack ---" marker — the split must not eat into the list.
     [Test]
     public void Report_listPayloadStaysAboveTheStack()
     {
@@ -61,8 +47,6 @@ public class ReportConsoleTests
         StringAssert.Contains("m_LocalScale.x) from ClipC", body);
     }
 
-    // filterText matches the FULL entry, not just the header — otherwise a caller cannot search for the
-    // payload text this tool exists to surface.
     [Test]
     public void Report_filterTextMatchesTheBody_notJustTheHeader()
     {
@@ -75,7 +59,7 @@ public class ReportConsoleTests
         StringAssert.Contains("shown=1", result);
     }
 
-    // ----- 2. The split is Unity's index, and its absence is safe ----------------------------
+    // ----- The split is Unity's index, and its absence is safe -------------------------------
 
     [Test]
     public void SplitAt_usesTheReportedIndex()
@@ -87,7 +71,7 @@ public class ReportConsoleTests
         Assert.AreEqual("UnityEngine.Debug:Log ()", stack);
     }
 
-    // No callstack recorded: the whole message is body. Nothing may be split off on a guess.
+    // Index 0 is Unity recording no callstack.
     [Test]
     public void SplitAt_zeroIndex_keepsWholeMessageAsBody()
     {
@@ -98,8 +82,6 @@ public class ReportConsoleTests
         Assert.AreEqual("", stack);
     }
 
-    // An index Unity reports that we cannot honour (drift, or a truncated message) must degrade to
-    // "keep everything" rather than throwing or trimming blind.
     [Test]
     public void SplitAt_outOfRangeIndex_keepsWholeMessageAsBody()
     {
@@ -113,8 +95,6 @@ public class ReportConsoleTests
         Assert.AreEqual("", stack);
     }
 
-    // Only the single separator newline is removed. A trailing blank line the payload meant to have
-    // is content, and TrimEnd would have eaten the whole run of them.
     [Test]
     public void SplitAt_keepsABlankLineAtTheBoundary()
     {
@@ -125,7 +105,7 @@ public class ReportConsoleTests
         Assert.AreEqual("Foo:Bar ()", stack);
     }
 
-    // ----- 3. Type comes from mode bits ------------------------------------------------------
+    // ----- Type comes from mode bits ---------------------------------------------------------
 
     [Test]
     public void ClassifyMode_readsBits_notText()
@@ -138,17 +118,12 @@ public class ReportConsoleTests
         Assert.AreEqual(ReportConsole.EntryKind.Log, ReportConsole.ClassifyMode(1 << 10));    // ScriptingLog
     }
 
-    // ClassifyMode against LIVE entries, not against ErrorMask's own constants. Asserting that
-    // `1<<20 => Error` is true by construction and stays green even if every bit label is wrong --
-    // which is how three unjustified bits got into the mask. This logs one entry of each severity
-    // and requires the classification Unity itself would give, so a wrong bit shows up as a wrong
-    // answer about a real entry.
+    // Against LIVE entries, not ErrorMask's own constants: asserting `1<<20 => Error` is true by
+    // construction and stays green even if every bit label is wrong.
     [Test]
     public void ClassifyMode_matchesUnityOnLiveEntriesOfEachSeverity()
     {
         string token = "RCSEV-" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
-        // The error and exception below are the point of the test, so the framework must not treat
-        // them as unhandled failures. Scoped tightly and restored.
         LogAssert.ignoreFailingMessages = true;
         try
         {
@@ -204,10 +179,8 @@ public class ReportConsoleTests
         Assert.AreEqual(ReportConsole.EntryKind.Error, ReportConsole.ClassifyMode((1 << 0) | (1 << 9)));
     }
 
-    // ----- 4. Nothing is dropped silently -----------------------------------------------------
+    // ----- Nothing is dropped silently --------------------------------------------------------
 
-    // Suppressed frames must still be announced, or `includeStackTrace:false` reproduces the
-    // header-only read this tool replaces.
     [Test]
     public void Report_withoutStackTrace_countsTheWithheldFrames()
     {
@@ -221,15 +194,14 @@ public class ReportConsoleTests
         StringAssert.DoesNotContain("--- stack ---", result);
     }
 
-    // ----- 5. The benign strip: on by default, never silent, never self-defeating ------------
+    // ----- The benign strip: on by default, never silent, never self-defeating ---------------
 
     [Test]
     public void BenignLabel_namesEachKnownFamily()
     {
         Assert.AreEqual("MACS third-party load noise",
             ReportConsole.BenignLabel("<color=#007076>[MACS]</color>: Applying patches"));
-        // The real specimen, captured off a live console (AvatarProject, 2026-08-13). It carries no
-        // [MACS] token at all — a bare HarmonyLib exception — which is why it needs its own family.
+        // A real specimen: a bare HarmonyLib exception with no [MACS] token, so it needs its own family.
         Assert.AreEqual("MACS Harmony startup patch failure",
             ReportConsole.BenignLabel("Exception: Parameter \"\" not found in method static System.Void "
                 + "UnityEditor.Animations.MecanimUtilities::DestroyBlendTreeRecursive("
@@ -240,7 +212,6 @@ public class ReportConsoleTests
             ReportConsole.BenignLabel("VF.Exceptions: Progress (3/9)"));
     }
 
-    // The predicates must not eat a real diagnostic that merely shares a word with one of them.
     // Each of these is one token away from a family above.
     [Test]
     public void BenignLabel_realDiagnosticIsSignal()
@@ -251,10 +222,9 @@ public class ReportConsoleTests
         Assert.IsNull(ReportConsole.BenignLabel(null));
     }
 
-    // The strip takes the whole FAMILY, real failures included -- these pin that honestly rather than
-    // letting the suite imply a safety it does not have. If one of these ever needs to survive, the
-    // predicate has to narrow; until then the reported count is the only trace, which is why the
-    // summary must always carry it (next test).
+    // The strip takes the whole FAMILY, real failures included. If one of these ever needs to survive,
+    // the predicate has to narrow; until then the reported count is the only trace
+    // (Report_stripIsNeverSilent).
     [Test]
     public void BenignLabel_swallowsRealFailuresOfTheSameFamily()
     {
@@ -267,11 +237,7 @@ public class ReportConsoleTests
     }
 
     // The family is keyed on the patch TARGET plus a patch-application co-token, so the target's bare
-    // name stays signal. That name is a real UnityEditor API our own controller tooling calls, and the
-    // old bare-substring form ate any error mentioning it — including, in the field, this very MACS
-    // failure, which was then counted under a label naming a VRCFury frame that does not exist:
-    // measured 2026-08-13, zero occurrences of DestroyBlendTreeRecursive anywhere in the venue's
-    // packages, VRCFury included. A library-keyed family would be worse still — see BenignLabel.
+    // name, a real UnityEditor API, stays signal.
     [Test]
     public void BenignLabel_patchTargetNameAloneIsSignal()
     {
@@ -284,22 +250,19 @@ public class ReportConsoleTests
             "Exception: patching failed\nHarmonyLib.PatchProcessor.Patch\nVF.Hooks.VFInitHook"));
     }
 
-    // Stripping must be visible in the summary. A dropped entry whose count is not reported is the
-    // silent loss this whole tool exists to end -- the text may go, the number may not.
     [Test]
     public void Report_stripIsNeverSilent()
     {
         Debug.LogWarning("[MACS] Applying patches " + System.Guid.NewGuid().ToString("N").Substring(0, 6));
 
         // The strip counts are tallied over every matched entry before `count` trims the list, so a
-        // small count still reports the full tally -- and keeps the digest inline (see above).
+        // small count still reports the full tally and keeps the digest inline.
         string result = ReportConsole.Run(types: "all", count: 5);
 
         StringAssert.Contains("benign-stripped=[", result);
         StringAssert.Contains("MACS third-party load noise", result);
     }
 
-    // Filtering FOR noise by name must still return it, or the filter defeats itself.
     [Test]
     public void Report_filterTextExemptsAnEntryFromTheBenignStrip()
     {
@@ -318,19 +281,13 @@ public class ReportConsoleTests
         string token = "RCRAW-" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
         Debug.LogWarning("[MACS] Applying patches " + token);
 
-        // count is deliberately small: a large one lets ambient console volume push the digest past
-        // the inline budget, where the return value is a summary + artifact path and the entry text
-        // is on disk instead. The entry just logged is the newest, so a small count still contains it.
+        // Small count per the header hazard: the entry just logged is the newest, so it still lands.
         string kept = ReportConsole.Run(types: "all", count: 5, stripBenign: false);
         StringAssert.Contains(token, kept);
     }
 
-    // ----- 6. The Console window's filters bound the read, and must be declared ---------------
+    // ----- The Console window's filters bound the read, and must be declared ------------------
 
-    // The most dangerous state this door can be in: a search filter set in the Console window makes
-    // GetEntryInternal enumerate almost nothing, so an unannotated digest reports `scanned=0 => OK`
-    // on a console full of errors -- a cleaner loss than the truncation this tool replaces. Measured
-    // on a live console: 8 entries, 6 with Log hidden, 0 with a search filter. The summary must say so.
     [Test]
     public void Report_declaresTheConsoleWindowsOwnFilterState()
     {
@@ -371,7 +328,7 @@ public class ReportConsoleTests
             StringAssert.Contains("UNREACHED=", searched);
             StringAssert.Contains("search=\"zzz-no-such-text-zzz\"", searched);
             StringAssert.Contains("FILTERED VIEW", searched);
-            StringAssert.Contains("scanned=0", searched);   // the blackout case, now declared
+            StringAssert.Contains("scanned=0", searched);
         }
         finally
         {
@@ -391,18 +348,14 @@ public class ReportConsoleTests
         StringAssert.Contains("wraning", result);
     }
 
-    // A types string naming nothing must not quietly widen to `all` — that would hand back errors to a
-    // caller who asked for something else.
     [Test]
     public void Report_emptyTypeList_failsRatherThanMeaningAll()
     {
         StringAssert.Contains("[ReportConsole] FAIL", ReportConsole.Run(types: ","));
     }
 
-    // The door must not write to the console it reads: a logging reader pollutes its own next read, and
-    // a logged error is indistinguishable from a real one to PlayGate and to any clean-console check.
-    // Both the success and the failure path are checked — the failure path is where a LogError is most
-    // tempting and most damaging.
+    // A logging reader pollutes its own next read, and a logged error is indistinguishable from a real
+    // one to any clean-console check.
     [Test]
     public void Report_writesNothingToTheConsole()
     {
@@ -418,10 +371,8 @@ public class ReportConsoleTests
     }
 
     // ── Duplicate collapse ────────────────────────────────────────────────────────────────────────────
-    // A flood of one repeated message spends the whole `count` budget teaching one fact (5,672 identical
-    // entries returned 60 verbatim copies in a measured session). Collapse is pure over its input, so the two
-    // properties that matter — which occurrence represents a group, and what must stay apart — are asserted
-    // directly rather than by provoking a real flood.
+    // Collapse is pure over its input, so which occurrence represents a group and what must stay apart are
+    // asserted directly rather than by provoking a real flood.
 
     private static ReportConsole.Entry E(string body, string stack = "")
         => new ReportConsole.Entry { Kind = ReportConsole.EntryKind.Error, Full = body + stack, Body = body, Stack = stack };
@@ -438,9 +389,6 @@ public class ReportConsoleTests
         Assert.AreEqual(2, collapsed, "collapsed counts rows REMOVED — `matched` already carries the before");
     }
 
-    // The regression the last-occurrence rule exists to prevent. `count` clamps from the NEWEST end, so a group
-    // represented by its oldest instance can be clamped away — erasing a message that recurred a moment ago from
-    // a read taken to see exactly that. Asserted by position: the row lands where its newest instance sat.
     [Test]
     public void Collapse_keepsTheLastOccurrenceSoTheClampCannotEraseARecurrence()
     {
@@ -481,9 +429,8 @@ public class ReportConsoleTests
         Assert.AreEqual(1, rows[0].Value);
     }
 
-    // The tagged-probe idiom (`emulator.md`): a lambda logging one tagged line every N frames, read back by tag.
-    // There the identical repeats ARE the time series, so a filtered read must return them whole — the same
-    // exemption stripBenign already makes for a filter match.
+    // The tagged-probe idiom (`emulator.md`): the identical repeats ARE the time series, so a filtered read must
+    // return them whole.
     [Test]
     public void Report_filteredRead_isExemptFromCollapse()
     {

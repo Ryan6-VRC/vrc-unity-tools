@@ -6,20 +6,16 @@ using UnityEngine;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// The one home for vendor (MA / VRCFury / NDMF) reflection plumbing: by-name type resolution, the
-    /// MA-installed probe, and the pinned vendor-method handles the checkers INVOKE instead of re-deriving
-    /// vendor behavior from field values (a hand-copy of a vendor resolution order was correct once and
-    /// drifted silently — twice; invoking the real method can't drift, and a broken pin fails loud).
-    /// The two resolver seams are injectable exactly like <see cref="CheckAvatar"/>'s frame seams: real
-    /// vendor APIs always reflect in a live Editor, so the drift/degrade branches are otherwise
-    /// unexercisable — a test swaps a seam in SetUp and restores it in TearDown. Defaults are the real
-    /// behavior, and the seams run unconditionally on the hot path (no test-only conditional in production).
+    /// Vendor (MA / VRCFury) reflection: by-name type resolution, the MA-installed probe, and the pinned
+    /// vendor-method handles a checker invokes rather than re-deriving vendor behavior from field values.
+    /// The <c>Func</c> fields are test seams: real vendor APIs always reflect in a live Editor, so a test
+    /// swaps one to reach a drift or degrade branch.
     /// </summary>
     internal static class VendorReflect
     {
-        /// <summary>Resolve a type by full name across the loaded domain; null when genuinely absent.
-        /// Probes each assembly by name (<c>asm.GetType</c>), so one unloadable sibling type can never hide
-        /// the target the way a <c>GetTypes()</c> enumeration drop could.</summary>
+        /// <summary>Resolves a type by full name across the loaded domain; null when absent. Probes each
+        /// assembly by name, because a <c>GetTypes()</c> enumeration can lose the target to an unloadable
+        /// sibling type.</summary>
         internal static Type FindType(string fullName)
         {
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
@@ -32,10 +28,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return null;
         }
 
-        /// <summary>MA-present probe independent of any single type resolving: the runtime assembly name is
-        /// far more stable than a type's FullName, so a null <see cref="FindType"/> WITH this true means the
-        /// type drifted (surface loud), vs MA genuinely absent (the legitimate silent floor). An assembly
-        /// rename would defeat it, but that is a far larger break.</summary>
+        /// <summary>MA-present probe independent of any single type resolving: a null <see cref="FindType"/>
+        /// with this true means the type drifted (surface it loud); with this false, MA is absent (the
+        /// legitimate silent floor).</summary>
         internal static bool ModularAvatarInstalled()
         {
             foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
@@ -45,22 +40,18 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── MA AvatarObjectReference.Get(Component) ──────────────────────────────────────────────────────
 
-        /// <summary>Boxes an <c>AvatarObjectReference</c> property (default <c>p.boxedValue</c>, which THROWS
-        /// for unsupported shapes). A test swaps a throwing variant to exercise the caught-and-degrade path.</summary>
+        /// <summary>Boxes an <c>AvatarObjectReference</c> property. <c>boxedValue</c> throws for unsupported
+        /// shapes, so a caller catches and degrades.</summary>
         internal static Func<SerializedProperty, object> GetBoxedValue = p => p.boxedValue;
 
         /// <summary>Resolves the pinned <c>Get(Component)→GameObject</c> instance overload for a boxed
-        /// reference type (default <see cref="PinAorGetOverloadImpl"/>; null ⇒ unreachable/drift → the
-        /// caller runs its explicitly-labeled degraded fallback, loud).</summary>
+        /// reference type. Null means drift: the caller runs its explicitly-labeled degraded fallback, loud.</summary>
         internal static Func<Type, MethodInfo> ResolveAorGetOverload = PinAorGetOverloadImpl;
 
-        // Cached pinned instance overload: AvatarObjectReference.Get(Component) -> GameObject. Pinned by
-        // parameter type == Component AND return type == GameObject, so a future/other Get overload (e.g. the
-        // static Get(SerializedProperty), whose resolution order differs — nondestructive.md owns why) can
-        // never be silently mis-bound. Memoized PER TYPE (null included): ScanSceneRefs pins the runtime
-        // type of anything AOR-*shaped* (a referencePath + targetObject child pair), so a single global slot
-        // would let whichever type arrived first answer for every later one — and a foreign first arrival
-        // would silently blind every consumer of the pin.
+        // Memoized per type, null included: ScanSceneRefs pins the runtime type of anything AOR-shaped (a
+        // referencePath + targetObject child pair), so one global slot would let a foreign first arrival
+        // answer for every later type. MA's static Get(SerializedProperty) resolves differently from this
+        // instance overload (nondestructive.md owns how), so it is never the pin.
         private static readonly System.Collections.Generic.Dictionary<Type, MethodInfo> _aorPins =
             new System.Collections.Generic.Dictionary<Type, MethodInfo>();
         private static MethodInfo PinAorGetOverloadImpl(Type aorType)
@@ -81,10 +72,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return pin;
         }
 
-        /// <summary>The diagnostic name+message for a failed reflective invoke: unwraps the
-        /// <see cref="TargetInvocationException"/> shell <c>MethodInfo.Invoke</c> puts around whatever the
-        /// vendor method threw, so a reason string names the actual cause instead of always reading
-        /// "TargetInvocationException".</summary>
         internal static string DescribeInvokeError(Exception e)
         {
             var inner = (e as TargetInvocationException)?.InnerException ?? e;
@@ -94,12 +81,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── VRCFury AnimationBindingUtils.RewriteRelativePath(string, IReadOnlyList<BindingRewrite>) ─────
 
         /// <summary>Resolves the pinned <c>RewriteRelativePath(string, IReadOnlyList&lt;BindingRewrite&gt;)→string</c>
-        /// internal static — the build's own Path-Rewrite-Rules application (moved out of
-        /// <c>FullControllerBuilder.RewritePath(FullController, string)</c> at VRCFury 1.1380.0), invoked on the
-        /// caller's live <c>rewriteBindings</c> list so the rule semantics can never drift (and so no near-copy
-        /// of VRCFury code lives in this repo — VRCFury is not FOSS-licensed, so a hand-rolled replication is a
-        /// licensing question as well as a drift hazard). null ⇒ unreachable (API drift / VRCFury absent) → the
-        /// caller anchors it, loud. Param order is (path, rules) — the reverse of the pre-1.1414 method.</summary>
+        /// internal static, the build's own Path-Rewrite-Rules application, invoked on the caller's live
+        /// <c>rewriteBindings</c> list. VRCFury is not FOSS-licensed, so no hand-copy of it lives in this repo.
+        /// Null means unreachable (API drift or VRCFury absent): the caller anchors it, loud.</summary>
         internal static Func<MethodInfo> ResolveVrcfRewritePath = PinVrcfRewritePathImpl;
 
         private static bool _vrcfPinAttempted;
@@ -116,8 +100,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     if (m.Name != "RewriteRelativePath" || m.ReturnType != typeof(string)) continue;
                     var ps = m.GetParameters();
-                    // Pinned by shape, not just name: ps[0] the path, ps[1] a generic collection whose element
-                    // type is FullController.BindingRewrite — so a future overload can never silently mis-bind.
                     if (ps.Length == 2 && ps[0].ParameterType == typeof(string)
                                        && ps[1].ParameterType.IsGenericType
                                        && ps[1].ParameterType.GetGenericArguments().Length == 1
@@ -132,13 +114,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── VRCFury ArmatureLinkService.GetLinks + the ArmatureLink walk's supporting handles ─────────────
 
         /// <summary>Every pinned handle <c>CheckSeam</c>'s VRCFury collector invokes, resolved as one set
-        /// because none of them is usable alone. The METHOD and FIELD pins below are declared in resolution
-        /// order, and that order is load-bearing: each has its own throw site, so a release that drifts two
-        /// of them names the earlier one, and reordering silently changes which member the operator is sent
-        /// to. The three Type fields are not ordered — all five resolved types share one combined null check
-        /// and one message, so their order is unobservable. The two op_Implicit converter pins are ordered
-        /// with the rest and sit LAST, so a VFGameObject operator drift names itself after every service
-        /// handle has already resolved.</summary>
+        /// because none is usable alone. The method and field pins are declared in resolution order, and
+        /// that order is load-bearing: each has its own throw site, so a release that drifts two names the
+        /// earlier one, and reordering changes which member the operator is sent to.</summary>
         internal sealed class VrcfArmatureLinkPins
         {
             internal Type VrcfType;                     // VF.Model.VRCFury — the component the collector sweeps for
@@ -155,19 +133,17 @@ namespace Ryan6Vrc.AgentTools.Editor
             internal MethodInfo FromVfGo;               // static op_Implicit(VFGameObject) → Transform (preferred) | GameObject
         }
 
-        /// <summary>Resolves the ArmatureLink pin set. <b>null means VRCFury is ABSENT</b> — the legitimate
-        /// silent floor, on which the caller returns without recording anything. That is the OPPOSITE of the
-        /// two seams above, where null means drift and the caller runs a loud degraded fallback, so this
-        /// method deliberately has <b>no catch</b>: every drift branch THROWS, and <c>CheckSeam</c>'s
-        /// ClassifyReflect (which owns that taxonomy) maps Missing*/TypeLoad onto an error-severity REFUSE.
-        /// Swallowing a drift to null here would instead hand the collector an empty result, which reads
-        /// downstream as "no seam — bare prop" at warning: a broken tool telling the operator to add a seam
-        /// that already exists. Not memoized either, because a memo would have to cache a throw.</summary>
+        /// <summary>Resolves the ArmatureLink pin set. Null means VRCFury is absent, the silent floor on which
+        /// the caller records nothing: the opposite of the seams above, where null means drift. So this has
+        /// no catch. Every drift branch throws, and <c>CheckSeam</c>'s ClassifyReflect turns it into an
+        /// error-severity REFUSE; swallowed to null, a drift would read downstream as "no seam — bare prop", a
+        /// broken tool telling the operator to add a seam that already exists. Not memoized, because a memo
+        /// would have to cache a throw.</summary>
         internal static VrcfArmatureLinkPins ResolveVrcfArmatureLink()
         {
             var pins = new VrcfArmatureLinkPins();
             pins.VrcfType = FindType("VF.Model.VRCFury");
-            if (pins.VrcfType == null) return null; // VRCFury not installed ⇒ no VRCFury seam
+            if (pins.VrcfType == null) return null;
 
             pins.ArmLinkType = FindType("VF.Model.Feature.ArmatureLink");
             pins.VfGoType = FindType("VF.Utils.VFGameObject");
@@ -178,10 +154,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 || pathCacheType == null || armCacheType == null)
                 throw new TypeLoadException("VRCFury ArmatureLink/Service/VFGameObject/cache type missing");
 
-            // The full parameter SHAPE is asserted at pin time — types, not arity alone — so a signature
-            // change fails HERE as named drift. Arity alone passes on 1.1380.0 (param 3 is
-            // IReadOnlyList<VRCFObjectPathCache> there) and the invoke then throws ArgumentException into
-            // ClassifyReflect's wrong arm; the type assert is what closes that.
             pins.GetLinks = svcType.GetMethod("GetLinks", BindingFlags.Public | BindingFlags.Static);
             if (pins.GetLinks == null || !ParamTypesAre(pins.GetLinks, pins.ArmLinkType, pins.VfGoType, pathCacheType, armCacheType))
                 throw new MissingMethodException("ArmatureLinkService.GetLinks(ArmatureLink, VFGameObject, VRCFObjectPathCache, VRCFArmatureCache)");
@@ -195,30 +167,18 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (pins.ContentField == null) throw new MissingFieldException("VRCFury.content");
             pins.ForceOneWorldScaleField = pins.ArmLinkType.GetField("forceOneWorldScale", BindingFlags.Public | BindingFlags.Instance);
             if (pins.ForceOneWorldScaleField == null) throw new MissingFieldException("ArmatureLink.forceOneWorldScale");
-            // Deliberately a WEAKER assert than its neighbours — arity plus param[0] only. Its param 1 is
-            // VRCFury's internal `Links`, a type the collector never names (it holds whatever GetLinks handed
-            // back), so asserting it would pin a type nothing else here resolves. Tightening this to
-            // ParamTypesAre would fail a pin that passes today.
+            // Deliberately weaker than its neighbours, arity plus param 0 only: param 1 is ArmatureLinkService's
+            // nested Links, a type the collector never names (it holds whatever GetLinks handed back).
             pins.GetScalingFactor = svcType.GetMethod("GetScalingFactor", BindingFlags.Public | BindingFlags.Static);
             if (pins.GetScalingFactor == null || pins.GetScalingFactor.GetParameters().Length != 2
                 || pins.GetScalingFactor.GetParameters()[0].ParameterType != pins.ArmLinkType)
                 throw new MissingMethodException("ArmatureLinkService.GetScalingFactor(ArmatureLink, Links)");
 
-            // The two VFGameObject converters, pinned here rather than rescanned per call: CheckSeam invokes
-            // FromVfGo TWICE PER BONE PAIR, so a 60-bone seam paid ~120 full GetMethods() scans per check.
-            //
-            // BOTH pins are selected on the RETURN type as well as the parameter, and that is load-bearing, not
-            // belt-and-braces. VFGameObject declares FOUR op_Implicit taking VFGameObject — to GameObject, to
-            // Object, to Transform, and to BOOL. A per-call loop can afford to invoke each candidate and skip a
-            // result it can't use; a pin cannot, because Type.GetMethods() order is unspecified by the CLR. A
-            // pin selected on the parameter alone would therefore freeze the bool operator on some runs and not
-            // others, and FromVfGameObject would throw MissingMethodException into ClassifyReflect — every
-            // VRCFury seam check REFUSEing at error severity, blaming a vendor drift that never happened.
-            // Transform wins on BOTH pins, so neither depends on enumeration order. The `Object`-returning arm
-            // is deliberately refused rather than ranked third: its runtime result happens to be a GameObject
-            // today, so the old per-call loop consumed it, but pinning it would assert a return type the
-            // converter cannot check. A VRCFury release keeping ONLY that arm therefore fails here as named
-            // drift instead of working by luck — the trade this whole block exists to make.
+            // Both converters are selected on return type as well as parameter: VFGameObject declares four
+            // op_Implicit taking VFGameObject (to GameObject, Object, Transform and bool), and GetMethods() order
+            // is unspecified, so a parameter-only pin could freeze the bool operator on some runs. Transform wins
+            // on both pins, so neither depends on enumeration order. The Object-returning arm is refused rather
+            // than ranked third, so a release keeping only that arm fails here as named drift.
             foreach (var m in pins.VfGoType.GetMethods(BindingFlags.Public | BindingFlags.Static))
             {
                 if (m.Name != "op_Implicit") continue;
@@ -245,9 +205,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>True when the method's parameter list is exactly the given types, in order. The pins assert
-        /// TYPES, not arity: a same-arity retype (measured — GetLinks param 3 across 1.1380.0→1.1400.0) passes
-        /// every arity check and then throws ArgumentException at the invoke, into the wrong arm of
-        /// <c>CheckSeam</c>'s ClassifyReflect.</summary>
+        /// types, not arity: a same-arity retype passes an arity check, then throws a bare ArgumentException at
+        /// the invoke instead of naming the drifted member at pin time.</summary>
         internal static bool ParamTypesAre(MethodInfo m, params Type[] types)
         {
             var ps = m.GetParameters();
@@ -257,15 +216,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return true;
         }
 
-        /// <summary>Transform/GameObject → VFGameObject through the pinned op_Implicit (reflection won't apply
-        /// it implicitly). The operator and its arm are resolved once, in
-        /// <see cref="ResolveVrcfArmatureLink"/>, which owns why the pin asserts the return type.</summary>
         internal static object ToVfGameObject(VrcfArmatureLinkPins pins, GameObject go)
             => pins.ToVfGo.Invoke(null, new object[] { pins.ToVfGoTakesTransform ? (object)go.transform : go });
 
-        /// <summary>VFGameObject → Transform through the pinned op_Implicit. The result-type branch stays even
-        /// though the pin already asserted the return type: the pin is the guarantee, this is the second line
-        /// of defence, and it costs one type check.</summary>
         internal static Transform FromVfGameObject(VrcfArmatureLinkPins pins, object vfGo)
         {
             if (vfGo == null) return null;

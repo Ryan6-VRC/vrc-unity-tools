@@ -6,13 +6,12 @@ using UnityEditor.Animations;
 using UnityEngine;
 using Driver = VRC.SDKBase.VRC_AvatarParameterDriver;
 
-// A driver that repeats an operation on one parameter is refused either way — the schema holds one entry per
-// (type, name), so a recompile emits a driver the vendor did not author. What these pin is that the refusal
-// says only what is KNOWN. The message used to assert "commonly a mistyped parameter name", which is a guess
-// about intent, and it sent a reader hunting a typo through a driver whose two entries were byte-identical.
+// A driver that repeats an operation on one parameter is refused either way, because the schema holds one entry
+// per (type, name). These pin that the refusal says only what is KNOWN, never a guess at intent such as a mistyped
+// parameter name.
 //
-// Assertions match short stable tokens and the offending VALUES, never prose — the convention the surrounding
-// suites already use, so a reworded message does not rot the test while a wrong BRANCH still fails it.
+// Assertions match short stable tokens and the offending VALUES, never prose, so a reworded message does not rot
+// the test while a wrong BRANCH still fails it.
 public class DriverRepeatMessageTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/driverrepeat";
@@ -41,7 +40,6 @@ public class DriverRepeatMessageTests
         return r;
     }
 
-    // The regression the finding is about: a byte-identical repeat must not be described as a probable typo.
     [Test]
     public void Same_Value_Set_Repeat_Does_Not_Blame_A_Typo()
     {
@@ -53,9 +51,8 @@ public class DriverRepeatMessageTests
         StringAssert.Contains("same operand", r);
     }
 
-    // The replacement must not swap one guess for another. `Add` ACCUMULATES — two identical `Add X 2` entries
-    // add 4 — so "dropping one would not change runtime behaviour" is false, and a differing pair is not
-    // last-write-wins either. The message states the comparison and stops.
+    // `Add` ACCUMULATES: two identical `Add X 2` entries add 4, so "dropping one would not change runtime behaviour"
+    // is false, and a differing pair is not last-write-wins either.
     [Test]
     public void The_Message_Does_Not_Assert_Runtime_Consequences_It_Cannot_Know()
     {
@@ -95,9 +92,8 @@ public class DriverRepeatMessageTests
         StringAssert.Contains("7", r);
     }
 
-    // A driver Parameter is a union discriminated by `type`. Comparing `value` alone would call these two Copy
-    // entries identical — reporting a CONTRADICTORY repeat as a harmless one, which is the same species of
-    // misleading advice this split exists to end. `value` is untouched (0) on both.
+    // A driver Parameter is a union discriminated by `type`: comparing `value`, untouched (0) on both here, would
+    // call these two Copy entries identical and report a CONTRADICTORY repeat as a redundant one.
     [Test]
     public void Copy_Repeat_Compares_The_Source_Not_The_Value_Field()
     {
@@ -121,7 +117,6 @@ public class DriverRepeatMessageTests
         StringAssert.DoesNotContain("mistyped", r);
     }
 
-    // Random's operand is its range, again not `value`.
     [Test]
     public void Random_Repeat_Compares_Its_Range()
     {

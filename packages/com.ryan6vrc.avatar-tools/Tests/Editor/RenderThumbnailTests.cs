@@ -5,24 +5,17 @@ using Ryan6Vrc.AvatarTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Tests
 {
-    // Pure helpers ONLY (FramingGeometry / TryParseBg / YawOf / PitchOf / BundledPoses / NormalizeToken /
-    // ResolvePose / SolveCamera / ValidateCameraKnobs).
-    // Everything expression-side resolves against a BAKED avatar, so it is a scene object verified live
-    // (execute_code) by the coordinator, never in NUnit. No test here may create a GameObject,
-    // add a VRC_AvatarDescriptor, or call RenderThumbnail.Run — that class of EditMode test
-    // SIGSEGV-crashes this project's suite. In-memory AnimationClips are fine (no scene object).
+    // Scene-free helpers only. Expression resolution needs a BAKED avatar, so it is verified live
+    // (execute_code), never in NUnit. No test here may create a GameObject, add a VRC_AvatarDescriptor, or
+    // call RenderThumbnail.Run: docs/verify.md §Test venue.
     //
-    // The pose tests are deliberately GLOB-DRIVEN, never naming a specific RTPose_*: the bundled set is
-    // content that U3 churns (it replaces the two hand-authored poses wholesale). A test that hard-codes
-    // "clasped" asserts on someone else's content and breaks the moment they land.
+    // The pose tests stay glob-driven and name no specific RTPose_*: the bundled set is content, and it
+    // changes by dropping files into the folder.
     [TestFixture]
     public class RenderThumbnailTests
     {
-        // The framing REQUIREMENT, not the calibration. Echoing the six private consts made this file an
-        // edit on every recalibration while proving nothing a recalibration could get wrong; what actually
-        // has to hold is the span/drop ordering (spans are subject heights now, not dolly distances — an
-        // ordering-only check on spans alone would survive that semantic swap, so the drops are ordered too)
-        // plus the one measured constraint: the feet stay in frame at `full`.
+        // The framing requirement, not the calibration: assert the span and drop orderings plus feet in frame
+        // at `full`, and do not echo the private calibration consts.
         [Test]
         public void Framing_SpansAreSubjectHeights()
         {
@@ -37,10 +30,9 @@ namespace Ryan6Vrc.AvatarTools.Tests
             Assert.Less(bustDrop, halfDrop, "half aims lower than bust");
             Assert.Less(halfDrop, fullDrop, "full aims lower still");
 
-            // Deliberately NOT asserting full crown clearance: some crop is wanted (a thumbnail is
-            // displayed small, and a tight one reads as intentional), and chasing it on tall anime hair
-            // would cost the bust crop. Feet in frame at `full` IS load-bearing, though — and it is what
-            // ordering alone cannot give: 0.001/0.001/10 is ordered and destroys the framing.
+            // Full crown clearance is deliberately not asserted: a thumbnail displays small, a tight crop
+            // reads as intentional, and chasing clearance on tall anime hair would cost the bust crop. Feet
+            // in frame is what ordering alone cannot give: 0.001/0.001/10 is ordered and destroys the framing.
             const float WorstFeetBelowEyes = 0.95f, Ref = 1.6f;
             Assert.Greater(fullSpan / Ref * (0.5f + fullDrop), WorstFeetBelowEyes,
                 "full framing must seat the feet — measured, the lowest drawn point sits ~0.95 x view "
@@ -82,10 +74,8 @@ namespace Ryan6Vrc.AvatarTools.Tests
             Assert.IsFalse(RenderThumbnailCore.TryParseBg("#204060:8090A0", out _, out _), "both stops need '#'");
         }
 
-        // The camera solve's sign convention, which is invisible in code review and inverts the whole
-        // feature if wrong: positive yaw points toward +X, and the automatic oblique must land on the SAME
-        // side as the head's turn (measured off a real rig — see the pose-angle study table). Pitch shares
-        // the fixture: same direction vectors, the other axis of the same convention.
+        // The camera solve's sign convention, which is invisible in code review and inverts the feature if
+        // wrong: the automatic oblique must land on the SAME side as the head's turn.
         [Test]
         public void YawOf_IsSignedAboutY_PositiveTowardX()
         {
@@ -98,19 +88,8 @@ namespace Ryan6Vrc.AvatarTools.Tests
             Assert.Less(RenderThumbnailCore.PitchOf(new Vector3(0f, -1f, 1f)), 0f);
         }
 
-        // The rig-portability property the whole head-tracking feature rests on, and the one the canonical
-        // YawOf/PitchOf test above CANNOT catch by construction.
-        //
-        // Unity does not normalize humanoid bone axes. HeadFacing therefore takes the DELTA rotation first
-        // (posed · rest⁻¹) and extracts one angle from it. Extracting an angle from each forward vector and
-        // SUBTRACTING is the tempting-and-wrong alternative: it cancels a constant offset but not the axis
-        // dependence. This fixture pins both forms side by side, so the numbers the subtract form actually
-        // produces are on the record rather than asserted from the docstring.
-        //
-        // This BINDS to production: it drives the quaternion-only `HeadFacing` overload that the Transform door
-        // delegates to, so a switch to the subtract form reds this test. The subtract form is computed here too,
-        // and asserted to disagree — without that, a fixture whose rest orientation happens to make the two
-        // forms agree would pass while proving nothing.
+        // The subtract form is computed here too and asserted to disagree, because a rest orientation where the
+        // two forms agree would pass while proving nothing.
         [Test]
         public void HeadAngles_AreInvariantToTheRestBoneOrientation()
         {
@@ -126,14 +105,12 @@ namespace Ryan6Vrc.AvatarTools.Tests
 
             foreach (var rest in rests)
             {
-                // A real head turn composes ONTO the bone's rest orientation, so this is what the posed bone
-                // reports; `rest` genuinely survives into the input, which is the whole point of varying it.
+                // A head turn composes ONTO the rest orientation, so `rest` survives into the input.
                 Vector3 restFwd = rest * Vector3.forward;
                 Vector3 yawPosed = (yawTurn * rest) * Vector3.forward;
                 Vector3 pitchPosed = (chinUp * rest) * Vector3.forward;
 
-                // Production, not a re-implementation: `rootRot` is identity here, so the posed bone rotation in
-                // the root's basis is exactly `turn * rest`.
+                // `rootRot` is identity here, so the posed rotation in the root's basis is exactly `turn * rest`.
                 RenderThumbnailCore.HeadFacing(yawTurn * rest, rest, out float yawDeg, out _);
                 RenderThumbnailCore.HeadFacing(chinUp * rest, rest, out _, out float pitchDeg);
 
@@ -160,8 +137,8 @@ namespace Ryan6Vrc.AvatarTools.Tests
                 }
             }
 
-            // The measured defect itself, on the most common convention (bone +Z up the neck): tracking
-            // silently dead in yaw, and pitch inverted — a chin-up pose shot from below.
+            // The subtract form's failure on the most common convention (bone +Z up the neck): yaw tracking
+            // silently dead, and pitch inverted, so a chin-up pose is shot from below.
             var neckUp = Quaternion.Euler(-90f, 0f, 0f);
             Assert.AreEqual(0f,
                 RenderThumbnailCore.YawOf((yawTurn * neckUp) * Vector3.forward)
@@ -187,14 +164,12 @@ namespace Ryan6Vrc.AvatarTools.Tests
         public void BundledPoses_EachResolvesToItsOwnHumanoidClip()
         {
             // Doubles as a content gate: any RTPose_* that is not a humanoid muscle clip would not
-            // retarget across rigs, and ResolvePose rejects it pre-bake.
+            // retarget across rigs, and ResolvePose rejects it.
             //
-            // Name-collision guard, too. BundledPoses keys on the raw filename, so two files whose
-            // NORMALIZED names collide are two entries, and ResolvePose's first-match-wins makes one of them
-            // unreachable — silently, since there is no runtime collision check. Build time is the only place
-            // to catch it: poses land by dropping files into the folder with nobody reviewing this tool. The
-            // uniqueness assert comes first because it names the collision; the per-entry path assert below
-            // catches it too, but reports it as a mystery path mismatch.
+            // Also the only name-collision check: BundledPoses keys on the raw filename and ResolvePose takes
+            // the first normalized match, so two files whose NORMALIZED names collide leave one unreachable.
+            // The uniqueness assert comes first because it names the collision; the path assert below reports
+            // it as a mystery mismatch.
             var normalized = RenderThumbnailCore.BundledPoses().Keys
                 .Select(RenderThumbnailCore.NormalizeToken).ToList();
             CollectionAssert.AllItemsAreUnique(normalized);
@@ -203,8 +178,6 @@ namespace Ryan6Vrc.AvatarTools.Tests
             {
                 Assert.IsTrue(RenderThumbnailCore.ResolvePose(entry.Key, out AnimationClip clip, out string err),
                     entry.Key + " (" + entry.Value + ") failed to resolve: " + err);
-                // Assert WHICH clip came back, not merely that one did: with first-match-wins, a name
-                // collision resolves two entries to the same clip and the test would still pass green.
                 Assert.AreEqual(entry.Value, UnityEditor.AssetDatabase.GetAssetPath(clip),
                     "'" + entry.Key + "' resolved to the wrong asset");
                 Assert.IsTrue(clip.isHumanMotion, entry.Key + " must be a humanoid muscle clip");
@@ -214,8 +187,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
         [Test]
         public void Token_NormalizesCaseAndPunctuation()
         {
-            // Shared by pose names and FX state names: "Hand-On-Hip", "hand_on_hip" and "HandOnHip" are
-            // one token, as are "Thumbs up" and "thumbsup".
+            // Shared by pose names and FX state names.
             Assert.AreEqual(RenderThumbnailCore.NormalizeToken("handonhip"), RenderThumbnailCore.NormalizeToken("Hand-On-Hip"));
             Assert.AreEqual(RenderThumbnailCore.NormalizeToken("handonhip"), RenderThumbnailCore.NormalizeToken("hand_on_hip"));
             Assert.AreEqual("thumbsup", RenderThumbnailCore.NormalizeToken("Thumbs up"));
@@ -243,7 +215,6 @@ namespace Ryan6Vrc.AvatarTools.Tests
         [Test]
         public void Pose_Unknown_ErrEnumeratesTheFolder()
         {
-            // The advertised vocabulary is derived from disk, so it cannot drift from what ships.
             var bundled = RenderThumbnailCore.BundledPoses();
 
             bool ok = RenderThumbnailCore.ResolvePose("nope", out AnimationClip clip, out string err);
@@ -253,7 +224,6 @@ namespace Ryan6Vrc.AvatarTools.Tests
             foreach (var name in bundled.Keys)
             {
                 StringAssert.Contains(name, err);
-                // What it advertises must be what it accepts.
                 Assert.IsTrue(RenderThumbnailCore.ResolvePose(name, out AnimationClip _, out string _),
                     "advertised pose '" + name + "' does not resolve");
             }
@@ -262,10 +232,9 @@ namespace Ryan6Vrc.AvatarTools.Tests
 
         // ----- Camera knobs -----------------------------------------------------------------------------
 
-        // Default knobs must reproduce the camera from before the knobs existed. These goldens were read off
-        // the pre-knob SolveCamera by reflection, NOT computed from this code — computing them here would pass
-        // by construction. Cases 3 and 4 saturate the head-follow pitch clamp in both directions (fwd.y =
-        // ∓sin 20°), which is what a widened total clamp would have silently changed.
+        // Default-knob solves captured by reflection, NOT computed from this code, which would pass by
+        // construction. Cases 3 and 4 saturate the head-follow pitch clamp in both directions (fwd.y =
+        // ∓sin 20°), which a widened total clamp would silently change.
         private static CameraSolutionCase[] Goldens => new[]
         {
             new CameraSolutionCase("bust", 30f, null, 0f, 0f, new Vector3(0f, 1.2f, 0f), 0f, 1f, 1.2f,
@@ -314,8 +283,6 @@ namespace Ryan6Vrc.AvatarTools.Tests
             }
         }
 
-        // Aim = position + forward * distance; recovered here as the point the camera looks at, at its
-        // solved distance, so the knobs are asserted on the quantities they are defined over.
         [Test]
         public void Camera_ZoomScalesDistance_HeadroomRaisesAim_PitchRaisesCamera()
         {
@@ -323,9 +290,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
             var baseSol = c.Solve();
 
             // Every term of the camera's offset from the view point — the aim-drop, the lateral looking-room
-            // and the solved distance — is proportional to the span at a fixed orientation, so zoom must scale
-            // the whole offset by exactly 1/zoom. A zoom that moved distance but not the aim-drop, or the
-            // reverse, fails here.
+            // and the solved distance — is proportional to the span at a fixed orientation.
             var zoomed = c.Solve(zoom: 1.25f);
             AssertNear((baseSol.Position - c.Viewpoint) / 1.25f, zoomed.Position - c.Viewpoint,
                 "zoom scales the camera's whole offset from the view point by 1/zoom");

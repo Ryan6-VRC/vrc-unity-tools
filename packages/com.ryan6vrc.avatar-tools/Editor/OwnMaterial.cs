@@ -11,56 +11,27 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// Materializes an owned deep-copy of a vendor material (or branches/augments an already-owned one)
-    /// and forks exactly the named texture slots into that material's own namespace — every other slot
-    /// keeps its source GUID reference. Routing is a function of target identity: <c>outDir</c> given ⇒
-    /// own (vendor source) or branch (owned source, copy-to-new); <c>outDir</c> omitted ⇒ augment the
-    /// source in place (fork more slots on an already-owned material). The skill holds the judgment of
-    /// which slots to fork; this tool executes the copy deterministically and reports a per-slot
-    /// provenance table (<c>slots[]</c>) as the caller's verification gate.
+    /// Materializes an owned copy of a vendor material, or branches or augments an owned one, and forks the
+    /// named texture slots into its own namespace. Contract: docs/unity-tools.md.
     ///
-    /// This file is the behavioral spec. It implements the full Flow: arg guards, slot-name validation,
-    /// target-identity routing (own / branch / augment) with a copy-to-new deep copy, the copy-to-new
-    /// normalize step (a variant source is flattened into a standalone material BEFORE the unlock seam —
-    /// Thry's unlock selects <c>GetRoot()</c>, so an un-flattened variant would unlock the vendor root
-    /// instead of O — then a locked O is unlocked via reflection into
-    /// <c>Thry.ThryEditor.ShaderOptimizer.UnlockMaterials</c>,
-    /// avatar-tools never referencing <c>com.poiyomi.toon</c>, gated by a dialog guard that refuses rather
-    /// than risk Thry's blocking <c>DisplayDialog</c> when the original-shader tag can't resolve, and a
-    /// still-locked backstop that force-reimports a locked vendor source after unlocking its copy and
-    /// asserts the vendor is untouched), and the selective texture fork engine — requested slots resolve
-    /// into the per-material texture home <c>H(O) = &lt;O.folder&gt;/&lt;Sanitize(O.name)&gt;/</c> via a
-    /// run-local claimed-<c>dst</c> map (reuse/refuse, never a content-hash dedup pass or GUID-suffix
-    /// collision escape), untouched slots report their current reference, and the disk-truthful
-    /// post-condition rebuilds <c>slots[]</c> from the reloaded asset. The unlock's actual success path is
-    /// verified live in Task 7 (TestEditor has no Poiyomi package, so only detection and the
-    /// refuse-when-Thry-absent path are unit-testable here).
-    ///
-    /// Call <see cref="Run"/> from MCP execute_code or a menu item.
+    /// In comments here, S is the source material, O the owned result, and H(O) its texture home
+    /// <c>&lt;O.folder&gt;/&lt;Sanitize(O.name)&gt;/</c>. The unlock's success path needs Poiyomi installed;
+    /// without it, tests reach only lock detection and the refusal when Thry is absent.
     /// </summary>
     [AgentTool]
     public static class OwnMaterial
     {
-        // ── Thry (Poiyomi ShaderOptimizer) reflection constants — confirmed against
-        // Packages/com.poiyomi.toon/_PoiyomiShaders/Scripts/ThryEditor/Editor/ShaderOptimizer.cs: the type
-        // lives in namespace Thry.ThryEditor (not bare Thry). Tag names match ShaderOptimizer's own TAG_*
-        // consts verbatim. ──
+        // Reflection names from Packages/com.poiyomi.toon/_PoiyomiShaders/Scripts/ThryEditor/Editor/ShaderOptimizer.cs;
+        // the tags are its TAG_* consts.
         const string ThryShaderOptimizerTypeName = "Thry.ThryEditor.ShaderOptimizer";
         const string ThryTagOriginalShader = "OriginalShader";
         const string ThryTagOriginalShaderGuid = "OriginalShaderGUID";
 
-        /// <summary>
-        /// Bring <paramref name="materialPath"/> into ownership and fork <paramref name="forkTextureSlots"/>
-        /// (shader texture-property names, e.g. <c>_MainTex</c>) into the resulting owned material's own
-        /// namespace. <paramref name="outDir"/> given ⇒ own/branch a NEW owned <c>.mat</c> there (named
-        /// <paramref name="newName"/>, default the source's own name); omitted ⇒ augment the (already-owned)
-        /// source in place. Returns a one-line PASS/FAIL summary ending with the RunLog path
-        /// (<c>… =&gt; RESULT | log=&lt;path&gt;</c>); also Debug.Log/LogError's it.
-        /// </summary>
+        /// <summary><paramref name="forkTextureSlots"/> are shader texture-property names, e.g. <c>_MainTex</c>.
+        /// <paramref name="newName"/> defaults to the source's own name and requires <paramref name="outDir"/>.</summary>
         public static string Run(string materialPath, string outDir = null, string[] forkTextureSlots = null,
                                  string newName = null, bool force = false, bool whatIf = false)
         {
-            // ── Guards (Flow step 1) ────────────────────────────────────────────────────────────────
             if (string.IsNullOrEmpty(materialPath))
                 return ArgFail("null-material", "materialPath is null or empty");
 
@@ -86,10 +57,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 source = materialPath,
             };
 
-            // ── Slot-name validation (Flow step 2) — BEFORE any write/routing (no mode resolved yet, so
-            //    this FAIL stays label-only). A copy preserves the shader, so validating against S's
-            //    texture properties == validating against O's; failing here means a typo never leaves a
-            //    half-made copy. ──
             var requestedSlots = forkTextureSlots ?? Array.Empty<string>();
             var shaderTexProps = mat.GetTexturePropertyNames();
             foreach (var slot in requestedSlots)
@@ -105,9 +72,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             var requested = new HashSet<string>(requestedSlots, StringComparer.Ordinal);
 
-            // ── Routing (Flow step 3): targetPath is a pure function of target identity. From here on
-            //    the mode IS known, so every Fail/Finish call below prefixes it onto the label (the
-            //    mode-first one-liner: a wrong-mode run is catchable at a glance). ──
             string sourcePath = materialPath.Replace('\\', '/');
             bool outDirGiven = !string.IsNullOrEmpty(outDir);
             string outClean = outDirGiven ? outDir.Replace('\\', '/').TrimEnd('/') : null;
@@ -121,26 +85,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 string modeLabel = "augment " + label;
 
-                // outDir given but resolves to the source: never a silent reroute — one signal
-                // (outDir present/absent), one meaning (copy-to-new vs. augment).
                 if (outDirGiven)
                     return Fail(data, modeLabel, "outDir resolves to the source — omit outDir to augment in place");
-                // outDir omitted but newName given: closes the "meant to branch, forgot outDir, silently
-                // mutated the SOURCE" hole (DELTA 4 — attempt 1 did not have this guard).
                 if (!string.IsNullOrEmpty(newName))
                     return Fail(data, modeLabel, "newName requires outDir; omit both to augment in place");
-                // A vendor source has nowhere writable to land — it must be OWNED first via an outDir.
                 if (!TransplantCore.IsWritableAsset(sourcePath))
                     return Fail(data, modeLabel, "vendor source needs an outDir to own it into a writable bucket");
-                // In-place O (== S here) must be neither locked nor a variant — this tool never
-                // unlocks/flattens in place (that's the copy-to-new normalize step, Tasks 5/6).
                 if (IsLocked(mat))
                     return Fail(data, modeLabel, "owned material is locked; unlock first");
                 if (mat.parent != null)
                     return Fail(data, modeLabel, "owned material is a variant; OwnMaterial produces standalone materials");
 
-                // H(O) for the in-place route: O IS S, so O's folder is S's own folder — augment never
-                // renames or relocates, unlike the copy-to-new oName/outClean pairing below.
                 string inPlaceHome = InPlaceTextureHome(sourcePath, mat.name);
 
                 if (whatIf)
@@ -149,12 +104,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return WhatIfPreview(mat, inPlaceHome, requested, data, modeLabel);
                 }
 
-                // Augment: O = S already exists — createdO=false so a FAIL below never deletes the
-                // pre-existing (possibly hand-edited) material; only newly-copied textures roll back.
                 return ForkSlotsAndPersist(sourcePath, inPlaceHome, requested, data, modeLabel, createdO: false);
             }
 
-            // ── Copy-to-new: own (S vendor) or branch (S owned) — same mechanics, RunLog names which. ──
             string mode = TransplantCore.IsWritableAsset(sourcePath) ? "branch" : "own";
             string coLabel = mode + " " + label;
 
@@ -173,8 +125,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return Fail(data, coLabel, "an owned material already exists at '" + targetPath +
                     "' — pass it as materialPath to fork more slots, or choose another newName");
 
-            // H(O) = <O.folder>/<Sanitize(O.name)>/ — same oName used to build targetPath above, so O's
-            // eventual on-disk name always matches the home this plans against.
             string textureHome = outClean + "/" + TransplantCore.Sanitize(oName);
 
             if (whatIf)
@@ -183,12 +133,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (mat.parent != null)
                     data.Note("would flatten variant source into a standalone material before forking");
 
-                // Reproduce every read-only normalize FAIL on S directly (copy-to-new preserves the
-                // shader + tags, so IsLocked(S)/the tag resolution == O's pre-fork). The Thry-resolve
-                // check AND the dialog-guard's OriginalShaderResolves are both pure read-only (tags +
-                // GUIDToAssetPath/LoadAssetAtPath/Shader.Find, no Thry, no dialog risk), so both preview
-                // here — the only un-previewable step is the unlock's actual mutation. On mat (parent
-                // chain intact), matching execute's post-flatten computation.
+                // Keep in step with execute's unlock guards below: each read-only FAIL previews here against S,
+                // whose shader and tags the copy inherits. Only the unlock's own mutation cannot be previewed.
                 if (IsLocked(mat))
                 {
                     if (!TryResolvePoiUnlock(out _, out _, out string wiReason))
@@ -204,11 +150,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!TransplantCore.CopyAssetFile(sourcePath, targetPath))
                 return Fail(data, coLabel, "asset copy failed: " + sourcePath + " -> " + targetPath);
 
-            // ── Normalize O (Flow step 4, copy-to-new only — an in-place O is already normal since the
-            //    in-place guard above FAILs a variant/locked owned source before we ever get here).
-            //    Flatten a variant into a standalone material BEFORE the unlock below: Thry's unlock
-            //    selects m.GetRoot(), so an un-flattened variant would resolve to S's root and unlock THAT
-            //    (a vendor mutation) instead of O. ──
+            // Flatten before the unlock below: Thry's unlock selects m.GetRoot(), so on an unflattened variant it
+            // would unlock S's root (a vendor mutation) instead of O.
             var normalizeTarget = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
             if (normalizeTarget == null)
             {
@@ -224,12 +167,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 data.Note("flattened variant source into a standalone material before forking");
             }
 
-            // ── Unlock O if locked (Flow step 4, second half) — gated on O's own state (post-flatten, so
-            //    GetRoot() == O), so an already-unlocked branch source no-ops. Thry-resolve check FIRST
-            //    (poi simply absent is the common real-world FAIL — surfaces immediately naming Thry,
-            //    without ever popping Thry's own modal), THEN the dialog guard (refuses rather than risk
-            //    UnlockConcrete's blocking EditorUtility.DisplayDialog when the original-shader tag can't
-            //    resolve). Any FAIL here rolls back the just-created O (copy-to-new orphan). ──
             if (IsLocked(normalizeTarget))
             {
                 if (!TryResolvePoiUnlock(out _, out _, out string resolveReason))
@@ -238,11 +175,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return Fail(data, coLabel, ThryUnresolvedMessage(resolveReason));
                 }
 
-                // Dialog guard: Thry's UnlockConcrete pops a blocking EditorUtility.DisplayDialog in a live
-                // (non-batch) editor when the original-shader tag is present but does not RESOLVE to a real
-                // shader (a stale GUID after a poi reinstall/version bump, or a renamed shader) — a modal
-                // that would hang the session. Mirror Thry's own two-step fallback and refuse rather than
-                // risk it: GUID tag → GUIDToAssetPath → LoadAssetAtPath<Shader>, else name tag → Shader.Find.
                 if (!OriginalShaderResolves(normalizeTarget, out string origTag))
                 {
                     AssetDatabase.DeleteAsset(targetPath);
@@ -257,8 +189,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         unlockReason + " — is com.poiyomi.toon installed?");
                 }
 
-                // Hand-rolled rather than IsLocked(reloadedO): this must also FAIL on a null shader (a
-                // corrupt post-unlock load), which IsLocked treats as not-locked.
+                // Not IsLocked(reloadedO): this must also FAIL on a null shader, which IsLocked treats as not-locked.
                 var reloadedO = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
                 if (reloadedO == null || reloadedO.shader == null ||
                     reloadedO.shader.name.StartsWith("Hidden/Locked/", StringComparison.Ordinal))
@@ -267,13 +198,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return Fail(data, coLabel, "unlock claimed success but O still reports a locked shader");
                 }
 
-                // Still-locked backstop (replaces the cut vendor-byte gate — see the spec's "Cut from
-                // attempt 1"): when S was a locked VENDOR material, force-reimport it and assert it is
-                // STILL locked. A root-unlock via GetRoot() (an un-flattened variant, which can't happen
-                // here — flatten already ran above) or a deleted shared locked-shader folder both change
-                // S's shader name, but a folder deletion only surfaces after a reimport — a plain cached
-                // load would false-PASS. Never reached in the SDK venue (Thry never resolves, so unlock
-                // never succeeds this far); exercised live in Task 7.
+                // Still-locked backstop for a locked vendor S: a root-unlock or a deleted shared locked-shader
+                // folder both change S's shader name, but a folder deletion only surfaces after a reimport, so a
+                // plain cached load would false-PASS.
                 if (!TransplantCore.IsWritableAsset(sourcePath))
                 {
                     AssetDatabase.ImportAsset(sourcePath, ImportAssetOptions.ForceUpdate);
@@ -290,17 +217,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 data.Note("unlocked locked-poi material via Thry.ThryEditor.ShaderOptimizer.UnlockMaterials");
             }
 
-            // O now exists on disk (createdO=true) — any FAIL from here rolls it back (see
-            // ForkSlotsAndPersist's rollback closure).
             return ForkSlotsAndPersist(targetPath, textureHome, requested, data, coLabel, createdO: true);
         }
 
-        // ── Slot forking (Flow steps 5–6) ───────────────────────────────────────────────────────────────
+        // ── Slot forking ────────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// <c>H(O) = &lt;O.folder&gt;/&lt;Sanitize(O.name)&gt;/</c> for the in-place route, where O's folder
-        /// is S's own folder (no <c>outDir</c>/<c>newName</c> — augment never renames or relocates).
-        /// </summary>
         static string InPlaceTextureHome(string sourcePath, string matName)
         {
             int slash = sourcePath.LastIndexOf('/');
@@ -309,22 +230,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Read-only preview shared by both routes: full slot dispositioning off <paramref name="src"/>
-        /// (S for copy-to-new — an as-yet-uncreated O is byte-identical to it; the caller's owned material
-        /// for in-place) against <paramref name="home"/>. Mutates nothing on disk; reproduces every
-        /// read-only slot offender identically to execute (same <see cref="BuildPlan"/> call, a fresh
-        /// claimed-map — same-run collisions resolve the same way in both modes).
+        /// Read-only preview shared by both routes. <paramref name="src"/> stands in for O: S on copy-to-new,
+        /// the caller's owned material in place.
         /// </summary>
         static string WhatIfPreview(Material src, string home, HashSet<string> requested, RunData data, string label)
         {
-            // Snapshot BEFORE the first texture-slot getter BuildPlan fires (GetTexture silently wipes the
-            // material's in-memory shaderKeywords — memory unity-material-getter-clears-keywords). whatIf
-            // saves nothing, but src is the caller's LIVE material instance; leaving it keyword-wiped would
-            // be a real side effect of a call that promises to mutate nothing.
-            // Restore is in a finally — src is the caller's LIVE material, and whatIf promises to mutate
-            // nothing; if BuildPlan throws, a bare post-call restore would be skipped and leave src
-            // keyword-wiped with no RunLog (the execute path guards this exact case, see ForkSlotsAndPersist's
-            // finally).
+            // src is the caller's live material and whatIf mutates nothing, but BuildPlan's getters wipe its
+            // keywords (see FlattenVariant), so the finally restores them even if BuildPlan throws.
             var kw = src.shaderKeywords;
             try
             {
@@ -345,43 +257,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Shared mutating span for both copy-to-new (own/branch, <paramref name="createdO"/>=true — O was
-        /// just created by <c>CopyAssetFile</c> at <paramref name="targetPath"/>) and in-place (augment,
-        /// <paramref name="createdO"/>=false — <paramref name="targetPath"/> IS the caller's pre-existing
-        /// owned material): loads O, runs the fork rule (Flow step 5) against <paramref name="textureHome"/>,
-        /// persists, then rebuilds the disk-truthful <c>slots[]</c> table from the reloaded asset (Flow step 6).
-        /// An unexpected throw still rolls back and emits a FAIL RunLog, never propagates. <c>rollback</c>
-        /// ALWAYS cleans up textures <em>this run</em> wrote (never a reused pre-existing texture) but deletes
-        /// the material itself only when <paramref name="createdO"/> is true — a FAIL augmenting a
-        /// pre-existing owned material must never delete it.
+        /// The mutating span both routes share. With <paramref name="createdO"/>, O was just copied to
+        /// <paramref name="targetPath"/> and a FAIL deletes it; otherwise that path is the caller's own material,
+        /// which a FAIL never deletes. Forks into <paramref name="textureHome"/>, saves, and builds
+        /// <c>slots[]</c> from the reloaded asset. A throw becomes a rolled-back FAIL RunLog.
         /// </summary>
         static string ForkSlotsAndPersist(string targetPath, string textureHome, HashSet<string> requested,
                                           RunData data, string label, bool createdO)
         {
-            var newlyWrittenTex = new List<string>();     // texture dsts copied during this run
-            bool homeCreatedThisRun = false;               // did THIS run mkdir H(O)? (prune only then, only if empty)
+            var newlyWrittenTex = new List<string>();
+            bool homeCreatedThisRun = false;
 
-            // Hoisted above rollback (which needs `owned`/`slotBackup`) and above the try (so the finally
-            // can restore the keyword snapshot on EVERY exit path — early return, exception, or
-            // fall-through): for AUGMENT, rollback does NOT delete the caller's material, so a restore that
-            // only ran on some exits would leave the caller's LIVE in-memory material keyword-wiped with no
-            // recovery on any exit the restore forgot.
+            // Declared outside the try because the finally restores the keyword snapshot on every exit: augment's
+            // rollback spares the caller's live material, which would otherwise keep the wiped keywords.
             Material owned = null;
             string[] keywordsBeforeFork = null;
             List<(string slot, Texture tex, Vector2 scale, Vector2 offset)> slotBackup = null;
 
             Action rollback = () =>
             {
-                foreach (var t in newlyWrittenTex) AssetDatabase.DeleteAsset(t); // never a reused pre-existing texture
+                foreach (var t in newlyWrittenTex) AssetDatabase.DeleteAsset(t);
                 if (createdO)
                 {
                     AssetDatabase.DeleteAsset(targetPath);
                 }
                 else if (owned != null && slotBackup != null)
                 {
-                    // Augment rollback restores the caller's live slot refs it mutated, since it (correctly)
-                    // never deletes the material — otherwise a later row's failure would leave the caller's
-                    // LIVE material pointing at textures rollback just deleted above.
+                    // Augment keeps the caller's live material, so point its slots back at the pre-fork textures.
                     foreach (var b in slotBackup)
                     {
                         owned.SetTexture(b.slot, b.tex);
@@ -403,32 +305,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return Fail(data, label, "owned copy load failed (or wrong type): " + targetPath);
                 }
 
-                // Snapshot BEFORE any texture-slot getter fires (BuildPlan's classification reads every
-                // slot). GetTexture silently wipes the material's ENTIRE shaderKeywords array as a side
-                // effect (memory unity-material-getter-clears-keywords) — snapshot now, restore right
-                // before the persist below. For augment, `owned` IS the caller's live in-scene material —
-                // this protects its LIVE keyword state, not just what lands on disk.
+                // Snapshot before BuildPlan's slot getters wipe the keywords (see FlattenVariant). For augment,
+                // `owned` is the caller's live material, so this protects its in-memory state as well as the disk.
                 keywordsBeforeFork = owned.shaderKeywords;
 
                 if (!createdO)
                 {
-                    // Augment mutates the caller's pre-existing material's slots in place (below, per
-                    // successful forked row) — snapshot the requested slots' original refs so a LATER row's
-                    // failure can roll them back too, not just the textures this run wrote. Snapshotting via
-                    // GetTexture fires the keyword wipe, but keywordsBeforeFork above already covers that.
                     slotBackup = new List<(string, Texture, Vector2, Vector2)>();
                     foreach (var slot in requested)
                         slotBackup.Add((slot, owned.GetTexture(slot), owned.GetTextureScale(slot), owned.GetTextureOffset(slot)));
                 }
 
-                // ── Fork rule (Flow step 5), off O (byte-identical to S pre-fork on copy-to-new; the
-                //    caller's already-owned material, possibly already forked, on in-place). ──
                 var sourceToDst = new Dictionary<string, string>(StringComparer.Ordinal);
                 var claimedDstToSource = new Dictionary<string, string>(StringComparer.Ordinal);
                 var plan = BuildPlan(owned, textureHome, requested, data, sourceToDst, claimedDstToSource);
                 if (data.offenders.Count > 0)
                 {
-                    FillSlotsAndCounts(data, plan); // self-legible slots[]/counts even on a plan-validation FAIL
+                    FillSlotsAndCounts(data, plan);
                     rollback();
                     data.result = "FAIL";
                     data.error = "slot fork validation failed";
@@ -475,27 +368,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return Finish(data, label);
                 }
 
-                // G48: enable streaming mip maps on every freshly-forked texture — our OWNED copy, never the
-                // Vendor/ source (untouchable). Vendor textures routinely ship it OFF, which penalizes/blocks
-                // VRChat upload; the fork is the one moment we own a copy we may fix. Only meaningful when the
-                // texture actually has mip maps. A reused pre-existing copy (needsCopy=false) is left alone.
-                // BATCHED, and it has to be: ti.SaveAndReimport() is a full synchronous texture import per
-                // call, and a real own run forks ~25 textures — paid serially that is seconds of wall clock
-                // for a flag flip. Write every .meta first, then import the whole set in one pass with
-                // importing suspended, so the pipeline resolves them together. Safe here because nothing in
-                // the block needs a resolvable import artifact: the importer reads come first (outside), and
-                // O's own save/reimport/reload is after StopAssetEditing. StopAssetEditing MUST run — an
-                // escaped exception would otherwise leave the whole Editor with importing disabled.
+                // Enable streaming mip maps on every texture this run copied, never on the Vendor/ source. Vendor
+                // textures routinely ship it off, which the VRCSDK refuses an upload over, and the fork is the one
+                // moment we own a copy we may fix. StopAssetEditing must run: an escaped exception would otherwise
+                // leave the whole Editor with importing disabled.
                 var mipsToImport = new List<string>();
                 foreach (var texPath in newlyWrittenTex)
                 {
                     var ti = AssetImporter.GetAtPath(texPath) as TextureImporter;
                     if (ti == null || !ti.mipmapEnabled || ti.streamingMipmaps) continue;
                     ti.streamingMipmaps = true;
-                    // Gate on the .meta write, don't just fire it: a false means the flag never reached disk, so
-                    // importing that texture would apply nothing. Counting attempts instead would report "enabled
-                    // on 25" to the operator when a partial write landed it on fewer — a number they cannot check
-                    // without opening every importer.
                     if (AssetDatabase.WriteImportSettingsIfDirty(texPath)) mipsToImport.Add(texPath);
                     else data.Warning("streaming mip maps not persisted for " + texPath +
                         " (import settings write reported nothing written) — enable it by hand before upload");
@@ -511,18 +393,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     finally { AssetDatabase.StopAssetEditing(); }
                 }
                 int mipsEnabled = mipsToImport.Count;
-                // The note is deferred to the PASS point below: the save/reload and post-condition gates ahead
-                // can still rollback() (deleting these very textures), so a note here would outlive its subject.
 
-                // Re-assert the pre-fork keyword snapshot (see the note by its capture): every texture-slot
-                // read/write since then may have silently wiped shaderKeywords.
+                // Before the save, so wiped keywords do not persist.
                 owned.shaderKeywords = keywordsBeforeFork;
 
                 EditorUtility.SetDirty(owned);
                 AssetDatabase.SaveAssetIfDirty(owned);
 
-                // ── Disk-truthful post-condition (Flow step 6): reimport + reload, then rebuild slots[] and
-                //    the counts from the RELOADED O — never from pre-write intent. ──
                 AssetDatabase.ImportAsset(targetPath, ImportAssetOptions.ForceUpdate);
                 var reloaded = AssetDatabase.LoadAssetAtPath<Material>(targetPath);
                 if (reloaded == null)
@@ -573,8 +450,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     data.error = "fork did not land (post-condition)";
                     return Finish(data, label);
                 }
-                // Past every rollback gate — the forked textures are here to stay, so the streaming-mipmap
-                // note is honest now (G48).
+                // Past every rollback gate, so this note cannot outlive the textures it names.
                 if (mipsEnabled > 0)
                     data.Note("enabled streaming mip maps on " + mipsEnabled + " forked texture(s) (VRChat upload defense; owned copies only)");
                 data.result = "PASS";
@@ -589,17 +465,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             finally
             {
-                // Runs on every non-save exit (return or exception) and harmlessly-redundantly after the
-                // success path's own pre-save restore — structurally covers early returns without a manual
-                // repeat at each one (rollback spares the caller's material on the augment path, so without
-                // this the live in-memory material would keep the getter-wiped keywords with no recovery).
                 if (owned != null && keywordsBeforeFork != null) owned.shaderKeywords = keywordsBeforeFork;
             }
             return Finish(data, label);
         }
 
-        /// <summary>One planned/observed outcome for a single shader texture slot — the unit <see cref="BuildPlan"/>
-        /// produces and both the whatIf preview and the execute writer/rebuild consume.</summary>
         struct PlanRow
         {
             public string slot;
@@ -611,16 +481,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Classify every texture slot on <paramref name="src"/> (S pre-copy for whatIf/copy-to-new-preview;
-        /// the freshly-copied O for copy-to-new execute — byte-identical at this point; the caller's
-        /// already-owned material for augment) into exactly one final disposition, recording offenders
-        /// (empty/built-in/non-Texture2D/sub-asset/collision on a REQUESTED slot) and notes (unrequested
-        /// owned-elsewhere) onto <paramref name="data"/>. Requested, forkable slots get a planned destination
-        /// via <see cref="PlanFork"/>, threading <paramref name="sourceToDst"/>/<paramref name="claimedDstToSource"/>
-        /// so two slots sharing one source land on ONE planned copy and whatIf/execute agree on the fork
-        /// count. Read-only — never touches disk beyond the read-only existence/content check in
-        /// <see cref="PlanFork"/> (never mid-plan <c>File.Exists</c> for a same-run collision — the claimed
-        /// map is the sole same-run authority; this run's first copy hasn't landed yet).
+        /// Classifies every texture slot on <paramref name="src"/> into one final disposition, recording offenders
+        /// and notes on <paramref name="data"/>. Writes nothing to disk, so whatIf and execute share it.
         /// </summary>
         static List<PlanRow> BuildPlan(Material src, string textureHome, HashSet<string> requested, RunData data,
                                        Dictionary<string, string> sourceToDst, Dictionary<string, string> claimedDstToSource)
@@ -711,9 +573,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return rows;
         }
 
-        /// <summary>Outcome of <see cref="PlanFork"/>: either a resolved destination (<paramref name="refused"/>
-        /// false) or a refusal naming the occupying <c>dst</c> and the fix (<paramref name="refused"/> true;
-        /// <see cref="dstPath"/>/<see cref="needsCopy"/> undefined).</summary>
         struct ForkResolution
         {
             public string dstPath;
@@ -723,17 +582,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Resolve the destination for forking <paramref name="sourceTexPath"/> into <paramref name="textureHome"/>
-        /// against the run-local claimed set, in the spec's fixed order — the SOLE collision authority in both
-        /// whatIf and execute, so a collision refuses (or doesn't) identically in both:
-        /// (a) this SAME source already claimed a <c>dst</c> this run (two slots, one source) → reuse it;
-        /// (b) the <c>dst</c> leaf is already claimed by a DIFFERENT source this run → refuse (same-run
-        ///     collision) — never <c>File.Exists</c> here, this run's first copy hasn't landed yet;
-        /// (c) <c>dst</c> exists on disk from a PRIOR run (incremental augment) → byte-compare: equal ⇒ reuse
-        ///     (don't re-copy), different ⇒ refuse (cross-run collision) — the single pairwise byte-compare
-        ///     this tool ever does, not a general dedup pass;
-        /// (d) else claim it (<c>dstLeaf → source</c>) and plan a copy.
-        /// Read-only.
+        /// Resolves the fork destination, the sole collision authority in both whatIf and execute, so a collision
+        /// refuses identically in both. In order:
+        /// (a) this source already claimed a <c>dst</c> this run (two slots, one source) → reuse it;
+        /// (b) a different source claimed the <c>dst</c> this run → refuse, on the claimed map and never
+        ///     <c>File.Exists</c>, because this run's first copy has not landed yet;
+        /// (c) <c>dst</c> exists on disk from a prior run → byte-compare: equal reuses it, different refuses;
+        /// (d) otherwise claim it and plan a copy.
         /// </summary>
         static ForkResolution PlanFork(string sourceTexPath, string textureHome,
                                        Dictionary<string, string> sourceToDst, Dictionary<string, string> claimedDstToSource)
@@ -777,8 +632,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return new ForkResolution { dstPath = dst, needsCopy = true };
         }
 
-        /// <summary>Fill <c>data.slots</c> + the six <c>slotsX</c> counts straight from a whatIf plan (nothing
-        /// was written, so there is no reload to rebuild from — the plan IS the preview).</summary>
         static void FillSlotsAndCounts(RunData data, List<PlanRow> plan)
         {
             foreach (var row in plan)
@@ -793,18 +646,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             EmitDispositionCounts(data);
         }
 
-        /// <summary>Accumulate one slot's final disposition into <c>data</c>'s running tally. Paired with
-        /// <see cref="EmitDispositionCounts"/> (which flushes the tally into the six ordered counts) — the
-        /// single tally/emit both the whatIf preview and the execute post-reload rebuild share.</summary>
         static void TallyDisposition(RunData data, string disposition)
         {
             data.tally.TryGetValue(disposition, out long n);
             data.tally[disposition] = n + 1;
         }
 
-        /// <summary>Flush the disposition tally into the six <c>slotsX</c> counts, in the spec's fixed order
-        /// (a disposition never seen this run emits 0). No <c>slotsBuiltin</c> key — a built-in/non-Texture2D
-        /// untouched slot collapses into <c>empty</c>; a requested one is an <c>unforkable</c> offender.</summary>
+        /// <summary>There is no <c>slotsBuiltin</c> count: an untouched built-in or non-Texture2D slot counts as
+        /// <c>empty</c>, a requested one as <c>unforkable</c>.</summary>
         static void EmitDispositionCounts(RunData data)
         {
             long Get(string d) { data.tally.TryGetValue(d, out long n); return n; }
@@ -821,21 +670,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             texPath.StartsWith("Resources/", StringComparison.Ordinal) ||
             texPath.IndexOf("unity_builtin_extra", StringComparison.Ordinal) >= 0;
 
-        /// <summary>Segment-boundary containment: <paramref name="path"/> IS <paramref name="home"/> or is
-        /// nested under it — never a bare string-prefix match (no false hit on a sibling stem, e.g. "Dress"
-        /// vs "Dress_White").</summary>
+        /// <summary>Segment-boundary containment, not a string prefix: home "Dress" must not match "Dress_White".</summary>
         static bool UnderHome(string path, string home) =>
             !string.IsNullOrEmpty(path) && (path == home || path.StartsWith(home + "/", StringComparison.Ordinal));
 
-        /// <summary>Byte-for-byte content equality (never GUID identity — a copied asset always mints a
-        /// fresh GUID). Any read failure is treated as unequal (forces a refusal, never a silent overwrite).
-        /// The single pairwise compare this tool ever does — at an actual on-disk cross-run collision.</summary>
+        /// <summary>Compares bytes, not GUIDs: a copied asset always mints a fresh GUID.</summary>
         static bool BytesEqual(string pathA, string pathB)
         {
             byte[] a, b;
             try
             {
-                if (new FileInfo(pathA).Length != new FileInfo(pathB).Length) return false; // cheap size gate
+                if (new FileInfo(pathA).Length != new FileInfo(pathB).Length) return false;
                 a = File.ReadAllBytes(pathA); b = File.ReadAllBytes(pathB);
             }
             catch { return false; }
@@ -844,13 +689,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
-        /// <summary>A material is locked iff its shader is one of Thry's generated <c>Hidden/Locked/…</c>
-        /// shaders — shader-name ONLY. Real vendor poi materials carry a STALE non-empty
-        /// <c>AllLockedGUIDS</c> tag while fully UNLOCKED (a normal <c>.poiyomi/…</c> shader, live-confirmed
-        /// on the AvatarProject corpus — Thry's own <c>IsMaterialLocked</c> returns false there too), so the
-        /// tag is never a lock signal; only the shader name counts. Gates both the in-place augment guard
-        /// (an owned material must never be locked before this tool touches it) and the copy-to-new unlock
-        /// seam below.</summary>
+        /// <summary>Keys on the shader name alone: Thry's generated <c>Hidden/Locked/…</c> shaders. Never read the
+        /// <c>AllLockedGUIDS</c> tag, which real vendor Poiyomi materials carry stale and non-empty while fully
+        /// unlocked.</summary>
         internal static bool IsLocked(Material m) =>
             m.shader != null && m.shader.name.StartsWith("Hidden/Locked/", StringComparison.Ordinal);
 
@@ -861,13 +702,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             "locked poi material's original-shader tag ('" + tag + "') does not resolve to a shader — cannot safely unlock";
 
         /// <summary>
-        /// Does <paramref name="m"/>'s saved original-shader tag resolve to a REAL shader? Mirrors Thry's
-        /// own two-step fallback (the same order <c>UnlockConcrete</c> uses before it pops its blocking
-        /// <c>DisplayDialog</c>): the <c>OriginalShaderGUID</c> tag → <c>GUIDToAssetPath</c> →
-        /// <c>LoadAssetAtPath&lt;Shader&gt;</c>, else the <c>OriginalShader</c> tag (a shader NAME) →
-        /// <c>Shader.Find</c>. Presence alone is not enough — a stale GUID (poi reinstall/version bump) or a
-        /// renamed shader leaves the tag present but unresolvable, which is exactly what makes Thry pop the
-        /// modal. <paramref name="tag"/> returns whichever tag value was examined (for the refusal message).
+        /// Whether <paramref name="m"/>'s original-shader tag resolves to a real shader. When it does not (a stale
+        /// GUID after a Poiyomi reinstall, or a renamed shader), Thry's <c>UnlockConcrete</c> pops a blocking
+        /// <c>EditorUtility.DisplayDialog</c> that would hang the session, so callers refuse instead. Mirrors Thry's
+        /// fallback order: GUID tag → <c>GUIDToAssetPath</c> → <c>LoadAssetAtPath&lt;Shader&gt;</c>, else name tag →
+        /// <c>Shader.Find</c>. <paramref name="tag"/> returns the value examined, for the refusal message.
         /// </summary>
         internal static bool OriginalShaderResolves(Material m, out string tag)
         {
@@ -890,14 +729,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return false;
         }
 
-        /// <summary>
-        /// Reflection-resolve <c>Thry.ThryEditor.ShaderOptimizer.UnlockMaterials(IEnumerable&lt;Material&gt;,
-        /// ProgressBar)</c> without avatar-tools referencing <c>com.poiyomi.toon</c>: scan every loaded
-        /// assembly (mirrors <see cref="TransplantCore.ResolveTypes"/>'s assembly scan) for the type by
-        /// full name, then find the public static <c>UnlockMaterials</c> overload whose second parameter is
-        /// an enum (Thry's <c>ProgressBar</c>) and whose first accepts a <c>Material[]</c>. Never throws —
-        /// any miss is folded into <paramref name="reason"/> and the method returns false.
-        /// </summary>
+        /// <summary>Resolved by reflection because avatar-tools must not reference <c>com.poiyomi.toon</c>.</summary>
         static bool TryResolvePoiUnlock(out MethodInfo method, out Type progressBarType, out string reason)
         {
             method = null;
@@ -936,12 +768,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
-        /// <summary>
-        /// Unlock <paramref name="o"/> only, via <see cref="TryResolvePoiUnlock"/> + reflection invoke with
-        /// the enum's <c>None</c> (=0) member (no progress bar, no cancel). Any reflection miss or thrown
-        /// inner exception (<c>TargetInvocationException</c> unwrapped) becomes <c>(false, reason)</c> —
-        /// this method never throws out of <see cref="Run"/>.
-        /// </summary>
         static (bool ok, string reason) PoiUnlock(Material o)
         {
             try
@@ -968,41 +794,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // ── Normalize: variant flatten (Flow step 4) ────────────────────────────────────────────────────
+        // ── Normalize: variant flatten ──────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Bake a Material Variant into a standalone material: the resolved shader-keyword set,
-        /// <c>renderQueue</c>, and every override tag (walking the WHOLE parent chain for tag names, since
-        /// a tag never overridden on <paramref name="o"/> itself lives only in an ancestor's own
-        /// <c>stringTagMap</c>) are captured FIRST, before touching any shader property value — the first
-        /// GetColor/GetFloat/GetVector/GetInt/GetTexture call on a Material instance silently clears its
-        /// ENTIRE <c>shaderKeywords</c> array as a side effect (a Unity engine quirk confirmed empirically,
-        /// independent of variants, shaders, or this tool); reading keywords/queue/tags before ever touching
-        /// a property sidesteps it. Every shader property (float/range/color/vector/int/texture +
-        /// tiling/offset) is read off <paramref name="o"/> next — still resolving through its parent chain —
-        /// then <c>o.parent</c> is severed and everything is re-applied as <paramref name="o"/>'s own
-        /// explicit values. Un-timed: caller still owns <c>SetDirty</c>/<c>SaveAssetIfDirty</c>/reimport.
+        /// Bakes a Material Variant into a standalone material: captures keywords, <c>renderQueue</c> and override
+        /// tags, then every shader property through the parent chain, then severs <c>o.parent</c> and re-applies
+        /// them all as <paramref name="o"/>'s own values. The caller owns the save.
         /// </summary>
         static void FlattenVariant(Material o)
         {
             var shader = o.shader;
 
-            // Resolved-enabled keyword set: UNION of two sources, both read BEFORE any shader-property
-            // Get/Set below — the first GetColor/GetFloat/GetVector/GetInt/GetTexture call on a Material
-            // instance silently clears its ENTIRE shaderKeywords array as a side effect (memory
-            // unity-material-getter-clears-keywords; renderQueue, parent, the array getter itself, and
-            // IsKeywordEnabled itself do not trigger it), so keywords must be read first or lost outright.
-            //   - o.shaderKeywords (the array getter, as ForkSlotsAndPersist takes for a non-variant O):
-            //     LOCAL overrides only — but that includes keywords enabled via EnableKeyword that are NOT
-            //     in the shader's declared keyword space (common with Poiyomi/lilToon feature toggles),
-            //     which the probe below misses entirely.
-            //   - a per-name IsKeywordEnabled probe over shader.keywordSpace.keywordNames: resolves the
-            //     full effective set through the (about-to-be-severed) parent chain, so it also catches a
-            //     keyword inherited-but-never-locally-overridden — but only among shader-DECLARED names.
-            // Neither alone is complete; their union is. Residual gap: a keyword that is purely inherited
-            // from the parent AND not shader-declared is recoverable by neither method — rare (declared
-            // keywords are the normal case for inheritance) and strictly narrower than the old probe-only
-            // gap this fixes.
+            // Read keywords before any shader-property Get/Set below: the first GetColor/GetFloat/GetVector/GetInt/
+            // GetTexture call on a Material instance silently clears its ENTIRE shaderKeywords array, a Unity quirk
+            // (renderQueue, parent, the array getter and IsKeywordEnabled do not trigger it).
+            // The resolved set is the union of two sources, because neither alone is complete:
+            //   - o.shaderKeywords: local overrides only, including keywords enabled via EnableKeyword that are not
+            //     in the shader's declared keyword space (common with Poiyomi/lilToon feature toggles).
+            //   - IsKeywordEnabled over shader.keywordSpace.keywordNames: resolves through the parent chain, but
+            //     only among shader-declared names.
+            // Residual gap: a keyword purely inherited from the parent and not shader-declared is recoverable by
+            // neither.
             var enabledKeywords = new HashSet<string>(o.shaderKeywords, StringComparer.Ordinal);
             foreach (var kw in shader.keywordSpace.keywordNames)
                 if (o.IsKeywordEnabled(kw)) enabledKeywords.Add(kw);
@@ -1061,12 +873,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Every override-tag NAME ever set anywhere up <paramref name="o"/>'s parent chain (a tag never
-        /// overridden on <paramref name="o"/> itself lives only in an ancestor's own serialized
-        /// <c>stringTagMap</c> — walking the chain is the only way to find its name; there is no public
-        /// enumeration API), each resolved to <paramref name="o"/>'s own effective value via
-        /// <c>GetTag(name, false, "")</c> (Thry's own <c>DeleteTags</c> uses this exact
-        /// <c>SerializedObject</c>/<c>stringTagMap</c> walk to enumerate tag names).
+        /// Override-tag names from <paramref name="o"/>'s whole parent chain, each resolved to its effective value.
+        /// No public API enumerates tags, and a tag never overridden on <paramref name="o"/> lives only in an
+        /// ancestor's serialized <c>stringTagMap</c>, so this walks it.
         /// </summary>
         static List<KeyValuePair<string, string>> CaptureOverrideTags(Material o)
         {
@@ -1089,8 +898,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Route an argument-guard failure through the house RunLog grammar (summary + RunLog +
-        /// LogError), like the sibling transplant tools — never a bare trailer-less line.</summary>
         static string ArgFail(string label, string msg)
         {
             var data = new RunData { result = "FAIL", error = msg };
@@ -1098,8 +905,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return Finish(data, label);
         }
 
-        /// <summary>Fail an in-flight <see cref="RunData"/> (routing/write-guard stage — after arg/shader
-        /// guards, so <c>instance</c>/<c>source</c> are already populated) through the same grammar.</summary>
         static string Fail(RunData data, string label, string msg)
         {
             data.result = "FAIL";
@@ -1108,18 +913,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return Finish(data, label);
         }
 
-        /// <summary>Attach the bespoke <c>slots[]</c> section, then the shared envelope tail
-        /// (<see cref="TransplantCore.Finish"/>: RunLog + one-line summary + severity log; it also
-        /// backfills an offender on an offenderless FAIL). Every OwnMaterial exit funnels through here,
-        /// so every RunLog carries a <c>slots</c> key — empty on a pre-plan FAIL.</summary>
+        /// <summary>Every exit funnels here, so every RunLog carries a <c>slots</c> key, empty on a pre-plan FAIL.</summary>
         static string Finish(RunData data, string label)
         {
             data.Section("slots", RenderSlots(data.slots));
             return TransplantCore.Finish(data, label);
         }
 
-        /// <summary>Render the per-slot provenance table as a JSON array (the RunLog's <c>slots</c>
-        /// section) — see <see cref="SlotRow"/> for the disposition vocabulary.</summary>
         static string RenderSlots(List<SlotRow> slots)
         {
             var sb = new StringBuilder("[");
@@ -1140,11 +940,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Data types ────────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>One row of the per-slot provenance table (<see cref="RunData.slots"/>). <c>ownedPath</c>
-        /// is the owned texture's path for <c>forked</c>/<c>already-owned</c> slots; null otherwise. The six
-        /// dispositions: <c>forked</c> / <c>already-owned</c> / <c>unforkable</c> (requested slots only) and
-        /// <c>vendor-ref</c> / <c>owned-elsewhere</c> / <c>empty</c> (untouched slots) — see
-        /// <see cref="OwnMaterial.BuildPlan"/>.</summary>
+        /// <summary>One row of the RunLog's <c>slots</c> table, in <see cref="PlanRow"/>'s disposition vocabulary.</summary>
         struct SlotRow
         {
             public string slot;
@@ -1154,11 +950,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             public string ownedPath;
         }
 
-        /// <summary>The shared envelope accumulator plus this tool's bespoke rows: the <see cref="slots"/>
-        /// provenance table (rendered into the RunLog's <c>slots</c> section by
-        /// <see cref="OwnMaterial.Finish"/>) and its running disposition <see cref="tally"/>
-        /// (<see cref="OwnMaterial.TallyDisposition"/>, flushed into the six ordered <c>slotsX</c> counts
-        /// by <see cref="OwnMaterial.EmitDispositionCounts"/>).</summary>
         sealed class RunData : RunLog
         {
             public RunData() : base("own-material") { }

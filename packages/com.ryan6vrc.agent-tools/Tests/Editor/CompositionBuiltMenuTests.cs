@@ -6,10 +6,8 @@ using UnityEngine;
 using VRC.SDK3.Avatars.ScriptableObjects;
 
 /// <summary>
-/// The built-menu section reports the clone's expressions menu control by control. The cases pin what a reader
-/// acts on without a second look: a submenu the build shows twice is listed twice, a cycle and the depth cap
-/// are named rather than silently cut, an unread menu publishes no table, and <c>paramFilter</c> narrows the
-/// rows but never the summary count. Menus are built in memory, so no bake is needed.
+/// The built-menu section reports the clone's expressions menu control by control. Menus are built in memory, so
+/// no bake is needed.
 /// </summary>
 public class CompositionBuiltMenuTests
 {

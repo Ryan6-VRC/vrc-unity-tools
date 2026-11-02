@@ -15,61 +15,35 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// The <b>play-mode</b> front-end of RenderThumbnail: renders what players actually see — hair/cloth
-    /// SETTLED by the real physbone solver and FX toggles/materials RESOLVED — sharing
-    /// <see cref="RenderThumbnailCore"/>'s camera solve and capture core with the edit-mode
-    /// <see cref="RenderThumbnail"/>. Play mode is strictly opt-in and additive; the edit path is the
-    /// unchanged default.
+    /// The play-mode front-end of RenderThumbnail: hair and cloth settled by the real physbone solver and FX
+    /// resolved, over <see cref="RenderThumbnailCore"/>'s camera solve and capture.
+    /// Contract: docs/unity-tools.md.
     ///
-    /// <para><b>Why physbones need play.</b> Their solver is a Burst job driven only by the player loop; it
-    /// never ticks in edit mode or in an off-player-loop preview scene, so settle requires PLAY into a real
-    /// loaded scene. Settle spans ~60–90 player-loop frames that advance only BETWEEN editor ticks, so no
-    /// single synchronous call can settle-then-capture.</para>
+    /// <para>The physbone solver is driven only by the player loop and never ticks in edit mode or in an
+    /// off-player-loop preview scene. Settle frames advance only between editor ticks, so no single synchronous
+    /// call can settle then capture, and <c>EditorApplication.isPlaying</c> toggles only on the next editor
+    /// tick, so a tool method cannot both flip it and observe the result.</para>
     ///
-    /// <para><b>Lifecycle — the caller drives the play toggle around three tool calls:</b>
-    /// <c>Run(target)</c> (edit mode: snapshot the scene setup, open/ready the venue, enable the emulator,
-    /// isolate to one active avatar) → caller enters play (the SDK build-on-play runs, spawning the runtimes)
-    /// → <c>Shoot(…)</c> (play mode: attaches to the built local avatar on first call, then
-    /// poses/settles/composes/captures ASYNCHRONOUSLY, returning a tag the caller polls; one Begin serves many
-    /// Shoots) → caller exits play → <c>End()</c> (restore the scene setup from disk). Play entry/exit is left
-    /// to the caller (<c>manage_editor play/stop</c>) because <c>EditorApplication.isPlaying</c> toggles only
-    /// on the next editor tick — a tool method cannot both flip it and observe the result.</para>
+    /// <para>A Shoot poses on the Base playable and composes the expression into the FX playable by swapping
+    /// mixer inputs. The emulator's original playables are cached at attach and never destroyed; only the tool's
+    /// own inserted ones are. Otherwise a second shot that drops a pose or expression renders off a destroyed
+    /// playable while the verdict claims the prior state.</para>
     ///
-    /// <para><b>Playable-graph discipline.</b> A Shoot poses on the Base playable and composes the expression
-    /// into the FX playable by <em>swapping</em> mixer inputs. The emulator's ORIGINAL Base/FX playables are
-    /// cached at attach and never destroyed — a slot a shot does not override is reconnected to its original,
-    /// and only the tool's own inserted playables are destroyed. Without this, a second shot that drops a pose
-    /// or expression would render off a destroyed playable while the verdict claimed the prior state.</para>
-    ///
-    /// <para><b>Reproducibility is explicitly NOT a goal</b> (every thumbnail is a fresh avatar version).
-    /// Settle is never asserted — the verdict NAMES any chain still moving at capture (refusal over silent
-    /// cleverness). All emulator access is reflection into <c>LyumaAv3Runtime</c> privates (the emulator is an
-    /// optional dependency this package must not reference); <see cref="Run"/> asserts every member the tool
-    /// actually reads is present and FAILS LOUD, named, on drift.</para>
-    ///
-    /// <para><b>Venue.</b> The avatar is rendered in a loaded scene (the active scene, or one opened via
-    /// <c>scenePath</c>) — lit by THAT scene's lights (operator-customizable, unlike edit mode's fixed rig),
-    /// backdrop from the camera clear. On <see cref="End"/> the whole scene setup is restored from disk,
-    /// discarding the emulator control, deactivations, pose, and play-mode edits. This restore, and the
-    /// cross-call session state surviving play entry, both require Enter-Play-Mode Options with domain AND
-    /// scene reload disabled — <see cref="Run"/> SETS them (saving the operator's originals) and
-    /// <see cref="End"/> restores them, rather than demand a manual project change. Because that restore
-    /// replaces each loaded scene with its file, <see cref="Run"/> first saves every loaded scene under
-    /// <c>Assets/</c>, so the file holds what the scene held and the restore discards only this session's
-    /// own edits.</para>
+    /// <para>All emulator access is reflection into <c>LyumaAv3Runtime</c> privates, because this package must
+    /// not reference the optional emulator. <see cref="Run"/> asserts every member the tool reads and fails
+    /// loud, named, on drift.</para>
     /// </summary>
     [AgentTool]
     public static class RenderThumbnailPlay
     {
         // ~60-90 frames at the solver's fixed 60 Hz; hair/skirt/ribbons converge, underdamped props may not.
         private const int DefaultSettleFrames = 90;
-        // A chain that moved more than this (world metres, mean of its bones) between the last two settle ticks
-        // is reported "still moving" at capture. ~0.3 mm — below it is solver noise; above it the operator sees
-        // named chains and decides. NOT a settle assertion — the shot is taken regardless.
+        // A chain whose bones' mean position moved more than this (world metres) between the last two settle
+        // ticks is reported "still moving" at capture; below it is solver noise.
         private const float MovingLeafDeltaM = 0.0003f;
-        // If Time.frameCount does not advance for this long, the player loop has stalled (a paused editor keeps
-        // firing EditorApplication.update but freezes frameCount) — fail the shot rather than spin forever with
-        // _shootUpdate stuck non-null (which would refuse every later Shoot/End).
+        // A paused editor keeps firing EditorApplication.update but freezes Time.frameCount. After this long
+        // without a new frame, fail the shot rather than spin with _shootUpdate non-null, refusing every later
+        // Shoot.
         private const double StallSeconds = 20.0;
 
         /// <summary>One mixer slot: the emulator's ORIGINAL playable (cached, never destroyed) and its input
@@ -83,11 +57,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // ===== Session state (survives across MCP calls: no domain reload occurs while we stay in play) =====
-        private static bool _prepared;             // Begin ran (edit-mode prep done)
+        private static bool _prepared;             // Run's edit-mode prep is done
         private static bool _attached;             // isolated to the built local avatar (post-play-entry)
         private static string _targetName;
-        private static SceneSetup[] _sceneSetup;   // snapshot at Begin; restored from disk on End
-        // Operator's Enter-Play-Mode Options, saved at Begin and restored at End/AbortBegin (see Begin).
+        private static SceneSetup[] _sceneSetup;   // snapshot at Run; restored from disk on End
+        // Operator's Enter-Play-Mode Options, saved at Run and restored at End/AbortBegin.
         private static bool _optionsOverridden;
         private static bool _savedOptionsEnabled;
         private static EnterPlayModeOptions _savedOptions;
@@ -107,8 +81,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // Blendshape bindings any expression drove this session, keyed "path|blendShape.Name". A composed
         // override with WriteDefaults off leaves its shapes stuck on the renderer after the override is
-        // removed, so a later shot must drive the now-unused ones back to neutral (0). Reset once, then
-        // dropped — a held-0 shape needs no further reset. Cleared per attach.
+        // removed, so a later shot drives the now-unused ones back to 0, once: a held-0 shape needs no further
+        // reset.
         private static Dictionary<string, EditorCurveBinding> _touchedExpr = new Dictionary<string, EditorCurveBinding>();
 
         // In-memory controllers the current shot inserted (destroyed before the next shot / on End — HideAndDontSave
@@ -117,16 +91,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static EditorApplication.CallbackFunction _shootUpdate; // non-null while a Shoot is in flight
         private static string _lastShootResult = "(no shot yet)";
 
-        // ===== Reflected LyumaAv3Runtime members — ONLY those the tool reads (asserted in Begin) =====
+        // ===== Reflected LyumaAv3Runtime members — ONLY those the tool reads (asserted in Run) =====
         private static Type _runtimeType, _emulatorType;
         private static FieldInfo _fIsLocal, _fPlayableMixer, _fPlayables, _fFxIndex;
 
         /// <summary>
-        /// EDIT-MODE prep for a play session: snapshot the scene setup, set the Enter-Play-Mode Options (saved
-        /// for <see cref="End"/> to restore), open the venue (if <paramref name="scenePath"/> given), resolve
-        /// <paramref name="target"/>, assert the emulator's reflected members, enable the emulator, and isolate
-        /// to one active avatar (PlayGate's precondition). Does NOT enter play — after this returns READY, the caller enters play
-        /// (<c>manage_editor play</c>) so the SDK builds the avatar, then calls <see cref="Shoot"/>.
+        /// EDIT-MODE prep for a play session. Does NOT enter play: after this returns READY, the caller enters
+        /// play (<c>manage_editor play</c>) so the SDK builds the avatar, then calls <see cref="Shoot"/>.
         /// </summary>
         /// <param name="target">avatar root: hierarchy path, instance id, or name — resolved in the venue scene.</param>
         /// <param name="scenePath">optional venue scene to open (Single) first; null =&gt; use the active scene.</param>
@@ -137,13 +108,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             if (!ResolveEmulatorReflection(out string driftErr)) return Fail(driftErr);
 
-            // End restores the scene setup by reopening from disk, which replaces each loaded scene with its
-            // file. Save every loaded Assets/ scene first, unconditionally — Scene.isDirty is wrong in both
-            // directions (measured: dirty with content identical to disk; clean with a prefab instance moved in
-            // memory) — so the file holds what the scene holds and the restore discards only this session's
-            // own edits. Only scenes under Assets/: a package scene is never the caller's work, and NDMF's and
-            // Modular Avatar's preview scenes DESTROY their own roots when saved. An untitled scene has no file
-            // to save to or restore from, so it refuses — checked before any save, so a refusal writes nothing.
+            // End reopens each loaded scene from its file, so save every loaded Assets/ scene first,
+            // unconditionally: Scene.isDirty is wrong in both directions (dirty with content identical to disk;
+            // clean with a prefab instance moved in memory). Only scenes under Assets/: NDMF's and Modular
+            // Avatar's preview scenes DESTROY their own roots when saved.
             var untitled = new List<string>();
             for (int i = 0; i < SceneManager.sceneCount; i++)
             {
@@ -171,26 +139,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     + "restores the setup from disk and would discard what they hold. Save or close them"
                     + (saved.Count > 0 ? " (saved=[" + string.Join(",", saved) + "])" : ""));
 
-            // BEFORE any session state exists. Creating the RunLog dir leaves the AssetDatabase blind to it, so
-            // the first write pays a full Refresh — and a Refresh with a compile pending reloads the domain,
-            // wiping the non-serialized statics below (_prepared / _sceneSetup / _targetName). That would strand
-            // the forced play-mode options and the deactivated avatars with an End() that has nothing to restore
-            // from. Paying it here, before there is anything to lose, is what makes the later writes free.
+            // Before any session state exists: the Refresh this may pay can reload the domain, wiping the statics
+            // below.
             RenderThumbnailCore.EnsureRunLogDirImported();
 
             _sceneSetup = EditorSceneManager.GetSceneManagerSetup();
 
-            // Everything below mutates scene state; any throw (an OpenScene on a non-scene file, a bad target)
-            // must roll the operator's scenes back rather than escape raw and strand the un-restorable snapshot.
             try
             {
-                // This session REQUIRES both domain and scene reload disabled on play entry: the static
-                // session state must survive the Begin→play boundary (a domain reload would wipe it), and the
-                // edit-mode prep below must survive into the on-play SDK build (a scene reload would revert it).
-                // Set them here rather than demand a manual project change; End/AbortBegin restore the
-                // operator's originals. Set in edit mode, they apply to the caller's next play entry — and if a
-                // setting somehow didn't take, it surfaces loud downstream (the prep is lost, no runtime spawns,
-                // and the first Shoot's Attach fails "no local LyumaAv3Runtime"), never as a silent wrong shot.
+                // Both reloads must be off at play entry: a domain reload wipes the static session state, and a
+                // scene reload reverts the edit-mode prep before the on-play SDK build.
                 OverrideEnterPlayModeOptions();
 
                 if (scenePath != null)
@@ -210,8 +168,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var descriptor = target0.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
                 if (descriptor == null) { AbortBegin(); return Fail("no VRCAvatarDescriptor on '" + target0.name + "'"); }
 
-                // PlayGate wants exactly one active avatar. Deactivate every OTHER active avatar in the loaded
-                // scenes (restored by the End setup-restore). The target itself must be active to build.
+                // PlayGate wants exactly one active avatar; End's setup-restore brings the others back. The
+                // target itself must be active to build.
                 var deactivated = new List<string>();
                 foreach (var other in UnityEngine.Object.FindObjectsOfType<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>())
                 {
@@ -222,15 +180,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 bool emuMade = EnsureEmulatorEnabled(venue);
 
-                // Did we actually change the operator's options (vs. they were already both-reload-disabled)?
                 bool optsChanged = !IsBothReloadDisabled(_savedOptionsEnabled, _savedOptions);
-                // …and if they were already forced, is that the operator's own setting or an earlier session's
-                // residue? SessionState covers a domain reload but dies with the EDITOR, so a Begin followed by
-                // a close or a crash leaves the forced pair on disk (a project setting) with no record beside
-                // it. The next Begin then reads our own values as the originals and End "restores" them —
-                // cementing the very state this machinery exists to prevent. Nothing here can tell the two
-                // apart, so say so rather than adopt silently: refusing would be wrong (running both-reload-
-                // disabled is a legitimate project setting) but so is a reassuring silence.
+                // An already-forced pair with no record beside it is the operator's own setting or the residue of
+                // a session that died with the editor, and nothing here can tell them apart. Both-reload-disabled
+                // is a legitimate project setting, so the summary names the doubt rather than refuse.
                 bool adoptedForced = !optsChanged && !_recordWasPresent;
 
                 _targetName = target0.name;
@@ -262,8 +215,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // Undo a Begin that fails after it began mutating global/scene state (restore the operator's
-        // Enter-Play-Mode Options and scenes).
+        // Undo a Run that fails after it began mutating global and scene state.
         private static void AbortBegin()
         {
             RestoreEnterPlayModeOptions();
@@ -272,38 +224,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
             _sceneSetup = null;
         }
 
-        // The saved Enter-Play-Mode Options, mirrored where a domain reload cannot reach them.
-        //
-        // Every field above is a plain static, so a mid-session domain reload — a recompile, a package
-        // import — wipes the whole session at once. Options are NOT statics: they are project settings, so
-        // the forced DisableDomainReload | DisableSceneReload survives the reload that erased the record of
-        // what preceded it. That asymmetry is the bug. Two things then go wrong, and the second is worse:
-        // End() reports "no prepared session" and returns without restoring, and the NEXT Run() saves the
-        // forced values as if they were the operator's own, cementing them permanently. Measured in a live
-        // editor: options forced on, _optionsOverridden false, _savedOptions None — the originals gone.
-        //
-        // SessionState is the right shelf. It outlives a domain reload and dies with the editor, which is
-        // exactly a play session's lifetime; EditorPrefs would outlive the editor too and let a record from
-        // a crashed session clobber a later one's genuine settings.
+        // The saved options, mirrored where a domain reload cannot reach them. A mid-session reload wipes the
+        // statics above, but the forced pair is a project setting and stays, so without this record the next
+        // Run would save it as the operator's own. SessionState outlives a domain reload and dies with the
+        // editor, a play session's lifetime; EditorPrefs would let a crashed session's record clobber a later
+        // one's genuine settings.
         private const string OptionsKey = "Ryan6Vrc.RenderThumbnailPlay.savedEnterPlayModeOptions";
-        // Whether THIS Begin found a surviving record. Distinguishes "the operator runs both-reload-disabled"
-        // from "an earlier session forced it and died before End" — indistinguishable from the settings alone.
         private static bool _recordWasPresent;
 
-        // Force Enter-Play-Mode Options to both-reload-disabled for the session, saving the operator's
-        // originals for End/AbortBegin to put back. Called once per Begin, before End.
         private static void OverrideEnterPlayModeOptions()
         {
-            // Adopt a surviving record rather than overwrite it. Reached when a domain reload cleared the
-            // statics while an override was still in force: the values readable now are OUR forced ones, and
-            // saving those is what turns a recoverable reload into a permanent settings change.
-            //
-            // Both decisions below key off the PARSE, not off the raw string being non-empty. Keying the flag
-            // on the raw string let the two disagree on a malformed record: LoadSavedOptions drops it and
-            // returns false (so the forced values get saved as the operator's originals), while the flag read
-            // true and suppressed the very warning that case needs. No writer can emit a malformed record
-            // today, so this is a latent inconsistency rather than a live bug — but the two answers should
-            // never have come from different questions.
+            // Adopt a surviving record rather than overwrite it: after a domain reload cleared the statics, the
+            // values readable now are our forced ones. Both decisions below key off the parse, not the raw string,
+            // so a malformed record cannot save the forced pair as originals while suppressing the adoptedForced
+            // warning.
             bool usableRecord = !_optionsOverridden && LoadSavedOptions();
             _recordWasPresent = _optionsOverridden || usableRecord;
             if (usableRecord) { ApplyForcedOptions(); return; }
@@ -315,15 +249,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             ApplyForcedOptions();
         }
 
-        // ----- Pure record codec (unit-tested directly) ---------------------------------------------
+        // ----- Pure record codec -------------------------------------------------------------------
         //
-        // The record's only reader and only writer are a domain reload apart — the write happens in one
-        // Begin, the read in whatever Begin runs after a recompile wiped the statics. That reload cannot be
-        // provoked in the batchmode suite, so the live path can never prove the two halves agree: a writer
-        // and a parser that disagreed on the format would look exactly like "no record survived", the
-        // recoverable-looking symptom whose end state is the operator's Enter-Play-Mode Options cemented to
-        // our forced pair. Split out so the agreement is assertable without a reload — the round-trip is the
-        // proof, and it is what keeps the "no writer can emit a malformed record" claim above true.
+        // Writer and reader sit a domain reload apart, which the batchmode suite cannot provoke, so the
+        // round-trip test is what proves they agree.
 
         /// <summary>Encode the operator's options pair for <see cref="OptionsKey"/>. Inverse of
         /// <see cref="TryParseOptionsRecord"/>.</summary>
@@ -331,9 +260,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             (enabled ? "1" : "0") + "|" + (int)opts;
 
         /// <summary>Decode a record written by <see cref="FormatOptionsRecord"/>. False (with both outputs
-        /// left at default) for anything that is not a well-formed pair — absent, wrong arity, or a
-        /// non-integer options field. Half a settings pair is worse than none, so a malformed record is
-        /// rejected whole rather than partly applied.</summary>
+        /// left at default) for anything that is not a well-formed pair.</summary>
         internal static bool TryParseOptionsRecord(string raw, out bool enabled, out EnterPlayModeOptions opts)
         {
             enabled = false;
@@ -348,16 +275,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>Is this options pair already the both-reload-disabled state <see cref="ApplyForcedOptions"/>
-        /// forces? Drives Begin's `optsChanged` — when true, Begin changed nothing and End must not claim to
-        /// restore anything.</summary>
+        /// forces? When true, <see cref="Run"/> changed nothing.</summary>
         internal static bool IsBothReloadDisabled(bool enabled, EnterPlayModeOptions opts) =>
             enabled
             && (opts & EnterPlayModeOptions.DisableDomainReload) != 0
             && (opts & EnterPlayModeOptions.DisableSceneReload) != 0;
 
-        /// <summary>The pair Begin forces for the session. Named once so <see cref="ApplyForcedOptions"/> and
-        /// <see cref="IsBothReloadDisabled"/> cannot drift apart — were they to, every Begin would report
-        /// `playmode-reload=disabled` and then "restore" over settings it never changed.</summary>
         internal const EnterPlayModeOptions ForcedOptions =
             EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
 
@@ -367,8 +290,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             EditorSettings.enterPlayModeOptions = ForcedOptions;
         }
 
-        // Rehydrate _savedOptions* from SessionState. True iff a record was there and parsed; a malformed one
-        // is dropped rather than half-applied, since restoring half a settings pair is worse than refusing to.
+        // Rehydrate _savedOptions* from SessionState. True iff a record was there and parsed; a malformed one is
+        // erased.
         private static bool LoadSavedOptions()
         {
             var raw = SessionState.GetString(OptionsKey, "");
@@ -392,11 +315,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Pose, settle, compose the expression, and capture — asynchronously across editor ticks (play mode).
-        /// On the first call it attaches to the built local avatar (isolate by IsLocal, cull-guard). Returns
-        /// immediately with <c>STARTED tag=&lt;t&gt;</c>; when the settle completes it logs (and stores for
-        /// <see cref="Status"/>) the verdict line <c>[RenderThumbnailPlay] &lt;tag&gt; Shoot … =&gt; OK | png=… |
-        /// moving=[…]</c>. Poll <c>ReportConsole</c> (filterText: the tag) or call <see cref="Status"/>.
+        /// Pose, compose the expression, settle and capture, asynchronously across editor ticks, attaching to the
+        /// built local avatar on the first call. Returns immediately with <c>STARTED tag=&lt;t&gt;</c>; poll
+        /// <c>ReportConsole</c> (filterText: the tag) or <see cref="Status"/> for the verdict.
         /// </summary>
         /// <param name="pose">null =&gt; the emulator idle (a moving pose — prefer a clip); a bundled name or a
         /// clip asset path/GUID (resolved identically to edit mode).</param>
@@ -420,7 +341,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // Re-attach when the built avatar is gone (a prior play exit destroyed it while the session persisted).
             if (!_attached || _root == null) { if (!Attach(out string attachErr)) return Fail(attachErr); }
 
-            // Validate framing/bg/fov up front (mirrors edit mode's fail-fast).
             float span, aimDrop;
             try { RenderThumbnailCore.FramingGeometry(framing, out span, out aimDrop); }
             catch (ArgumentException ex) { return Fail(ex.Message); }
@@ -453,8 +373,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         + "which the play-mode expression compositor cannot clone — take this expression in edit mode");
                 if (_fxIndex < 0)
                     return Fail("no FX playable slot on the runtime — cannot compose the expression");
-                // Parity with edit mode's zero-binding guard: an expression that resolves no blendshape on this
-                // avatar renders an unchanged face under a verdict that claims it. Fail loud instead.
+                // An expression that resolves no blendshape on this avatar renders an unchanged face under a
+                // verdict that claims it.
                 if (!ExpressionBindsAny(_root, exprClip))
                     return Fail("expression '" + expression + "' (clip '" + exprClip.name + "') moves no blendshape on "
                         + "the built avatar — it binds shapes this avatar lacks, or only meshes that are not drawn");
@@ -465,25 +385,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var descriptor = _root.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             Vector3 viewpoint = _root.transform.TransformPoint(descriptor.ViewPosition);
 
-            // --- Build this shot's playables, then swap them in; the emulator originals are preserved. New
-            // controllers go to a LOCAL list, adopted only after the prior shot's playables are destroyed. ---
             var mixer = (AnimationLayerMixerPlayable)_fPlayableMixer.GetValue(_localRuntime);
             var graph = PlayableExtensions.GetGraph(mixer);
             var playables = (System.Collections.IList)_fPlayables.GetValue(_localRuntime);
             var newDisp = new List<UnityEngine.Object>();
 
-            // Build this shot's playables and swap them in as one all-or-nothing unit: a throw here (a bad clip,
-            // an invalidated graph) must not leak the just-built HideAndDontSave objects (they survive play exit
-            // under DisableDomainReload), half-swap the graph, or escape raw. Nothing is committed until it all
-            // succeeds — the prior shot's objects and _touchedExpr stay owned until then.
+            // A throw here must not leak the just-built HideAndDontSave objects, which survive play exit under
+            // DisableDomainReload. The prior shot's objects and _touchedExpr stay owned until the whole swap
+            // succeeds.
             Dictionary<string, EditorCurveBinding> newTouched = _touchedExpr;
             try
             {
                 AnimatorControllerPlayable? posePlayable = poseClip != null
                     ? WrapClip(poseClip, "__rtp_pose", graph, newDisp) : (AnimatorControllerPlayable?)null;
-                // The FX override clip is this shot's expression PLUS reset-to-0 for any shape a prior shot drove
-                // that this one doesn't (null when there is no expression and nothing to clear — then the FX slot
-                // returns to the emulator original). Only reachable with a clonable FX after the expression checks.
                 AnimationClip fxClip = BuildExpressionClip(exprClip, newDisp, out newTouched);
                 AnimatorControllerPlayable? exprPlayable = (fxClip != null && _fxIndex >= 0 && _origFxController is UnityEditor.Animations.AnimatorController)
                     ? ComposeFxOverride(fxClip, graph, newDisp) : (AnimatorControllerPlayable?)null;
@@ -494,20 +408,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             catch (Exception ex)
             {
-                // Free this shot's just-built objects; force a clean re-Attach (a partial swap leaves the graph
-                // inconsistent — re-Attach re-caches the slots from the live graph on the next Shoot).
+                // A partial swap leaves the graph inconsistent, so force a re-Attach on the next Shoot.
                 foreach (var o in newDisp) if (o != null) UnityEngine.Object.DestroyImmediate(o);
                 _attached = false;
                 return Fail("shot construction failed (" + ex.GetType().Name + ": " + ex.Message + ")");
             }
 
-            // Success: the prior shot's inserted playables are destroyed (by SetSlot) — destroy its controllers,
-            // adopt this shot's, and commit the touched-shape record for the next shot's reset.
+            // SetSlot destroyed the prior shot's inserted playables, so its controllers can go now.
             DisposeShootObjects();
             _shootDisposables.AddRange(newDisp);
             _touchedExpr = newTouched;
 
-            // --- Physbone chains to watch for the moving-chains verdict ---
             var chains = CollectChains(_root);
 
             // --- Frame-driven state machine: settle N frames, then solve + capture + log. ---
@@ -526,20 +437,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (!Application.isPlaying) { FinishShoot(step, tag, "[RenderThumbnailPlay] " + tag + " Shoot => FAIL: play exited mid-settle"); return; }
                     int elapsed = Time.frameCount - injectFrame;
 
-                    // Stall guard: if frames stop advancing (a paused editor), fail rather than spin forever.
                     if (Time.frameCount != lastFrameSeen) { lastFrameSeen = Time.frameCount; lastProgress = EditorApplication.timeSinceStartup; }
                     else if (EditorApplication.timeSinceStartup - lastProgress > StallSeconds)
                     { FinishShoot(step, tag, "[RenderThumbnailPlay] " + tag + " Shoot => FAIL: settle stalled — no frame progress for " + StallSeconds + "s (editor paused?)"); return; }
 
-                    // Measure per-chain motion each tick; the "still moving" set is recomputed from the LAST
-                    // interval, so it reflects convergence at capture, not accumulated history.
                     var nowLeaf = SampleLeaves(chains);
                     stillMoving.Clear();
                     for (int i = 0; i < chains.Count; i++)
                         if ((nowLeaf[i] - prevLeaf[i]).magnitude > MovingLeafDeltaM) stillMoving.Add(chains[i].name);
                     prevLeaf = nowLeaf;
 
-                    if (elapsed < settleFrames) return; // keep settling
+                    if (elapsed < settleFrames) return;
 
                     // ---- capture ----
                     float headYaw = 0f, headPitch = 0f;
@@ -599,10 +507,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         System.IO.File.WriteAllBytes(pngPath, cap.Png);
                         verdict = "[RenderThumbnailPlay] " + tag + " " + common + " => OK | png=" + pngPath;
                     }
-                    // The COMPLETION verdict is the event worth recording — the starter string carries only a tag.
-                    // A png-bearing verdict is logged WITHOUT that trailer and spliced back after: routing it
-                    // through the writer would let a failed write rewrite a good capture into "=> FAIL: write
-                    // failed" and drop the png= token UploadAvatar reads (RenderThumbnailCore.SpliceTrailers).
+                    // A png-bearing verdict is logged without that trailer and spliced back after
+                    // (RenderThumbnailCore.SpliceTrailers).
                     int pngAt = pngPath == null ? -1 : verdict.IndexOf(" | png=", StringComparison.Ordinal);
                     string verdictBody = pngAt < 0 ? verdict : verdict.Substring(0, pngAt);
                     string loggedShoot = RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-shoot", _root.name, verdictBody,
@@ -628,7 +534,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>The last completed Shoot's verdict line (the same text logged with its tag), or a
-        /// still-settling note. Convenience alternative to polling <c>ReportConsole</c> on the tag.</summary>
+        /// still-settling note.</summary>
         public static string Status()
         {
             if (!_prepared) return "[RenderThumbnailPlay] Status => no prepared session";
@@ -637,17 +543,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// EDIT-MODE teardown: restore the scene setup from disk (discarding the emulator control,
-        /// deactivations, pose, and every play-mode edit) and destroy the session's in-memory controllers.
-        /// Call AFTER exiting play (<c>manage_editor stop</c>).
+        /// EDIT-MODE teardown, after exiting play (<c>manage_editor stop</c>): restore the scene setup from disk
+        /// and destroy the session's in-memory controllers.
         /// </summary>
         public static string End()
         {
-            // No session in these statics, but a saved-options record outlived one: a domain reload happened
-            // mid-session. The scene setup went with it and cannot be recovered, so this is still a failure —
-            // but the operator's Enter-Play-Mode Options CAN be put back, and putting them back here is what
-            // stops the next Run() from adopting the forced values as their originals. Say which half was
-            // salvaged, so "End failed" is not read as "nothing was restored".
+            // A saved-options record with no session in the statics: a domain reload ended it. The scene setup
+            // went with it, but putting the options back stops the next Run adopting the forced values.
             if (!_prepared && !Application.isPlaying && LoadSavedOptions())
             {
                 RestoreEnterPlayModeOptions();
@@ -671,19 +573,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             catch (Exception ex)
             {
-                // Keep the session (and _sceneSetup) so End can be retried — a snapshotted scene may have been
-                // moved/deleted; nulling state here would strand a half-restored editor with no recovery.
+                // Keep the session and _sceneSetup so End can be retried: a snapshotted scene may have been moved
+                // or deleted.
                 return Fail("scene restore failed (" + ex.GetType().Name + ": " + ex.Message + ") — fix the scene(s) and call End() again");
             }
 
-            // Restore the operator's Enter-Play-Mode Options and clear session state — only after a successful
-            // scene restore (a failed restore above returns early, keeping the session AND its options for retry).
             RestoreEnterPlayModeOptions();
             string endLabel = _targetName ?? "session";
 
             _prepared = false; _attached = false; _root = null; _localRuntime = null; _origFxController = null;
             _sceneSetup = null; _targetName = null; _fxIndex = -1; _base = default; _fx = default;
-            // The restore claim gets an artifact behind it — previously it was asserted by the return string alone.
             string endSummary = "End => OK — scene setup" + (restored.Length > 0 ? restored : " had nothing to restore");
             return Ok(RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-end", endLabel, endSummary,
                 "# RenderThumbnailPlay End\n\n- scene setup: "
@@ -696,7 +595,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static bool Attach(out string err)
         {
             err = null;
-            // A prior session's in-memory controllers survive play exit under DisableDomainReload; clear them.
             DisposeShootObjects();
             _base = default; _fx = default; _attached = false;
             _touchedExpr.Clear();
@@ -707,7 +605,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             _root = ((Component)_localRuntime).gameObject;
             _localLayer = _root.layer;
 
-            // Guard the cull: the local must sit on a layer no clone shares, else 1<<layer draws a clone over it.
             foreach (var rt in UnityEngine.Object.FindObjectsOfType(_runtimeType))
             {
                 if (ReferenceEquals(rt, _localRuntime)) continue;
@@ -715,9 +612,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 { err = "local avatar shares layer " + _localLayer + " with a clone runtime — cannot cull cleanly; the emulator's layer separation drifted"; return false; }
             }
 
-            // Cache the emulator's ORIGINAL Base/FX playables + weights (never destroyed). FX may be absent
-            // (a bare avatar) — expression shots fail loud in Shoot; pose/settle/capture need no FX. The graph
-            // may not be built yet if Shoot races the emulator's Start — guard rather than throw raw.
+            // Cache the emulator's original Base/FX playables and weights. The graph may not be built yet if
+            // Shoot races the emulator's Start.
             var mixer = (AnimationLayerMixerPlayable)_fPlayableMixer.GetValue(_localRuntime);
             var playables = (System.Collections.IList)_fPlayables.GetValue(_localRuntime);
             if (!((Playable)mixer).IsValid() || playables == null || playables.Count == 0)
@@ -731,7 +627,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var desc = _root.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
             if (desc == null) { err = "the built avatar has no VRCAvatarDescriptor — the bake dropped it"; return false; }
 
-            // Neutral head baseline (pre-pose idle), captured ONCE.
             var animator = _root.GetComponent<Animator>();
             _headBone = animator != null && animator.isHuman ? animator.GetBoneTransform(HumanBodyBones.Head) : null;
             _viewPositionY = desc.ViewPosition.y;
@@ -776,17 +671,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>Point a mixer slot at <paramref name="ours"/> (the tool's inserted playable) or, when null,
-        /// back at the emulator's cached ORIGINAL. Destroys the slot's previously-inserted playable (never the
-        /// original) and updates <c>playables[index]</c> so the runtime's per-frame param push targets whatever
-        /// now occupies the slot.</summary>
+        /// back at the emulator's cached original. Updates <c>playables[index]</c> so the runtime's per-frame
+        /// param push targets whatever now occupies the slot.</summary>
         private static void SetSlot(PlayableGraph graph, AnimationLayerMixerPlayable mixer,
             System.Collections.IList playables, int index, ref SlotState slot, AnimatorControllerPlayable? ours)
         {
             int input = index + 1;
             var desired = ours ?? slot.orig;
-            // Param continuity: seed the incoming playable from the one currently in the slot BEFORE it is
-            // destroyed, so the runtime's change-gated two-way param sync doesn't adopt the newcomer's
-            // controller defaults and reset the operator's toggles (see SeedParameters).
+            // Seed the incoming playable before the occupant is destroyed (see SeedParameters).
             var occupant = slot.hasInserted && ((Playable)slot.inserted).IsValid() ? slot.inserted : slot.orig;
             if (!desired.Equals(occupant)) SeedParameters(occupant, desired);
 
@@ -813,10 +705,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return AnimatorControllerPlayable.Create(graph, ctrl);
         }
 
-        /// <summary>Clone the baked FX controller and append a full-weight OVERRIDE layer holding the
-        /// expression clip — the composition proven to render while the avatar's own FX toggles keep running.
-        /// Composing onto <see cref="_origFxController"/> (never a prior clone) keeps parameters identical, so
-        /// the runtime's per-index param caches stay valid. Caller guarantees it is an AnimatorController.</summary>
+        /// <summary>Clone the baked FX controller and append a full-weight override layer holding the expression
+        /// clip, so the avatar's own FX toggles keep running. Composing onto <see cref="_origFxController"/>
+        /// (never a prior clone) keeps parameters identical, so the runtime's per-index param caches stay valid.
+        /// Caller guarantees it is an AnimatorController.</summary>
         private static AnimatorControllerPlayable ComposeFxOverride(AnimationClip exprClip, PlayableGraph graph, List<UnityEngine.Object> sink)
         {
             var clone = UnityEngine.Object.Instantiate((UnityEditor.Animations.AnimatorController)_origFxController);
@@ -835,11 +727,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// The clip the FX override layer plays for this shot: <paramref name="src"/>'s blendShape curves,
-        /// PLUS a reset-to-0 for every shape a prior shot's expression drove that <paramref name="src"/> does
-        /// not (a WD-off override leaves its shapes stuck on the renderer, so an amortized re-shoot must drive
-        /// the now-unused ones back). Returns null when there is no expression AND nothing to clear — the FX
-        /// slot then returns to the emulator original. Reset target is 0, the neutral for expression shapes.
+        /// The clip the FX override layer plays for this shot: <paramref name="src"/>'s blendShape curves, plus a
+        /// reset-to-0 for every shape a prior shot's expression drove that <paramref name="src"/> does not (see
+        /// <see cref="_touchedExpr"/>). Null when there is no shape to drive or clear, which returns the FX slot
+        /// to the emulator original.
         /// </summary>
         private static AnimationClip BuildExpressionClip(AnimationClip src, List<UnityEngine.Object> sink,
             out Dictionary<string, EditorCurveBinding> newTouched)
@@ -927,11 +818,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (verdict.Contains("=> FAIL")) Debug.LogError(verdict); else Debug.Log(verdict);
         }
 
-        // Destroys exactly the in-memory objects a shot created (controller, its one state machine, its one
-        // state, the synthesized clip) — all tracked explicitly. DestroyImmediate does NOT cascade a controller
-        // to its state machine/state, so each is tracked. Instantiate is shallow (the FX clone SHARES the baked
-        // controller's asset state machines), so nothing here touches a shared original — only the override
-        // state machine/state this tool added.
         private static void DisposeShootObjects()
         {
             foreach (var o in _shootDisposables)
@@ -1001,7 +887,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var e in UnityEngine.Object.FindObjectsOfType(_emulatorType, true))
             {
                 var b = (UnityEngine.Behaviour)e;
-                if (b.enabled && b.gameObject.activeInHierarchy) return false; // an enabled control exists in some loaded scene
+                if (b.enabled && b.gameObject.activeInHierarchy) return false;
             }
             foreach (var e in UnityEngine.Object.FindObjectsOfType(_emulatorType, true))
             {

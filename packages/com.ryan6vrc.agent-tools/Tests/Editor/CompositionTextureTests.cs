@@ -5,21 +5,10 @@ using Ryan6Vrc.AgentTools.Editor;
 using UnityEngine;
 
 /// <summary>
-/// The texture section makes one claim — this texture costs N megabytes on the built avatar against M
-/// authored — and the whole section rests on that claim being the SAME measurement as the SDK total printed
-/// beneath it. So the first case below is the reconciliation: rows must sum to the figure the upload gate
-/// rates, or a reader who adds the column up finds the table contradicting its own total.
-///
-/// The rest pin the states a megabyte cell can be in — a number, `unknown`, and absent — because a zero
-/// where one of the other two belongs reads as "this texture is free", which is the misread this section
-/// must never manufacture. Plus the two pairing keys, which exist because neither survives both of the
-/// things a build does: identity dies on a resize, the slot set dies on a renderer merge.
-///
-/// <c>ReadTextures</c> takes a live root and <c>TextureSection</c> is pure, so both are reachable without a
-/// bake.
-///
-/// Objects are left for the next test's <c>NewScene(Single)</c> to take rather than destroyed —
-/// <c>docs/verify.md</c> §Test venue forbids destroying live objects a fixture has mutated.
+/// The texture rows must be the SAME measurement as the SDK total printed beneath them, the figure the upload
+/// gate rates, so the first case reconciles the two. A megabyte cell is a number, `unknown` or absent: a zero
+/// where either of the others belongs reads as "this texture is free". Pairing takes two keys because a build
+/// can break either: identity dies on a resize, the slot set dies on a renderer merge.
 /// </summary>
 public class CompositionTextureTests
 {
@@ -28,12 +17,9 @@ public class CompositionTextureTests
         UnityEditor.SceneManagement.NewSceneSetup.EmptyScene,
         UnityEditor.SceneManagement.NewSceneMode.Single);
 
-    /// <summary>The load-bearing case, and it must call the SDK for its expected value — the whole PR rests on
-    /// the rows and <c>textureMegabytes</c> being ONE measurement, and a test that compares this arithmetic to
-    /// a re-implementation of this arithmetic proves f(x) == f(x) and would pass through any shared error.
-    /// <para>Formats are deliberately mixed and include <c>RGB24</c>, the one entry whose measured rate (4 bpp,
-    /// 32-bit-aligned) does not follow from its name — the table was wrong there once, and this is the case
-    /// that would have caught it.</para></summary>
+    /// <summary>The expected value must come from the SDK: comparing this arithmetic to a re-implementation of
+    /// it proves f(x) == f(x) and passes through any shared error. The formats include <c>RGB24</c>, whose
+    /// measured rate (4 bytes per pixel) does not follow from its name.</summary>
     [Test]
     public void RowsSumToTheSdksOwnFigure_soTheResidualReadsZero()
     {
@@ -56,15 +42,10 @@ public class CompositionTextureTests
         StringAssert.Contains("authored 0.0000, built 0.0000", string.Join("\n", lines.ToArray()));
     }
 
-    /// <summary>A cubemap and a texture array are typed, not `unknown`, and typed the way the SDK rates them —
-    /// one face for the cubemap (not six), base level times slices for the array (no mip chain). The array
-    /// branch is what keeps the section reconciling on a d4rk-optimized avatar, which atlases into
-    /// `Texture2DArray`.</summary>
-    /// <summary>Driven through <c>TypeBytes</c> rather than a material, because Unity refuses to assign a CUBE
-    /// or array texture to a 2D shader property and the log error that produces is not what this case is
-    /// about. The expected figures are the ones measured against the SDK on a bare renderer: a 128 DXT1
-    /// cubemap rated 10922 bytes (one face's chain — six would be 65532), a 128x128x4 DXT1 array rated
-    /// 32768 (base level times slices, no chain).</summary>
+    /// <summary>The array branch keeps the section reconciling on a d4rk-optimized avatar, which atlases into
+    /// `Texture2DArray`. Driven through <c>TypeBytes</c> rather than a material, because Unity refuses to assign
+    /// a CUBE or array texture to a 2D shader property. The literal figures were measured against the SDK on a
+    /// bare renderer.</summary>
     [Test]
     public void CubemapsAndTextureArraysAreTypedTheWayTheSdkRatesThem()
     {
@@ -84,8 +65,7 @@ public class CompositionTextureTests
         Assert.IsTrue(rtRow.Unknown, "a RenderTexture is outside both totals");
     }
 
-    /// <summary>A texture twelve slots reach is ONE row, because the SDK counts it once. If it were rowed per
-    /// slot the column would sum to more than the total it sits under.</summary>
+    /// <summary>The SDK counts a shared texture once, so a row per slot would sum past the total above it.</summary>
     [Test]
     public void ASharedTextureIsOneRow_countedOnce_andSaysHowManySlotsReachIt()
     {
@@ -105,9 +85,6 @@ public class CompositionTextureTests
         StringAssert.Contains("reached by 2 slots; counted once", string.Join("\n", lines.ToArray()));
     }
 
-    /// <summary>A RenderTexture is `unknown` but for the opposite reason to an untyped format: the SDK rates
-    /// it at zero, so it is outside BOTH totals and cannot explain a residual. The row has to say which kind
-    /// of unknown it is, or a reader chasing a gap starts at the one row that provably is not the cause.</summary>
     [Test]
     public void ARenderTextureIsUnknownAndOutsideBothTotals_notAZero()
     {
@@ -123,7 +100,6 @@ public class CompositionTextureTests
         Assert.AreEqual(0, rt.Bytes, "an unknown row holds no bytes AND contributes none");
         long typed = rows.Where(r => !r.Unknown).Sum(r => r.Bytes);
         Assert.AreEqual(MipChainBytes(64, 0.5f), typed);
-        // The claim the legend makes about RenderTextures, asserted against the SDK rather than believed.
         Assert.AreEqual(CompositionBake.SdkTextureMegabytes(root).Value, typed / 1048576f, 1e-5f,
             "the SDK rates a RenderTexture at zero, so excluding it must leave the totals equal");
 
@@ -133,8 +109,6 @@ public class CompositionTextureTests
         StringAssert.Contains("cannot explain a residual", Row(lines, "B["));
     }
 
-    /// <summary>Two same-named sibling renderers must not collapse into one slot key — that would make two
-    /// different textures share a pairing handle, where first-wins silently drops the second.</summary>
     [Test]
     public void SameNamedSiblingRenderersKeepDistinctSlotKeys()
     {
@@ -150,8 +124,6 @@ public class CompositionTextureTests
         Assert.IsTrue(rows.Any(r => r.Slot.Contains("#2")), "the second sibling takes an ordinal suffix");
     }
 
-    /// <summary>A material whose texture properties cannot be read becomes a named `unreadable` row in no
-    /// total, rather than taking down the whole artifact or vanishing silently.</summary>
     [Test]
     public void AnUnreadableMaterialIsANamedRowInNoTotal()
     {
@@ -169,8 +141,6 @@ public class CompositionTextureTests
         Assert.IsTrue(rows.All(r => r.Unknown || r.Bytes > 0), "no row is a silent zero");
     }
 
-    /// <summary>A shader property the material leaves null is NOTHING — not a zero-byte row that a reader
-    /// would scan past as a texture costing nothing.</summary>
     [Test]
     public void ANullTextureSlotIsNoRowAtAll()
     {
@@ -189,8 +159,6 @@ public class CompositionTextureTests
         StringAssert.Contains("_MainTex", rows[0].Slot);
     }
 
-    /// <summary>Identity pairs a texture the build left alone even though a renderer merge moved every slot
-    /// handle — the case the slot key alone cannot reach, and the ordinary one under d4rk.</summary>
     [Test]
     public void IdentityPairsAcrossARendererMerge_whereTheSlotHandleMoved()
     {
@@ -213,8 +181,6 @@ public class CompositionTextureTests
         StringAssert.DoesNotContain("(authored-only)", body);
     }
 
-    /// <summary>The mirror: a resize mints a new object, so identity is gone and the slot set is what pairs
-    /// the two sides. Without this key every resized texture would read as a deletion plus an addition.</summary>
     [Test]
     public void TheSlotKeyPairsAResize_whereIdentityIsGone()
     {
@@ -236,8 +202,6 @@ public class CompositionTextureTests
         StringAssert.Contains(Mb(MipChainBytes(256, 0.5f)) + " | " + Mb(MipChainBytes(64, 0.5f)), row);
     }
 
-    /// <summary>The disclosed omission. A material only a swap curve can reach is counted and named; the
-    /// count says zero by measurement, not by assumption, when there is nothing to disclose.</summary>
     [Test]
     public void SwapOnlyMaterialsAreCountedAndDisclosed_andZeroSaysSoExplicitly()
     {
@@ -258,8 +222,6 @@ public class CompositionTextureTests
         StringAssert.Contains("in NO row above", some);
     }
 
-    /// <summary>A null SDK stat is an absent figure. `textureMB=0` would be a confident claim that the avatar
-    /// carries no textures at all.</summary>
     [Test]
     public void ANullSdkStatReportsUnknown_neverZero()
     {
@@ -274,8 +236,6 @@ public class CompositionTextureTests
         Assert.AreEqual("textureMB=unknown", keys);
     }
 
-    /// <summary>paramFilter narrows the parameter tables only; a geometry- or texture-table narrowed by it
-    /// would report a partial avatar under totals that read whole, so it is disclosed rather than applied.</summary>
     [Test]
     public void ParamFilterNarrowsNothingHere_andSaysSo()
     {
@@ -293,10 +253,8 @@ public class CompositionTextureTests
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Square-texture expected bytes, for the cases whose subject is a BRANCH (cubemap, array,
-    /// unreadable) rather than the arithmetic itself. The reconciliation case deliberately does not use this —
-    /// it takes its expected value from the SDK, because a helper that mirrors the production loop can only
-    /// prove the loop equals itself.</summary>
+    /// <summary>Square-texture expected bytes, for the cases whose subject is a branch rather than the
+    /// arithmetic; the reconciliation case does not use it. <paramref name="bpp"/> is bytes per pixel.</summary>
     private static long MipChainBytes(int dim, float bpp)
     {
         long px = (long)dim * dim, total = 0;

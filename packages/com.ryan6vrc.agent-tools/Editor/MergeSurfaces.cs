@@ -15,14 +15,8 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// before it. Mounts and rewrites are resolved by invoking the vendors' own code through
     /// <see cref="CheckAnimator"/>'s frame helpers, never by mirroring their rules.
     ///
-    /// It lives here rather than inside a door because three doors need the same answer and disagreeing
-    /// about it is the failure mode: <see cref="CheckAvatar"/> resolves reference breaks against it,
-    /// <see cref="ReportComposition"/> reports provenance from it, and <see cref="CheckAnimator"/>'s
-    /// mergeSites count is drawn from it. One walk, so no two of them can describe the same avatar
-    /// differently — the same guarantee <c>docs/animator.md</c> already states for the binding walk.
-    ///
-    /// Notes are pushed OUT through callbacks instead of being formatted here: a fail-loud note names the
-    /// door that emitted it, and this type is not a door.
+    /// <see cref="CheckAvatar"/>, <see cref="ReportComposition"/> and <see cref="CheckAnimator"/>'s mergeSites
+    /// count all read this one walk, so a change here moves all three.
     /// </summary>
     internal static class MergeSurfaces
     {
@@ -34,8 +28,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             /// VRCFury frame, the mount then each ancestor up to the avatar root, because the build's
             /// nearest-match rewriter accepts a binding that resolves at ANY of them.</summary>
             public List<GameObject> Roots;
-            /// <summary>The frame root itself — <c>Roots[0]</c>, named separately so a caller reporting
-            /// mount sites does not have to know the ancestor-chain convention.</summary>
+            /// <summary>The frame root itself: <c>Roots[0]</c>.</summary>
             public GameObject Mount;
             /// <summary>The merge component, or null for a descriptor playable layer.</summary>
             public Component Site;
@@ -43,9 +36,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Label;
             public Func<string, string> PathRewrite;
             public bool RootBindingsApplyToAvatar;
-            /// <summary>The raw frame as the vendor helpers resolved it. Carried so a door can caption its
-            /// own offenders from it — a caveat that cross-references a door's offender list is that door's
-            /// prose, and formatting it here would put one door's vocabulary in every other door's mouth.</summary>
+            /// <summary>The raw frame as the vendor helpers resolved it.</summary>
             public FrameResult Frame;
         }
 
@@ -53,28 +44,24 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// is exercisable without breaking a vendor install.</summary>
         internal static Func<string, string> FrameAnchorOverride = a => a;
 
-        /// <summary>Every (controller, frame) pair merged onto <paramref name="root"/>. Each pair is walked
-        /// once — dedup is per (controller, frame root, kind), not global, so a controller shared across
-        /// frames is resolved once per frame. <paramref name="descriptor"/> may be null (a bare module prefab
-        /// has none, and contributes no descriptor layers).
+        /// <summary>Every (controller, frame) pair merged onto <paramref name="root"/>. Dedup is per
+        /// (controller, frame root, kind), so a controller shared across frames appears once per frame.
+        /// <paramref name="descriptor"/> may be null: a bare module prefab has none.
         /// <paramref name="onUnreflected"/> receives (component, anchor) whenever a required frame field
-        /// fails to reflect — the controller is still returned, never dropped, so drift cannot yield a false
-        /// clean read. <paramref name="onMaFrame"/> fires for every MA frame discovered, BEFORE the dedup —
-        /// a door captioning its offenders needs one caption per authored component, not per surviving
-        /// surface, or two components mounting one controller at one mount silently lose a caveat.
+        /// fails to reflect; the controller is still returned, so drift cannot yield a false clean read.
+        /// <paramref name="onMaFrame"/> fires for every MA frame BEFORE the dedup, so a door captioning its
+        /// offenders gets one caption per authored component even when two mount one controller at one mount.
         /// <paramref name="onUnlintable"/> receives (site, description) for a surface that really mounts a
-        /// controller these doors cannot walk — an <c>AnimatorOverrideController</c>. Such a surface is NOT
-        /// returned in the list (see the note at the top of the body), so a caller reporting coverage must
-        /// treat it as a gap rather than as one of the surfaces it walked.</summary>
+        /// controller these doors cannot walk, such as an <c>AnimatorOverrideController</c>. That surface is
+        /// not in the returned list, so a caller reporting coverage must count it as a gap.</summary>
         internal static List<Surface> Enumerate(
             GameObject root, VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor,
             Action<Component, string> onUnreflected,
             Action<Component, FrameResult> onMaFrame = null,
             Action<Component, string> onUnlintable = null)
         {
-            // Reported here and deliberately NOT returned as a Surface: Surface.Controller is typed
-            // AnimatorController and every consumer runs rules on it unconditionally, so admitting one
-            // would turn a silent drop into a silent false inclusion. Don't count these as walked.
+            // Not returned as a Surface: Surface.Controller is typed AnimatorController and every consumer
+            // runs rules on it unconditionally, so admitting one would be a silent false inclusion.
             void Unlintable(Component site, List<string> descriptions)
             {
                 if (descriptions == null || onUnlintable == null) return;
@@ -97,14 +84,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                 });
             }
 
-            // (a) Descriptor playable-layer controllers — avatar-root frame, no merge component to read.
             if (descriptor != null)
                 CollectDescriptorLayers(descriptor, root, (c, label) => Add(
                     c, root, new List<GameObject> { root }, null, FrameKind.DescriptorLayer, label, null, false,
                     new FrameResult { Root = root, Kind = FrameKind.DescriptorLayer }),
                     (label, what) => onUnlintable?.Invoke(descriptor, label + ": " + what));
 
-            // (b)/(c) Every MA MergeAnimator + VRCFury FullController in the subtree.
             foreach (var c in root.GetComponentsInChildren<Component>(true))
             {
                 if (c == null) continue;
@@ -149,18 +134,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (layers == null) return;
                 foreach (var layer in layers)
                 {
-                    // Skip only SDK-default layers (nothing authored). CustomAnimLayer also carries an
-                    // `isEnabled` flag, but disabled-layer skipping is deliberately NOT adopted: whether the
-                    // SDK build honours isEnabled for base/special layers is unverified, and NOT skipping is
-                    // the fail-loud choice — a disabled layer's contents surface for agent discretion rather
-                    // than vanishing from every door at once.
+                    // Only isDefault (nothing authored) skips. CustomAnimLayer.isEnabled is deliberately not
+                    // consulted: whether the SDK build honours it for base/special layers is unverified, and a
+                    // disabled layer surfacing beats it vanishing from every door at once.
                     if (layer.isDefault) continue;
                     var c = layer.animatorController as AnimatorController;
                     if (c == null)
                     {
-                        // Same fail-loud reasoning as the isDefault note above: a slot holding a controller
-                        // these doors cannot walk must not vanish from every door at once, or an avatar-wide
-                        // verdict comes back clean having linted nothing.
                         var what = CheckAnimator.DescribeUnlintableController(layer.animatorController);
                         if (what != null) unlintable?.Invoke("descriptor " + which + " layer " + layer.type, what);
                         continue;
@@ -172,9 +152,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             Walk(descriptor.specialAnimationLayers, "special");
         }
 
-        /// <summary>The VRCF upward-strip nearest-match: mount root, then each ancestor up to (and including)
-        /// the avatar root. A binding resolving at ANY level is NOT a break — this mirrors VRCFury's build
-        /// rewriter rather than predicting where it lands.</summary>
+        /// <summary>The levels of VRCFury's upward-strip nearest-match, as <see cref="Surface.Roots"/> carries
+        /// them: mount root, then each ancestor up to and including the avatar root.</summary>
         internal static List<GameObject> AncestorChain(GameObject mount, GameObject avatarGO)
         {
             var roots = new List<GameObject>();
@@ -186,11 +165,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (cur == stop) break;
                 cur = cur.parent;
             }
-            if (roots.Count == 0 || roots[roots.Count - 1] != avatarGO) roots.Add(avatarGO); // avatar root always a candidate
+            if (roots.Count == 0 || roots[roots.Count - 1] != avatarGO) roots.Add(avatarGO);
             return roots;
         }
 
-        /// <summary>Full hierarchy path of a scene object, the handle every door in this package speaks.</summary>
         internal static string PathOf(GameObject go)
         {
             if (go == null) return "—";

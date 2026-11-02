@@ -6,14 +6,8 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AgentTools.Tests
 {
     /// <summary>
-    /// The bake scope's LIFETIME RULES, driven through the seam constructor's injected callbacks so the
-    /// paths that matter are reachable without a composed avatar and a live hook chain. What a real bake
-    /// does to a clone is measured live and recorded in <c>AvatarBake</c>'s doc comment; what is asserted
-    /// here is everything the scope itself promises — the pairing fires exactly once, fires on the FAILURE
-    /// path too, never fires when the chain was not entered, and survives a callback that throws.
-    /// <para>An earlier version of this fixture built every case with a null source, which returns before
-    /// the chain is ever entered. Three of its tests passed with the code under test deleted, and the two
-    /// teardown defects this fixture now covers shipped underneath them.</para>
+    /// The bake scope's lifetime rules, driven through the seam constructor's injected callbacks, so no
+    /// test here runs a real hook chain.
     /// </summary>
     public class AvatarBakeScopeTests
     {
@@ -37,9 +31,6 @@ namespace Ryan6Vrc.AgentTools.Tests
                 Assert.IsNull(bake.Failure);
                 Assert.IsNotNull(bake.Clone);
                 Assert.AreEqual("__test_clone", bake.Clone.name);
-                // The orphan sweep in RenderThumbnail's teardown depends on this: a clone stranded before the
-                // caller moves it is reachable there only because it lands in the active scene, where the
-                // target sits.
                 Assert.AreEqual(UnityEngine.SceneManagement.SceneManager.GetActiveScene(), bake.Clone.scene);
             }
         }
@@ -47,8 +38,6 @@ namespace Ryan6Vrc.AgentTools.Tests
         [Test]
         public void ASourceOutsideTheActiveScene_isClonedIntoTheActiveScene()
         {
-            // A source in the active scene cannot tell "lands in the active scene" from "lands in the source's
-            // scene"; a source in a second, non-active scene can.
             var active = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
             var other = UnityEditor.SceneManagement.EditorSceneManager.NewPreviewScene();
             try
@@ -102,8 +91,7 @@ namespace Ryan6Vrc.AgentTools.Tests
             Assert.IsNull(bake.Failure, "a refusal is not a crash — the channels stay disjoint");
 
             bake.Dispose();
-            // The whole point of pairing from the scope: the SDK's hooks keep state across the pair, and the
-            // failure path is where skipping it used to happen.
+            // The SDK's hooks keep state across the pair, so a refused bake owes the post-callback too.
             Assert.AreEqual(1, post);
         }
 
@@ -135,15 +123,12 @@ namespace Ryan6Vrc.AgentTools.Tests
             Assert.IsFalse(bake.EnteredChain);
 
             bake.Dispose();
-            // Nothing was entered, so nothing is owed — firing the post-callback here would move SDK state
-            // that no preprocess had touched.
             Assert.AreEqual(0, post);
         }
 
         [Test]
         public void DescribeFailure_namesSetupSeparatelyFromTheChain()
         {
-            // A setup throw must not be reported as OnPreprocessAvatar — that names a call that never ran.
             var bad = new GameObject("destroyed-before-use");
             UnityEngine.Object.DestroyImmediate(bad);
             var bake = Scope(bad, go => true, () => { });
@@ -159,14 +144,9 @@ namespace Ryan6Vrc.AgentTools.Tests
         {
             var bake = Scope(_source, go => true, () => { throw new InvalidOperationException("cleanup failed"); });
 
-            // Logged as WELL as noted, and this assertion is the reason: CompositionBake consumes the scope
-            // with `using` and writes its artifact inside it, so a caller that only carries CleanupNote
-            // reports a stale-hook-state failure to nobody. The console line is that caller's only channel.
             UnityEngine.TestTools.LogAssert.Expect(LogType.Warning,
                 new System.Text.RegularExpressions.Regex(@"\[AvatarBake\] OnPostprocessAvatar threw InvalidOperationException"));
 
-            // Never throws: Dispose runs inside callers' teardown finallys, where a throw would replace the
-            // real pipeline exception with a cleanup one.
             Assert.DoesNotThrow(() => bake.Dispose());
             Assert.AreEqual(" note=postprocess-cleanup-threw: InvalidOperationException", bake.CleanupNote);
         }
@@ -176,8 +156,6 @@ namespace Ryan6Vrc.AgentTools.Tests
         {
             var bake = Scope(_source, go => true, () => { });
             bake.Dispose();
-            // Null, never "" — callers accumulate with `residualNote +=` then branch on IsNullOrEmpty to
-            // decide whether a run may ship its clean-success token.
             Assert.IsNull(bake.CleanupNote);
         }
 
@@ -187,8 +165,6 @@ namespace Ryan6Vrc.AgentTools.Tests
             var bake = Scope(_source, go => true, () => { });
             bake.Dispose();
 
-            // The lifted trap: the post-callback has run and gutted the clone, so a late read is refused
-            // rather than silently returning an avatar whose controllers and meshes are destroyed.
             var ex = Assert.Throws<InvalidOperationException>(() => { var _ = bake.Clone; });
             StringAssert.Contains("after the scope closed", ex.Message);
         }
@@ -198,11 +174,8 @@ namespace Ryan6Vrc.AgentTools.Tests
         {
             string note = AvatarBake.FormatCleanupNote(new InvalidOperationException("boom"));
 
-            // Pinned verbatim because this string is spliced into a CALLER's one-line verdict. The leading
-            // space is what keeps it from running into the token before it; the key is what a reader greps.
             Assert.AreEqual(" note=postprocess-cleanup-threw: InvalidOperationException", note);
             StringAssert.StartsWith(" note=", AvatarBake.FormatDestroyNote(new Exception("x")));
-            // The caller owns the line's tool tag — a note carrying its own would contradict the head.
             StringAssert.DoesNotContain("[AvatarBake]", note);
         }
     }

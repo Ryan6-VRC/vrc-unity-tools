@@ -16,10 +16,6 @@ namespace Ryan6Vrc.AgentTools.Editor
     public static class DrivePhysBones
     {
         [Serializable] public class PoseList { public Pose[] poses = new Pose[0]; }
-        /// <summary><c>ramp</c> is seconds: 0 snaps to the pose in one frame; above 0 the bones ease (smoothstep) from the
-        /// previous row's pose to this one over that long, and the hold is timed from arrival. <c>hold</c> is seconds,
-        /// below 0 taking the drive's. <c>sample</c> is when the clipping measure runs: <c>end</c> of the hold,
-        /// <c>every</c> frame of the ramp and hold, <c>every:N</c> for every Nth of those from the first and always the last, or <c>none</c>.</summary>
         [Serializable] public class Pose { public string name; public BoneOp[] ops = new BoneOp[0]; public float ramp; public float hold = -1; public string sample = "end"; }
         [Serializable] public class BoneOp { public string bone, move = ""; public float pitch, yaw, roll; }
 
@@ -36,8 +32,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         static EditorApplication.CallbackFunction _pump;
         internal static bool Running => _pump != null;
 
-        /// <summary>The current play session's drive: running, or its verdict and rows. A record from an earlier play
-        /// session is never returned as current; it is named as history, verdict masked, with its log path.</summary>
+        /// <summary>The current play session's drive: running, or its verdict and rows.</summary>
         public static string Status()
         {
             var s = SessionState.GetString(Key, Tag + " idle: no drive has run this editor session");
@@ -45,7 +40,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return PlaySession.IsCurrent(SessionState.GetInt(SessionKey, 0)) ? s : PlaySession.Stale(Tag, "drive", s.Split('\n')[0]);
         }
 
-        /// <param name="maxSeconds">The operator's cap on one run, in simulated and in wall-clock seconds; leave it at the default.</param>
         public static string Run(string avatarRoot, string poses, string[] chains = null, string stage = "drive", string[] bodies = null, string[] garments = null, string[] groups = null,
             float hold = 2.5f, string[] views = null, string outDir = null, bool control = false, string baseline = null, float maxSeconds = 180f)
         {
@@ -120,7 +114,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             Vector3[] restAv = null, restIn = null, prevAv = null, prevIn = null; (Vector3, Quaternion)[] frame0 = null;
             bool frozen = false, held = false, animEnable = true; int row = 0, lastFrame = -1, stable = 0, lastAnim = int.MinValue, shotFails = 0; string firstShotFail = null;
             float t0 = 0, rowT0 = 0; double lastTick = EditorApplication.timeSinceStartup, armedAt = lastTick;
-            // A ramped pose eases from the pose the bones held to the new one; the hold is timed from arrival.
             Vector3[] fromP = null, toP = null; Quaternion[] fromR = null, toR = null; float rampT0 = 0, rampSec = 0; int rampFrames = 0; string approach = "-";
             string started = DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture), label = "drive-physbones_" + RunLogFormat.Sanitize(rt.name) + "_" + stage, logPath = null;
             int session = PlaySession.Current;
@@ -202,8 +195,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                             + "stage | pose | approach | tipTravelCm root max/mean | tipTravelCm inFrame max/mean | jitterMmPerFrame mid/end | sample | crossingCm | vertsBehindBody/signed edgeNearest | maxDepthCm | throughCm\n");
                     }
                     if (anim) anim.enabled = false;   // re-asserted every frame: an emulator re-enables it
-                    // Before this tick moves the pose: the chains last solved against the pose the bones hold now.
-                    // Decided before the pose moves, so a stride measures the row's last frame; a ramp arriving now ends the row only on a zero hold.
+                    // Before this tick moves the pose, since the chains last solved against the pose the bones hold now:
+                    // deciding `ends` here makes a stride measure the row's last frame; a ramp arriving now ends the row only on a zero hold.
                     bool ends = fromP != null ? Ramp01(Time.time - rampT0, rampSec) >= 1f && !(0 < HoldOf(row)) : !(Time.time - t0 < HoldOf(row));
                     int stride = EveryStride(Mode(row));
                     if (stride > 0 && (rowFrame++ % stride == 0 || ends))
@@ -316,10 +309,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         const string Cheaper = "the cap is the operator's limit, so make the program cheaper (sample \"every:N\" on slow ramps, fewer rows) and do not raise it";
 
-        /// <summary>A program's simulated seconds: the rest row's hold, then every row's ramp and hold. Pure.</summary>
         internal static float ProgramSeconds(PoseList pl, float hold) => hold + pl.poses.Sum(p => p.ramp + (p.hold >= 0 ? p.hold : hold));
 
-        /// <summary>A sample's stride: 1 for <c>every</c>, N for <c>every:N</c> (N 1 or more), 0 for no per-frame measure, -1 for a malformed one. Pure.</summary>
+        /// <summary>0 for no per-frame measure, -1 for a malformed <c>every:N</c>.</summary>
         internal static int EveryStride(string sample)
         {
             if (sample == "every") return 1;
@@ -329,8 +321,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         static bool InScope(VRCPhysBoneBase p, Transform[] scope) => scope == null || scope.Any(s => WriteDynamics.EffRoot(p).IsChildOf(s));
 
-        /// <summary>A pose op's bone: a root-relative path, else a humanoid bone name the avatar maps, as the clipping
-        /// report prints it (<c>LeftUpperLeg</c>).</summary>
         static Transform Bone(Transform rt, string name, out string err)
         {
             var b = WriteDynamics.Find(rt, name, out err); if (b != null) return b;
@@ -357,8 +347,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (m != null) bone.position += rt.rotation * m.Value;
         }
 
-        /// <summary>The one source a constraint follows rigidly, or null: an active, locked parent constraint on all six
-        /// axes, not frozen to world, with exactly one weighted source, it and the constraint both at full weight.</summary>
+        /// <summary>The one source a constraint follows rigidly, or null.</summary>
         static Transform Followed(VRCConstraintBase c)
         {
             if (!(c is VRCParentConstraintBase p) || !c.isActiveAndEnabled || !c.IsActive || !c.Locked || c.GlobalWeight < 0.999f || c.FreezeToWorld) return null;
@@ -367,8 +356,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return w.Length == 1 && w[0].Weight >= 0.999f ? w[0].SourceTransform : null;
         }
 
-        /// <summary>A transform's place in another's unscaled frame: world poses, or for a constraint solving in local space
-        /// the two local poses, which is the relation such a constraint holds fixed while it runs.</summary>
+        /// <summary>A transform's place in another's unscaled frame, in the space its constraint solves in.</summary>
         static (Vector3, Quaternion) InSource(Transform t, Transform s, bool local) => local
             ? (Quaternion.Inverse(s.localRotation) * (t.localPosition - s.localPosition), Quaternion.Inverse(s.localRotation) * t.localRotation)
             : (Quaternion.Inverse(s.rotation) * (t.position - s.position), Quaternion.Inverse(s.rotation) * t.rotation);
@@ -517,7 +505,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             SessionState.SetString(Key, line + "\n" + prior);
         }
 
-        /// <summary>Pose list shape rules. Pure: no scene.</summary>
         internal static string ParsePoses(string text, out PoseList pl)
         {
             pl = null; text = text?.Trim() ?? "";
@@ -556,7 +543,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal static bool IsCurrent(int stamp) => stamp == Current;
 
         /// <summary>An earlier session's record, named as history with its verdict token masked, so no reader can take it
-        /// for this session's result. Pure but for the play flag.</summary>
+        /// for this session's result.</summary>
         internal static string Stale(string tag, string what, string firstLine) =>
             tag + " idle this play session (" + (EditorApplication.isPlaying ? "entered " : "the last one entered ") + EnteredAt + "): no " + what
             + " has started in it. The last record is from an earlier play session, not this one's result: " + firstLine.Replace("=> ", "was ");

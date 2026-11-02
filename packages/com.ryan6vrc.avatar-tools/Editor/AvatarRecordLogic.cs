@@ -4,18 +4,14 @@ using System.Text;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>VRC-free decision helpers for the avatar-record doors — unit-tested, no editor/SDK deps.
-    /// Contract for the family lives in <c>docs/unity-tools.md</c> §Publish; this file holds the decisions,
-    /// not their rationale.</summary>
+    /// Contract: <c>docs/unity-tools.md</c> §Publish.</summary>
     internal static class AvatarRecordLogic
     {
         // ── Output formatting ───────────────────────────────────────────────────────────────────
 
-        /// <summary>Escape a value before it enters the one-line output grammar.
-        ///
-        /// Names, descriptions and tags are SERVER-controlled text. A value carrying a newline followed by
-        /// something shaped like a verdict would forge a line inside the door's own grammar — the grammar
-        /// the calling agent parses — so control characters are neutralised at every emit site, not just
-        /// the ones that look risky today.</summary>
+        /// <summary>Escape a value before it enters the one-line output grammar. Names, descriptions and
+        /// tags are server-controlled, and a newline followed by something shaped like a verdict would
+        /// forge a line in the grammar the calling agent parses, so escape at every emit site.</summary>
         internal static string Escape(string s)
         {
             if (s == null) return null;
@@ -37,9 +33,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         internal static string Quote(string s) => s == null ? "<null>" : "\"" + Escape(s) + "\"";
 
-        /// <summary>Render a tag list. An EMPTY list prints as <c>[]</c> rather than nothing, because
-        /// "cleared every tag" and "did not touch tags" are different outcomes and a blank would read as
-        /// the second.</summary>
         internal static string FormatTags(string[] tags)
         {
             if (tags == null) return "<null>";
@@ -53,9 +46,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return sb.Append(']').ToString();
         }
 
-        /// <summary>Decompose a string into code points — not UTF-16 code units — so a non-BMP character
-        /// (an emoji in an avatar name is ordinary on VRChat) is one element rather than a surrogate pair
-        /// the reader has to recombine.</summary>
         internal static int[] ToCodePoints(string s)
         {
             var list = new System.Collections.Generic.List<int>(s.Length);
@@ -68,9 +58,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return list.ToArray();
         }
 
-        /// <summary>Code points, capped. The helper exists to make an invisible substitution legible, and a
-        /// full dump of a description-length value defeats that as thoroughly as printing nothing — the two
-        /// characters that matter are lost in eighty that did not change.</summary>
         internal static string CodePoints(string s, int max = 16)
         {
             if (s == null) return "<null>";
@@ -86,11 +73,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return sb.Append(']').ToString();
         }
 
-        /// <summary>Name the code points that actually CHANGED, positionally.
-        ///
-        /// This is what a caller needs from a homoglyph substitution: "position 7 went U+002E → U+2024",
-        /// not a transcription of the whole value. Falls back to a capped dump of the landed value when the
-        /// lengths differ, since positional pairing would then be misleading rather than merely long.</summary>
+        /// <summary>The code points that changed, by position. A length change makes positional pairing
+        /// misleading, so it falls back to a capped dump of the landed value.</summary>
         internal static string DescribeCodePointDiff(string submitted, string landed, int max = 6)
         {
             var a = ToCodePoints(submitted);
@@ -121,21 +105,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>Map an SDK API error to the door's REFUSE text.
         ///
         /// Fed from the exception's <c>StatusCode</c>/<c>ErrorMessage</c> FIELDS, never its
-        /// <c>.Message</c>: the SDK's error types do not pass a message to their base constructor, so
-        /// <c>.Message</c> is the content-free "Exception of type … was thrown." while the server's real
-        /// text sits in the field.
+        /// <c>.Message</c>: the SDK's error types pass no message to their base constructor, so
+        /// <c>.Message</c> is the content-free "Exception of type … was thrown."
         ///
-        /// 404 is deliberately NOT reported as "not found": the API returns it both for a record that does
-        /// not exist and for one this account may not see, and the door cannot tell those apart — so the
-        /// text names both branches rather than asserting the one it cannot prove.</summary>
+        /// The 404 text names both branches because the API returns it for a missing record and for one
+        /// this account may not see.</summary>
         internal static string RefuseForStatus(int? statusCode, string serverMessage)
             => RefuseForStatus(statusCode, serverMessage, forImage: false);
 
-        /// <summary>As above, but able to name the IMAGE as what was rejected.
-        ///
-        /// Only 422 differs. Its text tells the caller to change the offending text, which is the right
-        /// instruction for a name or description and a wrong one for an image-only call — there is no text
-        /// in that request to change.</summary>
+        /// <summary>As above, but able to name the IMAGE as what was rejected. Only 422 differs: its text
+        /// tells the caller to change the offending text, and an image-only call has none.</summary>
         internal static string RefuseForStatus(int? statusCode, string serverMessage, bool forImage)
         {
             string tail = string.IsNullOrEmpty(serverMessage) ? "" : " — server said: " + Escape(serverMessage);
@@ -166,11 +145,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // ── Input validation ────────────────────────────────────────────────────────────────────
+        // These catch what a caller can fix without a round trip. Server rules stay the API's to reject,
+        // never mirrored here: a copied tag allow-list would drift and refuse tags the API accepts.
 
-        /// <summary>Reject a name the API would refuse or that would make the door's own report ambiguous.
-        /// Deliberately thin: server-side rules are the API's to enforce and we do not mirror them (a
-        /// mirrored rule drifts silently), so this catches only what a caller can fix without a round trip.
-        /// A null name means "leave the name alone" and is the caller's to interpret, not this method's.</summary>
+        /// <summary>Refuses null, though null means "leave the name alone" at the door: the caller skips
+        /// this call for a null name.</summary>
         internal static string ValidateNewName(string newName)
         {
             if (newName == null) return "newName is null — pass the name to publish";
@@ -181,14 +160,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        /// <summary>Reject a tag list the caller can fix without a round trip. An EMPTY array is legal and
-        /// means "clear every tag" — the only way to express clearing, since null already means "leave them
-        /// alone", so it must not be mistaken for an omission.
-        ///
-        /// Content tags are a server-side vocabulary this door deliberately does not mirror: a copied
-        /// allow-list would drift silently and start refusing tags the API accepts. Malformed shape is
-        /// caught here; unknown vocabulary is the API's to reject, and its refusal reaches the caller
-        /// intact through the status register above.</summary>
+        /// <summary>An empty array passes: it clears every tag (<c>docs/unity-tools.md</c>
+        /// §Publish).</summary>
         internal static string ValidateTags(string[] newTags)
         {
             if (newTags == null) return null;
@@ -205,11 +178,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        /// <summary>Which fields a call intends to write, and the refusal when it intends none.
-        ///
-        /// Every field is null-means-unchanged, so "change nothing" is expressible and is almost always a
-        /// caller bug — a door that silently posted the record back unchanged would still bump the server's
-        /// Version and report PASS, which reads as a successful edit that never happened.</summary>
+        /// <summary>The refusal for a call that sets no field; <c>docs/unity-tools.md</c> §Publish says
+        /// why.</summary>
         internal static string CheckSomethingToDo(string newName, string newDescription, string[] newTags,
                                                   string newImagePath = null)
         {
@@ -221,18 +191,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── The image ───────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Reject an image the call cannot use, BEFORE anything is written.
+        /// <summary>Reject an image the call cannot use, BEFORE anything is written. It runs in the
+        /// synchronous guard because the image attaches after the metadata write, so a path rejected later
+        /// would leave the name landed and the thumbnail refused; existence is checked here for the same
+        /// reason.
         ///
-        /// This runs in the synchronous guard rather than the async body on purpose: the image is attached
-        /// after the metadata write, so a path rejected late would leave a half-applied call behind — the
-        /// name landed, the thumbnail refused. Existence is checked here for the same reason.
-        ///
-        /// There is no way to CLEAR a thumbnail: the API exposes no delete-image call, only a replace. So
-        /// an empty string is a caller error rather than the "clear it" idiom an empty tag array is, and
-        /// saying so beats letting it read as an omission.
-        ///
-        /// The extension list is a caller-fixable shape check, not a mirror of server policy — the API is
-        /// what decides what it accepts, and its refusal reaches the caller intact.</summary>
+        /// The API has no delete-image call, so an empty string is a caller error rather than the "clear
+        /// it" idiom an empty tag array is. The extension list is a shape check; the API decides what it
+        /// accepts.</summary>
         internal static string ValidateImagePath(string newImagePath, Func<string, bool> fileExists)
         {
             if (newImagePath == null) return null;
@@ -251,45 +217,34 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        /// <summary>Whether a failed image upload is the SDK refusing a file it already holds.
+        /// <summary>Whether a failed image upload is the SDK refusing a file it already holds:
+        /// <c>UploadFile</c> throws when the candidate's MD5 matches the version already stored. A re-shot
+        /// thumbnail can come out byte-identical, so this is a common case rather than an edge one.
         ///
-        /// <c>UploadFile</c> throws when the candidate's MD5 matches the version already stored. That is not
-        /// a failure for this door: the requested image IS what is published. It matters because thumbnails
-        /// here are deliberately disposable and re-shot on any change, and a deterministic renderer produces
-        /// a byte-identical file whenever nothing about the avatar moved — so the no-op re-attach is the
-        /// common case, not an edge one.
-        ///
-        /// Matched on the message because <c>UploadException</c> carries no status field of any kind, so the
-        /// shape-based classifier that handles every API error cannot see it. The prefix is what both of the
-        /// SDK's two throw sites share.</summary>
+        /// Matched on the message because <c>UploadException</c> carries no status field, so the
+        /// shape-based classifier that handles every API error cannot see it. Both SDK throw sites share
+        /// the matched phrase.</summary>
         internal static bool IsAlreadyUploaded(string exceptionMessage)
             => exceptionMessage != null &&
                exceptionMessage.IndexOf("was already uploaded", StringComparison.OrdinalIgnoreCase) >= 0;
 
-        /// <summary>Report what the image half did, given whether the record's image URL moved.
-        ///
-        /// Takes the decision as a BOOL rather than re-deriving it from the URLs, because the caller's
-        /// verdict and this sentence must not be able to disagree: a verdict recovered by string-matching
-        /// the prose would flip to PASS the moment the wording changed, which is the same defect that rules
-        /// out <c>hasThumbnail</c> below.
-        ///
-        /// The move has to be observed at the call site rather than read back later: <c>hasThumbnail</c> is
-        /// a bool off <c>ThumbnailImageUrl</c>, a different and server-derived field already true on any
-        /// avatar ever uploaded, so it cannot distinguish a landed attach from a no-op.</summary>
+        /// <summary>Report what the image half did, given whether the record's image URL moved. The
+        /// decision arrives as a bool so the caller's verdict and this sentence cannot disagree: a verdict
+        /// recovered by string-matching the prose would flip to PASS the moment the wording changed. No
+        /// read can confirm the move afterwards (<c>docs/unity-tools.md</c> §Publish), so the caller
+        /// observes it at the call site.</summary>
         internal static string DescribeImageLanding(bool moved)
             => moved
                 ? "image landed (the record's image url moved)"
                 : "image DID NOT CHANGE — the API returned the record unmodified, which is how a failed " +
                   "upload surfaces without throwing; the published thumbnail is still the old one";
 
-        /// <summary>The row for an upload the SDK refused because it already holds the file.
-        ///
-        /// Deliberately does NOT claim the published thumbnail is the requested one, because the door
-        /// cannot know that. The SDK derives the file id from the record's image url but compares the MD5
-        /// against the file's LATEST version, and those differ after a run whose upload completed and whose
-        /// final url PUT did not: the record still points at the older version while the newer one matches.
-        /// The recovery this door recommends — re-running — lands exactly there, so asserting success would
-        /// turn the documented remedy into a false PASS.</summary>
+        /// <summary>The row for an upload the SDK refused because it already holds the file. It does NOT
+        /// claim the published thumbnail is the requested one: the SDK derives the file id from the
+        /// record's image url but compares the MD5 against the file's LATEST version, and those differ
+        /// after a run whose upload completed and whose final url PUT did not. Re-running, this door's
+        /// recommended recovery, lands exactly there. The door still closes PASS on this row, so its text
+        /// is where the doubt shows.</summary>
         internal static string ImageAlreadyUploadedRow()
             => "image not re-uploaded — the server already holds a byte-identical file. Normally that " +
                "means the requested thumbnail is published; it does NOT prove it, because the match is " +
@@ -298,13 +253,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Landing (server-side sanitization) ──────────────────────────────────────────────────
 
-        /// <summary>Describe how a landed field value differs from the submitted one.
-        ///
-        /// VRChat sanitizes text server-side — an ASCII period comes back as U+2024 ONE DOT LEADER, and it
-        /// is not name-specific — so every text field this door writes is reported from what LANDED, never
-        /// from the input. A door echoing its own argument would silently misreport every value the server
-        /// rewrites, and the two forms are visually identical, which is why a difference is shown as code
-        /// points. The field is named because two writable text fields can move in one call.</summary>
+        /// <summary>Describe how a landed field value differs from the submitted one. Text fields report
+        /// from what LANDED, never the input, because the server's sanitized form can look identical to it
+        /// (<c>docs/unity-tools.md</c> §Publish). A difference shows as code points, and the field is named
+        /// because two writable text fields can move in one call.</summary>
         internal static string DescribeLanding(string field, string submitted, string landed)
         {
             if (landed == null) return field + " landed=<null> (the API returned no value)";
@@ -317,23 +269,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── The expected-name check ─────────────────────────────────────────────────────────────
 
-        /// <summary>Confirm the caller is editing the record it thinks it is.
-        ///
-        /// A call names the avatar by GameObject, but the id actually written comes from that object's
-        /// PipelineManager — an id the caller never sees. A stale or mis-wired one silently retargets the
-        /// write onto a different live record, so requiring the caller to state the name it believes is
-        /// live turns that into a refusal instead of a wrong edit. It is what makes ReportAvatarRecord's
-        /// output chain into this door's input.
-        ///
-        /// It is a BEST-EFFORT confirmation, not a compare-and-swap, and must not be described as one:
-        /// the read and the write are separate requests with no server-side conditional (the API offers no
-        /// ETag or version predicate), so a name that changes in between is not caught; and a display name
-        /// is not an identity, so a stale id pointing at an identically-named record passes. It narrows the
-        /// blast radius of a mis-wired id; it does not close it.
-        ///
-        /// Compared ordinally against the LANDED current name, so a caller chaining a sanitized name from
-        /// a report matches, and one that retyped the ASCII form is told about the difference rather than
-        /// being silently accepted.</summary>
+        /// <summary>Confirm the caller is editing the record it thinks it is: best-effort, not a
+        /// compare-and-swap (<c>docs/unity-tools.md</c> §Publish says what it misses). Compared ordinally
+        /// against the LANDED current name, so a chained sanitized name matches and a retyped ASCII form is
+        /// told about the difference.</summary>
         internal static string CheckExpectedName(string expectCurrentName, string liveName)
         {
             if (expectCurrentName == null)
@@ -349,24 +288,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Interrupted-operation reconciliation ────────────────────────────────────────────────
 
-        /// <summary>How far an operation had got when the editor lost it, and therefore what the caller
-        /// must be told. The distinction is the whole point: a lost READ costs nothing, while a lost WRITE
-        /// may have landed on the server, and reporting either as a plain failure invites a re-run that
-        /// silently double-writes or a false belief that nothing changed.</summary>
-        /// <summary>How far an operation had got. <c>ImageSent</c> is distinct from <c>UpdateSent</c>
-        /// because the two need OPPOSITE advice: a lost metadata write must not be re-issued blindly, while
-        /// a lost image attach is safe to re-run — the SDK refuses a byte-identical re-upload outright.
-        /// Collapsing them would tell the caller to reconcile with a read that cannot see an image.
-        /// <c>EnqueueSent</c> is the impostor batch past its first request: no read shows a queued request,
-        /// so its advice can only be a scoped re-run.</summary>
+        /// <summary>How far an operation had got when the editor lost it. <c>UpdateSent</c> and
+        /// <c>ImageSent</c> need OPPOSITE advice: a lost metadata write must not be re-issued blindly,
+        /// while a lost image attach is safe to re-run because the SDK refuses a byte-identical re-upload,
+        /// and a read cannot see an image. <c>EnqueueSent</c> is the impostor batch past its first request:
+        /// no read shows a queued request, so its advice can only be a scoped re-run.</summary>
         internal enum Phase { Reading, UpdateSent, ImageSent, EnqueueSent }
 
-        /// <summary>The verdict for an operation this editor can no longer observe — a domain reload during
-        /// the call, or a frame budget that expired with the request still in flight.
-        ///
-        /// A write past the send point is reported UNKNOWN, never FAIL: the request reached the server and
-        /// most likely landed. Naming ReportAvatarRecord as the reconciler matters more than the verdict —
-        /// it is the only way the caller can find out what is actually true.</summary>
+        /// <summary>The verdict for an operation this editor can no longer observe: a domain reload during
+        /// the call, or a frame budget that expired with the request still in flight. A write past the send
+        /// point is UNKNOWN, never FAIL: it may well have landed.</summary>
         internal static string InterruptedVerdict(string door, string handle, Phase phase, string cause)
         {
             if (phase == Phase.EnqueueSent)
@@ -390,13 +321,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Impostor batch ──────────────────────────────────────────────────────────────────────
 
-        /// <summary>Whether a failed impostor request ends the batch. Only a rate limit does: the next
-        /// request would meet the same limit and spend nothing but another refusal, while any other failure
-        /// is particular to its avatar and says nothing about the rest.</summary>
         internal static bool StopsImpostorBatch(int? statusCode) => statusCode == 429;
 
-        /// <summary>The impostor batch's terminal line. PASS means every avatar's request was ACCEPTED into
-        /// the queue — not that an impostor exists, which the server generates afterwards.</summary>
+        /// <summary>PASS means every avatar's request was queued, not that an impostor exists.</summary>
         internal static string ImpostorSummary(string[] rows, int queued, int failed, int notAttempted)
         {
             var sb = new StringBuilder("[avatar-record] impostor all: queued=").Append(queued)

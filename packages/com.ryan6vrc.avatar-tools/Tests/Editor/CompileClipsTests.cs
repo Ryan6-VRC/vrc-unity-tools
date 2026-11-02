@@ -1,6 +1,3 @@
-// Behavioral tests for CompileClips (the external-clip writer). Throwaway .anim assets under an owned scratch
-// path; the clips-file YAML is written to a temp filesystem path (Parse reads text, not an asset). Assert on
-// the returned one-line summary + post-write clip state. Headless via tools/run-editmode-tests.ps1.
 using System.IO;
 using NUnit.Framework;
 using UnityEditor;
@@ -113,8 +110,8 @@ public class CompileClipsTests
     [Test]
     public void Batch_atomic_on_a_bad_clip()
     {
-        // "Arm/UI.Image.enabled" → ResolveComponentType("UI") rejects a non-UnityEngine-namespace type →
-        // EmitException in the build-all phase, before any write. Good.anim must therefore never appear.
+        // "Arm/UI.Image.enabled" names component type `UI`, which resolves in no allowlisted namespace, so the
+        // build-all phase throws before any write and Good.anim never appears.
         string body = Head + "clips:\n" +
             "  Good: { set: { \"Arm/SkinnedMeshRenderer.blendShape.Wave\": 100 } }\n" +
             "  Bad:  { set: { \"Arm/UI.Image.enabled\": 1 } }\n";
@@ -127,8 +124,7 @@ public class CompileClipsTests
     [Test]
     public void Sanitized_filename_collision_is_refused()
     {
-        // "Wave Left" and "Wave_Left" both sanitize to "Wave_Left.anim" — a silent clobber under a green
-        // PASS if unguarded. Fail loud naming both authored names; write nothing.
+        // "Wave Left" and "Wave_Left" both sanitize to "Wave_Left.anim".
         string body = Head + "clips:\n" +
             "  \"Wave Left\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.A\": 100 } }\n" +
             "  \"Wave_Left\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.B\": 100 } }\n";
@@ -143,10 +139,7 @@ public class CompileClipsTests
     [Test]
     public void Sanitized_filename_collision_is_case_insensitive()
     {
-        // "Wave" and "wave" sanitize to "Wave.anim"/"wave.anim" — distinct under Ordinal but ONE file on the
-        // case-insensitive (VRChat-pinned Windows/NTFS) filesystem. The guard's OrdinalIgnoreCase comparer must
-        // collide them and refuse; otherwise the write loop's case-insensitive LoadAssetAtPath would resolve the
-        // second onto the first and silently clobber it under a green PASS.
+        // "Wave.anim" and "wave.anim" are distinct under Ordinal but one file on case-insensitive NTFS.
         string body = Head + "clips:\n" +
             "  \"Wave\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.Wave\": 100 } }\n" +
             "  \"wave\": { set: { \"Arm/SkinnedMeshRenderer.blendShape.Wave\": 100 } }\n";
@@ -195,16 +188,17 @@ public class CompileClipsTests
         var c = AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim");
         Assert.AreEqual(h1, CompileClips.HashClipContent(c), "hash of the on-disk clip matches its stamp");
         string mutated = TwoPoses.Replace("blendShape.Wave", "blendShape.Salute");
-        CompileClips.Run(WriteYaml(mutated), Out);                  // recompile with changed YAML: the on-disk clip still matches its stamp (no human edit), so it is NOT diverged and overwrites without force; the new content changes the hash
+        // Changed YAML over an unedited clip: the on-disk clip still matches its stamp, so it overwrites
+        // without force.
+        CompileClips.Run(WriteYaml(mutated), Out);
         Assert.AreNotEqual(h1, CompileClips.ReadContentStamp(Out + "/Wave.anim"), "hash changes when content changes");
     }
 
     [Test]
     public void Weighted_tangent_edit_is_caught()
     {
-        // A weighted-tangent toggle (a common smoothing hand-edit) changes serialized content WITHOUT touching
-        // any pre-F3 hashed field. The fuller hash (weightedMode/inWeight/outWeight) must now catch it as a
-        // divergence and refuse — else a no-force recompile would silently clobber the smoothing.
+        // The content hash covers weightedMode/inWeight/outWeight, so a no-force recompile refuses rather than
+        // clobbering a weighted-tangent toggle, a common smoothing hand-edit.
         CompileClips.Run(WriteYaml(TwoPoses), Out);                  // emit + stamp Wave (PASS)
         var wave = AssetDatabase.LoadAssetAtPath<AnimationClip>(Out + "/Wave.anim");
         var binding = AnimationUtility.GetCurveBindings(wave)[0];
@@ -233,8 +227,6 @@ public class CompileClipsTests
         AnimatorTestHelpers.AddFloatCurve(wave, "HandEdited", typeof(Transform), "m_LocalPosition.x");
         AnimatorTestHelpers.Save(wave, Out + "/Wave.anim");             // human edit lands on disk (stamp now stale)
 
-        // No-force recompile: Wave's on-disk hash no longer matches its stamp → refuse, write nothing. Point's
-        // does match → not named. FAIL routes through Finish's Debug.LogError.
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("refusing to clobber"));
         string s = CompileClips.Run(WriteYaml(TwoPoses), Out);
         StringAssert.Contains("FAIL", s);
@@ -253,15 +245,13 @@ public class CompileClipsTests
         var pre = AnimatorTestHelpers.MakeClip(Out + "/Wave.anim");
         AnimatorTestHelpers.AddFloatCurve(pre, "Human", typeof(Transform), "m_LocalPosition.x");
         AnimatorTestHelpers.Save(pre, Out + "/Wave.anim");             // pre-existing human .anim, never stamped by us
-        // ReadContentStamp == null → diverged → refuse; nothing written (Point never created either).
+        // An unstamped clip counts as diverged, so the recompile refuses and writes nothing, Point included.
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("refusing to clobber"));
         string s = CompileClips.Run(WriteYaml(TwoPoses), Out);
         StringAssert.Contains("FAIL", s);
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(Out + "/Wave.anim", "Human"), "unstamped human .anim protected (nothing written)");
     }
 
-    // End-to-end: a CompileClips-emitted external .anim, referenced from a controller by `ref:{path}`,
-    // compiles and the state resolves to that STANDALONE external clip (not an embedded sub-asset).
     [Test]
     public void Controller_resolves_an_external_clip_by_ref_path()
     {
@@ -294,13 +284,9 @@ public class CompileClipsTests
     [Test]
     public void Tangents_UnsupportedToken_RefusedAtParse()
     {
-        // 'auto'/'free' are refused fail-loud at parse (Unity recomputes auto/clamped-auto; free carries
-        // explicit tangent values the [t,v] schema can't express) — the real entry point is
-        // AnimatorSchemaYaml.Parse, throwing SchemaException. This is the ONLY coverage of that refusal
-        // anywhere in the suite, so it stays here even though the door under test is CompileClips.
-        // ONE token is enough: both tokens reach one throw. And the assertion must quote `got '<token>'` —
-        // the refusal text names 'auto' AND 'free' verbatim as the unsupported pair, so a bare
-        // Contains(token) passes for either input and proves nothing about what was actually rejected.
+        // One token is enough: both reach one throw. The assertion quotes `got '<token>'` because the refusal
+        // text names 'auto' and 'free' verbatim as the unsupported pair, so a bare Contains(token) passes for
+        // either input.
         string body = Head + "clips:\n  Bad:\n    curves:\n      Prop/Renderer.enabled:\n" +
             "        tangents: auto\n        keys: [[0, 0], [1, 1]]\n";
         var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(body, "test"));
@@ -311,10 +297,9 @@ public class CompileClipsTests
     [Test]
     public void No_clips_is_refused()
     {
-        // Valid doc that parses + validates (schema + a declared param) but carries no clips: — the
-        // doc.Clips.Count==0 guard refuses before any folder is created.
+        // Parses and validates (schema + a declared param) but has no `clips:` block.
         string body = "schema: 1\nbasis: avatar-root\ncontroller: Empty\nparameters:\n  P: { type: float }\n";
-        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("no clips")); // Finish logs Debug.LogError on FAIL
+        LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("no clips"));
         string s = CompileClips.Run(WriteYaml(body), Out);
         StringAssert.Contains("FAIL", s);
         StringAssert.Contains("no clips", s);

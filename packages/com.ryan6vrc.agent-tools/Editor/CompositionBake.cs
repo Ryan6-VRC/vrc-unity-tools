@@ -13,41 +13,19 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
-    /// <summary>
-    /// <see cref="ReportComposition"/>'s bake mode: measure the composed truth instead of inferring it.
-    /// It builds a fresh clone through <see cref="AvatarBake"/> and diffs the built parameter set against
-    /// the authored census, so the rewrite a build performs is READ rather than modelled — no vendor
-    /// name-mangling grammar is pinned anywhere here, because a mis-pinned one returns plausible strings
-    /// with nothing to signal they are wrong.
-    ///
-    /// <b>Two-phase, by measurement.</b> A full preprocess chain on a complex avatar with an optimizer
-    /// installed runs past the MCP transport's patience, and a lost reply on a synchronous call discards a
-    /// result the editor actually produced. So <see cref="Begin"/> writes the artifact path FIRST, schedules
-    /// the work, and returns <c>PENDING</c> with that path; <see cref="Verify"/> re-reads it. The transport
-    /// re-sends a timed-out payload, so <see cref="Begin"/> is idempotent while a bake is in flight — a
-    /// duplicate returns the same pending path rather than starting a second build.
-    ///
-    /// Deferred off <c>EditorApplication.update</c>, never <c>delayCall</c>: an MCP-driven editor is
-    /// unfocused, where <c>delayCall</c> queues indefinitely and fires on the click that focuses the window.
-    ///
-    /// <b>Freshness is by construction.</b> The clone is built here and destroyed after the read; no
-    /// previously-baked artifact under <c>com.vrcfury.temp</c> is ever consulted, because those reflect the
-    /// VRCFury version that produced them and a stale one can differ structurally from what the installed
-    /// version now emits.
-    /// </summary>
+    /// <summary><see cref="ReportComposition"/>'s bake mode: builds a fresh clone through <see cref="AvatarBake"/>
+    /// and diffs the built parameter set against the authored census. It reads the rewrite a build performs; pin
+    /// no vendor name-mangling grammar here, since a wrong pin returns plausible strings with nothing to signal it.
+    /// Contract: docs/unity-tools.md.</summary>
     internal static class CompositionBake
     {
         private const string Pending = "pending";
-        /// <summary>Well past the ~30 s worst case measured on a complex avatar with an optimizer installed,
-        /// so a slow bake is never called dead; short enough that a discarded callback is not a long wedge.</summary>
         private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(5);
         private static readonly Dictionary<int, bool> InFlight = new Dictionary<int, bool>();
-        /// <summary>Roots whose in-flight bake was scheduled with a probe.</summary>
         private static readonly HashSet<int> InFlightProbed = new HashSet<int>();
 
-        // Keyed on name AND instance id: the path must be STABLE (the caller re-reads it after a transport
-        // timeout, so a timestamp is out) but two roots named "Avatar" in one scene would otherwise share a
-        // file — B's pending stub overwriting A's result, and Verify(B) returning A's summary as B's.
+        // Stable, because the caller re-reads it after a transport timeout; the instance id keeps two same-named
+        // roots in one scene from sharing a file.
         private static string ArtifactPath(GameObject root) =>
             RunLogFormat.SnapshotDir + "/composition-bake_" + RunLogFormat.Sanitize(root.name)
             + "_" + root.GetInstanceID().ToString("X", CultureInfo.InvariantCulture) + ".md";
@@ -59,10 +37,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             int key = root.GetInstanceID();
             if (InFlight.TryGetValue(key, out bool running) && running)
             {
-                // A running bake that was scheduled with NO probe cannot take one on, so its PENDING path would
-                // hand this caller an artifact that reads as if the probe had been dropped. One scheduled WITH a
-                // probe gets the ordinary answer: the transport re-sends a timed-out call, and that re-send is
-                // the same probe arriving twice, which must not be told to bake again.
+                // A second probe on a probed bake is the transport re-sending a timed-out call, so it gets the
+                // ordinary PENDING.
                 if (probe != null && !InFlightProbed.Contains(key))
                 {
                     string refusal = "[ReportComposition] FAIL: a bake of '" + root.name + "' is already running and was started "
@@ -75,10 +51,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             if (probe != null) InFlightProbed.Add(key); else InFlightProbed.Remove(key);
 
-            // One bake back is kept, because the path is stable on purpose and this stub is about to replace it.
             if (KeepPrevious(FullPath(path))) RunLogFormat.PublishArtifact(RunLogFormat.SnapshotDir, path + PreviousSuffix);
 
-            // The path is on disk BEFORE the work starts, so a transport timeout loses nothing.
             WriteArtifact(path, "# ReportComposition (bake): " + root.name + "\n\nstatus: " + Pending
                 + "\nstarted: " + DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
                 + "\n\nThe bake is running. Re-read this file, or call `ReportComposition.Verify(<avatarRoot>)`.\n"
@@ -96,6 +70,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 try { Run(rootRef, census, paramFilter, path, probe); }
                 finally { InFlight[key] = false; }
             };
+            // update, never delayCall, which queues while the Editor is unfocused: docs/unity.md §Sharp edges.
             EditorApplication.update += step;
 
             return "[ReportComposition] " + root.name + ": mode=bake => PENDING | log=" + path;
@@ -110,10 +85,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             string text = File.ReadAllText(full);
             if (!IsFinished(text) && text.Contains("status: " + Pending))
             {
-                // A domain reload discards the scheduled callback WITHOUT running it and clears the in-memory
-                // in-flight flag, leaving the artifact reading `pending` forever. Nothing in the editor can be
-                // asked whether the callback still exists, so age is the only available signal — and without
-                // it the artifact's own "do not re-issue" instruction wedges the door permanently.
+                // A domain reload discards the scheduled callback without running it and clears the in-flight flag,
+                // leaving the artifact `pending` forever. Nothing in the editor can report whether the callback
+                // still exists, so age is the only signal.
                 var m = Regex.Match(text, @"^started: (.+)$", RegexOptions.Multiline);
                 if (m.Success && DateTime.TryParse(m.Groups[1].Value, CultureInfo.InvariantCulture,
                         DateTimeStyles.RoundtripKind, out var started)
@@ -133,14 +107,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal const string PreviousSuffix = ".prev.md";
 
         /// <summary>A finished bake's artifact opens with its summary line; the pending stub and a refusal open
-        /// with a heading. Keyed on the opening rather than on a search of the body, because the body quotes
-        /// text this tool does not write (VRCFury's debug text, a caller's probe output).</summary>
+        /// with a heading.</summary>
         internal static bool IsFinished(string artifactText) =>
             artifactText != null && artifactText.StartsWith("summary: ", StringComparison.Ordinal);
 
-        /// <summary>Copy a FINISHED bake at <paramref name="fullPath"/> to its <see cref="PreviousSuffix"/>
-        /// sibling, replacing the one before it. A pending stub or a refusal is not copied, so a failed re-bake
-        /// never costs the last good one. Never throws: a copy that fails must not stop the bake it precedes.</summary>
+        /// <summary>Copy a finished bake to its <see cref="PreviousSuffix"/> sibling, so a failed re-bake never
+        /// costs the last good one. Never throws: a failed copy must not stop the bake it precedes.</summary>
         internal static bool KeepPrevious(string fullPath)
         {
             try
@@ -165,27 +137,19 @@ namespace Ryan6Vrc.AgentTools.Editor
                 WriteArtifact(path, Refusal(path, "the avatar root was destroyed before the bake ran", "(destroyed)", probe != null));
                 return;
             }
-            // Rechecked here as well as at Run: play can be entered between scheduling and this tick, and a bake
-            // then would measure the play build.
             if (EditorApplication.isPlayingOrWillChangePlaymode)
             {
                 WriteArtifact(path, Refusal(path, "play mode was entered before the bake ran; exit play and re-issue the bake", root.name, probe != null));
                 return;
             }
 
-            // `using`, so the SDK's paired post-callback fires on EVERY exit — including the refusal return
-            // below, which sits inside the scope precisely because that early return used to skip the pairing.
-            // The read happens INSIDE the scope by necessity, not by style: the post-callback destroys the
-            // clone's generated assets, so every playable-layer controller BuiltDeclarations exists to read is
-            // null once the scope closes (AvatarBake's doc comment has the measurement).
+            // `using`, so the SDK's paired post-callback fires on every exit, including the refusal below. Every read
+            // sits inside the scope: the post-callback destroys the clone's generated assets (built controllers,
+            // parameters, menus, the optimizers' textures), as AvatarBake's doc comment measures.
             using (var bake = AvatarBake.Begin(root))
             {
                 if (!bake.Ok)
                 {
-                    // A loud refusal naming the stage — NEVER a silent fallback to the authored census. Emitting
-                    // authored rows under a heading that promises composed truth is the failure this door exists
-                    // to prevent, so bake mode publishes no table at all when the bake did not happen. A hook
-                    // that THREW is reported as the crash it was, not as a refusal that never happened.
                     string failedStage = bake.DescribeFailure();
                     WriteArtifact(path, Refusal(path, failedStage, root.name, probe != null));
                     Debug.LogError("[ReportComposition] " + root.name + ": mode=bake => FAIL (" + failedStage + ") | log=" + path);
@@ -199,21 +163,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var diff = Diff(census, built, paramFilter, incomplete == null);
                 string geometryKeys;
                 var geometry = GeometrySection(ReadGeometry(root), ReadGeometry(clone), paramFilter, out geometryKeys);
-                // The SDK scan runs once, on the clone, and feeds both the Performance section and the texture
-                // total — inside the scope for the same reason as every read here.
                 var perfRead = ReadPerformance(clone);
                 string perfKeys;
                 var performance = PerformanceSection(perfRead, paramFilter, out perfKeys);
-                // Inside the scope too: the built parameters asset is a generated asset the post-callback sweeps.
                 var syncRead = ReadSync(clone);
                 string syncKeys;
                 var sync = SyncSection(syncRead, paramFilter, out syncKeys);
-                // Inside the scope too: the built menus are generated assets the post-callback sweeps.
                 string menuKey;
                 var builtMenu = BuiltMenuSection(ReadBuiltMenu(clone), paramFilter, out menuKey);
-                // Both texture reads sit INSIDE the scope for ReadGeometry's reason: the optimizers' output
-                // textures are NDMF `__Generated` assets the post-callback deletes, so after the scope closes
-                // the built side has nothing left to measure.
                 int swapAuthored, swapBuilt;
                 var texAuthored = ReadTextures(root, out swapAuthored);
                 var texBuilt = ReadTextures(clone, out swapBuilt);
@@ -221,17 +178,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var textures = TextureSection(texAuthored, texBuilt,
                     SdkTextureMegabytes(root), perfRead.Stats != null ? perfRead.Stats.textureMegabytes : null,
                     swapAuthored, swapBuilt, paramFilter, out textureKeys);
-                // LAST, after every read above: the probe is the caller's code holding the clone, and whatever
-                // it does to the clone can then spoil only its own section.
+                // Last: the probe is the caller's code holding the clone, so whatever it does can spoil only its
+                // own section.
                 string probeKey = null;
                 var probed = probe != null ? ProbeSection(probe, clone, out probeKey) : null;
                 string summary = string.Format(CultureInfo.InvariantCulture,
-                    // `unattributed=` is deliberately GONE rather than kept with a narrower meaning: it used to
-                    // count ambiguity and built-only rows together, so preserving the key while the number moves
-                    // (145 → 8 on one measured avatar) would leave a reader comparing two artifacts with no
-                    // signal that the denominator changed. Renaming both halves makes the change visible.
-                    // unlintableSurfaces rides here too, not only EmitPlain: bake is the EXACTNESS mode, so a
-                    // surface this run could not walk is where the omission costs most.
                     "[ReportComposition] {0}: surfaces={1}{13} params={2} kept={3} renamed={4} dropped={5} merged={6} ambiguous={7} builtOnly={8} vrcReserved={9} notInScope={10} builtSideUnread={11} {14} {15} {16} {17} {19}{18} mode=bake => OK | log={12}",
                     root.name, census.Surfaces.Count, census.Params.Count,
                     diff.Count(d => d.Category == "kept"), diff.Count(d => d.Category == "renamed"),
@@ -253,9 +204,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     section.Add("| `" + RunLogFormat.Cell(d.Authored) + "` | " + d.Category + " | `" + RunLogFormat.Cell(d.Built) + "` | "
                               + RunLogFormat.Cell(d.Surface + d.Caveat) + " |");
                 section.Add("");
-                // Each note ends with a hard break and the block ends with a blank line, matching RenderBody's own
-                // note convention: without both, CommonMark lazy continuation folds every following paragraph —
-                // the incompleteness warning, the category legend, the arithmetic — into this blockquote.
+                // Each note ends with a hard break and the block with a blank line: without both, CommonMark lazy
+                // continuation folds every following paragraph into this blockquote.
                 foreach (var n in readNotes) section.Add("> built-side read note: " + n + "  ");
                 if (readNotes.Count > 0) section.Add("");
                 if (incomplete != null)
@@ -307,41 +257,32 @@ namespace Ryan6Vrc.AgentTools.Editor
                             + ReportComposition.RenderBody(root, census, paramFilter, "bake (measured against a fresh build)", section, geometry, textures, performance, sync, builtMenu, probed);
                 WriteArtifact(path, body);
                 Debug.Log(summary);
-            }   // scope closes: the clone is destroyed and OnPostprocessAvatar fires, in that order
+            }
         }
 
         // ── Geometry: triangles, authored against built ───────────────────────────────────────────────
 
-        /// <summary>One renderer's triangles on one side of the diff. <c>Unreadable</c> is a THIRD state, not
-        /// a zero: a renderer whose mesh is null, destroyed or unreadable is a named row with an empty count,
-        /// because a 0 in a triangle column reads as "the build emptied this" — the one claim this section
-        /// exists to let a reader make, and the one it must not manufacture.</summary>
+        /// <summary>One renderer's triangles on one side of the diff. <c>Unreadable</c> is never a zero: a 0 in a
+        /// triangle column reads as "the build emptied this".</summary>
         internal struct GeoRow
         {
-            public string Path;      // hierarchy path relative to the side's own root
-            public bool Skinned;     // SkinnedMeshRenderer; false is a MeshRenderer read through its MeshFilter
-            public bool Active;      // active in hierarchy AND the renderer component enabled
+            public string Path;
+            public bool Skinned;
+            public bool Active;
             public long Tris;
             public bool Unreadable;
             public string Caveat;
-            /// <summary>The mesh's UV channels as <c>channel:components</c> (<c>0:2 1:4</c>), <c>none</c> for a
-            /// mesh carrying no UV channel, null where there is no mesh. Vertex LAYOUT, read off the attribute
-            /// descriptors, so it is there for a mesh whose index buffer is not readable.</summary>
+            /// <summary><c>channel:components</c> per UV channel (<c>0:2 1:4</c>), read off the attribute descriptors,
+            /// so it is there for a mesh whose index buffer is not readable; null where there is no mesh.</summary>
             public string Uv;
         }
 
-        /// <summary>Every <c>SkinnedMeshRenderer</c> and <c>MeshRenderer</c> under <paramref name="root"/>,
-        /// active or not: the build merges toggled-off renderers into an always-active mesh under NaNimation,
-        /// so "active" is runtime state and filtering on it would report a merge as a deletion.
-        /// <para><b>The built side is readable only inside the bake scope</b>, which is why the call sits where
-        /// it does in <see cref="Run"/>: both optimizers' output meshes live only in memory — AAO's under
-        /// NDMF's generated-asset root that the post-callback's <c>CleanupTemporaryAssets</c> deletes, d4rk's a
-        /// bare <c>new Mesh()</c> never persisted — so after the scope closes there is nothing left to count.
-        /// The other half of the same question is what the chain SKIPS when no upload is happening: VRCFury's
-        /// <c>DisablePluginsWhenNotUploadingHook</c> inhibits six named callback types (Poiyomi's and liltoon's
-        /// material lockdown, UdonSharp's recompile, and the SDK's product/network id assignment), none of
-        /// which touches a mesh — read from VRCFury 1.1436.0's source; re-read that list if a triangle count
-        /// ever disagrees with an uploaded avatar's.</para></summary>
+        /// <summary>Every <c>SkinnedMeshRenderer</c> and <c>MeshRenderer</c> under <paramref name="root"/>, active or
+        /// not: the build merges toggled-off renderers into an always-active mesh under NaNimation, so filtering on
+        /// "active" would report a merge as a deletion.
+        /// <para>The built side is readable only inside the bake scope: AAO's output meshes live under NDMF's
+        /// generated-asset root, which the post-callback's <c>CleanupTemporaryAssets</c> deletes, and d4rk's merged mesh
+        /// is a bare <c>new Mesh()</c> never persisted.</para></summary>
         internal static List<GeoRow> ReadGeometry(GameObject root)
         {
             var rows = new List<GeoRow>();
@@ -357,7 +298,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var mf = r.GetComponent<MeshFilter>();
                     mesh = mf != null ? mf.sharedMesh : null;
                 }
-                else continue;   // particle, trail and line renderers carry no mesh this read counts
+                else continue;
 
                 var row = new GeoRow
                 {
@@ -410,12 +351,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return sb.ToString();
         }
 
-        /// <summary>The <c>## Geometry</c> table, and (out) the built side's three summary keys. Pure — rows in,
-        /// lines out — so the arithmetic every reading of this section rests on is unit-testable without a bake.
-        /// <para>Rows are keyed on path AND kind, because one transform may carry both a skinned and a mesh
-        /// renderer and a path-only key would silently fold them into one row. <paramref name="paramFilter"/>
-        /// narrows nothing here — it is a parameter-name filter, and a geometry table narrowed by it would
-        /// report a partial avatar under totals that read whole — so it is only disclosed.</para></summary>
         internal static List<string> GeometrySection(List<GeoRow> authored, List<GeoRow> built,
                                                      string paramFilter, out string summaryKeys)
         {
@@ -439,13 +374,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var caveats = new List<string>();
                 if (inA && !string.IsNullOrEmpty(a[k].Caveat)) caveats.Add((inB ? "authored: " : "") + a[k].Caveat);
                 if (inB && !string.IsNullOrEmpty(b[k].Caveat)) caveats.Add((inA ? "built: " : "") + b[k].Caveat);
-                // The `active` cell reports the BUILT side where there is one; a side that disagrees is named
-                // rather than dropped, since a renderer the build activates is exactly the NaNimation merge the
-                // population rule above exists for.
                 if (inA && inB && a[k].Active != b[k].Active)
                     caveats.Add("active differs: authored=" + (a[k].Active ? "yes" : "no"));
-                // The same guard for the layout: the column shows the built side, so an authored one that
-                // differs is named rather than hidden.
                 if (inA && inB && a[k].Uv != b[k].Uv)
                     caveats.Add("authored uv: " + (a[k].Uv ?? "unreadable"));
                 lines.Add("| `" + RunLogFormat.Cell(row.Path) + "` | " + (row.Skinned ? "skinned" : "mesh") + presence
@@ -474,10 +404,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return lines;
         }
 
-        /// <summary>Unity permits same-named siblings, so path plus kind is not unique: a second renderer on the
-        /// same key takes an ordinal suffix on its displayed path (` #2`, ` #3`, …) in hierarchy order, so every
-        /// renderer keeps its own row and the two sides pair by that order rather than one silently overwriting
-        /// the other.</summary>
         private static Dictionary<string, GeoRow> KeyRows(List<GeoRow> rows)
         {
             var d = new Dictionary<string, GeoRow>(StringComparer.Ordinal);
@@ -499,8 +425,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return r.Unreadable ? "unreadable" : r.Tris.ToString(CultureInfo.InvariantCulture);
         }
 
-        /// <summary>An unreadable row contributes nothing to any subtotal — its count is unknown, not zero —
-        /// which is why its row says `unreadable` where a total could not.</summary>
         private static string Subtotal(List<GeoRow> side, string which)
         {
             long sum = 0;
@@ -516,11 +440,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Probe: the caller's own read of the clone ─────────────────────────────────────────────────
 
-        /// <summary>Run the caller's <paramref name="probe"/> against the clone and render what it returned as
-        /// the <c>## Probe</c> section. The call and its catch live here so a throwing probe costs only this
-        /// section: the bake's other reads are already taken, and the scope still disposes the clone and fires
-        /// the paired post-callback. Fenced, so probe text carrying its own code fence or a line this tool's
-        /// readers key on stays inert.</summary>
+        /// <summary>The <c>## Probe</c> section. The call and its catch live here so a throwing probe costs only this
+        /// section. Fenced, so probe text carrying its own code fence or a line this tool's readers key on stays
+        /// inert.</summary>
         internal static List<string> ProbeSection(Func<GameObject, string> probe, GameObject clone, out string summaryKey)
         {
             var lines = new List<string>
@@ -540,7 +462,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             summaryKey = "probe=ok";
             if (text == null) { lines.Add("(returned null)"); return lines; }
             if (text.Length == 0) { lines.Add("(returned empty)"); return lines; }
-            // One backtick longer than the longest run in the text, so nothing the probe returns can close it.
             int longest = 0, run = 0;
             foreach (char ch in text) { run = ch == '`' ? run + 1 : 0; if (run > longest) longest = run; }
             string fence = new string('`', Math.Max(3, longest) + 1);
@@ -552,20 +473,15 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Textures: memory, authored against built ──────────────────────────────────────────────────
 
-        /// <summary>One distinct texture on one side of the diff, with the slots that reach it.
-        /// <para><c>Unknown</c> is the THIRD state, and it is the analogue of <see cref="GeoRow.Unreadable"/>
-        /// for the same reason: a 0 in a megabyte column reads as "this costs nothing", which is a claim this
-        /// section must never manufacture. A texture whose <c>TextureFormat</c> this arithmetic cannot type,
-        /// and every non-<c>Texture2D</c> (RenderTexture, Cubemap, Texture2DArray), is Unknown — named in its
-        /// row, excluded from the total and from the ordering. AAO's own reader guesses 16 bpp on an
-        /// unrecognised format and logs an error doing it; a guess laundered into a table a reader sorts by
-        /// size is worse than an honest gap.</para></summary>
+        /// <summary>One distinct texture on one side of the diff, with the slots that reach it. <c>Unknown</c> is
+        /// never a zero, as with <see cref="GeoRow.Unreadable"/>: the row is named and left out of the total. AAO's own
+        /// reader guesses 16 bpp on an unrecognised format; this one leaves the gap named.</summary>
         internal struct TexRow
         {
-            public string Slot;        // "<renderer path>[slot].<shader property>" — first slot reaching this texture
-            public int OtherSlots;     // how many further slots reach the same texture; it is counted ONCE
-            public string SlotKey;     // every reaching slot, ordinal-sorted — the pairing key when identity fails
-            public string Identity;    // asset path, else instance id: survives a renderer merge, dies on a resize
+            public string Slot;
+            public int OtherSlots;
+            public string SlotKey;
+            public string Identity;
             public int Width, Height, Mips;
             public string Format;
             public long Bytes;
@@ -573,14 +489,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Caveat;
         }
 
-        /// <summary>Bytes per pixel, <b>every entry measured black-box against the SDK's own
-        /// <c>textureMegabytes</c></b> — one texture of each format on a bare renderer, the reported figure
-        /// divided by the mip chain's pixel count. Not inferred from the format's name or its bit layout:
-        /// <c>RGB24</c> rates <b>4</b>, not 3, because the SDK counts it 32-bit-aligned, and that one entry
-        /// would otherwise leave a permanent ~25% residual on any avatar carrying an uncompressed texture.
-        /// <para>A format absent here is Unknown, never a guess. The ASTC/ETC families are absent because
-        /// this is PC-facing (<c>optimization.md</c> works PC only) and they are unmeasured — not because
-        /// they are impossible.</para></summary>
+        /// <summary>Bytes per pixel, each entry measured against the SDK's own <c>textureMegabytes</c>: one texture
+        /// of each format on a bare renderer, the reported figure divided by the mip chain's pixel count. Not
+        /// inferred from the format: <c>RGB24</c> rates 4, not 3.
+        /// <para>A format absent here is Unknown, never a guess. The ASTC/ETC families are unmeasured because this
+        /// is PC-facing.</para></summary>
         private static readonly Dictionary<TextureFormat, float> BytesPerPixel = new Dictionary<TextureFormat, float>
         {
             { TextureFormat.DXT1, 0.5f },   { TextureFormat.DXT1Crunched, 0.5f },
@@ -598,12 +511,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             { TextureFormat.RGBAFloat, 16f },
         };
 
-        /// <summary>The mip chain's pixel count, <c>area &gt;&gt; 2i</c> per level.
-        /// <para><b>This is an area shift, and that is deliberate — it is what the SDK does.</b> The obvious
-        /// objection is that a non-square texture's real chain stops quartering once a dimension reaches 1,
-        /// so a per-dimension walk would count more. Measured on a 2048x8 DXT1: the SDK reports 10922 bytes,
-        /// which is this area shift exactly; the per-dimension walk gives 11007. Matching the SDK is the
-        /// whole point of this section, so the arithmetically-tidier loop is the wrong one.</para></summary>
+        /// <summary>The mip chain's pixel count, <c>area &gt;&gt; 2i</c> per level. The SDK uses this area shift, so do
+        /// not walk per dimension: on a 2048x8 DXT1 the SDK reports 10922 bytes, the shift exactly, and the walk gives
+        /// 11007.</summary>
         private static long MipChainPixels(int width, int height, int mips)
         {
             long px = (long)width * height, total = 0;
@@ -611,19 +521,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             return total;
         }
 
-        /// <summary>Every texture reachable from every renderer's shared materials under <paramref name="root"/>,
-        /// active or not — the same population rule <see cref="ReadGeometry"/> states, and measured the same way:
-        /// deactivating every renderer object on a real avatar moved the SDK's <c>textureMegabytes</c> by zero,
-        /// so an inactive renderer's textures count at full weight.
-        /// <para><b>This walks every <c>Renderer</c>, not <see cref="ReadGeometry"/>'s loop</b>, which
-        /// <c>continue</c>s past particle, trail and line renderers because they carry no mesh. They carry
-        /// materials, and those textures are in the megabyte figure.</para>
-        /// <para><paramref name="swapOnlyMaterials"/> is the disclosed omission: materials no renderer's
-        /// <c>sharedMaterials</c> holds, reachable only through an <c>m_Materials</c> object-reference curve.
-        /// They are COUNTED, not rowed — the optimizers that own this stat do reach them (AAO unions the
-        /// animated materials per renderer; Limitex walks the animator and the components besides), so their
-        /// textures sit inside the SDK total while being in no row here, and an undisclosed gap in a table a
-        /// reader uses to pick a target is this section's worst failure.</para></summary>
+        /// <summary>Every texture reachable from every <c>Renderer</c>'s shared materials under
+        /// <paramref name="root"/>, active or not: particle, trail and line renderers carry materials too, and
+        /// deactivating every renderer object on a real avatar moved the SDK's <c>textureMegabytes</c> by zero.
+        /// <para><paramref name="swapOnlyMaterials"/> counts materials no renderer's <c>sharedMaterials</c> holds,
+        /// reachable only through an <c>m_Materials</c> object-reference curve. They are counted, not rowed:
+        /// <see cref="SwapSentence"/> discloses them.</para></summary>
         internal static List<TexRow> ReadTextures(GameObject root, out int swapOnlyMaterials)
         {
             var rows = new List<TexRow>();
@@ -634,10 +537,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             var slots = new Dictionary<Texture, List<string>>();
             var sharedMats = new HashSet<Material>();
 
-            // Unity permits same-named siblings and vendor avatars ship them, so a bare RelPath would give two
-            // renderers one slot string — and then two DIFFERENT textures one SlotKey, where first-wins
-            // pairing silently drops the second. GeometrySection's KeyRows solved this with an ordinal
-            // suffix; the same discipline, applied to the path before any slot string is built from it.
+            // An ordinal suffix: same-named siblings would otherwise give two different textures one SlotKey, and
+            // PairTextures' first-wins map would leave the second unpaired.
             var pathUse = new Dictionary<string, int>(StringComparer.Ordinal);
             var unreadableMaterials = new List<string>();
 
@@ -660,9 +561,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     if (m == null) continue;
                     sharedMats.Add(m);
                     string[] props;
-                    // A material with a missing or broken shader throws here. ReadGeometry gives every
-                    // problem renderer an Unreadable row precisely so one bad asset cannot take down the
-                    // whole artifact; this is that, for materials.
+                    // A material with a missing or broken shader throws here.
                     try { props = m.GetTexturePropertyNames(); }
                     catch (Exception e)
                     {
@@ -675,8 +574,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                         Texture t;
                         try { t = m.GetTexture(prop); }
                         catch (Exception) { continue; }
-                        // A property the shader declares and the material leaves null is NOTHING — not a
-                        // zero-byte row, which would read as a texture that costs nothing.
                         if (t == null) continue;
                         List<string> reaching;
                         if (!slots.TryGetValue(t, out reaching))
@@ -706,10 +603,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                     Height = t.height,
                     Mips = t.mipmapCount,
                 };
-                // The asset PATH alone is not an identity: every sub-asset of one file shares it, and d4rk
-                // mints every non-material object it creates into a single shared TrashBin asset with no
-                // count cap — so a path-keyed first-wins pair would marry unrelated textures. The local file
-                // id disambiguates within the file; a runtime-only texture has no asset at all.
+                // The asset path alone is not an identity: every sub-asset of one file shares it, and d4rk mints every
+                // non-material object it creates into a single shared TrashBin asset, so a path-keyed pair would marry
+                // unrelated textures. A runtime-only texture has no asset at all.
                 string guid, assetPath = AssetDatabase.GetAssetPath(t);
                 long localId;
                 row.Identity = !string.IsNullOrEmpty(assetPath)
@@ -731,25 +627,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             return rows;
         }
 
-        /// <summary>Fill a row's <c>Format</c> and <c>Bytes</c> — or mark it Unknown. Every branch below is
-        /// measured against the SDK on a bare renderer rather than reasoned from the type:
+        /// <summary>Fill a row's <c>Format</c> and <c>Bytes</c>, or mark it Unknown. Each rate is measured against the
+        /// SDK on a bare renderer:
         /// <list type="bullet">
-        /// <item><b><c>Texture2D</c></b> — the mip chain times the format's bytes per pixel.</item>
-        /// <item><b><c>Cubemap</c></b> — the SDK counts ONE face's mip chain, not six (128 DXT1 reported 10922
-        /// bytes, a single face's chain; six would be 65532). So a cubemap is typed exactly like a 2D texture,
-        /// and the six-face reading would have overcounted it 6x.</item>
-        /// <item><b><c>Texture2DArray</c></b> — <c>w * h * depth * bpp</c> with NO mip chain (128x128x4 DXT1
-        /// reported 32768, which is base level times four slices). This branch is why the section still
-        /// reconciles on a d4rk-optimized avatar: d4rk atlases into <c>Texture2DArray</c>, so leaving arrays
-        /// Unknown would collapse the built column toward zero on exactly the avatars that carry the most
-        /// texture memory, and print the gap as an unexplained residual.</item>
-        /// <item><b><c>RenderTexture</c></b> — the SDK counts it as ZERO (a 256 RenderTexture on a renderer
-        /// moved <c>textureMegabytes</c> not at all). Excluded from the row total to match, and its row says
-        /// so, because an Unknown that reads as "may explain the residual" would be the wrong steer: this one
-        /// provably cannot.</item>
+        /// <item><c>Cubemap</c>: one face's mip chain, not six (128 DXT1 reported 10922 bytes; six would be 65532).</item>
+        /// <item><c>Texture2DArray</c>: <c>w * h * depth * bpp</c> with no mip chain (128x128x4 DXT1 reported 32768).</item>
+        /// <item><c>RenderTexture</c>: zero (a 256 RenderTexture on a renderer moved <c>textureMegabytes</c> not at
+        /// all), so it stays out of the row total.</item>
         /// </list>
-        /// <c>Texture3D</c> and anything else is Unknown — unmeasured, and rare enough on an avatar that
-        /// guessing it is not worth a wrong number.</summary>
+        /// <c>Texture3D</c> and anything else is unmeasured, so Unknown.</summary>
         internal static void TypeBytes(Texture t, ref TexRow row)
         {
             var t2 = t as Texture2D;
@@ -798,11 +684,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             row.Caveat = "this texture type is not typed by this arithmetic, so its bytes are unknown rather than guessed";
         }
 
-        /// <summary>Materials any <c>m_Materials</c> object-reference curve can put into a slot, across every
-        /// clip reachable from an <c>Animator</c> under the root. Deliberately the cheap half of the question:
-        /// it exists to COUNT a disclosed omission, not to resolve one, so it reads clips and stops there. A
-        /// material a COMPONENT sets (MA Material Setter) is reached by neither this count nor the rows, and
-        /// the section's prose says so rather than letting the count imply a completeness it lacks.</summary>
+        /// <summary>Materials any <c>m_Materials</c> object-reference curve can put into a slot, across every clip on
+        /// <see cref="SwapSearchControllers"/>. A material a component sets (MA Material Setter) is not reached.</summary>
         private static IEnumerable<Material> SwapReachableMaterials(GameObject root)
         {
             var seen = new HashSet<Material>();
@@ -825,14 +708,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
         }
 
-        /// <summary>Every controller a swap curve could live on. <b>The descriptor's playable layers are the
-        /// load-bearing half, not the child Animators</b>: an avatar's FX, Gesture and Action controllers sit
-        /// in <c>baseAnimationLayers</c> / <c>specialAnimationLayers</c>, and nothing in the stack puts them
-        /// on the root Animator — NDMF writes built controllers back to the descriptor slots, VRCFury's own
-        /// holder destroys the root Animator mid-build, and Modular Avatar never assigns one. A walk over
-        /// child Animators alone therefore finds nothing on essentially every avatar and reports it as a
-        /// measured zero, which is worse than not counting at all. <see cref="BuiltDeclarations"/> reads the
-        /// same two layer sets for the same reason.</summary>
+        /// <summary>Every controller a swap curve could live on. The descriptor's playable layers are the load-bearing
+        /// half: NDMF writes built controllers back to the descriptor slots, VRCFury's holder destroys the root
+        /// Animator mid-build, and Modular Avatar never assigns one, so child Animators alone find nothing on
+        /// essentially every avatar.</summary>
         private static IEnumerable<RuntimeAnimatorController> SwapSearchControllers(GameObject root)
         {
             var seen = new HashSet<RuntimeAnimatorController>();
@@ -844,8 +723,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (descriptor.specialAnimationLayers != null) layers.AddRange(descriptor.specialAnimationLayers);
                 foreach (var layer in layers)
                 {
-                    // isDefault means the slot ships the SDK's own controller; its clips are not this
-                    // avatar's authoring and counting them would inflate the disclosure with SDK content.
                     if (layer.isDefault || layer.animatorController == null) continue;
                     if (seen.Add(layer.animatorController)) yield return layer.animatorController;
                 }
@@ -857,14 +734,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        /// <summary>The <c>## Textures</c> table, and (out) the built side's summary key. Pure — rows in,
-        /// lines out — so the reconciliation every reading of this section rests on is unit-testable without
-        /// a bake.
-        /// <para><b>Pairing is identity first, slot set second, and it needs both.</b> An untouched texture
-        /// keeps its asset path and pairs straight through a renderer merge; a resized one is a NEW object
-        /// whose only surviving handle is the set of slots reaching it. Neither key alone survives both cases
-        /// — identity dies on a resize, the slot set dies on a merge — and d4rk's <c>MergeSkinnedMeshes</c> is
-        /// on in the house profile, so the merge case is the ordinary one, not the exotic one.</para></summary>
         internal static List<string> TextureSection(List<TexRow> authored, List<TexRow> built,
                                                     float? sdkAuthored, float? sdkBuilt,
                                                     int swapOnlyAuthored, int swapOnlyBuilt,
@@ -891,9 +760,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (inB && !string.IsNullOrEmpty(p.Built.Value.Caveat)) caveats.Add((inA ? "built: " : "") + p.Built.Value.Caveat);
                 if (row.OtherSlots > 0)
                     caveats.Add("reached by " + (row.OtherSlots + 1) + " slots; counted once, as the SDK counts it once");
-                // The displayed size/format/mips are the BUILT side's where there is one, and a resize is the
-                // headline case this table exists to rank — so a hidden authored shape is named rather than
-                // dropped. GeometrySection's "active differs" cell is the same guard on the same hazard.
                 if (inA && inB)
                 {
                     var a = p.Authored.Value;
@@ -952,26 +818,20 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Sync: the clone's built synced-bit total and whether VRCFury's Parameter Compressor compressed ──
 
-        /// <summary>What the clone says about sync after every build pass. <see cref="Bits"/> is the SDK's own
-        /// cost of the built parameters asset (null with <see cref="BitsError"/> when it could not be read).
-        /// The compressor leaves two marks, read independently because they fail differently: a layer on a
-        /// playable-layer controller (needs nothing), and a <c>VF.Model.VRCFuryDebugInfo</c> on the root that
-        /// is <c>IEditorOnly</c> and outlives the SDK's final strip only through VRCFury's Harmony prefix.
-        /// <see cref="SyncSection"/> treats their disagreement as unread, never as either answer.</summary>
+        /// <summary>What the clone says about sync after every build pass. The compressor leaves two marks, read
+        /// independently because they fail differently: a layer on a playable-layer controller, and a
+        /// <c>VF.Model.VRCFuryDebugInfo</c> on the root that is <c>IEditorOnly</c> and outlives the SDK's final strip
+        /// only through VRCFury's Harmony prefix. <see cref="SyncSection"/> treats their disagreement as
+        /// unread.</summary>
         internal sealed class SyncRead
         {
             public int? Bits;
             public string BitsError;
             public bool Layer;
             public bool Component;
-            /// <summary>The component's <c>debugInfo</c>, VRCFury's own text, quoted verbatim by the section.</summary>
             public string ComponentText;
-            /// <summary>Parsed from the component text's <c>Old Total: N bits</c>; null when absent or unparsed.</summary>
             public int? OldTotal;
-            /// <summary><c>VRCExpressionParameters.MAX_PARAMETER_COST</c>, read from the SDK so the text never carries a literal.</summary>
             public int Max = VRCExpressionParameters.MAX_PARAMETER_COST;
-            /// <summary>Every parameter of the built expression parameters asset, in asset order; null when the
-            /// asset could not be reached, which is a different answer from an asset declaring nothing.</summary>
             public List<BuiltParam> Params;
         }
 
@@ -981,8 +841,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const string CompressorDebugType = "VF.Model.VRCFuryDebugInfo";
 
         /// <summary>VRCFury's <c>ControllerManager.NewLayerName</c> prefixes every layer it creates with
-        /// <c>[VF&lt;n&gt;] </c>, so the built layer is <c>[VF12] Parameter Compressor</c>, never the bare title.
-        /// The legacy method's two layers carry the same prefix.</summary>
+        /// <c>[VF&lt;n&gt;] </c>, so the built layer is <c>[VF12] Parameter Compressor</c>, never the bare title.</summary>
         private static readonly Regex CompressorLayer =
             new Regex(@"^(\[VF\d+\] )?(Parameter Compressor|Legacy Parameter Compressor( \(Math\))?)$");
 
@@ -1020,8 +879,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     }
                 }
 
-            // No type lookup: a workspace without VRCFury simply has no such component, and that is the
-            // `no` answer the layer read also gives. The class is internal, its fields public.
+            // Matched by name: the class is internal, its fields public, and a workspace without VRCFury simply has
+            // none.
             foreach (var c in clone.GetComponents<Component>())
             {
                 if (c == null) continue;
@@ -1042,10 +901,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return read;
         }
 
-        /// <summary>The <c>## Sync</c> section and (out) its summary keys. Pure over the read, so it is testable
-        /// without a bake. The ceiling is named as the point past which the compressor engages and never as
-        /// <c>N/MAX</c>: VRCFury absorbs an overflow and the build still ships, so a near-ceiling figure is not
-        /// a fault, and a reader shown <c>254/256</c> treats it as one. No verdict is emitted.</summary>
         internal static List<string> SyncSection(SyncRead read, string paramFilter, out string summaryKeys)
         {
             var lines = SyncFigure(read, paramFilter, out summaryKeys);
@@ -1074,7 +929,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return lines;
         }
 
-        /// <summary>The section's figure and compressor answer: everything above the per-parameter table.</summary>
         private static List<string> SyncFigure(SyncRead read, string paramFilter, out string summaryKeys)
         {
             string max = read.Max.ToString(CultureInfo.InvariantCulture);
@@ -1136,13 +990,10 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Built menu: the clone's expressions menu, control by control ──────────────────────────────
 
-        /// <summary>One control of the built menu. <c>Parameter</c> is null for a control that names none.</summary>
         internal struct BuiltMenuRow { public string Path, Type, Parameter, SubParameters; public float Value; }
 
-        /// <summary>The clone's built expressions menu, walked depth-first in control order. <see cref="Rows"/>
-        /// is null with <see cref="Error"/> when the root menu was not reached, a different answer from a menu
-        /// holding no controls. Cut walks (depth cap, a submenu reopening one of its own ancestors) are named
-        /// in <see cref="Notes"/>, never dropped silently.</summary>
+        /// <summary>The clone's built expressions menu. <see cref="Rows"/> null with <see cref="Error"/> means the root
+        /// menu was not reached, a different answer from a menu holding no controls.</summary>
         internal sealed class BuiltMenuRead
         {
             public List<BuiltMenuRow> Rows;
@@ -1160,9 +1011,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return ReadMenu(d.expressionsMenu);
         }
 
-        /// <summary>The walk itself, over any menu. A submenu reached twice from different parents is listed
-        /// twice, because the built menu shows it twice: deduplicating by asset would hide exactly that. Only a
-        /// submenu reopening one of its own ancestors is cut, since that walk never ends.</summary>
+        /// <summary>A submenu reached twice from different parents is listed twice, because the built menu shows it
+        /// twice. Only a submenu reopening one of its own ancestors is cut.</summary>
         internal static BuiltMenuRead ReadMenu(VRCExpressionsMenu root)
         {
             var read = new BuiltMenuRead { Rows = new List<BuiltMenuRow>() };
@@ -1199,9 +1049,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return read;
         }
 
-        /// <summary>The <c>## Built menu</c> section and (out) its summary key. Pure over the read. It reports
-        /// the built menu and joins nothing to the authored Menu controls table: the build rewrites paths and
-        /// names, so any pairing would be inference this section has no basis for.</summary>
+        /// <summary>The <c>## Built menu</c> section. It joins nothing to the authored Menu controls table: the build
+        /// rewrites paths and names, so any pairing would be inference.</summary>
         internal static List<string> BuiltMenuSection(BuiltMenuRead read, string paramFilter, out string summaryKey)
         {
             var lines = new List<string>
@@ -1240,27 +1089,20 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Performance: the SDK's own scan of the clone ─────────────────────────────────────────────
 
-        /// <summary>One physbone component on the clone: its bone list as the SDK builds it
-        /// (<c>InitTransforms(force: true)</c>) and its collider references. <c>Bones</c> is -1 when the list
-        /// could not be built, which is a named row, never a zero.</summary>
         internal struct PhysBoneRow
         {
             public string Path;
             public int Bones;
             public int Colliders;
             public bool Active;
-            /// <summary>The SDK scan skips this component (an <c>EditorOnly</c> ancestor, or the SDK's public
-            /// ignore hook), so it is listed but left out of the sum.</summary>
             public bool Ignored;
             public string Caveat;
         }
 
         internal sealed class PerformanceRead
         {
-            /// <summary>Null when the scan threw; <see cref="Error"/> then says how.</summary>
             public VRC.SDKBase.Validation.Performance.Stats.AvatarPerformanceStats Stats;
             public string Error;
-            /// <summary>How the constraint-group refresh went: <c>ok</c>, <c>unavailable</c> or <c>failed: …</c>.</summary>
             public string ConstraintRefresh;
             public readonly List<PhysBoneRow> PhysBones = new List<PhysBoneRow>();
         }
@@ -1269,10 +1111,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             VendorReflect.FindType("VRC.Dynamics.VRCConstraintManager")?.GetMethod("Sdk_ManuallyRefreshGroups",
                 BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
 
-        /// <summary>Scan the baked clone the way the upload panel does, PC thresholds. The clone's VRC constraints
-        /// are regrouped first: on a fresh clone the manager has not grouped them, and <c>constraintDepth</c>
-        /// then reads a different wrong figure bake to bake (measured 48, then 62, against 14 refreshed, on one
-        /// row). The census runs AFTER the scan because <c>InitTransforms</c> rebuilds each chain's bone list.</summary>
+        /// <summary>Scan the baked clone the way the upload panel does, PC thresholds. The clone's VRC constraints are
+        /// regrouped first: on a fresh clone the manager has not grouped them, and <c>constraintDepth</c> then reads a
+        /// different wrong figure bake to bake. The census runs after the scan because <c>InitTransforms</c> rebuilds
+        /// each chain's bone list.</summary>
         internal static PerformanceRead ReadPerformance(GameObject clone)
         {
             var read = new PerformanceRead();
@@ -1309,9 +1151,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return read;
         }
 
-        /// <summary>Whether the SDK's scan leaves <paramref name="c"/> out, judged by the two rules it exposes:
-        /// an <c>EditorOnly</c>-tagged ancestor, and <c>AvatarPerformance.ShouldIgnoreComponent</c>, the hook a
-        /// package can set.</summary>
         private static bool ScanIgnores(Component c)
         {
             for (var t = c.transform; t != null; t = t.parent)
@@ -1328,8 +1167,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             VRC.SDKBase.Validation.Performance.AvatarPerformanceCategory.AvatarPerformanceCategoryCount,
         };
 
-        /// <summary>The <c>## Performance</c> section and (out) its summary keys. Pure over the read, so it is
-        /// testable without a bake. Every rating is the SDK's own; nothing here knows a threshold.</summary>
         internal static List<string> PerformanceSection(PerformanceRead read, string paramFilter, out string summaryKeys)
         {
             var lines = new List<string>
@@ -1377,7 +1214,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var v = f.GetValue(stats);
                 if (v == null) { lines.Add("| " + f.Name + " | — |"); continue; }
                 var vt = v.GetType();
-                // The SDK's own nested stat structs (physBone) are expanded; anything else prints whole.
                 if (!vt.IsPrimitive && !vt.IsEnum && (vt.Namespace ?? "").StartsWith("VRC", StringComparison.Ordinal))
                     foreach (var g in vt.GetFields(BindingFlags.Instance | BindingFlags.Public))
                         lines.Add("| " + f.Name + "." + g.Name + " | " + Convert.ToString(g.GetValue(v), CultureInfo.InvariantCulture) + " |");
@@ -1415,11 +1251,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return lines;
         }
 
-        /// <summary>The SDK's own <c>textureMegabytes</c> for <paramref name="go"/> — the figure the upload gate
-        /// rates, and the only one <c>optimization.md</c> §Measuring lets a rank conversation use.
-        /// <para>Returns null rather than 0 on any failure, and the stat field is itself nullable: a 0 here would
-        /// be a confident claim that the avatar carries no textures. The call is ~2 ms for the whole stat vector,
-        /// so it is free beside the bake that had to happen anyway.</para></summary>
+        /// <summary>The SDK's own <c>textureMegabytes</c> for <paramref name="go"/>, the figure the upload gate rates.
+        /// Null on any failure, never a 0, which would claim the avatar carries no textures.</summary>
         internal static float? SdkTextureMegabytes(GameObject go)
         {
             if (go == null) return null;
@@ -1438,9 +1271,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private struct TexPair { public TexRow? Authored, Built; }
 
-        /// <summary>Identity first, then the slot set, then unpaired. Each built row is claimed at most once,
-        /// and a claimed row cannot be claimed again by the weaker key — the same "an exact match is not
-        /// another row's rename" discipline the parameter diff holds, for the same reason.</summary>
+        /// <summary>Identity first, then the slot set, then unpaired. An untouched texture keeps its identity through a
+        /// renderer merge, where its slot set changes; a resized one is a new object whose only surviving handle is
+        /// its slot set. Each built row is claimed at most once.</summary>
         private static List<TexPair> PairTextures(List<TexRow> authored, List<TexRow> built)
         {
             var pairs = new List<TexPair>();
@@ -1472,8 +1305,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             for (int i = 0; i < built.Count; i++)
                 if (!takenBuilt[i]) pairs.Add(new TexPair { Authored = null, Built = built[i] });
 
-            // Ordered by BUILT megabytes descending so the levers sort to the top; an authored-only row sorts
-            // on what it used to cost, and an unknown row sorts last rather than as a zero.
             return pairs
                 .OrderByDescending(p => p.Built.HasValue && !p.Built.Value.Unknown ? p.Built.Value.Bytes
                                       : p.Authored.HasValue && !p.Authored.Value.Unknown ? p.Authored.Value.Bytes : -1L)
@@ -1481,8 +1312,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 .ToList();
         }
 
-        /// <summary>An Unknown row contributes nothing to the row total — its bytes are unknown, not zero —
-        /// which is exactly why its cell says `unknown` where a total could not.</summary>
         private static long SumBytes(List<TexRow> side)
         {
             long sum = 0;
@@ -1501,8 +1330,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return row.Value.Unknown ? "unknown" : Mb(row.Value.Bytes);
         }
 
-        /// <summary>A null stat is an ABSENT figure, never a 0 — <c>textureMB=0</c> is a confident claim that
-        /// the avatar carries no textures, and the SDK's stat fields are nullable.</summary>
         private static string SdkCell(float? mb)
         {
             return mb.HasValue ? mb.Value.ToString("F4", CultureInfo.InvariantCulture) : "unknown";
@@ -1532,22 +1359,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                  + "Material Setter) is reached by neither the rows nor this count.";
         }
 
-        /// <summary>One row of the diff. <c>Caveat</c> is kept OUT of <c>Surface</c> rather than concatenated into
-        /// it so it can be CARRIED when a row is replaced: the <c>merged</c> pass destroys the rows it summarises,
-        /// and a caveat living inside their prose died with them. Rendered immediately after <c>Surface</c>, so the
-        /// cell reads the same either way.</summary>
+        /// <summary>One row of the diff. <c>Caveat</c> is kept out of <c>Surface</c> so the <c>merged</c> pass can carry
+        /// it onto the row that replaces this one.</summary>
         internal struct DiffRow { public string Authored, Built, Category, Surface, Caveat; }
 
-        /// <summary>Every parameter name the BUILT clone declares: its descriptor's expression parameters
-        /// UNION every parameter on every controller the clone plays. Both halves are needed. The expression
-        /// asset alone is a synced-parameter budget, not the avatar's parameter set — a controller-only value
-        /// (a driver scratch, a gesture built-in) never appears there, so diffing against it alone put every
-        /// such name in <c>dropped</c>, whose plain reading is "the build removed it".
-        /// <para>Two channels for an unreadable controller, and the split is deliberate.
-        /// <paramref name="incompleteReason"/> is set only for a <b>playable-layer slot</b> — the avatar's own
-        /// declaration set — because a non-null value downgrades every unmatched row on the avatar.
-        /// <paramref name="notes"/> takes anything else (a child <c>Animator</c> playing a controller this read
-        /// cannot resolve), naming it without downgrading a single category.</para></summary>
+        /// <summary>Every parameter name the built clone declares: its descriptor's expression parameters union every
+        /// parameter on every controller the clone plays. The expression asset alone is a synced-parameter budget, and
+        /// a controller-only value (a driver scratch, a gesture built-in) never appears there.
+        /// <para><paramref name="incompleteReason"/> is set only from the playable-layer slots, because a non-null
+        /// value downgrades every unmatched row on the avatar; <paramref name="notes"/> takes any other controller
+        /// this read cannot resolve, downgrading nothing.</para></summary>
         internal static List<string> BuiltDeclarations(GameObject clone, List<string> notes, out string incompleteReason)
         {
             incompleteReason = null;
@@ -1557,10 +1378,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (ep != null && ep.parameters != null)
                 foreach (var p in ep.parameters)
                     if (p != null && !string.IsNullOrEmpty(p.name)) names.Add(p.name);
-            // A controller here that cannot be read is NOTED, never a global downgrade: a nested
-            // AnimatorOverrideController on a child prop is legal and defeats the one-hop cast below, and
-            // downgrading a whole avatar's diff over one prop would be a far bigger lie than the prop's
-            // absent parameters. Only the descriptor's own playable layers carry the avatar's declaration set.
             foreach (var anim in clone.GetComponentsInChildren<Animator>(true))
             {
                 var rac = anim != null ? anim.runtimeAnimatorController : null;
@@ -1579,15 +1396,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                     if (set == null) continue;
                     foreach (var l in set)
                     {
-                        // The `isDefault` guard stays. Measured post-bake, every slot reads isDefault=false with
-                        // a real controller, so it never fires — but the SDK keeps the flag and a non-null
-                        // controller mutually exclusive only along its INSPECTOR path, so a programmatic write
-                        // can leave a default-flagged slot holding a controller the built avatar does not play.
-                        // Reading that would union parameters from a controller nothing plays: a false `kept`
-                        // masking a real `dropped`, which is the failure direction that matters here.
+                        // Never fired post-bake when measured, but the SDK keeps isDefault and a non-null controller
+                        // mutually exclusive only along its inspector path, so a programmatic write can leave a
+                        // default-flagged slot holding a controller the built avatar does not play: a false `kept`.
                         if (l.isDefault) continue;
-                        // An EMPTY slot declares nothing, and that is all it means. It used to be counted as
-                        // evidence the built side went unread — see the history note below.
                         if (l.animatorController == null) continue;
                         slotsWithController++;
                         if (!AddParams(l.animatorController, names))
@@ -1596,31 +1408,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                     }
                 }
             }
-            // The one condition that makes this a genuinely PARTIAL read: a playable layer holds a controller
-            // whose parameters could not be read. Every authored name would then fail to match and be reported
-            // `dropped` — "the build removed it" — when the truth is that this read never saw them.
-            //
-            // It used to key on an empty non-default slot instead, explained as "the preprocess chain does not
-            // leave the built controllers in the descriptor's slots". That was true only of a clone read AFTER
-            // the paired OnPostprocessAvatar had swept its generated assets (atelier vrc-unity-tools#118 fixed
-            // the lifetime; AvatarBake's doc comment has the measurement). Measured after the fix: 8/8 slots
-            // hold real controllers under `Packages/nadena.dev.ndmf/__Generated/`, on a VRCFury avatar and an
-            // MA-only one alike. An empty slot is authoring state, and emptying one on a baked clone left the
-            // built name set IDENTICAL — nothing was unread — while the old arm downgraded every unmatched row
-            // on the avatar and suppressed the one claim bake mode exists to make.
+            // An empty slot is authoring state and declares nothing; only a controller that cannot be read makes this
+            // read partial.
             if (unreadableSlots.Count > 0)
                 incompleteReason = unreadableSlots.Count + " playable-layer slot(s) hold a controller this read "
                     + "could not resolve to an AnimatorController (" + string.Join("; ", unreadableSlots)
                     + "), so their parameters are absent and the built side is a PARTIAL read";
-            // The retarget above dropped a FALSE arm, and with it the only automated detection of the arm's one
-            // TRUE case: a clone holding no controller in any slot and declaring nothing. That is the state #118
-            // measured on a clone read after its generated assets were swept — not an authoring state, and not
-            // survivable, because every authored name would fall to `dropped`: a confident "the build removed it"
-            // across a whole avatar. Kept as a second arm rather than trusted to the caller, because the only
-            // thing standing between this door and that state is AvatarBakeScope's lifetime, which this codebase
-            // has already gotten wrong once and silently. Judgment-free, and unable to fire on a healthy bake:
-            // a real built avatar always has a controller in a slot, and an avatar that truly declares nothing
-            // has no diffable census rows for the flag to downgrade.
+            // No controller in any slot and nothing declared is a clone read after its generated assets were swept,
+            // where every authored name would fall to `dropped`. A healthy bake always has a controller in a slot.
             else if (d != null && slotsWithController == 0 && names.Count == 0)
                 incompleteReason = "the built clone's descriptor holds no playable-layer controller at all and its "
                     + "expression parameters declare nothing, so NOTHING of the built side was readable — the shape "
@@ -1628,26 +1423,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             return names.ToList();
         }
 
-        /// <summary>Union <paramref name="rac"/>'s parameters into <paramref name="into"/>. Returns <b>false</b>
-        /// only when a controller was PRESENT and could not be read as an <c>AnimatorController</c> — the one
-        /// condition that makes a built read partial, and a silent return before this.
-        /// <para>A null controller returns true, deliberately: an absent controller declares nothing, and a
-        /// child <c>Animator</c> with no controller is the common case on any avatar — counting it would make
-        /// the incompleteness flag non-null essentially always and delete <c>dropped</c> as a category. An empty
-        /// parameter list returns true too: that read succeeded and found nothing.</para></summary>
+        /// <summary>Union <paramref name="rac"/>'s parameters into <paramref name="into"/>. Returns false only when a
+        /// controller was present and could not be read as an <c>AnimatorController</c>.</summary>
         private static bool AddParams(RuntimeAnimatorController rac, HashSet<string> into)
         {
             if (rac == null) return true;
             var ac = rac as AnimatorController;
-            // Deliberate divergence from the asset doors, which REFUSE an override controller by name rather
-            // than unwrapping it (they report a named asset, so silently reporting a different one would
-            // mislead). Here the subject is the built avatar's parameter SET, not a named asset, and an
-            // override controller declares no parameters of its own — every one it can carry comes from the
-            // base — so unwrapping reads the right set rather than a substitute for it.
-            //
-            // Chains unwrap too: an override OF an override is legal, and stopping at one hop would read
-            // nothing and mark the built side incomplete. Depth-capped because the chain is data, and a
-            // cycle in it must not hang the bake.
+            // Unlike the asset doors, which refuse an override controller by name, this unwraps it: the subject is the
+            // built avatar's parameter set, and an override declares no parameters of its own. Chains unwrap too,
+            // depth-capped because a cycle in the data must not hang the bake.
             for (int hop = 0; ac == null && rac is AnimatorOverrideController ovr && hop < 8; hop++)
             {
                 ac = ovr.runtimeAnimatorController as AnimatorController;
@@ -1659,12 +1443,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return true;
         }
 
-        /// <summary>Is <paramref name="built"/> a prefixed form of <paramref name="authored"/>? The build
-        /// prepends a namespace, so the authored name survives as a suffix behind a SEPARATOR. A bare
-        /// EndsWith would make authored <c>Toggle</c> a candidate for built <c>Hair/HairToggle</c> and emit a
-        /// confident, wrong provenance claim from the one door whose whole thesis is that it never makes one.
-        /// The boundary is declared here rather than left implicit, and anything outside it stays
-        /// unattributed rather than guessed.</summary>
+        /// <summary>Is <paramref name="built"/> a prefixed form of <paramref name="authored"/>? The build prepends a
+        /// namespace, so the authored name survives as a suffix behind a separator; anything else stays
+        /// unattributed.</summary>
         internal static bool IsPrefixedForm(string built, string authored)
         {
             if (string.IsNullOrEmpty(built) || string.IsNullOrEmpty(authored)) return false;
@@ -1673,23 +1454,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             return boundary == '/' || boundary == '_';
         }
 
-        /// <summary>Diff the authored census against the built declaration set. Pure — it touches no Unity
-        /// object — which is what makes it unit-testable, and it is the part of this door most able to lie.
-        ///
-        /// Only rows the census marked diffable participate. A physbone suffix or a menu sub-parameter is
-        /// written by the runtime and declared by nothing, so a declaration set cannot carry it: those are
-        /// reported <c>not-in-scope</c> rather than counted as removed.
-        ///
-        /// <paramref name="paramFilter"/> is applied LAST, to both sides of each row. Filtering the authored
-        /// census first — the obvious order — makes the answer depend on the filter: a built name whose
-        /// authored counterpart was filtered out has nothing left to claim it and is reported built-only, so
-        /// filtering on a surface prefix (the most natural use) would report that whole surface as
-        /// unattributed.
-        /// <para>Precedence is filter-INDEPENDENT for a reason worth recording, since the live census reaching
-        /// this method is already narrowed: an excludable built name <c>b</c> ends with a separator plus the
-        /// authored name it would claim, so any filter matching that short name necessarily matches <c>b</c>
-        /// too (matching is substring). A filter can therefore drop the short row but never strip the
-        /// exact-claimer of a row it kept — so no verdict can flip on the filter.</para></summary>
+        /// <summary>Diff the authored census against the built declaration set. A row the census did not mark diffable
+        /// is reported <c>not-in-scope</c>: the runtime writes it and nothing declares it, so a declaration set cannot
+        /// carry it.
+        /// <para><paramref name="paramFilter"/> is applied last, to both sides of each row, so it narrows the view
+        /// without changing a category over the census it is handed. The live census is already narrowed by the same
+        /// filter (<c>ReportComposition.Census</c>), so an authored name the filter misses has no row here, and a
+        /// built form of it that matches reads <c>built-only</c>.</para></summary>
         internal static List<DiffRow> Diff(ReportComposition.CensusResult census, List<string> built, string paramFilter,
                                            bool builtSideComplete = true)
         {
@@ -1699,18 +1470,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             var rowsByBuilt = new Dictionary<string, List<int>>(StringComparer.Ordinal);
             var rows = new List<DiffRow>();
 
-            // Pass 1 — every built name an authored row claims by EXACT match. The predicate is exactly the
-            // `kept` branch's own, and must stay that way: the natural shortcut ("census names ∩ built") lets a
-            // NON-diffable row in, and a non-diffable row claims nothing in pass 2 — so its name would be
-            // excluded from a candidate set while no row ever claims it, and one built name would read
-            // `dropped` ("the build removed it") AND `built-only` ("present, unclaimed") in the same table.
+            // Pass 1: every built name an authored row claims by exact match, under the `kept` branch's own predicate.
             var exactClaim = new HashSet<string>(StringComparer.Ordinal);
             foreach (var p in census.Params)
                 if (p.Diffable && builtSet.Contains(p.Name)) exactClaim.Add(p.Name);
 
-            // The non-diffable half of that same intersection: authored names the build carries verbatim
-            // that no row can claim. Collected so the two rows describing one parameter can point at each
-            // other — see the not-in-scope branch below.
             var notInScopeNames = new HashSet<string>(StringComparer.Ordinal);
             foreach (var p in census.Params)
                 if (!p.Diffable && builtSet.Contains(p.Name)) notInScopeNames.Add(p.Name);
@@ -1728,12 +1492,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 if (!p.Diffable)
                 {
-                    // A non-diffable name that the built avatar ALSO carries, byte-identical, is the one
-                    // shape this table used to leave the reader to join by eye: two rows, one string, two
-                    // dispositions (`not-in-scope` here and `built-only` below), nothing saying they are
-                    // the same parameter. Neither row is wrong — nothing authored declares it, and nothing
-                    // authored claims it — so the fix is the cross-reference, not a category change, and
-                    // the exact-claim set above stays diffable-only for the reason its own comment gives.
                     bool alsoBuilt = builtSet.Contains(p.Name);
                     rows.Add(new DiffRow
                     {
@@ -1751,28 +1509,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                     continue;
                 }
                 var raw = built.Where(b => IsPrefixedForm(b, p.Name)).ToList();
-                // Pass 2 — a built name already claimed by exact match is not this row's rename: an exact match
-                // is a stronger claim than a prefix inference. Without this, a gimmick that declares its own
-                // internal `ObjectSync/D/Prop/PX/C` alongside the avatar's `Prop/PX/C` made every internal name
-                // a spurious candidate for the shorter one: 63 of 271 rows on the demo avatar reported ambiguous
-                // while the 63 real renames were orphaned as built-only. One defect, counted twice.
-                //
-                // But exclusion is a TIE-BREAKER, never evidence of removal — so it applies only while it leaves
-                // a candidate standing. Emptying the set and falling through to `dropped` would assert "the build
-                // removed it" on the ordinary idiom of an inner parameter exposed under a name the outer avatar
-                // also declares (MA `remapTo`): authored `Toggle` + `Hair/Toggle` onto built `Hair/Toggle` is a
-                // MERGE, and the fallback keeps it reported as one. `dropped` therefore still fires iff no built
-                // name is a prefixed form at all — precisely the pre-precedence condition, so this rule cannot
-                // manufacture a false removal.
+                // Pass 2: a built name already claimed by exact match is not this row's rename. That exclusion is a
+                // tie-breaker, so it applies only while it leaves a candidate standing: authored `Toggle` +
+                // `Hair/Toggle` onto built `Hair/Toggle` (MA `remapTo`) is a merge, and emptying the set would report
+                // it `dropped`.
                 var narrowed = raw.Where(b => !exactClaim.Contains(b)).ToList();
                 var candidates = narrowed.Count > 0 ? narrowed : raw;
                 if (candidates.Count == 1)
                 {
                     Claim(candidates[0], p.Name, rows.Count);
-                    // Disclosed PER ROW, not once in the legend. Exclusion deletes the evidence of a possible
-                    // merge, so a row that reads as a confident rename because its rivals were excluded has to
-                    // carry that fact where a reader checking THIS row will see it — a legend sentence cannot be
-                    // checked against a specific row, and these are exactly the rows the rule is adopted for.
                     rows.Add(new DiffRow
                     {
                         Authored = p.Name, Built = candidates[0], Category = "renamed", Surface = p.Declared,
@@ -1781,14 +1526,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
                 else if (candidates.Count > 1)
                 {
-                    // Ambiguous, so nothing is attributed — and the candidates stay UNCLAIMED on purpose, or a
-                    // genuinely built-only parameter that happens to match an ambiguous authored name would be
-                    // swallowed: never given its own built-only row, and visible only inside a cell attributed
-                    // to an unrelated parameter.
-                    //
-                    // Exclusion is disclosed here too, and it matters MORE than on a renamed row: this is the one
-                    // category whose whole purpose is honesty about not knowing, so a candidate list silently
-                    // trimmed by precedence would make the trimming unknowable from the artifact.
+                    // The candidates stay unclaimed, so a genuinely built-only parameter matching an ambiguous authored
+                    // name still gets its own built-only row.
                     rows.Add(new DiffRow
                     {
                         Authored = p.Name, Built = string.Join(" or ", candidates), Category = "ambiguous",
@@ -1802,8 +1541,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
                 else
                 {
-                    // No match AND the built side is known partial: `dropped` would assert a removal this
-                    // read cannot see. Say what is true instead.
                     rows.Add(new DiffRow
                     {
                         Authored = p.Name, Built = "?", Category = "built-side-unread",
@@ -1812,19 +1549,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
             }
 
-            // `merged` REPLACES the rows it summarises rather than riding beside them. Emitting one merged row
-            // on top of the two renamed rows that produced it double-counts a single built parameter and makes
-            // the category totals exceed the parameter count — a table lying about its own arithmetic.
             var drop = new HashSet<int>();
             var merged = new List<DiffRow>();
             foreach (var kv in claimedBy)
             {
                 if (kv.Value.Count <= 1) continue;
-                // Every caveat on a replaced row is CARRIED onto the row that replaces it. A merged row is the most
-                // confident statement this table makes — "these names became that one" — and it is assembled from
-                // rows that may each have reached their claim only because precedence excluded a rival. Dropping
-                // their caveats here would launder exactly the disclosure the renamed branch exists to make, and
-                // silently: the foreclosed reading vanishes with the row that named it.
                 var carried = new List<string>();
                 foreach (var i in rowsByBuilt[kv.Key])
                 {
@@ -1843,10 +1572,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             for (int i = 0; i < rows.Count; i++) if (!drop.Contains(i)) final.Add(rows[i]);
             final.AddRange(merged);
 
-            // A built name no authored one claims. This is a MEASURED fact, not an inference failure — which is
-            // why it no longer shares a category with ambiguity: build-minted internals and SDK-supplied names
-            // are the normal population here, and the note says so IN THE CELL, following the empty-writers-cell
-            // precedent, because a bare `(built only)` on a hundred rows reads as a hundred findings.
             foreach (var b in unclaimed)
                 final.Add(ControllerRules.IsVrcReserved(b)
                     ? new DiffRow
@@ -1871,8 +1596,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 (r.Built != null && r.Built.IndexOf(paramFilter, StringComparison.OrdinalIgnoreCase) >= 0)).ToList();
         }
 
-        /// <summary>What a `renamed` row owes its reader when exclusion is what made it unambiguous: which
-        /// candidates were removed, why they were removable, and the alternative reading this row is NOT.</summary>
         private static string ExclusionNote(List<string> raw, List<string> narrowed)
         {
             var excluded = raw.Where(b => !narrowed.Contains(b)).Select(b => "`" + b + "`");

@@ -8,17 +8,13 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using Ryan6Vrc.AgentTools.Editor;
 
-// All non-SDK fixtures (VRCAvatarDescriptor, VRCFury, GestureManager, LyumaAv3Emulator) are the REAL
-// installed types, resolved by name via reflection AddComponent — the same path the core detects them on.
-// No synthetic stand-in matching a hazard's FullName exists: such a stub (equal to a possibly-wrong const)
-// is exactly what let the emulator rule go dead-but-green once, so the emulator tests must drive the real
-// type. The fail-closed reflection degradation is instead covered directly via ReportGimmick.ReadBoolMember
-// (a same-FullName-but-fieldless stub would reintroduce that masking risk and make Resolve ambiguous).
+// Fixtures are the REAL installed types (VRCAvatarDescriptor, VRCFury, GestureManager, LyumaAv3Emulator),
+// added by reflection. Add no stand-in with a hazard's FullName: it equals a possibly-wrong const, so the rule
+// goes dead while the test stays green, and it makes Resolve ambiguous. The fail-closed reflection path is
+// covered through ReportGimmick.ReadBoolMember instead.
 
 public class PlayGateCoreTests
 {
-    // Each test gets an isolated preview scene so Evaluate sees only that test's objects — no dependence on
-    // the Editor's real open scene, and Ryan's scenes are never mutated.
     private Scene _scene;
 
     [SetUp]    public void SetUp()    { _scene = EditorSceneManager.NewPreviewScene(); }
@@ -45,7 +41,6 @@ public class PlayGateCoreTests
         return go;
     }
 
-    // Real VF.Model.VRCFury component. featureFullName == null explicitly nulls content (undecodable).
     private void AddVrcFury(GameObject avatar, string featureFullName)
     {
         var vt = Resolve("VF.Model.VRCFury");
@@ -73,9 +68,7 @@ public class PlayGateCoreTests
         b.enabled = enabled;
     }
 
-    // Real emulator control object (public bool config fields set by reflection). This is the exact type the
-    // core matches — a synthetic stub would mask a wrong const — so it resolves through EmulatorBinding for
-    // the same reason production does: one re-pin site, and no literal here to survive the next rename.
+    // Resolves through EmulatorBinding, as production does: one re-pin site, no literal to survive a rename.
     private void NewEmulator(bool run, bool perm, bool enabled = true)
     {
         var t = Resolve(EmulatorBinding.EmulatorFullName);
@@ -93,7 +86,7 @@ public class PlayGateCoreTests
     [Test]
     public void ZeroDescriptor_passes_silently()
     {
-        NewGo("JustAProp"); // a non-avatar / codegen / bake scene is never gated
+        NewGo("JustAProp");
         var r = PlayGateCore.Evaluate(_scene);
         Assert.IsTrue(r.Pass);
         Assert.AreEqual(0, r.Offenders.Count);
@@ -108,10 +101,9 @@ public class PlayGateCoreTests
         Assert.AreEqual(0, r.Offenders.Count);
     }
 
-    // A deactivated top-level backup avatar must NOT count toward the active total — otherwise the gate
-    // false-positives "More than 1 avatar enabled" and its own "deactivate all but one" fix does nothing.
-    // (Regression: GetComponentsInChildren(false) on Unity 2022.3 returns the queried inactive root's own
-    // component, so rule 1 gathers includeInactive:true then filters on activeInHierarchy.)
+    // GetComponentsInChildren(false) on Unity 2022.3 returns the queried inactive root's own component, so rule 1
+    // gathers includeInactive:true and filters on activeInHierarchy. Counting the backup would false-positive
+    // "More than 1 avatar enabled", and the gate's own "deactivate all but one" fix would do nothing.
     [Test]
     public void OneActive_plus_one_deactivated_backup_avatar_passes()
     {
@@ -155,13 +147,11 @@ public class PlayGateCoreTests
     public void VrcFury_with_FWD_passes()
     {
         var a = NewAvatar("Avatar");
-        AddVrcFury(a, PlayGateCore.FwdFeatureFullName); // the real Fix-Write-Defaults feature
+        AddVrcFury(a, PlayGateCore.FwdFeatureFullName);
         var r = PlayGateCore.Evaluate(_scene);
         Assert.IsTrue(r.Pass, "FWD present should pass: " + string.Join(",", Tags(r)));
     }
 
-    // Degradation branch (fail-closed): a VRCFury component whose feature is undecodable must block loud —
-    // never read as an honest "no FWD needed / all clear".
     [Test]
     public void VrcFury_undecodable_feature_fails_loud()
     {
@@ -173,8 +163,7 @@ public class PlayGateCoreTests
         StringAssert.Contains("undecodable", r.Offenders[0].Message);
     }
 
-    // VRCFury under a TOGGLED-OFF child must still be seen (the build processes inactive objects) — an
-    // active-only scan would fail open and let the blocking modal pop.
+    // The build processes inactive objects, so an active-only scan would fail open and let the blocking modal pop.
     [Test]
     public void VrcFury_on_inactive_child_is_still_seen()
     {
@@ -182,7 +171,7 @@ public class PlayGateCoreTests
         var child = NewGo("OffChild");
         child.transform.SetParent(a.transform);
         child.SetActive(false);
-        AddVrcFury(child, "VF.Model.Feature.Toggle"); // no FWD, on an inactive child
+        AddVrcFury(child, "VF.Model.Feature.Toggle");
         var r = PlayGateCore.Evaluate(_scene);
         Assert.IsFalse(r.Pass, "VRCFury on an inactive child must still be detected");
         CollectionAssert.Contains(Tags(r), "VRCFury");
@@ -205,7 +194,7 @@ public class PlayGateCoreTests
     public void EnabledGestureManager_without_emulator_passes()
     {
         NewAvatar("Avatar");
-        NewGestureManager(enabled: true); // standalone GM, no emulator → allowed
+        NewGestureManager(enabled: true);
         var r = PlayGateCore.Evaluate(_scene);
         Assert.IsTrue(r.Pass, "a standalone enabled GestureManager (no emulator) is allowed: " + string.Join(",", Tags(r)));
     }
@@ -229,7 +218,6 @@ public class PlayGateCoreTests
         NewEmulator(run: false, perm: true); // both flags wrong
         var r = PlayGateCore.Evaluate(_scene);
         Assert.IsFalse(r.Pass);
-        // a single "Emulator config" offender that names both wrong flags (not one per flag)
         Assert.AreEqual(1, r.Offenders.Count(o => o.Tag == "Emulator config"));
         var msg = r.Offenders.First(o => o.Tag == "Emulator config").Message;
         StringAssert.Contains("RunPreprocessAvatarHook", msg);
@@ -248,7 +236,7 @@ public class PlayGateCoreTests
     [Test]
     public void EmulatorAbsent_ignores_emulator_flags()
     {
-        NewAvatar("Avatar"); // no emulator at all — a legitimate bake-only check
+        NewAvatar("Avatar");
         var r = PlayGateCore.Evaluate(_scene);
         Assert.IsTrue(r.Pass, "emulator flags are moot with no emulator present: " + string.Join(",", Tags(r)));
     }
@@ -257,16 +245,15 @@ public class PlayGateCoreTests
     public void DisabledEmulator_ignores_emulator_rules()
     {
         NewAvatar("Avatar");
-        NewGestureManager(enabled: true);                     // would fail IF the emulator counted
-        NewEmulator(run: false, perm: true, enabled: false);  // disabled → moot
+        NewGestureManager(enabled: true);
+        NewEmulator(run: false, perm: true, enabled: false);
         var r = PlayGateCore.Evaluate(_scene);
         Assert.IsTrue(r.Pass, "a disabled emulator arms neither the GM nor the config rule: " + string.Join(",", Tags(r)));
     }
 
     // ── Fail-closed reflection degradation (the emulator-field safety property) ──────────────────────
     // Drives ReportGimmick.ReadBoolMember directly: a missing member returns null, which is what routes
-    // CheckEmulatorConfig into its loud "field(s) not reflectable" block. (Testing the integration branch
-    // would need a stub with the emulator's exact FullName but no fields — the masking anti-pattern.)
+    // CheckEmulatorConfig into its loud "field(s) not reflectable" block.
 
     private class BoolProbe { public bool Flag = true; }
 
@@ -284,14 +271,10 @@ public class PlayGateCoreTests
         Assert.IsNull(ReportGimmick.ReadBoolMember(o, o.GetType(), "NoSuchMember"));
     }
 
-    // ── OverlaySummaryLine (deterministic, no text-width measurement) ────────────────────────────────
+    // ── OverlaySummaryLine ───────────────────────────────────────────────────────────────────────────
 
     private static List<PlayGateCore.Offender> Offs(params string[] tags) =>
         tags.Select(t => new PlayGateCore.Offender { Tag = t }).ToList();
-
-    // (No zero-offender case for either summary line: an empty list falls out as "" from the string building
-    // itself, so deleting the early return / guard the case appeared to test leaves it green. Nothing
-    // distinguishes it — the one/two/three-offender cases below are where the clamp and join arithmetic live.)
 
     [Test] public void Overlay_one_offender()  => Assert.AreEqual("(A)", PlayGateCore.OverlaySummaryLine(Offs("A")));
     [Test] public void Overlay_two_offenders()  => Assert.AreEqual("(A) (B)", PlayGateCore.OverlaySummaryLine(Offs("A", "B")));
@@ -303,7 +286,7 @@ public class PlayGateCoreTests
             PlayGateCore.OverlaySummaryLine(Offs("More than 1 avatar enabled", "VRCFury", "Gesture Manager")));
     }
 
-    // ── ConsoleSummaryLine (line 1 of the FAIL — the agent's whole channel, so it must be single-line) ──
+    // ── ConsoleSummaryLine (the FAIL's first line) ───────────────────────────────────────────────────
 
     private static List<PlayGateCore.Offender> FullOffs(params (string tag, string msg, string fix)[] os) =>
         os.Select(o => new PlayGateCore.Offender { Tag = o.tag, Message = o.msg, Fix = o.fix }).ToList();
@@ -314,11 +297,9 @@ public class PlayGateCoreTests
             PlayGateCore.ConsoleSummaryLine(FullOffs(
                 ("VRCFury", "no Fix Write Defaults", "add a VRCFury Fix Write Defaults component (mode Disabled)"))));
 
-    // The exact string also pins the load-bearing property for clean offenders: line 1 carries no newline.
-    // read_console keeps only the first line, so a newline here would be a silently-dropped fix (the exact
-    // bug this repairs). The separator is the only thing joining could inject, so a no-newline assert over
-    // the same shape of input adds nothing on top of this equality — the dirty-input case below is where
-    // flattening is actually decided.
+    // The exact string also pins the line grammar for clean offenders: line 1 carries no newline. The separator
+    // is the only thing joining could inject, so a no-newline assert over this input adds nothing; the
+    // dirty-input case below is where flattening is decided.
     [Test]
     public void Console_multi_offender_pipe_separated() =>
         Assert.AreEqual("[More than 1 avatar enabled] active avatars: A, B (fix: deactivate all but one) | [Emulator config] flags wrong (fix: set them)",
@@ -326,10 +307,8 @@ public class PlayGateCoreTests
                 ("More than 1 avatar enabled", "active avatars: A, B", "deactivate all but one"),
                 ("Emulator config", "flags wrong", "set them"))));
 
-    // The exception FAIL feeds an offender whose Message embeds a multi-line stack trace (PlayGate's
-    // catch). The invariant must be enforced in ConsoleSummaryLine itself, not assumed of the caller:
-    // a raw join would reinstate the newline and drop the fix — line 1 must still be flat and carry the
-    // exception detail AND the fix.
+    // PlayGate's catch feeds an offender whose Message embeds a multi-line stack trace, so ConsoleSummaryLine
+    // itself must flatten rather than assume a clean caller.
     [Test]
     public void Console_summary_flattens_embedded_newlines_from_a_multiline_message()
     {
@@ -339,17 +318,14 @@ public class PlayGateCoreTests
              "fix the exception above\nor override via the menu")));
         Assert.IsFalse(line.Contains("\n"), "line 1 must carry no newline");
         Assert.IsFalse(line.Contains("\r"), "line 1 must carry no carriage return");
-        StringAssert.Contains("boom", line);          // exception detail survives on line 1
+        StringAssert.Contains("boom", line);
         StringAssert.Contains("at Foo.Bar()", line);
         StringAssert.Contains("(fix: fix the exception above or override via the menu)", line);
     }
 
     // ── Scope: which rule set produced a result ───────────────────────────────────
 
-    // This case is what makes the two Entry asserts below mean anything. Were the enum declared Entry-first,
-    // Entry would BE the struct default and an Entry assert would pass with every assignment deleted — the
-    // dead-but-green shape this file's header exists to forbid. Pinning the default also fixes the direction
-    // of the failure: a result that forgot to set Scope refuses rather than posing as an entry verdict.
+    // Were the enum Entry-first, the Entry asserts below would pass with every Scope assignment deleted.
     [Test]
     public void Play_is_the_struct_default_so_an_unset_scope_never_reads_as_Entry()
     {
@@ -357,8 +333,6 @@ public class PlayGateCoreTests
         Assert.AreNotEqual(PlayGateCore.PlayGateScope.Entry, default(PlayGateCore.PlayGateResult).Scope);
     }
 
-    // The two entry returns are separate construction sites (the silent zero-descriptor early return, and the
-    // offender-bearing tail), so each is asserted rather than one standing for both.
     [Test]
     public void EvaluateEntry_scopes_the_silent_zero_descriptor_pass_as_Entry()
     {
@@ -378,9 +352,8 @@ public class PlayGateCoreTests
         Assert.AreEqual(PlayGateCore.PlayGateScope.Entry, r.Scope);
     }
 
-    // In edit mode the public door IS the entry rules, and the 23 cases above all reach them through it.
-    // Asserted as an equality between the two doors so the dispatch cannot start diverging silently on the
-    // path every other test in this file depends on.
+    // The cases above that call Evaluate reach the entry rules through this dispatch, so a silent divergence
+    // here would hollow them out.
     [Test]
     public void Evaluate_in_edit_mode_is_EvaluateEntry()
     {
@@ -394,10 +367,8 @@ public class PlayGateCoreTests
                         PlayGateCore.ConsoleSummaryLine(viaDispatch.Offenders));
     }
 
-    // The play branch itself is unreachable from an EditMode test (nothing here can set
-    // Application.isPlaying), so what IS tested is the refusal's rendered form: it is the one offender an
-    // agent reads through the struct, and it must obey the same single-line grammar as every other one.
-    // The in-play return itself is verified via execute_code on a real venue, not here.
+    // Nothing in an EditMode test can set Application.isPlaying, so the play branch is unreachable here and this
+    // pins only the refusal's rendered form. The in-play return is verified via execute_code on a real venue.
     [Test]
     public void Scope_refusal_renders_as_one_flat_line_naming_Scope_and_the_route()
     {
@@ -406,7 +377,7 @@ public class PlayGateCoreTests
         Assert.IsFalse(line.Contains("\n"), "the refusal must carry no newline");
         Assert.IsFalse(line.Contains("\r"), "the refusal must carry no carriage return");
         StringAssert.Contains("not a scene finding", line);
-        StringAssert.Contains("PlayGateResult.Scope", line);   // the field a caller must branch on
-        StringAssert.Contains("docs/emulator.md", line);       // the route to the real question
+        StringAssert.Contains("PlayGateResult.Scope", line);
+        StringAssert.Contains("docs/emulator.md", line);
     }
 }

@@ -9,40 +9,14 @@ using VRC.Dynamics;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// The primitive set for simulating player manipulation of physbones in play mode: grab, move,
-    /// release, step frames, read what is held. Six doors, composed by the caller — <c>Run</c> →
-    /// <c>Advance(5)</c> → <c>Move</c> → <c>Advance(5)</c> → … → <c>Release</c> — rather than one
-    /// choreography door. It induces manipulation; it asserts nothing and emits no verdict token
-    /// beyond OK/PENDING/FAIL, and it is not a sampler.
+    /// Simulates player manipulation of physbones in play mode: grab, move, release, step frames, read
+    /// what is held. It induces manipulation and asserts nothing. Contract: docs/unity-tools.md.
     ///
-    /// <para>Why a tool at all: <c>docs/emulator.md</c> §Induce a physbone grab/pose is mostly
-    /// mechanical traps every session re-arms by re-typing — bracket-before-attempt, same-call
-    /// <c>GlobalPosition</c>, release-while-iterating, release-by-the-chain-you-meant. Each of those
-    /// is unreachable here rather than documented: <see cref="Run"/> brackets and seeds inside the
-    /// one call, <see cref="Release"/> materialises the grab list before releasing, and the handle
-    /// IS the returned grab's own <c>ChainId</c>, so there is no way to name a chain you did not
-    /// actually get.</para>
-    ///
-    /// <para>No reflection anywhere: the whole SDK surface this drives is public
-    /// (<c>PhysBoneManager</c>, its nested <c>Grab</c>, <c>ChainId</c>, <c>VRCPhysBoneBase.chainId</c>),
-    /// so an SDK rename or overload change is a COMPILE ERROR here. That covers BINDING drift only, and
-    /// it is why there is no binding-canary test — unlike <c>EmulatorBindingCanaryTests</c>, which exists
-    /// because av3emu is reached reflectively. It guards none of the measured SEMANTICS this tool rests on:
-    /// that <c>grabberId</c> is inert under the emulator, that <c>LocalOffset</c> is the seed convention,
-    /// and that a stepped frame's <c>dt</c> follows <c>Time.fixedDeltaTime</c>. An SDK update can change
-    /// any of those and compile clean; re-measure them rather than trusting a green suite.
-    /// This tool touches no emulator member at all.</para>
-    ///
-    /// <para><b>The venue freezes while a grab is held.</b> Pause is a property of the held grab, not
-    /// of one <see cref="Advance"/>: a resumed editor runs an unbounded, unrecorded number of frames
-    /// between MCP calls (12–200 fps) with the grab live and its target stale, which would make the
-    /// exact frame count this tool exists to provide a fiction. <see cref="Run"/>/<see cref="Reach"/>
-    /// freeze; <c>Release(resume: true)</c> hands the venue back. The freeze is visible to everything
-    /// else in the editor — notably a <c>RenderThumbnailPlay</c> Shoot in flight will trip its own
-    /// stall guard.</para>
-    ///
-    /// <para><b>Play mode only.</b> <c>PhysBoneManager.Inst</c> is null in edit mode, so there is
-    /// nothing to grab and nothing needs to survive play entry.</para>
+    /// <para>No reflection: the SDK surface it drives is public, so an SDK rename or overload change is a
+    /// compile error and there is no binding canary. That guards none of the measured semantics, which an
+    /// SDK update can change while compiling clean, so re-measure them rather than trusting a green suite:
+    /// <c>grabberId</c> is inert under the emulator, <c>LocalOffset</c> is the seed convention, and a
+    /// stepped frame's <c>dt</c> follows <c>Time.fixedDeltaTime</c>.</para>
     /// </summary>
     [AgentTool]
     public static class GrabPhysBone
@@ -51,16 +25,12 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // If Time.frameCount does not advance for this long the player loop has stalled — a modal, a
         // blocked main thread. Abort rather than spin: a pump stuck in flight refuses every later door
-        // for the rest of the session. Mirrors RenderThumbnailPlay's guard of the same name.
+        // for the rest of the session.
         private const double StallSeconds = 20.0;
 
         // ── Cross-call state ──────────────────────────────────────────────────────────────────────
         //
-        // This tool DOES carry cross-call state, and every field below is a plain static that a domain
-        // reload wipes — the two native mutations (a paused editor, a pinned Time.fixedDeltaTime) outlive
-        // it with no managed record of what they were, and the owned-handle set is what Release keys its
-        // refusal on. §Restore record below carries all three, so none of it rests on the inference that
-        // a reload always takes the PhysBoneManager with it.
+        // A domain reload wipes these statics; §Restore record below carries what must outlive it.
 
         private static readonly HashSet<string> Owned = new HashSet<string>();
         private static bool _frozen;              // this tool paused the editor
@@ -80,13 +50,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Doors ─────────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Grab by chain address: a hierarchy path to the <c>VRCPhysBone</c> host plus an int
-        /// bone index. Always available — including on the many rigs that author <c>radius 0</c>, which
-        /// the spatial query in <see cref="Reach"/> cannot touch at any grabber radius. Freezes the
-        /// venue. Seeds the grab target from the bone's own world position in this same call, so the
-        /// chain can never be left pinned at the origin. Returns
-        /// <c>[GrabPhysBone] Grab &lt;path&gt;#&lt;bone&gt; =&gt; OK | handle=&lt;A:B&gt; …</c>; every refusal is a bare
-        /// <c>FAIL</c> naming the fix.</summary>
+        /// <summary>Grab by chain address: a hierarchy path to the <c>VRCPhysBone</c> host plus an index into
+        /// its <c>bones</c>. Works on rigs authoring <c>radius 0</c>, which <see cref="Reach"/> cannot touch.
+        /// Freezes the venue and seeds the target from the bone's world position in this same call.</summary>
         public static string Run(string pbPath, int boneIndex, int grabberId = -1)
         {
             string bad = GuardMutating();
@@ -114,8 +80,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return Fail("boneIndex " + boneIndex + " is outside chain '" + pbPath + "' (bones=0.."
                     + (pb.bones.Count - 1) + ")");
 
-            // Bracket. A repeat AttemptGrab on a grabbed chain returns null, which is indistinguishable
-            // from a door that never works — so the state is read and named instead of guessed at.
+            // A repeat AttemptGrab on a grabbed chain returns null, indistinguishable from a door that
+            // never works, so the state is read first.
             if (mgr.IsChainGrabbed(pb.chainId))
                 return Fail("chain '" + pbPath + "' is already grabbed — GrabPhysBone.Held() names the "
                     + "holder; release it before grabbing again");
@@ -133,12 +99,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                     + " though the chain read ungrabbed — re-read the chain id, which a recompile re-mints");
         }
 
-        /// <summary>Grab spatially, at a reach point with a radius — what a player actually has. Its own
-        /// door rather than an overload of <see cref="Run"/> because the preconditions differ: the
-        /// spatial query searches the collision structure, so the physbone's own <c>radius</c> must be
-        /// non-zero (it authors as 0, and no grabber radius compensates) and the bone must be simulated
-        /// with a non-zero end radius. Reach is sum-of-radii — bone radius + <paramref name="radius"/>
-        /// against the distance. Freezes the venue; seeds the target from the reach point.</summary>
+        /// <summary>Grab spatially, at a reach point with a grabber radius. The query searches the collision
+        /// structure, so the physbone's own <c>radius</c> must be non-zero (no grabber radius compensates)
+        /// and the bone simulated with a non-zero end radius; docs/emulator.md §Induce owns the arithmetic.
+        /// Freezes the venue; seeds the target from the reach point.</summary>
         public static string Reach(float x, float y, float z, float radius, int grabberId = -1)
         {
             string bad = GuardMutating();
@@ -160,10 +124,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                     + "arithmetic and why a chain must be probed)");
         }
 
-        /// <summary>Move the held target. Takes the hand/target point in world space and adds the grab's
-        /// own <c>LocalOffset</c> internally, matching <c>PhysBoneGrabHelper</c>'s mouse path — the same
-        /// convention the grab doors seed with, so the first Move to the point you grabbed at does not
-        /// jump the chain.</summary>
+        /// <summary>Move the held target to a world-space hand point. Adds the grab's <c>LocalOffset</c>, as
+        /// <c>PhysBoneGrabHelper</c>'s mouse path does and the grab doors seed with, so the first Move to the
+        /// point you grabbed at does not jump the chain.</summary>
         public static string Move(string handle, float x, float y, float z)
         {
             string bad = GuardMutating();
@@ -181,12 +144,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Ok("Move", handle + " -> " + to.ToString("F3"), "held=" + Owned.Count);
         }
 
-        /// <summary>Release a grab this tool minted; with <paramref name="handle"/> omitted, release all
-        /// of them. Never a foreign grab: <c>PhysBoneGrabHelper</c> holds a live grab while the operator
-        /// has the mouse down, and releasing it leaves the helper writing <c>GlobalPosition</c> to a dead
-        /// grab every frame and releasing it a second time on mouse-up. Foreign grabs are named, not
-        /// touched. <paramref name="resume"/> also hands the venue back — a bare
-        /// <c>Release(resume: true)</c> with nothing held is the normal way to unfreeze after settling.
+        /// <summary>Release a grab this tool minted; with <paramref name="handle"/> omitted, all of them.
+        /// Never a foreign grab: <c>PhysBoneGrabHelper</c> holds a live grab while the operator has the mouse
+        /// down, and releasing it leaves the helper writing <c>GlobalPosition</c> to a dead grab every frame
+        /// and releasing it a second time on mouse-up. <paramref name="resume"/> also unfreezes the venue.
         /// </summary>
         public static string Release(string handle = null, bool resume = false)
         {
@@ -194,8 +155,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             if (!Application.isPlaying)
             {
-                // Nothing to release — the manager died with play mode. Still honour `resume`, since the
-                // freeze is editor state that outlives the session that made it.
+                // Nothing to release — the manager died with play mode. Thaw whatever `resume` says, since
+                // the freeze is editor state that outlives the session that made it.
                 string note = _frozen ? Thaw() : "venue was not frozen by this tool";
                 Owned.Clear();
                 PersistRecord();
@@ -242,16 +203,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>Step exactly <paramref name="frames"/> player-loop frames. The only async door: it
         /// arms a pump on <c>EditorApplication.update</c> and returns immediately (=&gt; PENDING), because
         /// <c>EditorApplication.Step()</c> needs the editor loop to run between frames and the call that
-        /// issues it holds the main thread. Poll <see cref="Held"/>. It never waits on a blocked main
-        /// thread — the stall guard aborts rather than spinning.
+        /// issues it holds the main thread. Poll <see cref="Held"/>.
         ///
         /// <para><paramref name="dt"/> (0 = leave alone) pins <c>Time.fixedDeltaTime</c>, which is what a
         /// stepped frame's <c>Time.deltaTime</c> actually equals — <c>Time.captureDeltaTime</c> is ignored
-        /// under <c>Step()</c> (measured). <b>It is a GLOBAL clock rescale</b>: the animator, every
-        /// FixedUpdate, and the emulator's sync-tick accumulators all advance at the same rescaled rate,
-        /// so a choreography stepped at a non-default dt supports no claim about a transition duration, a
-        /// sync interval or a debounce window — only about the solve's convergence per unit simulated
-        /// time.</para></summary>
+        /// under <c>Step()</c> (measured). docs/unity-tools.md owns what the global rescale
+        /// voids.</para></summary>
         public static string Advance(int frames, float dt = 0f)
         {
             if (!Application.isPlaying) return Fail(NotPlaying("Advance"));
@@ -287,16 +244,11 @@ namespace Ryan6Vrc.AgentTools.Editor
             return summary;
         }
 
-        /// <summary>What is held, and how the pump is doing. Pure read — no frame advances, nothing is
-        /// released. Classifies every live grab as <c>ours</c>, <c>foreign</c> (another owner's — the SDK
-        /// mouse helper, another probe) or <c>stale</c> (its chain no longer resolves — the chain object was
-        /// destroyed or deactivated under the grab, so nothing will drop it on its own and no scene read will
-        /// show it; this is the one leak only this door surfaces). A stale grab that is ours is still released
-        /// by <see cref="Release"/>, since the manager keeps honouring the id after the chain is gone.
-        ///
-        /// <para>Named <c>Held</c> rather than the family's <c>Status</c> because it has a subject of its
-        /// own — what is held, by whom, what has gone stale — and carries pump progress besides, where
-        /// <c>RenderThumbnailPlay.Status</c> is a bare poll.</para></summary>
+        /// <summary>What is held, and how the pump is doing; a pure read. Classifies every live grab as
+        /// <c>ours</c>, <c>foreign</c> (the SDK mouse helper, another probe) or <c>stale</c> (the chain object
+        /// was destroyed or deactivated under the grab, so nothing will drop it on its own and no scene read
+        /// will show it). A stale grab that is ours is still released by <see cref="Release"/>, since the
+        /// manager keeps honouring the id after the chain is gone.</summary>
         public static string Held()
         {
             if (!Application.isPlaying)
@@ -402,9 +354,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             catch (Exception e)
             {
-                // Nothing is on the caller's stack — this runs on an editor tick long after Advance
-                // returned — so an unhandled throw here would leave the pump armed, refusing every later
-                // door for the session, with the venue frozen and dt pinned.
+                // An unhandled throw here would leave the pump armed, refusing every later door for the
+                // session.
                 FinishPump("aborted: " + e.GetType().Name + ": " + e.Message + " => FAIL");
             }
         }
@@ -424,12 +375,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             Debug.Log(Tag + " Advance " + result);
         }
 
-        /// <summary>Play-mode exit tears the session down. Subscribed for the whole domain, NOT inside
-        /// <see cref="Advance"/>: a <c>Run</c> → <c>Move</c> → operator-stops-play session never arms a pump,
-        /// so a subscription owned by <c>Advance</c> would leave the venue frozen and a stale owned-handle set
-        /// crossing the play-mode boundary. Relying on the exit's domain reload to wipe the statics instead is
-        /// not sound either — a sibling in this kit deliberately suppresses that reload
-        /// (<c>RenderThumbnailPlay</c>'s Enter-Play-Mode override), and the operator can switch it off.</summary>
+        /// <summary>Play-mode exit tears the session down. Subscribed for the whole domain, not inside
+        /// <see cref="Advance"/>, because a session that never arms a pump needs it too. The exit's domain
+        /// reload cannot be trusted to wipe the statics: <c>RenderThumbnailPlay</c>'s Enter-Play-Mode override
+        /// suppresses it, and the operator can switch it off.</summary>
         private static void OnPlayModeChanged(PlayModeStateChange change)
         {
             if (change != PlayModeStateChange.ExitingPlayMode && change != PlayModeStateChange.EnteredEditMode) return;
@@ -456,9 +405,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public double SecondsSinceProgress;
         }
 
-        /// <summary>The whole pump policy, as a function of observable state. Split out because every
-        /// branch below is a lifecycle hazard that a live test cannot provoke reliably: play-mode exit,
-        /// a manual un-pause, a stalled player loop, and the arm-time off-by-one.
+        /// <summary>The whole pump policy, as a function of observable state.
         ///
         /// <para>Frames are counted from <c>Time.frameCount</c>, never from issued <c>Step()</c> calls.
         /// <c>Step()</c> is asynchronous — it requests a frame that runs after the editor tick returns —
@@ -492,9 +439,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return o.FrameCount > o.LastStepAtFrame ? PumpAction.Step : PumpAction.Wait;
         }
 
-        /// <summary>Which live grabs a <see cref="Release"/> should touch, and which are someone else's.
-        /// Pure so the ownership rule is assertable with no manager present. A null/empty
-        /// <paramref name="requested"/> means "all of ours"; a named one must be both live and ours.</summary>
+        /// <summary>Which live grabs a <see cref="Release"/> should touch, and which are
+        /// someone else's.</summary>
         internal static void SelectGrabsToRelease(
             IList<string> liveHandles, ICollection<string> owned, string requested,
             List<string> toRelease, List<string> foreign, out string refusal)
@@ -517,9 +463,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── Handle codec ──────────────────────────────────────────────────────────────────────────
         //
         // The handle is the returned grab's own ChainId. Both halves are ulong and real ids run close to
-        // long.MaxValue (a measured one: 5363680280397112067), so this parses as ulong — a long.Parse
-        // here would throw on a legitimate id. `A:B` is deliberately distinct from ChainId.ToString()'s
-        // own `A.B` so a hand-pasted ToString cannot be mistaken for a handle this tool minted.
+        // long.MaxValue, so a long.Parse here would throw on a legitimate id.
 
         internal static string FormatHandle(ChainId id) => FormatHandle(id.A, id.B);
 
@@ -539,12 +483,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── Restore record ────────────────────────────────────────────────────────────────────────
         //
         // Unity's default Script Changes While Playing is recompile-and-continue, so a mid-play domain
-        // reload is expected rather than exotic. After one, every static above is gone while the editor
-        // is STILL paused and Time.fixedDeltaTime is STILL pinned — and every later play session in that
-        // editor then runs at the wrong dt with no record of it, silently rescaling every timing claim
-        // made afterwards. SessionState is the right shelf: it outlives a domain reload and dies with the
-        // editor, which is exactly this state's lifetime. (EditorPrefs would outlive the editor too, and
-        // let a record from a crashed session clobber a later one's genuine settings.)
+        // reload is expected. After one, every static above is gone while the editor is still paused and
+        // Time.fixedDeltaTime still pinned, and every later play session in that editor runs at the wrong
+        // dt. SessionState outlives a domain reload and dies with the editor; EditorPrefs would let a
+        // record from a crashed session clobber a later one's genuine settings.
 
         private const string RecordKey = "Ryan6Vrc.GrabPhysBone.restoreRecord";
 
@@ -555,25 +497,20 @@ namespace Ryan6Vrc.AgentTools.Editor
             public bool DtPinned;
             public float SavedFixedDt;
             public bool PumpArmed;
-            /// <summary>The handles this tool minted. Carried because <see cref="Release"/> refuses a grab
-            /// the tool did not mint: were ownership to die with the statics while a grab outlived them, that
-            /// refusal would become a lock on an unreleasable chain. Cheaper to carry a few strings than to
-            /// rest on "the manager always dies too", which is an inference about av3emu rather than a
-            /// property of this tool.</summary>
+            /// <summary>The handles this tool minted. <see cref="Release"/> refuses any other, so a grab
+            /// outliving the statics would otherwise be unreleasable.</summary>
             public string[] Owned;
         }
 
-        /// <summary>Encode the restore record. Inverse of <see cref="TryParseRestoreRecord"/>; the two are
-        /// a domain reload apart, so no live test can prove they agree and the round-trip is the proof.</summary>
+        /// <summary>Inverse of <see cref="TryParseRestoreRecord"/>.</summary>
         internal static string FormatRestoreRecord(RestoreRecord r) =>
             "v2|" + (r.Frozen ? "1" : "0") + "|" + (r.PriorPaused ? "1" : "0") + "|"
             + (r.DtPinned ? "1" : "0") + "|" + r.SavedFixedDt.ToString("R", CultureInfo.InvariantCulture)
             + "|" + (r.PumpArmed ? "1" : "0")
             + "|" + (r.Owned == null ? "" : string.Join(",", r.Owned));
 
-        /// <summary>Decode a record written by <see cref="FormatRestoreRecord"/>. False (record left at
-        /// default) for anything not well formed — absent, wrong version, wrong arity, unparseable dt.
-        /// Half a restore is worse than none, so a malformed record is rejected whole.</summary>
+        /// <summary>Decode a record written by <see cref="FormatRestoreRecord"/>. False, with the record left
+        /// at default, for anything not well formed.</summary>
         internal static bool TryParseRestoreRecord(string raw, out RestoreRecord r)
         {
             r = default(RestoreRecord);
@@ -605,9 +542,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             }));
         }
 
-        /// <summary>Domain-reload recovery. Runs once per domain load; a surviving record means a session
-        /// was torn down mid-flight with native state still mutated. Restores it, drops the record, and
-        /// says so loudly — a silent recovery would leave the agent believing its Advance completed.</summary>
+        /// <summary>Runs once per domain load; a surviving record means a session was torn down mid-flight
+        /// with native state still mutated.</summary>
         internal static void RecoverAfterDomainReload()
         {
             RestoreRecord r;
@@ -624,8 +560,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 Time.fixedDeltaTime = r.SavedFixedDt;
                 what.Add("Time.fixedDeltaTime=" + r.SavedFixedDt.ToString("R", CultureInfo.InvariantCulture));
             }
-            // Re-adopt ownership before anything else can call Release. A grab that outlived the reload
-            // would otherwise read foreign, and the foreign-grab rule would refuse it forever.
             if (r.Owned != null)
             {
                 var mgr = PhysBoneManager.Inst;
@@ -647,20 +581,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                 + (r.PumpArmed ? " with an Advance in flight" : "")
                 + "; any grab it held died with the PhysBoneManager and its frame count is void";
 
-            // The durable channel is this tool's own next answer, not the console. Measured: a recovery
-            // logged from the first delayCall after a domain load lands inside the reload's console clear
-            // and the agent sees nothing at all — and a silent recovery is worse than none, because the
-            // caller goes on believing its Advance completed. Held() reports this whatever the Console
-            // window is set to; the log below is the same news, best-effort, for a human watching.
+            // The durable channel is Held()'s next answer, not the console. Measured: a recovery logged
+            // from the first delayCall after a domain load lands inside the reload's console clear and the
+            // agent sees nothing, going on believing its Advance completed. The log below is best-effort.
             _pumpResult = report;
             EditorApplication.delayCall += () => Debug.LogError(Tag + " Recover " + report + " => FAIL");
         }
 
         // [InitializeOnLoadMethod] on a method, NOT [InitializeOnLoad] on a nested holder class: measured,
-        // Unity does not run the static constructor of a private nested type marked [InitializeOnLoad], so
-        // the first draft's recovery never fired — a seeded record survived a real domain reload with the
-        // timestep left pinned, which is precisely the end state this whole section exists to prevent.
-        // A method attribute is discovered wherever the method lives.
+        // Unity does not run the static constructor of a private nested type marked [InitializeOnLoad].
         //
         // delayCall rather than the body: restoring pause and the time step during domain load runs before
         // the editor is ready to take either.
@@ -703,9 +632,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return null;
         }
 
-        /// <summary>The shared grab tail: attempt, seed the target in the SAME call, record ownership.
-        /// A call that grabs and then throws would leave an origin-grab live with the chain pinned at
-        /// 0,0,0, so the seed and the bookkeeping are inside one try with a release on the way out.</summary>
         private static string Attempt(
             Func<PhysBoneManager.Grab> attempt, Func<Vector3> seedPoint,
             string label, string subject, string nullMessage)
@@ -724,8 +650,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
 
                 // Same call, always: GlobalPosition defaults to the origin, so a grab that returns without
-                // one snaps its chain to 0,0,0. LocalOffset matches PhysBoneGrabHelper's `hit + LocalOffset`
-                // convention, which Move also uses.
+                // one snaps its chain to 0,0,0.
                 g.GlobalPosition = seedPoint() + g.LocalOffset;
 
                 var handle = FormatHandle(g.chainId);
@@ -754,6 +679,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
+        // Pause is a property of the held grab, not of one Advance: a resumed editor runs an unrecorded
+        // number of frames between MCP calls with the grab live and its target stale, voiding the exact
+        // frame count.
         private static void Freeze()
         {
             if (_frozen) return;
@@ -776,8 +704,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 ? "venue FROZEN by this tool — GrabPhysBone.Release(resume: true) hands it back"
                 : "venue not frozen";
 
-        /// <summary>Hierarchy path of the chain a live grab is on, so a summary names the object rather
-        /// than the request that found it. `(unresolved)` is the stale case Held reports separately.</summary>
+        /// <summary>Hierarchy path of the chain a live grab is on; `(unresolved)` when it no longer
+        /// resolves.</summary>
         private static string ChainPath(ChainId id)
         {
             var mgr = PhysBoneManager.Inst;

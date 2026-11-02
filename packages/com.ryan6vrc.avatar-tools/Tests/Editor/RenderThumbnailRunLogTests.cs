@@ -3,10 +3,8 @@ using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// Both thumbnail doors wrote no RunLog at all — they borrowed RunLogFormat.Sanitize for a temp PNG name and
-// nothing else — so the fitting sweep's "which doors were driven" signal was blind to both arcs and End()'s
-// restore claim rested on its own return string. The capture paths themselves need a real avatar and (for
-// play) the player loop, so what is pinned here is the envelope every verb now routes through.
+// The capture paths need a real avatar and (for play) the player loop, so these tests pin only the RunLog
+// envelope every verb routes through.
 public class RenderThumbnailRunLogTests
 {
     private readonly System.Collections.Generic.List<string> _written = new System.Collections.Generic.List<string>();
@@ -39,8 +37,7 @@ public class RenderThumbnailRunLogTests
         StringAssert.Contains("# body", File.ReadAllText(_written[0]));
     }
 
-    // The kind-prefixed filename is what makes a RunLog sweep able to tell the arcs apart — the fitting
-    // session's signal is exactly "which doors were driven", so begin/shoot/end must not share one name.
+    // A RunLog sweep tells the arcs apart by this kind prefix, so begin, shoot and end must not share a name.
     [Test]
     public void SessionLog_filenameCarriesTheVerbKind()
     {
@@ -57,9 +54,6 @@ public class RenderThumbnailRunLogTests
         StringAssert.StartsWith(RunLogFormat.RunLogDir, _written[0].Replace('\\', '/'));
     }
 
-    // The family's real write-failure contract, asserted rather than assumed: RunLogFormat REPLACES the
-    // verdict with a bare FAIL instead of returning the verdict without a trailer, so a line can never assert
-    // both a verdict and a failed write. A test written to the intuitive contract would fail against the code.
     [Test]
     public void SessionLog_writeFailure_rewritesTheVerdictAndOmitsTheTrailer()
     {

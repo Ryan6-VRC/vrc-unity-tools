@@ -7,28 +7,15 @@ using UnityEditor.Animations;
 
 namespace Ryan6Vrc.AvatarTools.Tests
 {
-    // A SECOND, INDEPENDENT reading of a built controller's graph — the counterweight to FixpointOracle.
-    //
-    // Every existing round-trip gate is decode(X) == decode(Y) through the one oracle, so a property
-    // ControllerDecompile does not model is dropped IDENTICALLY on both sides and the comparison stays green.
-    // That is not a weak spot in the assertions; it is structural, and it is how a cross-machine defaultState
-    // reached a perfect textual fixpoint while the two controllers booted different states. One lens agreeing
-    // with itself is not a theorem.
-    //
-    // So the digest deliberately does NOT reuse any part of ControllerDecompile. It runs ReportController
-    // (agent-tools) — a separately-authored walker of the same AnimatorController, written for humans reading a
-    // digest rather than for round-tripping — and compares its rendering. The value is precisely that nothing
-    // in this file knows what the schema models: a field the schema forgets tomorrow still shows up here.
-    //
-    // Read it as: "two unrelated readers of this graph describe it the same way." Where they disagree, one of
-    // them is losing something, and which one is the interesting question.
+    // A second reading of a built controller's graph, independent of FixpointOracle. The round-trip gates compare
+    // decode(X) == decode(Y) through ControllerDecompile, so a property it does not model drops identically on
+    // both sides and the comparison stays green. The digest therefore compares ReportController's rendering
+    // (agent-tools, a separately written walker) and must not reuse any part of ControllerDecompile.
     internal static class ControllerGraphDigest
     {
-        // ReportController returns its one-line summary and writes the body to a Snapshot; the body is the part
-        // worth comparing. Two lines vary with the HOST rather than the graph and are normalized out: the asset
-        // path (a scratch folder that differs per compile) and the controller's own name (C0 and C1 are
-        // deliberately different assets). Everything else — layers, states, motions, ladders, behaviours, and
-        // the default-state line this exists for — is graph content.
+        // Compares ReportController's Snapshot body, not its one-line summary. The asset path (a scratch folder
+        // per compile) and the controller's name (the two sides are different assets) vary with the host rather
+        // than the graph, so they are normalized out.
         internal static string Of(AnimatorController c)
         {
             string summary = Ryan6Vrc.AgentTools.Editor.ReportController.Run(c);
@@ -39,20 +26,14 @@ namespace Ryan6Vrc.AvatarTools.Tests
             string body = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), path));
             body = Regex.Replace(body, @"^asset: .*$", "asset: <normalized>", RegexOptions.Multiline);
             body = Regex.Replace(body, @"^# ReportController: .*$", "# ReportController: <normalized>", RegexOptions.Multiline);
-            // The controller name also appears inside the params-asset / menu references some fixtures carry.
             body = body.Replace(c.name, "<controller>");
             return body + DefaultStatePaths(c);
         }
 
-        // ReportController renders a default as the CARRYING machine's path plus the target's bare NAME
-        // ("Entry -> `Input RightHand/Neutral` (default)"), which cannot distinguish sibling branches that use
-        // the same state name — precisely the corpus shape this gate was built for, where five parallel
-        // `Preset N` machines each hold a `Neutral`. A rebuild booting `Preset 3/Neutral` instead of
-        // `Preset 0/Neutral` would render byte-identically. So the digest appends each default's FULL owner
-        // path, purpose-built here because the borrowed rendering is ambiguous at exactly the load-bearing spot.
-        //
-        // This block is the one part of the digest not independently authored, so it is kept minimal and additive:
-        // everything else still rests on ReportController's reading, and this only disambiguates it.
+        // ReportController renders a default as the carrying machine's path plus the target's bare name
+        // ("Entry → `Input RightHand/Neutral` (default)"), so a rebuild booting `Preset 3/Neutral` instead of
+        // `Preset 0/Neutral` would render byte-identically. The digest therefore appends each default's full
+        // owner path.
         private static string DefaultStatePaths(AnimatorController c)
         {
             var sb = new System.Text.StringBuilder("\n## Default state paths\n");
@@ -70,8 +51,6 @@ namespace Ryan6Vrc.AvatarTools.Tests
             }
         }
 
-        // Where a state actually lives, searched from the layer root — null when it lives nowhere in this layer
-        // (which is itself a difference worth surfacing).
         private static string OwnerPath(AnimatorState target, AnimatorController c, string layerName)
         {
             if (target == null) return null;
@@ -98,15 +77,11 @@ namespace Ryan6Vrc.AvatarTools.Tests
             }
         }
 
-        // Assert two controllers describe the same graph. `what` names the step under test (e.g. "raw -> owned"),
-        // because a digest diff is only meaningful against the step that produced it.
         internal static void AssertSameGraph(AnimatorController expected, AnimatorController actual, string what)
         {
             string a = Of(expected), b = Of(actual);
             if (a == b) return;
 
-            // Name the first differing line rather than dumping two multi-kilobyte digests: on the defect this
-            // gate was built for, that line IS the finding ("Entry -> `Neutral` (default)" vs "`Disable`").
             var la = a.Split('\n');
             var lb = b.Split('\n');
             int i = 0;

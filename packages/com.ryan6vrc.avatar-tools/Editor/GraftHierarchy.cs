@@ -8,15 +8,12 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// One planned action for a single vendor GO inside a grafted subtree: the vendor transform, its
-    /// root-relative path, and the per-component copy/skip decisions. Built in a single read-only pass
-    /// (no scene mutation); <see cref="GraftHierarchy.Run"/> PRINTS it for whatIf and REPLAYS it for
-    /// execute, so preview and execution consume identical decisions by construction.
+    /// One planned vendor GO in a grafted subtree: its root-relative path and per-component decisions.
     /// </summary>
     sealed class GraftStep
     {
         public Transform vendorGo;
-        public string vendorPath;        // root-relative path under vendorSource ("" == subtree-root-is-source, never happens)
+        public string vendorPath;        // root-relative path under vendorSource
         public bool hostWillMint;        // true: EnsureHost will create this dest GO; false: an existing GO is reused
         public readonly List<GraftCompDecision> comps = new List<GraftCompDecision>();
     }
@@ -30,21 +27,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
     }
 
     /// <summary>
-    /// The complete read-only plan for one <see cref="GraftHierarchy.Run"/>: the ordered subtree steps
-    /// (top→down so parents are scaffolded before children) plus the loud failure surfaces. Mutates
-    /// nothing to build. The exact same object drives whatIf (print) and execute (replay).
+    /// The read-only plan for one <see cref="GraftHierarchy.Run"/>: the steps, ordered so parents are scaffolded
+    /// before children, plus the loud failure surfaces. The same object drives whatIf (print) and execute (replay),
+    /// so the two consume identical decisions.
     /// </summary>
     sealed class GraftPlan
     {
         public readonly List<GraftStep> steps = new List<GraftStep>();
         /// <summary>subtreeRoots that resolved to no GameObject under vendorSource — caller FAILs loud, named.</summary>
         public readonly List<string> unresolvedRoots = new List<string>();
-        /// <summary>subtree GOs whose dest host could not be anchored within reach (EnsureHost would return null) — FAIL loud, named.</summary>
+        /// <summary>subtree GOs outside the reach root, which cannot occur while every GO comes from under vendorSource — FAIL loud, named.</summary>
         public readonly List<string> unanchorable = new List<string>();
 
-        /// <summary>A1 ambiguous-rename reasons hit while predicting host counterparts under a vendorToOwned. A
-        /// planner Counterpart reads an A1-null as "mint", so surfacing it here lets Run FAIL BOTH modes before
-        /// mutation, matching execute's EnsureHost A1 guard (preview == execute). Deduped.</summary>
+        /// <summary>Ambiguous-rename reasons hit while predicting host counterparts. The planner would read Counterpart's
+        /// null as "mint", so surfacing them lets Run FAIL both modes before mutation, matching EnsureHost's guard.</summary>
         public readonly List<string> renameAmbiguities = new List<string>();
 
         public int GoCount => steps.Count;
@@ -54,44 +50,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public int SkipCount { get { int n = 0; foreach (var s in steps) foreach (var c in s.comps) if (!c.copy) n++; return n; } }
     }
 
-    /// <summary>
-    /// Third transplant tool (sibling to <see cref="CopyComponents"/> / <see cref="MoveComponents"/>):
-    /// copies named GameObject SUBTREES WHOLESALE — the full structure plus ALL components on every GO —
-    /// from a vendor source into our instance, remapped against the reach root. This is how an operator
-    /// pulls an outfit's authoring tree / menu without listing every GameObject.
-    ///
-    /// Distinct, inverted contract vs <see cref="CopyComponents"/> (which is WHY it is a separate tool):
-    ///   - a different SELECTION MODEL — subtree-wholesale, copy-ALL-component-types (no tier/type list);
-    ///   - a missing destination host is EXPECTED AND NORMAL (you are scaffolding), NEVER a flag.
-    /// It does NOT invoke deep-tier dependency-follow or leaf-anchor recreate — the whole structure is
-    /// scaffolded wholesale, so those are moot; any VRC dynamics inside a grafted subtree are copied
-    /// verbatim and remapped like everything else.
-    ///
-    /// Reach root = (<paramref name="vendorSource"/>, <paramref name="ownedRoot"/>): the remap boundary.
-    /// A grafted ref whose target is UNDER vendorSource rebinds to the destination counterpart (e.g. a
-    /// VRCFury toggle's <c>obj → Kemono_Tail</c> rebinds to the destination avatar's tail when reach =
-    /// avatar); a ref outside reach (assets, other-avatar/external objects) is left alone and reported,
-    /// not failed.
-    ///
-    /// Idempotent: scaffold-GO reuse-by-path (a GO already at the target indexed path is reused, never
-    /// duplicated) + count-parity skip per (dest host, component type) — re-running a graft duplicates
-    /// nothing.
-    ///
-    /// PASS = subtree grafted and every under-reach ref rebound. FAIL = a ref leaked into the vendor
-    /// source, or an AddComponent / scaffold / anchor failure. Out-of-reach refs are reported (left for
-    /// placement-repair), not failed. RunLog kind <c>graft-hierarchy</c>.
-    /// </summary>
+    /// <summary>Copies named GameObject subtrees wholesale, structure plus every component, from a vendor source
+    /// into our instance, remapped against the reach root. VRC dynamics inside a subtree copy verbatim, with no
+    /// deep-tier dependency-follow or leaf-anchor recreate.
+    /// Contract: docs/unity-tools.md.</summary>
     [AgentTool]
     public static class GraftHierarchy
     {
-        /// <param name="vendorToOwned">Optional <c>vendorName ⇒ ownedName</c> correspondence (source-name key →
-        /// destination-name value) for the destination-side child lookups — the armature-root name mismatch
-        /// case (owned <c>Armature.1</c> vs vendor <c>Armature</c>). Validated once here (drop empties, reject
-        /// non-injective → FAIL), then threaded to host resolution / scaffold / ref-remap. Empty/absent/null
-        /// ⇒ byte-identical to today. Direction/case rationale is canonical at
-        /// <see cref="IndexedPath.Substitute"/> / <see cref="IndexedPath.ValidateRenameMap"/>.
-        /// <c>ConformRenderers</c> runs the OPPOSITE direction under the same invariant, so the two maps are
-        /// not interchangeable — see <see cref="IndexedPath.Substitute"/> before reusing one for both.</param>
+        /// <param name="vendorToOwned">Optional <c>vendorName ⇒ ownedName</c> map for destination-side child lookups, for
+        /// the armature-root name mismatch (owned <c>Armature.1</c> vs vendor <c>Armature</c>). Direction and case rules
+        /// are canonical at <see cref="IndexedPath.Substitute"/>.</param>
         public static string Run(GameObject ownedRoot, GameObject vendorSource,
                                  string[] subtreeRoots, IDictionary<string, string> vendorToOwned = null,
                                  bool whatIf = false)
@@ -117,8 +85,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return TransplantCore.Finish(log, label);
             }
 
-            // Validate the rename map ONCE before any mutation: a non-injective map cannot address a unique
-            // dst sibling → FAIL loud, naming the colliding keys (A2). Empty-after-cleaning ⇒ null ⇒ no-op.
+            // Validated before any mutation. Empty after cleaning returns null, a no-op.
             var cleanRename = IndexedPath.ValidateRenameMap(vendorToOwned, out var collidingKeys);
             if (collidingKeys != null)
             {
@@ -136,8 +103,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // ── Single read-only decision pass → the plan whatIf prints and execute replays ──────────
             var plan = BuildPlan(ownedRoot, vendorSource, subtreeRoots, cleanRename);
 
-            // A subtreeRoot that names no vendor GO, or a GO unanchorable within reach, is a tool fault →
-            // FAIL loud, named, before any mutation.
             if (plan.unresolvedRoots.Count > 0)
             {
                 log.result = "FAIL";
@@ -152,7 +117,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var u in plan.unanchorable) log.Offender("cannot anchor within reach: '" + u + "'");
                 return TransplantCore.Finish(log, label);
             }
-            // A1 ambiguous-rename hard precondition — FAIL both modes before any mutation (preview == execute).
             if (plan.renameAmbiguities.Count > 0)
             {
                 log.result = "FAIL";
@@ -169,9 +133,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             if (whatIf)
             {
-                // Preview: print the subtree, the scaffold to create, and the planned component copies.
-                // Refs are not classified here (no scene to remap against yet); execute reports the actual
-                // rebind/left-external/leak split. Preview mutates nothing.
+                // Refs are not classified in preview: only execute reports the rebind/left-external/leak split.
                 foreach (var s in plan.steps)
                     log.Note((s.hostWillMint ? "mint" : "reuse") + " host '" + s.vendorPath + "' (" +
                              s.comps.Count + " component(s), " + CountCopies(s) + " to copy)");
@@ -189,12 +151,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             try
             {
-                // Pass 1 — scaffold every GO in every subtree (top→down so parents exist before children),
-                // recording vendor→dst transforms into the session map. EnsureHost reuses an existing GO at
-                // the target indexed path (idempotency) or mints a transforms-only GO with the vendor's
-                // verbatim local TRS, bounded by reach. Then create every planned component copy onto its
-                // host. Refs are NOT rebound yet — the session map must be fully populated first so an
-                // intra-subtree ref hits a mapped target in pass 2 rather than path-remapping spuriously.
+                // Pass 1: scaffold every GO and create every planned component copy. Refs wait for pass 2: the session
+                // map must be fully populated first, so an intra-subtree ref hits a mapped target rather than
+                // path-remapping spuriously.
                 foreach (var step in plan.steps)
                 {
                     Transform host = ScaffoldBuilder.EnsureHost(vendorRoot, ourRoot, step.vendorGo,
@@ -225,14 +184,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // Pass 2 — ref-remap on every created component, now that the session map is fully
-                // populated. Per object-ref: session map-hit (copied component / scaffolded transform)
-                // wins; else generic path-remap WITHIN REACH (RemapReferencesByPath); else it nulls. Refs
-                // outside reach are left untouched (assets, external/other-avatar objects). A grafted
-                // SkinnedMeshRenderer's bones[]/rootBone ride this same path (no current fixture grafts a
-                // skinned mesh — exercised by construction, not fixture-verified).
-                int leftExternal = 0;   // refs left pointing outside reach (reported, NOT failed)
-                int nulledRefs   = 0;   // under-reach refs the remap could not resolve (reported)
+                // Pass 2: ref-remap every created component. A grafted SkinnedMeshRenderer's bones[]/rootBone ride this
+                // path, but no fixture grafts a skinned mesh, so that case is unverified.
+                int leftExternal = 0;
+                int nulledRefs   = 0;
                 foreach (var (vendor, ours) in created)
                 {
                     if (ours == null) continue;
@@ -247,8 +202,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                     ours.gameObject.name + "': " + w);
                 }
 
-                // Pass 3 — vendor-leak sweep (shared). Any ref on a created component still pointing INTO
-                // the vendor source is one the remap failed to rebind → FAIL (the contract's only ref-fault).
+                // Pass 3: any ref still pointing into the vendor source is the contract's only ref fault.
                 var createdComps = new List<Component>(created.Count);
                 foreach (var c in created) createdComps.Add(c.ours);
                 int leaks = TransplantCore.SweepVendorLeaks(createdComps, vendorRoot, log);
@@ -282,10 +236,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── Pure read-only plan builder ──────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Build the read-only graft plan: resolve each subtree root, enumerate its GOs top→down, predict
-        /// host mint-vs-reuse and per-component copy-vs-present-skip (count parity), and record unresolved
-        /// roots / unanchorable GOs as loud failure surfaces. Mutates nothing. Internal so tests can drive
-        /// it; <see cref="Run"/> is the public surface.
+        /// Builds the read-only plan: resolves each subtree root, predicts host mint-vs-reuse and per-component
+        /// copy-vs-present-skip, and records the failures for <see cref="Run"/> to report.
         /// </summary>
         internal static GraftPlan BuildPlan(GameObject ownedRoot, GameObject vendorSource, string[] subtreeRoots,
                                             IDictionary<string, string> vendorToOwned = null)
@@ -296,9 +248,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Transform vendorRoot = vendorSource.transform;
             Transform ourRoot     = ownedRoot.transform;
 
-            // Count-parity per (dest host transform identity, type): the same skip key CopyComponents uses.
-            // Keyed on the resolved dest Transform when it exists (so duplicate-named siblings each count
-            // their own host), else the unique vendor Transform (dest not yet minted → M is 0).
+            // Count parity per (dest host transform, type), the skip key CopyComponents uses. Duplicate-named siblings
+            // each count their own host; a not-yet-minted dest keys on its unique vendor Transform.
             var plannedSlots = new Dictionary<(Transform host, Type type), int>();
 
             // De-dup GOs across overlapping/nested subtree roots so a GO is planned once.
@@ -309,14 +260,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var rootPath = raw?.Trim();
                 if (string.IsNullOrEmpty(rootPath)) { plan.unresolvedRoots.Add(raw ?? "(null)"); continue; }
 
-                // ResolveUnderRoot does NOT take vendorToOwned: subtreeRoots are author-given VENDOR-side paths
-                // resolved against the vendor hierarchy, so a vendorName⇒ownedName substitution would never
-                // fire. Rename applies only to DESTINATION-child lookups (Counterpart / EnsureHost below).
+                // subtreeRoots are vendor-side paths, so vendorToOwned applies only to the destination lookups below.
                 Transform subRoot = ResolveUnderRoot(vendorRoot, rootPath);
                 if (subRoot == null) { plan.unresolvedRoots.Add(rootPath); continue; }
 
-                // Enumerate the subtree top→down (parent before child) so the executor scaffolds parents
-                // first. GetComponentsInChildren<Transform> returns the root first then descends in order.
+                // GetComponentsInChildren<Transform> returns the root first and descends, so parents scaffold first.
                 foreach (var vgo in subRoot.GetComponentsInChildren<Transform>(true))
                 {
                     if (vgo == null || !seen.Add(vgo)) continue;
@@ -327,9 +275,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         vendorPath = RelativePath(vendorRoot, vgo),
                     };
 
-                    // Mint-vs-reuse: does a dest counterpart already exist at this indexed path? If not,
-                    // EnsureHost will mint it. Out-of-reach (not under vendorRoot) is impossible here (vgo
-                    // is under subRoot under vendorRoot), but guard the contract anyway — fail loud.
                     if (!vgo.IsChildOf(vendorRoot) && vgo != vendorRoot)
                     {
                         plan.unanchorable.Add(step.vendorPath);
@@ -339,9 +284,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (cpFail != null && !plan.renameAmbiguities.Contains(cpFail)) plan.renameAmbiguities.Add(cpFail);
                     step.hostWillMint = dstHost == null;
 
-                    // Per-component copy decision: copy ALL component types (it's an authoring unit), under
-                    // count parity per (host identity, type). Transform itself is the scaffold, never copied.
-                    Transform parityHost = dstHost != null ? dstHost : vgo;   // index-aware identity
+                    Transform parityHost = dstHost != null ? dstHost : vgo;
                     foreach (var comp in vgo.GetComponents<Component>())
                     {
                         if (comp == null || comp is Transform) continue;
@@ -367,10 +310,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Rebind every object ref on <paramref name="comp"/>: session map-hit (component/transform) wins;
-        /// else generic path-remap within reach. Returns (nulled, leftExternal): under-reach refs the
-        /// remap could not resolve, and refs left pointing outside reach (untouched). Mirrors
-        /// CopyComponents.RemapBySession, plus an external-ref tally for the reporting contract.
+        /// Rebinds every object ref on <paramref name="comp"/>: a session-map hit wins, else generic path-remap within
+        /// reach. Returns nulled (under-reach refs the remap could not resolve) and external (refs left outside reach).
+        /// Mirrors CopyComponents.RemapBySession, plus the external tally.
         /// </summary>
         static (int nulled, int external, List<string> renameWarnings) RemapBySession(
             Component comp, SessionMap session, Transform vendorRoot, Transform ourRoot,
@@ -379,11 +321,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var so = new SerializedObject(comp);
             so.Update();
 
-            // Pass A — session map-hit: rebind refs to copied components / scaffolded transforms. These are
-            // exactly the refs the generic path-remap cannot resolve (a copied component lives at a NEW
-            // path; a path-remap would miss it or bind the wrong one of N same-type components). Also tally
-            // refs that point OUTSIDE reach (left untouched here and by the path-remap below) so the run can
-            // report them as left-for-placement.
+            // Pass A: session-map hits. A path-remap cannot resolve these: a copied component lives at a new path,
+            // so it would miss the target or bind the wrong one of N same-type components.
             int external = 0;
             var it = so.GetIterator();
             while (it.Next(true))
@@ -400,8 +339,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     it.objectReferenceValue = mgt.gameObject;
                 else
                 {
-                    // Not a session-map hit. Is it an under-reach scene object the path-remap will handle,
-                    // or an out-of-reach ref left for placement-repair?
                     Transform t = o is Component oc ? oc.transform : (o is GameObject og ? og.transform : null);
                     bool underReach = t != null && (t == vendorRoot || t.IsChildOf(vendorRoot));
                     if (t != null && !underReach) external++;   // asset/null-host refs aren't counted external
@@ -409,8 +346,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             so.ApplyModifiedPropertiesWithoutUndo();
 
-            // Pass B — generic path-remap for whatever the session map didn't cover (under-reach scene
-            // objects at a path-present transform). Refs outside reach are left untouched.
+            // Pass B: generic path-remap for whatever the session map did not cover.
             so.Update();
             var rr = RemapReferencesByPath.Remap(so, vendorRoot, ourRoot, vendorToOwned);
             so.ApplyModifiedPropertiesWithoutUndo();
@@ -426,9 +362,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var seg in segs)
             {
                 if (string.IsNullOrEmpty(seg)) continue;
-                // First same-named child at each level (subtreeRoots are author-given paths; duplicate-named
-                // top-level subtree roots are not a case the operator addresses — the indexed remap handles
-                // duplicate-named siblings DEEPER inside the subtree once the root is found).
+                // First same-named child at each level: a subtree root cannot address a duplicate-named sibling. The
+                // indexed remap handles those deeper inside the subtree.
                 Transform next = IndexedPath.NthChildWithName(cur, seg, 0);
                 if (next == null) return null;
                 cur = next;

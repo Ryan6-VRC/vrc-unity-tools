@@ -7,19 +7,14 @@ using UnityEditor.Animations;
 using UnityEngine;
 using UnityEngine.TestTools;
 
-// Behavioral tests for inline-clip component-type resolution (the C1 widening): the namespace-allowlisted
-// ResolveComponentType (VRC dynamics + UnityEngine.Animations join the vocabulary), the tightened
-// non-Component refusal, and the decompile side's oracle symmetry (an out-of-vocabulary binding type is a
-// located Refusal, never YAML that won't recompile). typeof() references double as rename canaries against
-// the pinned SDK: a VRC type rename fails these tests at compile time, not silently at resolve time.
-// Headless via tools/run-editmode-tests.ps1.
+// Inline-clip component-type resolution: the namespace-allowlisted ResolveComponentType, its non-Component
+// refusal, and the decompile side's refusal of a binding type outside that vocabulary. typeof() references
+// double as rename canaries against the pinned SDK: a VRC type rename fails these tests at compile time.
 public class ClipBindingTypeTests
 {
     private const string ScratchFolder = "Assets/Agent/Scratch/emit";
     private const string ClipsOut = "Assets/Agent/Scratch/ClipBindingType_NUnit";
 
-    // ControllerEmit.Build's 2-arg door mints a VRCExpressionParameters nobody persists; see
-    // AnimatorTestHelpers.UnownedSideAssetSweep for why a survivor breaks unrelated suites.
     private readonly AnimatorTestHelpers.UnownedSideAssetSweep _paramSweep =
         new AnimatorTestHelpers.UnownedSideAssetSweep();
 
@@ -38,11 +33,8 @@ public class ClipBindingTypeTests
 
     // ---- resolver: VRC dynamics types ---------------------------------------------------------
 
-    // Kept as a full typeof() table, not TestCases: the table IS the SDK-rename canary (a renamed VRC type
-    // breaks COMPILATION here, loudly, instead of quietly narrowing the resolver at runtime), and one test
-    // looping it costs one NUnit case instead of nine. Resolution is per-NAMESPACE
-    // (ControllerEmit.BindingNamespaces), so the three namespaces below are the distinct behavior; the extra
-    // types in each re-probe one allowlist entry — they are here for the canary, not for coverage.
+    // Resolution is per namespace (ControllerEmit.BindingNamespaces), so a table's extra types in one namespace
+    // re-probe one allowlist entry: they are here for the rename canary, not for coverage.
     private static readonly (string Name, System.Type Type)[] VrcDynamicsVocabulary =
     {
         ("VRCPositionConstraint", typeof(VRC.SDK3.Dynamics.Constraint.Components.VRCPositionConstraint)),
@@ -59,10 +51,8 @@ public class ClipBindingTypeTests
     [Test]
     public void Resolves_vrc_dynamics_types() => AssertWholeVocabularyResolves(VrcDynamicsVocabulary);
 
-    // ---- resolver: UnityEngine.Animations constraints (the sub-namespace gap) -----------------
+    // ---- resolver: UnityEngine.Animations constraints -----------------------------------------
 
-    // All six share ONE allowlist entry ("UnityEngine.Animations"), so this is one behavior — the table is
-    // again the rename canary, walked by a single case.
     private static readonly (string Name, System.Type Type)[] UnityConstraintVocabulary =
     {
         ("PositionConstraint", typeof(UnityEngine.Animations.PositionConstraint)),
@@ -76,11 +66,8 @@ public class ClipBindingTypeTests
     [Test]
     public void Resolves_unityengine_animations_types() => AssertWholeVocabularyResolves(UnityConstraintVocabulary);
 
-    // Walk the WHOLE table before failing. ResolveComponentType THROWS on a name it cannot resolve (it never
-    // returns null — see Refuses_non_component_type), so an Assert per iteration escapes the loop at the first
-    // offender and its c.Name label never renders: the canary names ONE entry and hides its siblings, so a
-    // single upstream move (a namespace reshuffle, an allowlist narrowed) costs one diagnose-fix cycle per
-    // affected type. Collect every offender — refusal AND wrong-type resolution — and fail once naming all.
+    // ResolveComponentType throws on a name it cannot resolve, so an Assert per iteration would stop at the
+    // first offender and hide its siblings. Collect every offender and fail once naming all.
     private static void AssertWholeVocabularyResolves((string Name, System.Type Type)[] vocabulary)
     {
         var bad = new List<string>();
@@ -102,25 +89,21 @@ public class ClipBindingTypeTests
             + "the schema §clips vocabulary together, never one alone): " + string.Join(" | ", bad));
     }
 
-    // ---- resolver: the pre-widening surface is unchanged ---------------------------------------
+    // ---- resolver: core types --------------------------------------------------------------------
 
-    // Two cases, two distinct code paths: GameObject is a special-cased early return (animatable but NOT a
-    // Component), SkinnedMeshRenderer goes through the "UnityEngine" allowlist entry. Adding Transform /
-    // Renderer / Light / AudioSource back would re-probe that same entry — and no Unity core type is a
-    // plausible rename, so they carry no canary value either.
+    // Two cases, two code paths: GameObject's early return and the "UnityEngine" allowlist entry.
     [TestCase("GameObject")]
     [TestCase("SkinnedMeshRenderer")]
     public void Still_resolves_core_types(string simpleName)
         => Assert.IsNotNull(ControllerEmit.ResolveComponentType(simpleName));
 
-    // ---- resolver: refusals survive the widening -----------------------------------------------
+    // ---- resolver: refusals ------------------------------------------------------------------------
 
     [Test]
     public void Refuses_non_component_type()
     {
-        // UnityEngine.Time IS a UnityEngine-namespace type — the Component-assignability check is what
-        // must refuse it (previously it resolved silently into a junk binding). 'Object' is what a
-        // classID-0 placeholder curve reads back as; same check refuses it.
+        // UnityEngine.Time is in an allowlisted namespace, so only the Component-assignability check refuses
+        // it. 'Object' is what a classID-0 placeholder curve reads back as; the same check refuses it.
         var ex = Assert.Throws<ControllerEmit.EmitException>(() => ControllerEmit.ResolveComponentType("Time"));
         StringAssert.Contains("Time", ex.Message);
         Assert.Throws<ControllerEmit.EmitException>(() => ControllerEmit.ResolveComponentType("Object"));
@@ -138,15 +121,14 @@ public class ClipBindingTypeTests
     [Test]
     public void Refuses_out_of_scope_and_unknown_types()
     {
-        // UnityEngine.UI stays out of scope (simple name 'Image' is under no allowlisted namespace), and
-        // the refusal must name the supported surface so the author can fix the document.
+        // Image lives in UnityEngine.UI, which is not allowlisted.
         var ui = Assert.Throws<ControllerEmit.EmitException>(() => ControllerEmit.ResolveComponentType("Image"));
         StringAssert.Contains("Image", ui.Message);
         StringAssert.Contains("VRC.SDK3.Dynamics", ui.Message);
         Assert.Throws<ControllerEmit.EmitException>(() => ControllerEmit.ResolveComponentType("NoSuchComponentType"));
     }
 
-    // ---- end-to-end: CompileClips emits the new bindings ---------------------------------------
+    // ---- end-to-end: CompileClips emits VRC bindings -------------------------------------------
 
     private string _yamlPath;
     private string WriteYaml(string body)
@@ -182,7 +164,7 @@ public class ClipBindingTypeTests
             "contact filter binding");
     }
 
-    // ---- round-trip: newly accepted types decompile back to the same YAML ----------------------
+    // ---- round-trip: allowlisted types decompile back to the same YAML -------------------------
 
     [Test]
     public void Roundtrip_vrc_bindings_decompile_equal()
@@ -279,9 +261,7 @@ layers:
     {
         // Serialized producers only reachable through import (no public API fabricates them): a classID-0
         // curve (an OSCmooth-style no-op placeholder) reads back as typeof(UnityEngine.Object), a curve
-        // whose script guid resolves to nothing as typeof(MonoBehaviour). Previously the first would emit
-        // 'X/Object.NOPE' and the second 'X/MonoBehaviour.someField' — recompilable-looking YAML that drops
-        // the (already broken) intent silently. Both must refuse; the valid sibling curve still decodes.
+        // whose script guid resolves to nothing as typeof(MonoBehaviour).
         AnimatorTestHelpers.EnsureFolder(ClipsOut);
         string animPath = ClipsOut + "/placeholders.anim";
         System.IO.File.WriteAllText(animPath, PlaceholderAnimYaml);
@@ -311,7 +291,7 @@ layers:
     }
 
     // A minimal serialized clip: classID-0 curve ('NOPE'), a classID-114 curve with an unresolvable script
-    // guid, and a valid Light.m_Intensity curve. Constant single-key curves.
+    // guid, and a valid Light.m_Intensity curve.
     private const string PlaceholderAnimYaml = @"%YAML 1.1
 %TAG !u! tag:unity3d.com,2011:
 --- !u!74 &7400000
