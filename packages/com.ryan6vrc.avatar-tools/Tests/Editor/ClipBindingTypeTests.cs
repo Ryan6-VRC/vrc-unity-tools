@@ -143,7 +143,7 @@ public class ClipBindingTypeTests
     public void CompileClips_emits_vrc_constraint_and_contact_bindings()
     {
         // Sources.source0.Weight also proves the first-dot split: the property keeps its own dots.
-        string body = "schema: 1\nbasis: avatar-root\ncontroller: C1Clips\n" +
+        string body = "schema: 1\nbasis: avatar-root\ncontroller: ClipBindingClips\n" +
             "clips:\n" +
             "  Latch: { set: { \"Cage/VRCPositionConstraint.Sources.source0.Weight\": 1, \"Recv/VRCContactReceiver.allowOthers\": 0 } }\n";
         string s = CompileClips.Run(WriteYaml(body), ClipsOut);
@@ -170,7 +170,7 @@ public class ClipBindingTypeTests
     public void Roundtrip_vrc_bindings_decompile_equal()
     {
         const string doc = @"schema: 1
-controller: C1RoundTrip_Fx
+controller: ClipBindingRoundTrip_Fx
 basis: avatar-root
 role: fx
 clips:

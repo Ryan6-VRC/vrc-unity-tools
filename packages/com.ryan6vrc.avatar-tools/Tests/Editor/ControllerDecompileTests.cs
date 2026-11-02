@@ -619,7 +619,7 @@ public class ControllerDecompileTests
         Assert.IsNotNull(a.Motion?.RefGuid, "state A decodes a dangling guid ref");
         Assert.IsNotNull(b.Motion?.RefGuid, "state B decodes a dangling guid ref");
         Assert.AreEqual(missingGuid, a.Motion.RefGuid.Guid, "state A recovers the missing guid");
-        Assert.AreEqual(missingGuid, b.Motion.RefGuid.Guid, "state B ALSO recovers it (the old shared FIFO gave the 2nd 'unknown')");
+        Assert.AreEqual(missingGuid, b.Motion.RefGuid.Guid, "state B ALSO recovers it (each dangling slot keeps its own guid, not a shared queue)");
         Assert.AreEqual(2, w.UnresolvedGuids.Count, "both dangling slots are listed");
     }
 
@@ -660,7 +660,7 @@ public class ControllerDecompileTests
         var sub = root.AddStateMachine("Sub");
         root.AddStateMachineExitTransition(sub);
         var w = ControllerDecompile.Walk(c);
-        Assert.IsEmpty(w.Refusals, "an outgoing sub-machine transition is now in vocabulary");
+        Assert.IsEmpty(w.Refusals, "an outgoing sub-machine transition is in vocabulary");
         var subModel = w.Doc.Layers[0].Root.Machines.Single(m => m.Name == "Sub");
         Assert.AreEqual(1, subModel.OnExit.Count, "the edge decodes onto the parent's SubMachine entry");
         Assert.IsTrue(subModel.OnExit[0].ToExit, "an exit transition decodes as 'to: Exit'");
@@ -792,7 +792,7 @@ public class ControllerDecompileTests
     // sweep: a widen that bound a field but left it out of StateTransitionAware would refuse its own
     // freshly-emitted output.
     [Test]
-    public void Walk_Transition_Offset_Decodes_And_Is_No_Longer_Swept()
+    public void Walk_Transition_Offset_Decodes_Without_Refusal()
     {
         var c = new AnimatorController { name = "TransOff_Fx" };
         c.AddLayer("L");
@@ -802,7 +802,7 @@ public class ControllerDecompileTests
         var tr = s.AddTransition(t);
         tr.offset = 0.3f;
         var w = ControllerDecompile.Walk(c);
-        Assert.IsEmpty(w.Refusals, "a non-default transition offset is now in vocabulary");
+        Assert.IsEmpty(w.Refusals, "a non-default transition offset is in vocabulary");
         var decoded = w.Doc.Layers[0].Root.States.Single(x => x.Name == "S").Transitions[0];
         Assert.That(decoded.Offset, Is.EqualTo(0.3f).Within(1e-5f));
         Object.DestroyImmediate(c);
@@ -854,7 +854,7 @@ public class ControllerDecompileTests
 
         var w = ControllerDecompile.Walk(emitted.Controller);
         Assert.IsFalse(w.Refusals.Any(r => r.Contains("NormalizedBlendValues")),
-            "normalizedBlendValues is consumed now, not swept-refused");
+            "normalizedBlendValues is consumed, not swept-refused");
         var t2 = w.Doc.Layers[0].Root.States.First(s => s.Name == "S").Motion.Tree;
         Assert.IsTrue(t2.Normalized.HasValue, "the Direct tree's normalized value is decoded");
         Assert.AreEqual(false, t2.Normalized.Value, "the explicit normalized value round-trips (would else reset to the construction default)");

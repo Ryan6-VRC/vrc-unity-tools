@@ -129,7 +129,7 @@ public class CompileControllerRobustnessTests
     // ── UnityEngine.UI.Image is outside ControllerEmit.BindingNamespaces, so a binding to it is refused
     // fail-loud rather than mis-emitted.
     [Test]
-    public void Inline_Binding_To_NonUnityEngine_Component_Is_Refused()
+    public void Inline_Binding_To_Component_Outside_Allowlisted_Namespaces_Is_Refused()
     {
         string src = TestRoot + "/Ui_Fx.yaml";
         File.WriteAllText(src,
@@ -143,7 +143,7 @@ public class CompileControllerRobustnessTests
 
         StringAssert.Contains("FAIL", result);
         StringAssert.Contains("UnityEngine", result,
-            "the refusal names the UnityEngine-namespace scope limit so it reads as intentional");
+            "the refusal names the supported-namespace scope limit so it reads as intentional");
         Assert.IsFalse(File.Exists(outDir + "/Ui_Fx.controller"), "no controller written on the refused binding");
         AnimatorTestHelpers.DeleteRefusalArtifact(result);
     }
@@ -151,7 +151,7 @@ public class CompileControllerRobustnessTests
     [Test]
     public void Failed_Fresh_Compile_Leaves_No_Empty_Folders()
     {
-        string outDir = TestRoot + "/g4_new/deep"; // neither segment exists yet
+        string outDir = TestRoot + "/new_ancestor/deep"; // neither segment exists yet
         Assert.IsFalse(AssetDatabase.IsValidFolder(outDir), "precondition: outDir does not exist yet");
 
         // Parses + validates but fails emit AFTER folder creation (transition to a nonexistent state — a
@@ -166,7 +166,7 @@ public class CompileControllerRobustnessTests
 
         StringAssert.Contains("FAIL", result);
         Assert.IsFalse(AssetDatabase.IsValidFolder(outDir), "freshly-created leaf folder removed on a failed compile");
-        Assert.IsFalse(AssetDatabase.IsValidFolder(TestRoot + "/g4_new"), "freshly-created ancestor folder removed too");
+        Assert.IsFalse(AssetDatabase.IsValidFolder(TestRoot + "/new_ancestor"), "freshly-created ancestor folder removed too");
         AnimatorTestHelpers.DeleteRefusalArtifact(result);
     }
     [Test]

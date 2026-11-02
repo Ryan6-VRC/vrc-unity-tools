@@ -13,11 +13,11 @@ using Ryan6Vrc.AgentTools.Editor;
 //
 // Run resolves scene handles through SceneHandle.Resolve, whose path and name rungs search the ACTIVE scene,
 // which no preview scene can stand in for — so the fixtures live in the active scene and are torn down in place.
-public class CheckAnimatorRefactorTests
+public class CheckAnimatorTests
 {
-    private const string TmpDir = "Assets/AgentLintRefactorTmp";
-    private const string AssetPath = TmpDir + "/RefactorTest.controller";
-    private const string AvatarName = "LintRefactorAvatar";
+    private const string TmpDir = "Assets/AgentCheckAnimatorTmp";
+    private const string AssetPath = TmpDir + "/CheckAnimatorTest.controller";
+    private const string AvatarName = "CheckAnimatorAvatar";
 
     private GameObject _avatar;
     private string _logPath;
@@ -41,7 +41,7 @@ public class CheckAnimatorRefactorTests
         child.transform.SetParent(_avatar.transform);
 
         if (!AssetDatabase.IsValidFolder(TmpDir))
-            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+            AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
 
         // SetEditorCurve (not clip.SetCurve) so each path yields EXACTLY one binding — SetCurve on a
@@ -76,7 +76,7 @@ public class CheckAnimatorRefactorTests
     public void ExplicitBasis_nonFloatBlendParam_showsCountInSummary_andFails()
     {
         if (!AssetDatabase.IsValidFolder(TmpDir))
-            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+            AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
         controller.AddParameter("IntSpeed", AnimatorControllerParameterType.Int);
 
@@ -105,7 +105,7 @@ public class CheckAnimatorRefactorTests
     public void ExplicitBasis_nonFloatParamCurve_showsCountInSummary_andFails()
     {
         if (!AssetDatabase.IsValidFolder(TmpDir))
-            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+            AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
         controller.AddParameter("Flag", AnimatorControllerParameterType.Bool);
 
@@ -126,14 +126,14 @@ public class CheckAnimatorRefactorTests
         StringAssert.Contains("nonFloatParamCurve=1", result,
             "the firing rule's count must reach the summary, not only the offender body: " + result);
         StringAssert.Contains("=> FAIL", result,
-            "a parameter curve on a Bool is an error-tier defect at the Lint door too: " + result);
+            "a parameter curve on a Bool is an error-tier defect at the CheckAnimator door too: " + result);
     }
 
     [Test]
     public void ExplicitBasis_driverOnAnimatedParam_showsCountInSummary_andFails()
     {
         if (!AssetDatabase.IsValidFolder(TmpDir))
-            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+            AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
         controller.AddParameter("Held", AnimatorControllerParameterType.Float);
 
@@ -164,7 +164,7 @@ public class CheckAnimatorRefactorTests
         StringAssert.Contains("driverOnAnimatedParam=1", result,
             "the firing rule's count must reach the summary, not only the offender body: " + result);
         StringAssert.Contains("=> FAIL", result,
-            "a driver op on a clip-bound parameter is an error-tier defect at the Lint door too: " + result);
+            "a driver op on a clip-bound parameter is an error-tier defect at the CheckAnimator door too: " + result);
     }
 
     [Test]
@@ -176,7 +176,7 @@ public class CheckAnimatorRefactorTests
         var armature = new GameObject("Armature"); armature.transform.SetParent(nested.transform);
         var bone = new GameObject("Bone"); bone.transform.SetParent(armature.transform);
 
-        if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+        if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
         var clip = new AnimationClip { name = "RwClip" };
         var curve = AnimationCurve.Linear(0, 0, 1, 1);
@@ -200,17 +200,17 @@ public class CheckAnimatorRefactorTests
         StringAssert.Contains("=> PASS", result, "auto-basis still demotes broken-binding to advisory (PASS): " + result);
     }
 
-    // SweepTestDummySmb exercises the SMB arm of the five-type filter. HideInHierarchy matches a controller's own
+    // OrphanTestSmb exercises the SMB arm of the five-type filter. HideInHierarchy matches a controller's own
     // sub-objects, for which AssetDatabase.IsSubAsset returns false, so a reintroduced IsSubAsset gate fails here.
     [Test]
     public void OrphanSubAsset_hiddenSmb_isReported()
     {
         if (!AssetDatabase.IsValidFolder(TmpDir))
-            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+            AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
         controller.layers[0].stateMachine.AddState("A");
 
-        var orphan = ScriptableObject.CreateInstance<SweepTestDummySmb>();
+        var orphan = ScriptableObject.CreateInstance<OrphanTestSmb>();
         orphan.name = "ORPHAN_SMB";
         AssetDatabase.AddObjectToAsset(orphan, controller);
         orphan.hideFlags = HideFlags.HideInHierarchy;
@@ -222,7 +222,7 @@ public class CheckAnimatorRefactorTests
         var result = CheckAnimator.Run(controller, "explicit", null, null, null);
         _logPath = ExtractLogPath(result);
 
-        Assert.Contains("SweepTestDummySmb 'ORPHAN_SMB'", OrphanTokens(result),
+        Assert.Contains("OrphanTestSmb 'ORPHAN_SMB'", OrphanTokens(result),
             "CheckAnimator must name the hidden orphan sub-asset (regression: a reintroduced IsSubAsset gate hides it): " + result);
     }
 

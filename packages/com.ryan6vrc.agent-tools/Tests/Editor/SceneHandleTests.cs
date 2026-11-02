@@ -115,7 +115,7 @@ public class SceneHandleTests
         Go("SH_SameRoot");
         var r = SceneHandle.Resolve("SH_SameRoot");
         Assert.That(r.Outcome, Is.EqualTo(SceneHandleOutcome.Ambiguous),
-            "first-wins across duplicate roots is silent today, in the write door included");
+            "duplicate root names must refuse as Ambiguous on the path branch, never resolve first-wins");
     }
 
     /// <summary>Transform.Find returns the FIRST same-named child, so an outfit's own Armature beside the base's

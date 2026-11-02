@@ -122,7 +122,7 @@ public class FixViewpointTests
         Assert.That((slidHead - HeadO).magnitude * 1000f, Is.GreaterThan(30f),
             "fixture must be a joint move of realistic magnitude — a rest-pose bake does this");
         Assert.That(Mathf.Abs(riseSlid - riseRef), Is.LessThan(1e-5f),
-            "rise is INVARIANT here, so the old gate's riseDelta conjunct could never fire");
+            "rise is INVARIANT here, so a riseDelta conjunct could never fire");
         Assert.That(Quaternion.Angle(frameRef, frameSlid), Is.EqualTo(20f).Within(0.01f),
             "yet the frame turns a full 20°, and the nudge turns with it");
 

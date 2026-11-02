@@ -12,7 +12,7 @@ public class AgentInspectorSizeTests
     private string _tmp;
 
     [SetUp]
-    public void SetUp() => _tmp = Path.Combine(Path.GetTempPath(), "d3_sizenote_" + Path.GetRandomFileName());
+    public void SetUp() => _tmp = Path.Combine(Path.GetTempPath(), "agentinspector_size_" + Path.GetRandomFileName());
 
     [TearDown]
     public void TearDown() { if (File.Exists(_tmp)) File.Delete(_tmp); }

@@ -94,7 +94,7 @@ public class CompositionBuiltReadsTests
     [Test]
     public void OnlyAFinishedBake_isKeptAsThePreviousOne()
     {
-        string dir = Path.Combine(Path.GetTempPath(), "b1-prev-" + System.Guid.NewGuid().ToString("N"));
+        string dir = Path.Combine(Path.GetTempPath(), "compositionbuiltreads-" + System.Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         try
         {

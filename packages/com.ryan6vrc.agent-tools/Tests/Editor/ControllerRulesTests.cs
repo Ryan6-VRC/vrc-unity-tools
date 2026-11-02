@@ -7,7 +7,7 @@ using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 
 // Pins the raw ControllerRules.Run contract on an in-memory, unsaved controller, the shape CompileController hands
-// it, including the roots-empty broken-binding skip. CheckAnimatorRefactorTests covers CheckAnimator end to end.
+// it, including the roots-empty broken-binding skip. CheckAnimatorTests covers CheckAnimator end to end.
 public class ControllerRulesTests
 {
     private AnimatorController _controller;

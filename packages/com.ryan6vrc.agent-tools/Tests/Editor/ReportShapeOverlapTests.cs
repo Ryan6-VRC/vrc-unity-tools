@@ -364,7 +364,7 @@ public class ReportShapeOverlapTests
 
         var actives = new ReportShapeOverlap.Ingested { ActiveStateUnknown = true };
         StringAssert.Contains("signal WITHHELD", ReportShapeOverlap.WithheldNotes(actives),
-            "the third signal predates this change and must keep the shared spelling");
+            "the active-state-unknown signal must use the shared WITHHELD spelling");
     }
 
     // The note is gated on the SCAN, not on an empty result: with a caller-supplied set and no outfitRoot,

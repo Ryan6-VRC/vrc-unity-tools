@@ -105,7 +105,7 @@ public class CrossMachineDefaultTests
         var c = SeedCorpusShape("Corpus3", out _);
         string y1 = Roundtrip(c, "c1", out var c1);
         string y2 = FixpointOracle.Decode(c1);
-        Assert.AreEqual(y1, y2, "the new key round-trips textually as well as structurally");
+        Assert.AreEqual(y1, y2, "the key round-trips textually as well as structurally");
     }
 
     [Test]

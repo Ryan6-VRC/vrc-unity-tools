@@ -557,7 +557,7 @@ layers:
     // reading its own field set, so a per-kind build isolates nothing. Assert every field here when a kind gains
     // one. The fail-loud cases stay separate because they throw, so they cannot share a build.
     [Test]
-    public void Emit_All_Six_NonDriver_Behaviour_Kinds_Set_Their_Fields()
+    public void Emit_Six_Behaviour_Kinds_Onto_One_State_Set_Their_Fields()
     {
         var doc = AnimatorSchemaYaml.Parse(
             "schema: 1\ncontroller: Bhv_Fx\nbasis: avatar-root\nrole: fx\n" +

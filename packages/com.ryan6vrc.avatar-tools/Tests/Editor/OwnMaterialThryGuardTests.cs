@@ -11,11 +11,11 @@ using Ryan6Vrc.AvatarTools.Editor;
 public class OwnMaterialThryGuardTests
 {
     const string Seed = "Assets/Agent/Scratch/OwnMatThryGuardSeed";
-    const string ProbeShaderPath = Seed + "/F39Probe.shader";
-    const string LockedShaderPath = Seed + "/F39Locked.shader";
+    const string ProbeShaderPath = Seed + "/ThryProbe.shader";
+    const string LockedShaderPath = Seed + "/ThryLocked.shader";
     // The probe is Hidden/ but NOT Hidden/Locked/: the near miss a loosened prefix check would swallow.
-    const string ProbeShaderName = "Hidden/F39/ProbeShader";
-    const string LockedShaderName = "Hidden/Locked/F39Probe";
+    const string ProbeShaderName = "Hidden/ThryGuard/ProbeShader";
+    const string LockedShaderName = "Hidden/Locked/ThryProbe";
 
     // Thry's tag names as LITERALS, deliberately: arranging via OwnMaterial's own constants would make test and
     // production read the same symbol, and the value — whether it matches Thry's actual TAG_* — is the only
@@ -107,7 +107,7 @@ public class OwnMaterialThryGuardTests
     [Test]
     public void OriginalShaderResolves_deadNameTag_isFalse_andNamesTheName()
     {
-        const string gone = "Hidden/F39/NoSuchShaderAnywhere";
+        const string gone = "Hidden/ThryGuard/NoSuchShaderAnywhere";
         _mat.SetOverrideTag(TagName, gone);
         Assert.IsFalse(OwnMaterial.OriginalShaderResolves(_mat, out string tag));
         Assert.AreEqual(gone, tag);
@@ -130,7 +130,7 @@ public class OwnMaterialThryGuardTests
     public void OriginalShaderResolves_bothTagsDead_isFalse_andPrefersNamingTheGuid()
     {
         _mat.SetOverrideTag(TagGuid, DeadGuid);
-        _mat.SetOverrideTag(TagName, "Hidden/F39/AlsoGone");
+        _mat.SetOverrideTag(TagName, "Hidden/ThryGuard/AlsoGone");
 
         Assert.IsFalse(OwnMaterial.OriginalShaderResolves(_mat, out string tag));
         Assert.AreEqual(DeadGuid, tag);

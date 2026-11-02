@@ -272,7 +272,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
                 + ", got " + actual.ToString("F5"));
 
         [Test]
-        public void Camera_DefaultKnobs_ReproduceThePreKnobSolve()
+        public void Camera_DefaultKnobs_ReproduceTheGoldenSolve()
         {
             foreach (var c in Goldens)
             {
@@ -324,7 +324,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
         public void Knobs_RefuseOutOfRangeAndNaN_AndTheTooCloseCorner()
         {
             Assert.IsNull(RenderThumbnailCore.ValidateCameraKnobs(30f, 1f, 0f, 0f));
-            Assert.IsNull(RenderThumbnailCore.ValidateCameraKnobs(90f, 1f, 0f, 0f), "today's closest shot stays legal");
+            Assert.IsNull(RenderThumbnailCore.ValidateCameraKnobs(90f, 1f, 0f, 0f), "the closest shot stays legal");
             StringAssert.Contains("zoom", RenderThumbnailCore.ValidateCameraKnobs(30f, 1.7f, 0f, 0f));
             StringAssert.Contains("zoom", RenderThumbnailCore.ValidateCameraKnobs(30f, float.NaN, 0f, 0f));
             StringAssert.Contains("pitch", RenderThumbnailCore.ValidateCameraKnobs(30f, 1f, -21f, 0f));

@@ -151,7 +151,7 @@ public class AnimatorSchemaEmitTests
     // The seven kinds other than faceTrackingSets, which has its own test below. Fields are keyed by the
     // camelCase emit tokens.
     [Test]
-    public void Serialize_Roundtrips_All_Seven_Behaviour_Kinds()
+    public void Serialize_Roundtrips_Seven_Behaviour_Kinds_Besides_FaceTrackingSets()
     {
         const string src =
             "schema: 1\ncontroller: Bhv_Fx\nbasis: avatar-root\nrole: fx\n" +

@@ -25,7 +25,7 @@ public class ConformRenderersDefaultMaterialTests
         try
         {
             impostor.name = "Default-Material";
-            Assert.AreEqual("Default-Material", impostor.name, "the impostor must satisfy the OLD name compare");
+            Assert.AreEqual("Default-Material", impostor.name, "the impostor must satisfy a name-only compare");
             Assert.IsFalse(ConformRenderers.IsBuiltinDefaultMaterial(impostor),
                 "identity, not name, is what decides — this material is not Unity's built-in");
         }

@@ -66,7 +66,7 @@ public class ReportPackageTests
     // ── The assembly authority (a namespace root cannot carry these) ───────────────────────────
 
     [Test]
-    public void NonSdkKey_excludes_base_library_types_the_root_list_no_longer_names()
+    public void NonSdkKey_excludes_base_library_types_the_root_list_omits()
     {
         // "System" is not a namespace root, so a project's own System.* types stay visible, and only the
         // assembly check can exclude the real base library.

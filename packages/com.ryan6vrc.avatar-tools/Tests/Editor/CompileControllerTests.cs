@@ -49,7 +49,7 @@ public class CompileControllerTests
 
         StringAssert.Contains("FAIL", result);
         Assert.IsFalse(File.Exists(outDir + "/Debounce_Fx.controller"), "no controller on validation failure");
-        StringAssert.Contains("| log=", result, "a refusal carries the in-band artifact trailer (R4)");
+        StringAssert.Contains("| log=", result, "a refusal carries the in-band artifact trailer");
         string artifact = result.Substring(result.IndexOf("log=") + 4);
         Assert.IsTrue(File.Exists(artifact), "the refusal artifact is on disk: " + artifact);
         StringAssert.Contains("validation failed", File.ReadAllText(artifact), "the artifact names the reason");

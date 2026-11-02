@@ -92,7 +92,7 @@ public class RenderAvatarFreshnessTests
     [Test]
     public void HasReactiveMA_AncestorScope_CatchesSiblingReactives_AndNamesThem()
     {
-        var root = new GameObject("V3_FixtureRoot");
+        var root = new GameObject("SiblingReactiveRoot");
         try
         {
             var target = new GameObject("Body"); target.transform.SetParent(root.transform);
@@ -102,8 +102,8 @@ public class RenderAvatarFreshnessTests
             Assert.IsFalse(RenderAvatar.HasReactiveMA(target, out _),
                 "subtree scan unexpectedly sees the sibling — scope semantics changed, retire this test deliberately");
             Assert.IsTrue(RenderAvatar.HasReactiveMA(target.transform.root.gameObject, out string armedBy),
-                "root scan missed a sibling reactive — the G56 leaf-mesh arming hole is open again");
-            Assert.AreEqual("V3_FixtureRoot/Outfit", armedBy,
+                "root scan missed a sibling reactive — the leaf-mesh arming hole is open again");
+            Assert.AreEqual("SiblingReactiveRoot/Outfit", armedBy,
                 "armedBy must be the matched component's hierarchy path — the settle-FAIL messages append it");
         }
         finally { Object.DestroyImmediate(root); }
@@ -115,7 +115,7 @@ public class RenderAvatarFreshnessTests
         Assert.IsTrue(RenderAvatar.IsAttributionAllNull(RenderAvatar.Settle.Settled, 5, 0),
             "proxies discovered + settled + every attribution null = the silent body-drop — must FAIL");
         Assert.IsFalse(RenderAvatar.IsAttributionAllNull(RenderAvatar.Settle.Settled, 0, 0),
-            "zero discovered (at-rest avatar) is normal — must NOT FAIL (the deleted presence false-FAIL)");
+            "zero discovered (at-rest avatar) is normal — must NOT FAIL");
         Assert.IsFalse(RenderAvatar.IsAttributionAllNull(RenderAvatar.Settle.Settled, 5, 5),
             "healthy: discovered and attributed");
         Assert.IsFalse(RenderAvatar.IsAttributionAllNull(RenderAvatar.Settle.Unsettled, 5, 0),
@@ -132,7 +132,7 @@ public class RenderAvatarFreshnessTests
     [Test]
     public void ClassifyArmScope_TriState_DistinguishesDriftFromNoAvatarRoot()
     {
-        var go = new GameObject("V4_ArmScopeFixture");
+        var go = new GameObject("ArmScopeFixture");
         try
         {
             var t = go.transform;
@@ -175,9 +175,9 @@ public class RenderAvatarFreshnessTests
         Assert.IsTrue(RenderAvatar.ShouldRunCanary(false, true),
             "edit-mode SMR grab is where the freeze lives — canary must run, FOCUSED OR NOT (a "
             + "kicked-but-not-interacted editor reads focused while still parked; a focus skip "
-            + "certified a stale sheet live, 2026-07-29)");
+            + "certified a stale sheet live)");
         Assert.IsFalse(RenderAvatar.ShouldRunCanary(true, true),
-            "play mode renders through the live player loop — measured fresh 2026-07-29, no canary");
+            "play mode renders through the live player loop — measured fresh, no canary");
         Assert.IsFalse(RenderAvatar.ShouldRunCanary(false, false),
             "nothing skinned was drawn — nothing can be parked, no canary");
     }

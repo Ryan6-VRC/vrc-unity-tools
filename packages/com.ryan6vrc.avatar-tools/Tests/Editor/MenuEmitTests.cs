@@ -363,7 +363,7 @@ menu:
         // The vrc-patterns gate compiles every entry this way (ControllerFixpoint.CompileToTemp): a yaml outside
         // the project, its icon beside it, into a host whose AssetDatabase sees neither. Failing here would
         // make `icon:` unauthorable by that library.
-        var outside = Path.Combine(Path.GetTempPath(), "f11_icon_" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
+        var outside = Path.Combine(Path.GetTempPath(), "menu_icon_" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
         Directory.CreateDirectory(Path.Combine(outside, "assets"));
         try
         {
@@ -387,7 +387,7 @@ menu:
     {
         // The regime follows the document's location, so every icon spelling degrades together: a throw on a
         // project-spelled icon would fail a gate run over an entry that compiles fine in a project.
-        var outside = Path.Combine(Path.GetTempPath(), "f11_spell_" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
+        var outside = Path.Combine(Path.GetTempPath(), "menu_spell_" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
         Directory.CreateDirectory(outside);
         try
         {

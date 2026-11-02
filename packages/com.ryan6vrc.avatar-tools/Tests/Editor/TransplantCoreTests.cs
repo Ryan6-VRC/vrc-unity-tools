@@ -267,7 +267,7 @@ public class TransplantCoreTests
     }
 
     [Test]
-    public void EnsureHost_null_map_mints_parallel_armature_exactly_as_today()
+    public void EnsureHost_null_map_mints_parallel_armature()
     {
         var (vroot, chest) = VendorArmatureChest();
         var droot = new GameObject("D").transform;

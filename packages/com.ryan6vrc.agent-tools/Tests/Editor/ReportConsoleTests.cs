@@ -434,7 +434,7 @@ public class ReportConsoleTests
     [Test]
     public void Report_filteredRead_isExemptFromCollapse()
     {
-        string tag = "D3ProbeTag" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
+        string tag = "ProbeTag" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
         for (int i = 0; i < 4; i++) Debug.Log(tag + " holding");
 
         var outText = ReportConsole.Run(types: "log", filterText: tag, count: 50);

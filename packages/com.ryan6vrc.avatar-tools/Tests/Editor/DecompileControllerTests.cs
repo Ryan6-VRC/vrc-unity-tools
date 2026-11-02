@@ -129,7 +129,7 @@ public class DecompileControllerTests
         StringAssert.Contains("FAIL", res);
         StringAssert.Contains("Trigger", res, "the refusal names the offending construct");
         Assert.IsFalse(File.Exists(yamlOut), "a refusal writes no .yaml");
-        StringAssert.Contains("| log=", res, "a refusal carries the in-band artifact trailer (R4)");
+        StringAssert.Contains("| log=", res, "a refusal carries the in-band artifact trailer");
         string artifact = res.Substring(res.IndexOf("log=") + 4);
         Assert.IsTrue(File.Exists(artifact), "the refusal artifact is on disk: " + artifact);
     }

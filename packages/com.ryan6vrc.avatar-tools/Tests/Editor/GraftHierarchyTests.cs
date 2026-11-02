@@ -181,7 +181,7 @@ public class GraftHierarchyTests
 
     // Twin of the rename test above: the map is the only thing that changes the outcome.
     [Test]
-    public void Graft_null_map_leaves_cross_armature_ref_nulled_as_today()
+    public void Graft_null_map_leaves_cross_armature_ref_nulled()
     {
         var vendor = new GameObject("V");
         var vArm = Child(vendor, "Armature");

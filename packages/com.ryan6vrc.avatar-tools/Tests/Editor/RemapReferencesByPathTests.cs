@@ -42,7 +42,7 @@ public class RemapReferencesByPathTests
     }
 
     [Test]
-    public void NoMap_leaves_renamed_root_ref_unresolved_exactly_as_today()
+    public void NoMap_leaves_renamed_root_ref_unresolved()
     {
         // "Armature" has no counterpart under DST, so the indexed path is plainly missing and resolution returns
         // null without the ambiguous-rename guard, which never fires with a null map.
@@ -52,7 +52,7 @@ public class RemapReferencesByPathTests
 
         var hit = IndexedPath.FindByIndexedPath(src.transform, dst.transform, hips, null, out var failReason);
         Assert.IsNull(hit);
-        Assert.IsNull(failReason, "a plain missing path is not the A1 ambiguous-rename guard");
+        Assert.IsNull(failReason, "a plain missing path is not the ambiguous-rename guard");
 
         // Counterpart with a null map returns null on the same input.
         Assert.IsNull(RemapReferencesByPath.Counterpart(src.transform, dst.transform, hips));
@@ -88,7 +88,7 @@ public class RemapReferencesByPathTests
     }
 
     [Test]
-    public void A1_count_mismatch_resolves_to_null_with_ambiguous_rename_reason()
+    public void Count_mismatch_resolves_to_null_with_ambiguous_rename_reason()
     {
         // src has 1 'Armature'; dst has 2 'Armature.1', so the mapped-name occurrence is ambiguous and the
         // count-equality guard (IndexedPath.GuardRename) resolves to null and names the reason.

@@ -272,7 +272,7 @@ public class CheckSeamTests
         LogAssert.Expect(LogType.Warning, RefuseRe); // proxy abstain ⇒ warning
         SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
         var bpType = Resolve("nadena.dev.modular_avatar.core.ModularAvatarBoneProxy");
-        Assert.IsNotNull(bpType, "TestEditor must have Modular Avatar installed (setup-test-editor copies it)");
+        Assert.IsNotNull(bpType, "TestEditor must have Modular Avatar installed (the test venue provisions it)");
         mergeGO.AddComponent(bpType); // a BoneProxy maps no humanoid bones ⇒ zero scorable pairs
         CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution();
         var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
@@ -292,7 +292,7 @@ public class CheckSeamTests
         LogAssert.Expect(LogType.Warning, RefuseRe); // abstain ⇒ warning
         SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
         var maType = Resolve("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
-        Assert.IsNotNull(maType, "TestEditor must have Modular Avatar installed (setup-test-editor copies it)");
+        Assert.IsNotNull(maType, "TestEditor must have Modular Avatar installed (the test venue provisions it)");
         mergeGO.AddComponent(maType); // present, but the injected resolution matched nothing
         CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution();
         var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
@@ -895,7 +895,7 @@ public class CheckSeamTests
     }
 
     [Test]
-    public void Bare_nonPositiveTolerance_refusesAtError()
+    public void Bare_invalidTolerance_refusesAtError()
     {
         BuildBare(out var baseGO, out var mergeGO, new[] { "Chest", "Spine" });
 

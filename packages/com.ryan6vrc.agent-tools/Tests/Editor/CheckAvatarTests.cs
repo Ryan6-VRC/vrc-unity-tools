@@ -290,10 +290,10 @@ public class CheckAvatarTests
         StringAssert.Contains("maSceneRef=0", r, "a genuinely unset ref is not an offender: " + r);
     }
 
-    // ── A renamed base surfaces (Proof A), a present to-be-merged bone does not (Proof B) ─────────────
+    // ── A renamed base surfaces, a present to-be-merged bone does not ─────────────
 
     [Test]
-    public void ProofA_break_and_ProofB_noFalseAbort_coexist()
+    public void RenamedBaseSurfaces_PresentToBeMergedBoneDoesNot()
     {
         var a = NewAvatar("LintAB");
         NewChild(a, "Body_Base");                          // base renamed away from Body_base
@@ -304,11 +304,11 @@ public class CheckAvatarTests
         var fxClip = NewClip(TmpDir, "FxBroken", "Body_base");
         SetBaseLayers(a, (VRCAvatarDescriptor.AnimLayerType.FX, NewController("FxCtrl", fxClip)));
 
-        // MA MergeAnimator (Relative, frame = Outfit) clip animates the present bone → resolves (Proof B).
+        // MA MergeAnimator (Relative, frame = Outfit) clip animates the present bone → resolves.
         var outfitClip = NewClip(TmpDir, "OutfitOk", "Bone_Present");
         AddMaMergeAnimator(outfit, NewController("OutfitCtrl", outfitClip));
 
-        // MA reactive ref to the renamed base → MA-scene-ref offender (Proof A). Plus a resolving ref (not counted).
+        // MA reactive ref to the renamed base → MA-scene-ref offender. Plus a resolving ref (not counted).
         AddMaObjectToggle(outfit, "Body_base", null);
         AddMaObjectToggle(outfit, "Outfit/Bone_Present", null);
 
@@ -319,7 +319,7 @@ public class CheckAvatarTests
         StringAssert.Contains("maSceneRef=1", r, "exactly the one broken reactive ref: " + r);
         StringAssert.Contains("clipBinding=1", r, "exactly the base-rename binding; the present bone must NOT surface: " + r);
         StringAssert.Contains("path=`Body_base`", log, "the broken binding is surfaced by its class: " + log);
-        Assert.IsFalse(log.Contains("path=`Bone_Present`"), "Proof B: the present to-be-merged bone must not be an offender: " + log);
+        Assert.IsFalse(log.Contains("path=`Bone_Present`"), "the present to-be-merged bone must not be an offender: " + log);
     }
 
     // ── VRCF ancestor walk ────────────────────────────────────────────────────────────────────────────
@@ -339,7 +339,7 @@ public class CheckAvatarTests
 
         StringAssert.Contains("clipBinding=1", r, "only the renamed base fails; the avatar-level obj resolves via upward strip: " + r);
         StringAssert.Contains("path=`Body_base`", log, log);
-        Assert.IsFalse(log.Contains("path=`AvatarLevelThing`"), "D-A: an avatar-level object resolves upward and must not surface: " + log);
+        Assert.IsFalse(log.Contains("path=`AvatarLevelThing`"), "an avatar-level object resolves upward and must not surface: " + log);
     }
 
     // ── VRCF rewriteBindings ───────────────────────────────────────────────────────────────────────────
@@ -546,7 +546,7 @@ public class CheckAvatarTests
         var r = Inspect("LintRH");
         var log = ReadLog(r);
 
-        StringAssert.Contains("clipBinding=1", r, "R-H: the controller is NOT dropped — its broken binding still surfaces: " + r);
+        StringAssert.Contains("clipBinding=1", r, "the controller is NOT dropped — its broken binding still surfaces: " + r);
         StringAssert.Contains(CheckAvatar.FailLoudNotePrefix, log, "the unreflected anchor is surfaced in Notes: " + log);
     }
 
@@ -563,7 +563,7 @@ public class CheckAvatarTests
         var r = Inspect("LintRhVrcf");
         var log = ReadLog(r);
 
-        StringAssert.Contains("clipBinding=1", r, "R-H: the VRCF controller is NOT dropped — its broken binding still surfaces: " + r);
+        StringAssert.Contains("clipBinding=1", r, "the VRCF controller is NOT dropped — its broken binding still surfaces: " + r);
         StringAssert.Contains(CheckAvatar.FailLoudNotePrefix, log, "the unreflected anchor is surfaced in Notes: " + log);
     }
 
@@ -813,7 +813,7 @@ public class CheckAvatarTests
         var r = Inspect("LintMaFrameNote");
         var log = ReadLog(r);
 
-        StringAssert.Contains("maSceneRef=1", r, "W9's scan still flags the targetObject-only ref: " + r);
+        StringAssert.Contains("maSceneRef=1", r, "the scan still flags the targetObject-only ref: " + r);
         StringAssert.Contains("frame-certain", log,
             "the offender must carry its frame caption — the frame is the own GameObject, the REF is what is broken: " + log);
     }

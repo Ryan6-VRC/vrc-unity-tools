@@ -490,7 +490,7 @@ public class OwnMaterialTests
         var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
         string ownedTexPath = AssetDatabase.GetAssetPath(o.GetTexture("_MainTex"));
         var ownedTi = (TextureImporter)AssetImporter.GetAtPath(ownedTexPath);
-        Assert.IsTrue(ownedTi.streamingMipmaps, "forked owned texture must have streaming mip maps enabled (G48)");
+        Assert.IsTrue(ownedTi.streamingMipmaps, "forked owned texture must have streaming mip maps enabled");
 
         var reSrcTi = (TextureImporter)AssetImporter.GetAtPath(srcPath);
         Assert.IsFalse(reSrcTi.streamingMipmaps, "vendor source must be left untouched (streaming still off)");
@@ -558,7 +558,7 @@ public class OwnMaterialTests
 
         var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
         CollectionAssert.Contains(o.shaderKeywords, marker,
-            "fork must not wipe shaderKeywords (memory: unity-material-getter-clears-keywords)");
+            "fork must not wipe shaderKeywords");
     }
 
     [Test] public void Same_run_collision_refuses_and_names_occupying_dst()
