@@ -282,7 +282,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// "active" would report a merge as a deletion.
         /// <para>The built side is readable only inside the bake scope: AAO's output meshes live under NDMF's
         /// generated-asset root, which the post-callback's <c>CleanupTemporaryAssets</c> deletes, and d4rk's merged mesh
-        /// is a bare <c>new Mesh()</c> never persisted.</para></summary>
+        /// is a bare <c>new Mesh()</c> never persisted.</para>
+        /// <para>VRCFury's <c>DisablePluginsWhenNotUploadingHook</c> skips six callback types during a bake (material
+        /// lockdown, UdonSharp's recompile, SDK id assignment), none of which touches a mesh; re-read its list if a
+        /// triangle count disagrees with an uploaded avatar's.</para></summary>
         internal static List<GeoRow> ReadGeometry(GameObject root)
         {
             var rows = new List<GeoRow>();
