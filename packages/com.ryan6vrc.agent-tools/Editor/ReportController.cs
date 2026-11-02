@@ -10,31 +10,13 @@ using UnityEngine;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
-    /// <summary>
-    /// Read-only markdown DIGEST of an <see cref="AnimatorController"/> for the AI-assisted VRChat
-    /// workflow — the semantic decode a coding agent needs to reason about an animator without opening
-    /// the graph window. Walks parameters, layers (with the Write-Defaults ON/OFF/MIXED signal
-    /// CheckAnimator flags), every state (recursing sub-state-machines at any depth), the first-match
-    /// transition ladder with real parameter names, blend trees, and — the highest-value surface —
-    /// VRC state-machine behaviours decoded typed (parameter drivers, tracking control, locomotion).
-    ///
-    /// Speaks the substrate's own handles: GameObject-free but asset paths + GUIDs for every clip
-    /// (a clip is only recoverable by GUID once its path rots), real parameter/state/motion names.
-    /// The load-bearing motion distinction is EMPTY (a clean, intentional idiom) vs BROKEN (a dangling
-    /// motion reference whose asset is gone) — the latter surfaces the raw dangling GUID, the only
-    /// surviving handle, recovered by parsing the controller YAML once (no C# API exposes it). This
-    /// distinction is applied identically to top-level state motions AND blend-tree children (at any
-    /// nesting depth), both through the one <see cref="MotionNullCell"/> classifier.
-    ///
-    /// INSPECTION ONLY — never mutates. Emits one line carrying the artifact path in-band.
-    /// </summary>
+    /// <summary>Read-only markdown digest of an <see cref="AnimatorController"/>: parameters, layers, every state
+    /// with its first-match transition ladder, blend trees and typed VRC behaviours.
+    /// Contract: docs/animator.md.</summary>
     [AgentTool]
     public static class ReportController
     {
         // ----- Agent entry points ------------------------------------------------------------------
-        // Take the AnimatorController asset object, OR its asset path/GUID (the overload below) — pass
-        // whichever handle you already hold. Scene-scoped doors (CheckAvatar) take a scene-handle string
-        // instead; that path/GUID-vs-scene split is the family convention, documented in unity-tools.md.
 
         /// <summary>Path/GUID overload: resolve <paramref name="controllerPathOrGuid"/> (an asset path or a
         /// GUID) to the <see cref="AnimatorController"/> and digest it. A handle that names no controller
@@ -53,9 +35,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Why a handle that named no <c>AnimatorController</c> was refused. An
         /// <c>AnimatorOverrideController</c> is the case worth separating: it is a live asset at that exact
-        /// path, so "no AnimatorController at '…'" reads as a missing file and sends the caller hunting one.
-        /// The base is named because that is where the caller reads next — and the omission is named with
-        /// it, because reading the base is NOT reading this asset's behaviour.</summary>
+        /// path, so "no AnimatorController at '…'" reads as a missing file and sends the caller hunting one.</summary>
         public static string RefuseWhy(string handle)
         {
             var any = RunLogFormat.LoadByPathOrGuid<RuntimeAnimatorController>(handle);
@@ -81,23 +61,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             int layerCount = controller.layers.Length;
             int paramCount = controller.parameters.Length;
             int stateCount = 0;
-            bool sawOffset = false;   // any transition carried a non-zero offset ⇒ emit the legend once
+            bool sawOffset = false;
 
-            // Recover the dangling-motion GUIDs from the controller YAML (the only handle a broken motion
-            // leaves behind — no C# API exposes it), each tagged with the fileID of the block that holds
-            // it, so the header can split live-reachable (a walked state/tree references it → a real
-            // runtime break) from orphan-only (in the asset but not reached by any walked state → leftover
-            // YAML residue). Without the split a residue-heavy controller reads as N broken motions (F26).
+            // Each dangling GUID is tagged with the fileID of the block holding it, so the header can split
+            // live-reachable (a walked state/tree references it: a real runtime break) from orphan-only
+            // (YAML residue no walked state reaches).
             var danglingGuids = RecoverDanglingMotions(controller, out var danglingByBlock);
             var visited = new HashSet<long>(); // fileIDs of every walked state + blend tree (the "live" set)
 
-            // ---- Header ----
             string assetPath = AssetDatabase.GetAssetPath(controller);
             sb.Append("# ReportController: ").Append(controller.name).Append('\n');
             sb.Append("asset: `").Append(string.IsNullOrEmpty(assetPath) ? "(unsaved)" : assetPath).Append("`  \n");
             sb.Append("layers=").Append(layerCount).Append(" states=(see below) params=").Append(paramCount).Append('\n');
 
-            // ---- Parameters (into bodySb; the broken-motion split is appended to sb after the walk) ----
             bodySb.Append("\n## Parameters\n\n");
             if (paramCount == 0) bodySb.Append("_(none)_\n");
             else
@@ -117,31 +93,24 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
             }
 
-            // ---- Layers + nested states/transitions/blend-trees ----
-            // Reading an animator means reading each state alongside its own transitions, so states,
-            // their first-match ladders, and blend-tree expansions render together under their layer.
             var layers = controller.layers;
             for (int li = 0; li < layers.Length; li++)
             {
                 var layer = layers[li];
 
-                // A synced layer owns no state machine: it re-skins the SOURCE layer's states with
-                // per-state OVERRIDE motions/behaviours (the whole point — common in VRC gesture
-                // layers). Walk the source topology but resolve motion/behaviours through the layer's
-                // override APIs so those overrides are decoded, not silently dropped.
+                // A synced layer owns no state machine: it re-skins the SOURCE layer's states with per-state
+                // OVERRIDE motions/behaviours. Walk the source topology but resolve through the layer's override
+                // APIs, or those overrides are silently dropped.
                 bool synced = layer.syncedLayerIndex >= 0;
                 var walkSm = synced ? layers[layer.syncedLayerIndex].stateMachine : layer.stateMachine;
 
                 // A synced layer's override motions live inline in the controller's OWN main-object block
-                // (m_AnimatorLayers[].m_Motions), not a state block — so record that block's fileID as visited
+                // (m_AnimatorLayers[].m_Motions), not a state block, so record that block's fileID as visited
                 // or a dangling override clip (a real runtime break) is mis-bucketed as orphan residue. Residue
-                // always sits in separate orphaned-state blocks, so this can't mark residue live (F26).
+                // always sits in separate orphaned-state blocks, so this can't mark residue live.
                 if (synced && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(controller, out _, out long ctrlFid))
                     visited.Add(ctrlFid);
 
-                // states=N makes a 0-state layer explicit — its empty section is otherwise
-                // indistinguishable from a truncated report (F27). Counts the walked SM's own states
-                // (recursing sub-machines); a synced layer reports its source SM's count.
                 bodySb.Append("\n## Layer ").Append(li).Append(": ").Append(layer.name).Append('\n');
                 bodySb.Append("weight=").Append(F(layer.defaultWeight))
                   .Append(" blend=").Append(layer.blendingMode)
@@ -159,16 +128,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 WalkStateMachine(walkSm, "", bodySb, controller, layer, synced, danglingGuids, visited, ref stateCount, ref sawOffset);
             }
 
-            // Said once, and only when some edge carries an offset — the per-edge `offset=` value is the fact,
-            // this is why it decides anything. Placed after the layers so it reads as a note on what was just
-            // rendered rather than a header the reader meets before any offset appears.
             if (sawOffset)
                 bodySb.Append("\n_A transition `offset=v` starts the destination state's motion at normalized "
                     + "time v of its own clip, not at the start. Two states holding the SAME clip at speed=0 and "
                     + "differing only in their incoming offset are therefore two distinct POSES — a pose picker, "
                     + "not a redundant layer — and zeroing the offset collapses them onto one pose._\n");
 
-            // ---- Broken-motion split (the walk has now recorded every live fileID) ----
+            // The walk has now recorded every live fileID, so the broken-motion split can run.
             var liveGuids = new HashSet<string>();
             foreach (var fid in visited)
                 if (danglingByBlock.TryGetValue(fid, out var gs))
@@ -188,7 +154,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             sb.Append(bodySb);
 
-            // ---- Summary + artifact ----
             var body = sb.ToString();
             var brokenTail = danglingGuids.Count > 0
                 ? " brokenMotions=" + live.Count + "live/" + orphan.Count + "orphan" : "";
@@ -207,8 +172,6 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             var def = sm.defaultState;
 
-            // AnyState / Entry ladders are per-state-machine — render them at this level's head,
-            // scoped by the sub-SM path so the reader can tell which level a ladder governs.
             foreach (var t in sm.anyStateTransitions)
                 sb.Append("- ").Append(prefix).Append("AnyState ").Append(RenderTransition(t, ref sawOffset)).Append('\n');
             foreach (var t in sm.entryTransitions)
@@ -216,11 +179,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (def != null)
                 sb.Append("- ").Append(prefix).Append("Entry → `").Append(prefix).Append(def.name).Append("` (default)\n");
 
-            // A child sub-machine's OUTGOING edges, fired when it reaches its own Exit. They hang off THIS
-            // machine, so they render at this level beside the ladders — the same reason the schema carries
-            // them on the parent. They are the ONLY way out of a sub-machine, so omitting them shows the
-            // reader a machine with no exit and no sign that control flow was left out. AnimatorTransitions
-            // (conditions + target, no timing), so they share the entry ladder's renderer.
+            // A child sub-machine's outgoing edges hang off THIS machine and are the only way out of the child,
+            // so they render here. They are AnimatorTransitions, so they share the entry ladder's renderer.
             foreach (var child in sm.stateMachines)
             {
                 if (child.stateMachine == null) continue;
@@ -238,16 +198,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 var st = cs.state;
                 if (st == null) continue;
-                // Record this state's fileID — a dangling motion in its YAML block is "live" (reachable
-                // by the walk), as opposed to orphan residue no walked object references (F26).
                 if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(st, out _, out long stFid)) visited.Add(stFid);
-                // A synced layer re-skins the SOURCE layer's states — they are the same AnimatorState
-                // objects already counted for the source layer, so counting them again would inflate the
-                // hint. Count each distinct state once (on its owning, non-synced layer).
+                // A synced layer walks the same AnimatorState objects already counted for its source layer.
                 if (!synced) stateCount++;
 
-                // In a synced layer the state belongs to the source SM; its EFFECTIVE motion/behaviours
-                // are this layer's overrides (falling back to the source when no override is set).
                 Motion motion;
                 string motionCell;
                 if (synced)
@@ -256,7 +210,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     motion = ov != null ? ov : st.motion;
                     motionCell = motion != null
                         ? MotionLabel(motion) + (ov != null ? " (synced override)" : " (inherited source)")
-                        : "(empty)";
+                        : StateMotion(st, controller, danglingGuids);
                 }
                 else
                 {
@@ -273,14 +227,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                     sb.Append(" motionTime=`").Append(st.timeParameter).Append('`');
                 sb.Append(" WD=").Append(st.writeDefaultValues ? "on" : "off").Append('\n');
 
-                // Expand a blend-tree motion inline (recursing nested trees).
                 if (motion is BlendTree bt)
                     AppendBlendTree(bt, 0, sb, danglingGuids, visited);
 
-                // Typed VRC behaviour decode (override behaviours for a synced layer).
                 AppendBehaviours(synced ? layer.GetOverrideBehaviours(st) : st.behaviours, sb);
 
-                // This state's own transition ladder.
                 foreach (var t in st.transitions)
                     sb.Append("- → ").Append(RenderTransition(t, ref sawOffset)).Append('\n');
             }
@@ -301,9 +252,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return MotionNullCell(mp, danglingGuids);
         }
 
-        // Classify a null Motion slot: clean-empty idiom vs dangling (broken) reference. Shared by
-        // top-level state motions and blend-tree children so both speak one grammar. A null property
-        // (unexpected serialization shape / wrong key) is loud, never a silent "(empty)".
+        // A null Motion slot is either the clean-empty idiom or a dangling reference whose asset is gone. A
+        // null property (unexpected serialization shape / wrong key) is loud, never a silent "(empty)".
         private static string MotionNullCell(SerializedProperty mMotion, List<string> danglingGuids)
         {
             if (mMotion == null) return "(broken: motion property unreadable)";
@@ -338,8 +288,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static void AppendBlendTree(BlendTree bt, int indent, StringBuilder sb, List<string> danglingGuids, HashSet<long> visited)
         {
-            // The blend tree's own block holds its children's motion refs — record its fileID so a dangling
-            // child motion counts as live-reachable, not orphan residue (F26).
+            // The blend tree's own block holds its children's motion refs, so its fileID makes a dangling child
+            // live-reachable.
             if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(bt, out _, out long btFid)) visited.Add(btFid);
             string pad = new string(' ', (indent + 1) * 2);
             // Serialized child array is "m_Childs" (Unity's legacy misspelling), NOT "m_Children".
@@ -378,10 +328,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Transitions ------------------------------------------------------------------------
 
-        // A non-zero transition offset is rendered because it can be the ONLY thing distinguishing two states:
-        // a pose-picker layer holds one clip at speed=0 in several states and enters each at a different
-        // normalized time, so without the offset those states' blocks read byte-identical and the layer reads
-        // redundant. The section legend (AppendOffsetLegend) explains it once, when any edge carries one.
         private static string RenderTransition(AnimatorStateTransition t, ref bool sawOffset)
         {
             string dest = t.isExit ? "Exit"
@@ -393,9 +339,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return dest + " " + Conditions(t.conditions, t.hasExitTime) + offset;
         }
 
-        // `isExit` is read FIRST, exactly as RenderTransition does: an exit-targeted edge carries neither
-        // destinationState nor destinationStateMachine, so without this branch it falls through to "(none)"
-        // and a sub-machine's only way out renders identically to an unwired edge.
+        // An exit-targeted edge carries neither destinationState nor destinationStateMachine, so `isExit` is
+        // read first, or a sub-machine's only way out renders identically to an unwired edge.
         private static string RenderEntryTransition(AnimatorTransition t)
         {
             string dest = t.isExit ? "Exit"
@@ -429,7 +374,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return hasExitTime ? joined + " +exitTime" : joined;
         }
 
-        // ----- Write Defaults signal (majority / mixed over a layer's states, recursing) ----------
+        // ----- Write Defaults signal (ON/OFF/MIXED over a layer's states, recursing) ---------------
 
         private static string WriteDefaultsSummary(AnimatorStateMachine sm)
         {
@@ -492,7 +437,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         sb.Append(" value=").Append(F(p.value));
                         break;
                     case VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Random:
-                        // Numeric dest reads min..max; bool/trigger dest reads chance — render both honestly.
+                        // Numeric dest reads min..max; bool/trigger dest reads chance, so both render.
                         sb.Append(" min=").Append(F(p.valueMin)).Append(" max=").Append(F(p.valueMax)).Append(" chance=").Append(F(p.chance));
                         break;
                     case VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Copy:
@@ -527,9 +472,6 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
 #if VRC_FT_SETS_PRESENT
-        // One line per blendSets entry, in list order: the set it weights, then the constant or the parameter read
-        // (with its range when convertRange is on), then the lerp speed when non-zero. The fields hidden for an
-        // entry's source type are not rendered — the inspector does not show them either.
         private static void AppendFaceTrackingSets(VRC.SDKBase.VRC_AnimatorFaceTrackingBlendshapesSet ft, StringBuilder sb)
         {
             sb.Append("- FaceTrackingBlendshapesSet:\n");
@@ -554,11 +496,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Dangling-motion GUID recovery (parse controller YAML once) -------------------------
 
-        // Returns the deduped dangling-motion GUIDs (asset gone) AND, in <paramref name="byBlock"/>, the
-        // GUIDs each YAML object's block holds — keyed by the object's fileID (the `--- !u!<class> &<id>`
-        // the m_Motion line falls under). Report intersects byBlock with the set of fileIDs the walk
-        // actually visits to split live-reachable from orphan-only (F26). Line-scanned, not a whole-file
-        // regex, because the owning fileID is the current `&<id>` header — lost by a file-wide match.
+        // Returns the deduped dangling-motion GUIDs (asset gone; no C# API exposes them) and, in byBlock, the
+        // GUIDs each YAML block holds, keyed by its fileID. Line-scanned because the owning fileID is the
+        // current `&<id>` header, which a file-wide regex match loses.
         private static List<string> RecoverDanglingMotions(AnimatorController controller, out Dictionary<long, List<string>> byBlock)
         {
             var result = new List<string>();
@@ -572,18 +512,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                 long curFileId = 0;
                 foreach (var line in text.Split('\n'))
                 {
-                    // Unity sub-asset fileIDs (localIdentifierInFile) can be NEGATIVE — match the sign, or a
-                    // negative-id block's m_Motion is mis-attributed to the previous block and reads as orphan
-                    // (the walk's TryGetGUIDAndLocalFileIdentifier returns the same signed id).
+                    // fileIDs are signed: sub-asset localIdentifierInFile values and the hash-derived localID of
+                    // an FBX-embedded clip can be negative. Without the sign in the header match a block's m_Motion
+                    // is mis-attributed to the previous block; without it in the m_Motion match a dangling
+                    // reference is dropped entirely.
                     var hdr = Regex.Match(line, @"^--- !u!\d+ &(-?\d+)");
                     if (hdr.Success) { curFileId = long.Parse(hdr.Groups[1].Value); continue; }
-                    // fileID is signed too — an FBX-embedded clip has a hash-derived localID that is often
-                    // NEGATIVE (referenced type: 3). A dangling {fileID: -1234567, guid:…, type: 3} must match,
-                    // or the broken motion is dropped entirely (silent miss, not just mis-attributed).
                     var mm = Regex.Match(line, @"m_Motion:\s*\{fileID:\s*-?\d+,\s*guid:\s*([0-9a-fA-F]{32}),\s*type:\s*\d+\}");
                     if (!mm.Success) continue;
                     var g = mm.Groups[1].Value;
-                    if (RunLogFormat.AssetGuidResolves(g)) continue; // resolves ⇒ not dangling
+                    if (RunLogFormat.AssetGuidResolves(g)) continue;
                     if (seen.Add(g)) result.Add(g);
                     if (!byBlock.TryGetValue(curFileId, out var lst)) byBlock[curFileId] = lst = new List<string>();
                     if (!lst.Contains(g)) lst.Add(g);
@@ -593,8 +531,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return result;
         }
 
-        // Count of a state machine's own states, recursing sub-state-machines (for the per-layer states=N
-        // header). Mirrors CountWriteDefaults' recursion; null ⇒ 0.
         private static int CountStates(AnimatorStateMachine sm)
         {
             if (sm == null) return 0;
@@ -603,7 +539,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return n;
         }
 
-        // Render one side of the broken-motion split: an inline "none" when empty, else a bulleted GUID list.
         private static void AppendGuidList(StringBuilder sb, List<string> guids)
         {
             if (guids.Count == 0) { sb.Append(": none\n"); return; }

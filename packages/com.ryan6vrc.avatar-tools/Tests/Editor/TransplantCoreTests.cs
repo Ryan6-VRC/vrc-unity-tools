@@ -4,12 +4,10 @@ using UnityEditor;
 using UnityEngine;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// Synthetic Component subclasses used to exercise type-name resolution: they give us an ambiguous simple
-// name, a base/derived pair, and a guaranteed-unique name — none of which any real VRC type supplies, and
-// all of which would be hostage to the SDK's own naming if borrowed from it. (The assembly DOES reference
-// the SDK — see Ryan6VRC.AvatarTools.Tests.asmdef; where SDK identity is the thing under test, resolve
-// through it, as VrcTable_physbone_field_paths_are_real_serialized_properties does.) TypeCache picks these
-// up after compile.
+// Synthetic Component subclasses for type-name resolution: an ambiguous simple name, a base/derived pair and
+// a guaranteed-unique name, which no real VRC type supplies and which would be hostage to the SDK's naming.
+// Where SDK identity is under test, resolve through the SDK, as
+// VrcTable_physbone_field_paths_are_real_serialized_properties does. TypeCache picks these up after compile.
 namespace TransplantCoreTests_NsA
 {
     public class TcUniqueProbe : MonoBehaviour { }
@@ -26,11 +24,8 @@ public class TransplantCoreTests
 {
     // ── ResolveTypes ──────────────────────────────────────────────────────────────────────────
 
-    // Every query shape that must resolve to exactly one type: a unique simple name, its full name, and a
-    // BASE-type name. The base case says something only because TcDerivedProbe is in the scan too — a
-    // resolver that matched subclasses would find two candidates and report ambiguity instead. Scene
-    // selection later goes by assignability, so the concrete subclass is still caught; asserting THAT here
-    // would be a C# tautology, so only the resolution is pinned.
+    // The base-type case says something only because TcDerivedProbe is in the scan too: a resolver that
+    // matched subclasses would find two candidates and report ambiguity.
     [TestCase("TcUniqueProbe", typeof(TransplantCoreTests_NsA.TcUniqueProbe))]
     [TestCase("TransplantCoreTests_NsA.TcUniqueProbe", typeof(TransplantCoreTests_NsA.TcUniqueProbe))]
     [TestCase("TcBaseProbe", typeof(TransplantCoreTests_NsA.TcBaseProbe))]
@@ -53,7 +48,6 @@ public class TransplantCoreTests
     [Test]
     public void ResolveTypes_ambiguous_simple_name_fails_loud()
     {
-        // Same simple Name in two namespaces, both derive from Component → ambiguous → unresolved.
         var r = TransplantCore.ResolveTypes(new[] { "TcDupProbe" });
         Assert.AreEqual(0, r.resolved.Count);
         Assert.AreEqual(1, r.unresolved.Count);
@@ -128,14 +122,10 @@ public class TransplantCoreTests
 
     // ── VrcComponentTable (resolved through ResolveTypes, matching the transplant engine's own lookup) ──
 
-    // The table's field paths are SerializedProperty names on the live SDK type, and NOTHING else checks
-    // that they still name anything: the engine probes them and treats a miss as "this component has no
-    // such dependency", so an SDK rename makes the table quietly wrong — colliders stop being followed,
-    // relocation stops finding its anchor — with every count still reporting success.
-    //
-    // So each path is resolved against a real component's SerializedObject, which is exactly how the engine
-    // consumes it. FindProperty (not Type.GetField) because the serialized name is the contract: a field
-    // renamed under [FormerlySerializedAs] still resolves, and a field that stops being serialized does not.
+    // The table's field paths are SerializedProperty names on the live SDK type, and the engine reports a
+    // renamed one as table drift only when a live copy or move reaches it. So each path is resolved here
+    // against a real component's SerializedObject, as the engine consumes it. FindProperty, not
+    // Type.GetField, because the serialized name is the contract.
     [Test]
     public void VrcTable_physbone_field_paths_are_real_serialized_properties()
     {
@@ -144,8 +134,7 @@ public class TransplantCoreTests
         var d = VrcComponentTable.Lookup(r.resolved[0]);
         Assert.IsNotNull(d);
 
-        // Which bucket each path sits in is the row's own judgment (hard = pull the referent or null+flag it;
-        // soft = drop the entry silently), so that stays asserted by name.
+        // Which bucket each path sits in is the row's own judgment, so that stays asserted by name.
         CollectionAssert.Contains(d.hardDepFieldPaths, "colliders");
         CollectionAssert.Contains(d.softDepFieldPaths, "ignoreTransforms");
         CollectionAssert.Contains(d.anchorFieldPaths, "rootTransform");
@@ -168,8 +157,6 @@ public class TransplantCoreTests
     [Test]
     public void VrcTable_lookup_walks_base_chain_to_collider_base()
     {
-        // Concrete VRCPhysBoneCollider has no row of its own; lookup walks up to
-        // VRCPhysBoneColliderBase (leaf-recreate eligible).
         var r = TransplantCore.ResolveTypes(new[] { "VRCPhysBoneCollider" });
         Assert.AreEqual(1, r.resolved.Count, "VRCPhysBoneCollider should resolve (VRC SDK present)");
         var d = VrcComponentTable.Lookup(r.resolved[0]);
@@ -207,12 +194,11 @@ public class TransplantCoreTests
         Assert.AreEqual("B", h1.parent.name);
         Assert.AreEqual("A", h1.parent.parent.name);
         Assert.AreSame(droot, h1.parent.parent.parent);
-        Assert.AreEqual(new Vector3(1, 2, 3), h1.parent.localPosition);   // verbatim vendor local TRS
+        Assert.AreEqual(new Vector3(1, 2, 3), h1.parent.localPosition);
         Assert.AreEqual(new Vector3(2, 2, 2), h1.parent.localScale);
         Assert.AreEqual(new Vector3(0, 0.5f, 0), h1.localPosition);
         Assert.IsTrue(session.TryGetTransform(host, out var mappedHost) && mappedHost == h1);
 
-        // Re-run is idempotent: reuse-by-path, no duplicate GOs.
         var h2 = ScaffoldBuilder.EnsureHost(vroot, droot, host, session, "T");
         Assert.AreSame(h1, h2);
         int aCount = 0;
@@ -235,7 +221,6 @@ public class TransplantCoreTests
 
     // ── EnsureHost renameMap (armature-root reconcile) ────────────────────────────────────────────
 
-    // Builds vendor V/Armature/Hips/Chest (Chest = host) with verbatim TRS on Chest.
     static (Transform vroot, Transform chest) VendorArmatureChest()
     {
         var vroot = new GameObject("V").transform;
@@ -265,7 +250,6 @@ public class TransplantCoreTests
         Assert.AreEqual(new Vector3(1, 2, 3), h1.localPosition, "verbatim vendor local TRS");
         Assert.AreEqual(new Vector3(2, 2, 2), h1.localScale);
 
-        // Re-run reuses all — never mints a parallel 'Armature'.
         var h2 = ScaffoldBuilder.EnsureHost(vroot, droot, chest, out _, null, "T", map);
         Assert.AreSame(h1, h2);
         int armDot = 0, armPlain = 0;
@@ -283,14 +267,14 @@ public class TransplantCoreTests
     }
 
     [Test]
-    public void EnsureHost_null_map_mints_parallel_armature_exactly_as_today()
+    public void EnsureHost_null_map_mints_parallel_armature()
     {
         var (vroot, chest) = VendorArmatureChest();
         var droot = new GameObject("D").transform;
         new GameObject("Armature.1").transform.SetParent(droot);
 
-        // Null map → the vendor segment 'Armature' has no counterpart, so a parallel 'Armature' is minted
-        // (today's behavior), proving the map is the only thing that changes behavior.
+        // With no map the vendor segment 'Armature' has no counterpart, so a parallel 'Armature' is minted:
+        // the map is the only thing that changes this.
         var h = ScaffoldBuilder.EnsureHost(vroot, droot, chest, out _, null, "T", null);
         Assert.IsNotNull(h);
         Assert.AreEqual("Armature", h.parent.parent.name, "minted the vendor name under a null map");
@@ -303,10 +287,9 @@ public class TransplantCoreTests
     [Test]
     public void EnsureHost_rename_funnel_binds_1to1_across_siblings_no_orphan()
     {
-        // source P/[Other, Armature], map {Other ⇒ Armature}, dest P/[Armature#0, Armature#1]. The mapped key
-        // AND the literal sibling both resolve to "Armature"; the occurrence index must be counted in the SAME
-        // resolving-to space as the dest lookup so they bind 1:1 (Other→#0, Armature→#1), never collapsing onto
-        // #0 and orphaning #1.
+        // The mapped key and the literal sibling both resolve to "Armature", so the occurrence index must
+        // be counted in the same resolving-to space as the dest lookup for them to bind 1:1, not collapse
+        // onto #0 and orphan #1.
         var vroot = new GameObject("V").transform;
         var vp = new GameObject("P").transform; vp.SetParent(vroot);
         var vOther = new GameObject("Other").transform; vOther.SetParent(vp);
@@ -331,10 +314,9 @@ public class TransplantCoreTests
     [Test]
     public void EnsureHost_rename_funnel_fails_loud_when_dest_count_differs()
     {
-        // Same source/map but dest has ONE Armature → 2 source siblings resolve to "Armature", dest has 1 →
-        // the occurrence index cannot address a unique dest sibling → named FAIL (not a silent mis-bind).
-        // Covers the mirrored A1 shape too (source 1, dest 2): the guard is a `srcResolving != dstCount`
-        // inequality, so a second fixture with the operands swapped exercises the identical branch.
+        // Two source siblings resolve to "Armature" and the dest has one, so the occurrence index cannot
+        // address a unique dest sibling. The mirrored shape (source 1, dest 2) needs no fixture: the guard
+        // is a `srcResolving != dstCount` inequality, so swapped operands exercise the identical branch.
         var vroot = new GameObject("V").transform;
         var vp = new GameObject("P").transform; vp.SetParent(vroot);
         var vOther = new GameObject("Other").transform; vOther.SetParent(vp);
@@ -356,8 +338,6 @@ public class TransplantCoreTests
 
     // ── EnsureFailHasOffender (offenders⇔FAIL reverse-leg guard) ──────────────────────────────────
 
-    // Every leg of the guard: backfill from the error text, fall back to fixed text when there is no error,
-    // never double-add over a real named offender, never touch a PASS.
     [TestCase("FAIL", "NullReferenceException: boom", null, 1, "NullReferenceException: boom")]
     [TestCase("FAIL", null, null, 1, "no error detail")]
     [TestCase("FAIL", "an error AND an offender", "real named offender", 1, "real named offender")]
@@ -385,7 +365,7 @@ public class TransplantCoreTests
         try
         {
             string json = System.IO.File.ReadAllText(path);
-            StringAssert.Contains("\"warnings\": []\n}", json); // envelope closes right after warnings
+            StringAssert.Contains("\"warnings\": []\n}", json);
         }
         finally { UnityEditor.AssetDatabase.DeleteAsset(path); }
     }

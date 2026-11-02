@@ -10,39 +10,17 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// Conforms our owned FBX's humanoid avatar to match the vendor avatar's bone mapping
-    /// exactly, correcting any auto-mapper mistakes (e.g. Jaw → hair bone).
-    ///
-    /// Strategy: set our importer to Humanoid/CreateFromThisModel, then assemble the FULL
-    /// humanDescription and reimport — rather than letting Unity's auto-mapper run. The assembled
-    /// description combines: skeleton[] built from OUR OWN model transforms (the bind pose; never
-    /// the vendor's, so it survives reproportioning), the vendor's human[] mapping (exact
-    /// humanName→boneName pairs, filtered to bones present in our skeleton), and the vendor's
-    /// muscle settings (per-bone angular limits + the 8 global muscle fields). Supplying our own
-    /// skeleton[] is what makes Unity honor the explicit mapping and limits instead of re-running
-    /// its auto-mapper.
+    /// Conforms our owned FBX's humanoid avatar to the vendor avatar's bone mapping and muscle settings,
+    /// correcting auto-mapper mistakes (e.g. Jaw → hair bone). Supplying our own skeleton[] in the assembled
+    /// humanDescription is what makes Unity honor the explicit mapping and limits instead of re-running its
+    /// auto-mapper.
+    /// Contract: docs/unity-tools.md.
     /// </summary>
     [AgentTool]
     public static class MatchHumanoidRig
     {
-        // ── Public API ──────────────────────────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Conforms our owned FBX humanoid rig to match the vendor's bone mapping exactly.
-        /// </summary>
-        /// <param name="ourFbxPath">
-        ///   Asset path of our owned FBX, e.g. "Assets/Avatars/Chocolat/Models/Chocolat.fbx".
-        /// </param>
-        /// <param name="vendorAvatarSource">
-        ///   The vendor FBX's imported model root GameObject. The vendor ModelImporter is
-        ///   resolved via AssetDatabase.GetAssetPath on this object.
-        /// </param>
-        /// <returns>One-line PASS/FAIL summary string ending with the RunLog path
-        /// (<c>… => RESULT | log=&lt;path&gt;</c>, when the log was written); also emitted via Debug.Log/LogError.</returns>
         public static string Run(string ourFbxPath, GameObject vendorAvatarSource)
         {
-            // No whatIf here: the reimport IS the operation and cannot be dry-run — see Preflight for the honest go/no-go preview.
-
             // ── 1. Resolve importers ──────────────────────────────────────────────────────────
 
             if (string.IsNullOrEmpty(ourFbxPath))
@@ -69,13 +47,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             ourImp.isReadable = true;
 
-            // Import mesh normals; skip blendshape normals (ModelImporterNormals.Import / .None).
             ourImp.importNormals = ModelImporterNormals.Import;
             ourImp.importBlendShapeNormals = ModelImporterNormals.None;
 
-            // This is an internal ModelImporter property (no public API) — set it via SerializedObject.
-            // If a future SDK/Unity renames it, the else-branch logs the available property names as a
-            // defensive fallback.
+            // An internal ModelImporter property with no public API, so it is set via SerializedObject.
             {
                 var so = new SerializedObject(ourImp);
                 var prop = so.FindProperty("legacyComputeAllNormalsFromSmoothingGroupsWhenMeshHasBlendShapes");
@@ -86,8 +61,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 else
                 {
-                    // Diagnostic: log available property names so the coordinator can identify
-                    // the correct one if it differs in this Unity version.
                     var sb = new StringBuilder("[MatchHumanoidRig] WARN: serialized property "
                         + "'legacyComputeAllNormalsFromSmoothingGroupsWhenMeshHasBlendShapes' not found. "
                         + "Available top-level properties: ");
@@ -105,7 +78,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             ourImp.animationType = ModelImporterAnimationType.Human;
-            // Build the avatar from this model's own rig (ModelImporterAvatarSetup.CreateFromThisModel).
             ourImp.avatarSetup = ModelImporterAvatarSetup.CreateFromThisModel;
 
             // ── 3. Guard: vendor must be configured Humanoid ──────────────────────────────────
@@ -132,9 +104,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // ── 5. Build skeleton[] from OUR model (bind pose; reproportion-safe) ──────────────
-            // Includes ALL transforms. The ambiguity guard above only covers humanoid TARGET bones, so
-            // duplicate NON-humanoid names can still enter skeleton[]; Unity rejects a malformed skeleton
-            // and the avatarOk gate below catches it (fails loud, never passes silently).
+            // The ambiguity guard in step 6 covers only humanoid target bones, so duplicate non-humanoid names
+            // can still enter skeleton[]; Unity rejects a malformed skeleton and the avatarOk gate catches it.
             var skeleton = new List<SkeletonBone>();
             foreach (var t in ourModel.GetComponentsInChildren<Transform>(true))
             {
@@ -148,8 +119,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             // ── 6. Conform human[] from the vendor mapping ────────────────────────────────────
-            //   keep only bones present in our skeleton; FAIL loudly on a required bone absent or an
-            //   ambiguous (duplicate) target name; carry angular limits; derive axisLength from us.
             var conformed = new List<HumanBone>(vendorHuman.Length);
             var skipped = new List<string>();
             foreach (var vb in vendorHuman)
@@ -167,11 +136,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         + "' is ambiguous — " + targets.Count + " transforms share that name; "
                         + "cannot bind unambiguously.");
 
-                var hb = vb; // carries humanName, boneName, and the limit's angular fields
+                var hb = vb;
                 if (!hb.limit.useDefaultValues)
                 {
                     var lim = hb.limit;
-                    lim.axisLength = DeriveAxisLength(targets[0]); // OUR geometry, not the vendor's
+                    lim.axisLength = DeriveAxisLength(targets[0]);
                     hb.limit = lim;
                 }
                 conformed.Add(hb);
@@ -203,12 +172,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             var ourFinalHuman = ourImp.humanDescription.human;
 
-            // Build lookup: humanName → boneName for our final result.
             var ourMap = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var hb in ourFinalHuman)
                 ourMap[hb.humanName] = hb.boneName;
 
-            // Compare against vendor.
             int totalVendorBones = vendorHuman.Length;
             var mismatches = new List<BoneDiff>();
             foreach (var vb in vendorHuman)
@@ -238,9 +205,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             int bonesMatched = totalVendorBones - mismatches.Count;
             int boneDiff = mismatches.Count;
 
-            // Informational only (NEVER gates): max world-space position drift of the humanoid bones vs
-            // the vendor. With skeleton[] derived from OUR model, a reproportioned bind legitimately
-            // differs from the vendor's — so this is a raw diagnostic, not a normalized gate metric.
             var humanoidBoneNames = new HashSet<string>(StringComparer.Ordinal);
             foreach (var hb in conformed) humanoidBoneNames.Add(hb.boneName);
 
@@ -258,10 +222,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 float d = (ourT.position - vT.position).magnitude;
                 if (d > poseDriftMax) poseDriftMax = d;
             }
-            int poseDriftMm = Mathf.RoundToInt(poseDriftMax * 1000f); // millimetres, info only
+            int poseDriftMm = Mathf.RoundToInt(poseDriftMax * 1000f);
 
-            // Validity gate — necessary, not sufficient. isValid asserts structural mappability, not a
-            // sane bind; the real bind proof is the operator drive. Still a cheap, named hard stop.
+            // Necessary, not sufficient: isValid asserts structural mappability, not a sane bind. The real
+            // bind proof is the operator drive.
             UnityEngine.Avatar builtAvatar = null;
             foreach (var o in AssetDatabase.LoadAllAssetsAtPath(ourFbxPath))
                 if (o is UnityEngine.Avatar) { builtAvatar = (UnityEngine.Avatar)o; break; }
@@ -273,7 +237,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             else if (!avatarOk)
                 failReason = builtAvatar == null ? "(no Avatar built)" : "(Avatar !isHuman/!isValid)";
 
-            bool pass = failReason == null; // PASS = mapping conformant AND a valid humanoid Avatar
+            bool pass = failReason == null;
             string label = TransplantCore.Leaf(ourFbxPath);
             string logPath = WriteRunLog(label, ourFbxPath, vendorAssetPath, totalVendorBones, bonesMatched,
                 boneDiff, poseDriftMm, skipped, mismatches, pass ? "PASS" : "FAIL", failReason);
@@ -288,15 +252,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return summary;
         }
 
-        // ── Preflight (dry-run go/no-go) ──────────────────────────────────────────────────────────
+        // ── Preflight ─────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Preflight: report go/no-go for MatchHumanoidRig WITHOUT reimporting. Checks the cheap pre-reimport
-        /// preconditions Run enforces before SaveAndReimport — our ModelImporter resolves; the vendor resolves and
-        /// is Humanoid; every required humanoid bone from the vendor mapping is present and unambiguous in our
-        /// model's transforms — and sets NO importer fields and does NOT reimport. (MatchHumanoidRig has no whatIf:
-        /// the reimport IS the operation and cannot be dry-run — the settled humanDescription/Avatar do not exist
-        /// until it runs. This preflight is the honest preview.)
+        /// Reports go/no-go for <see cref="Run"/> without reimporting or setting importer fields, checking the
+        /// guards Run enforces before SaveAndReimport: our ModelImporter resolves; the vendor resolves and is
+        /// Humanoid; every required bone of the vendor mapping is present and no mapped bone is ambiguous in our
+        /// model's transforms.
         /// </summary>
         public static string Preflight(string ourFbxPath, GameObject vendorAvatarSource)
         {
@@ -304,7 +266,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var blockers = new List<string>();
             string vendorPath = null;
 
-            // Write a preflight RunLog (verify_<label>_<stamp>.json convention, same as Run) and return null on error.
             string WriteLog(string result, string failReason)
             {
                 try
@@ -339,14 +300,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // The channel splits by WHAT went wrong, not by the verdict. A no-go is this dry run WORKING, and
-            // an error entry for it is one every later ReportConsole error read must discount — which is how
-            // a real fault gets lost in a scan. Misuse (a scene instance where an FBX root belongs) produced
-            // no answer at all, so it stays an error.
-            //
-            // The token and the RunLog `result` do NOT move with the channel: diverging them would make a
-            // `=> FAIL` sweep disagree with the artifact, and forcing both to PASS would print
-            // `preconditions=no-go => PASS`, a line that argues with itself.
+            // A no-go is this preflight working, so it logs a warning, not an error every later ReportConsole
+            // read must discount; misuse produced no answer, so it stays an error. The token and the RunLog
+            // `result` stay FAIL on either channel.
             string Report(bool go, string failReason, bool misuse = false)
             {
                 string result = go ? "PASS" : "FAIL";
@@ -361,9 +317,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return summary;
             }
 
-            // ── Precondition checks (each a no-go FAIL with a named reason; set NO importer fields) ──
-            // The first six are MISUSE — the caller's arguments are wrong, so no answer was produced. A
-            // non-Humanoid vendor counts: it cannot serve as the mapping source, so naming it is the error.
+            // ── Precondition checks ──
             if (string.IsNullOrEmpty(ourFbxPath))
                 return Report(false, "ourFbxPath is null or empty.", misuse: true);
 
@@ -384,30 +338,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return Report(false, "No ModelImporter at vendor path: " + vendorPath
                     + " — vendorAvatarSource must be the root of a model (FBX) asset.", misuse: true);
 
+            // A non-Humanoid vendor is misuse: it cannot serve as the mapping source.
             var vendorHuman = vendorImp.humanDescription.human ?? new HumanBone[0];
             if (vendorHuman.Length == 0)
                 return Report(false, "vendor avatar is not configured Humanoid (humanDescription.human is empty).", misuse: true);
 
             var ourModel = AssetDatabase.LoadAssetAtPath<GameObject>(ourFbxPath);
             if (ourModel == null)
-                // NOT misuse: a ModelImporter exists at this path, so the argument was right and the import
-                // is broken. That is a blocker the preflight found, not a question the caller asked wrong.
+                // Not misuse: a ModelImporter exists at this path, so the argument was right and the import
+                // is broken.
                 return Report(false, "Could not load model at " + ourFbxPath + " to read bones.");
 
-            // Build name → occurrence count over our model's transforms (ambiguity = count > 1).
             var nameCount = new Dictionary<string, int>(StringComparer.Ordinal);
             foreach (var t in ourModel.GetComponentsInChildren<Transform>(true))
                 nameCount[t.name] = nameCount.TryGetValue(t.name, out var n) ? n + 1 : 1;
 
-            // ── Bone preconditions (mirror Run's guards: required-absent and ambiguous are no-go;
-            //    non-required absent is fine) ─────────────────────────────────────────────────────
             foreach (var vb in vendorHuman)
             {
                 if (!nameCount.TryGetValue(vb.boneName, out var count))
                 {
                     if (RequiredHumanBones.Contains(vb.humanName))
                         blockers.Add("missing required bone '" + vb.humanName + "' → '" + vb.boneName + "'");
-                    // non-required absent bone is fine — skipped, no blocker
                 }
                 else if (count > 1)
                 {
@@ -426,7 +377,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             string label = string.IsNullOrEmpty(ourFbxPath) ? "(null)" : TransplantCore.Leaf(ourFbxPath);
 
-            // Write a minimal RunLog so the failure is recorded.
             string logPath = null;
             try
             {
@@ -481,13 +431,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 sb.Append("  \"failReason\": ").Append(TransplantCore.Q(failReason ?? "")).Append(",\n");
                 sb.Append("  \"result\": ").Append(TransplantCore.Q(result)).Append(",\n");
 
-                // Skipped entries (vendor bones not found in our skeleton — should be 0 for cloned FBX).
                 sb.Append("  \"skippedVendorBones\": [");
                 for (int i = 0; i < skipped.Count; i++)
                     sb.Append(i == 0 ? "" : ", ").Append(TransplantCore.Q(skipped[i]));
                 sb.Append("],\n");
 
-                // Per-bone mismatches.
                 sb.Append("  \"boneMismatches\": [");
                 for (int i = 0; i < mismatches.Count; i++)
                 {
@@ -523,8 +471,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         };
 
         // axisLength must track OUR geometry, not the vendor's (Unity honors the authored value verbatim).
-        // Best-effort: the bone's length ≈ the farthest child transform's local distance (not necessarily a
-        // bone); 0 for leaves (best-effort; the angular min/max are the load-bearing fields).
+        // Best-effort: the farthest child transform's local distance, 0 for leaves; the angular min/max are
+        // the load-bearing fields.
         private static float DeriveAxisLength(Transform bone)
         {
             float max = 0f;
@@ -536,8 +484,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return max;
         }
 
-        // Build name → Transform for every transform in a model's hierarchy. last-wins on dup names
-        // (fine for diagnostics; skeleton bone names are unique in practice). Null model → empty map.
+        // Last-wins on duplicate names, which the poseDrift diagnostic tolerates.
         private static Dictionary<string, Transform> BuildTransformMap(GameObject model)
         {
             var map = new Dictionary<string, Transform>(StringComparer.Ordinal);

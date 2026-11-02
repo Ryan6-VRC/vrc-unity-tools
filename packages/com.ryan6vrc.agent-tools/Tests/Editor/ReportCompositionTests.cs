@@ -11,14 +11,9 @@ using UnityEngine.TestTools;
 using VRC.SDK3.Avatars.ScriptableObjects;
 
 /// <summary>
-/// The two properties worth pinning here are the ones a reader's conclusions rest on: that the parameter
-/// census reports READS and WRITES from the same traversals the lint rules use, and that an empty writers
-/// cell says why it is empty. An empty cell that looks like a finding is the exact misread this door was
-/// built to stop, so it is asserted rather than left to review.
-///
-/// The surface enumeration itself is not re-tested here: <c>CheckAvatar</c> was rewired onto the same
-/// lifted core, so its whole existing fixture is the regression net for it, and duplicating that here
-/// would be two homes for one assertion.
+/// Pins what a reader's conclusions rest on: that the parameter census reports READS and WRITES from the same
+/// traversals the lint rules use, and that an empty writers cell says why it is empty. Surface enumeration is
+/// <c>MergeSurfaces</c>, shared with <c>CheckAvatar</c>, whose fixture covers it.
 /// </summary>
 public class ReportCompositionTests
 {
@@ -76,8 +71,7 @@ public class ReportCompositionTests
         Assert.IsTrue(usage.Reads.ContainsKey("Gate"), "a transition condition is a READ");
         Assert.IsTrue(usage.Reads.ContainsKey("Axis"), "a blend-tree axis is a READ");
         Assert.IsTrue(usage.Writes.ContainsKey("Written"), "a driver destination is a WRITE");
-        // The direction that is easy to get backwards, and the one that decides whether a provenance table
-        // says "nothing writes this": a Copy's SOURCE is read, never written.
+        // Easy to get backwards, and it decides whether a provenance table says "nothing writes this".
         Assert.IsTrue(usage.Reads.ContainsKey("CopiedFrom"), "a driver Copy source is a READ");
         Assert.IsFalse(usage.Writes.ContainsKey("CopiedFrom"), "a driver Copy source must NOT be reported as a writer");
         Assert.IsFalse(usage.Reads.ContainsKey("Written"), "a Set destination is not a read");
@@ -144,9 +138,8 @@ public class ReportCompositionTests
         var body = ReadArtifact(r);
         StringAssert.Contains("`Unwritten`", body, "the declared parameter must appear: " + body);
 
-        // Assert on the ROW, not on the document. Both constants are also printed unconditionally in the
-        // trailing Scope section, so a whole-body Contains passes even when the cell is empty — which is
-        // exactly the property this test exists to pin, and exactly what it failed to pin before.
+        // Assert on the ROW, not on the document: the trailing Scope section prints ScopeWriters
+        // unconditionally, so a whole-body Contains passes even when the cell is empty.
         string row = RowFor(body, "Unwritten");
         StringAssert.Contains(ReportComposition.ScopeWriters, row,
             "the scope note must be IN the writers cell, not only in the footer: " + row);
@@ -179,9 +172,7 @@ public class ReportCompositionTests
 
     // ── Fixture ──────────────────────────────────────────────────────────────────────────────────────
 
-    // Objects are left for the next test's NewScene(Single) to take, rather than DestroyImmediate'd —
-    // docs/verify.md §Test venue forbids building-then-destroying live objects this fixture has mutated,
-    // and the sibling CheckHumanoidRigAvatarTests already follows that rule.
+    // Objects stay for the next test's NewScene(Single): docs/verify.md §Test venue.
     private GameObject BuildAvatar(string name, params string[] declaredParams)
     {
         var root = new GameObject(name);
@@ -202,8 +193,7 @@ public class ReportCompositionTests
         return root;
     }
 
-    /// <summary>The one table row whose first cell names <paramref name="param"/>. Asserting on the whole
-    /// document cannot distinguish a cell from a footnote, and this door's contract is about the cell.</summary>
+    /// <summary>The one table row whose first cell names <paramref name="param"/>.</summary>
     private static string RowFor(string body, string param)
     {
         foreach (var line in body.Split('\n'))

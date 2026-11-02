@@ -1,20 +1,16 @@
 using NUnit.Framework;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// Behavioral tests for AnimatorSchemaYaml. The model + parser depend only on System.*, so these exercise
-// pure C# — no scene, no asset, no VRC SDK. Run headless via tools/run-editmode-tests.ps1 (or the Test
-// Runner window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
+// Tests for AnimatorSchemaYaml. The model and parser depend only on System.*, so these run with no scene, no
+// asset and no VRC SDK.
 public class AnimatorSchemaYamlTests
 {
-    // The canonical debounce document. Later tasks reference AnimatorSchemaYamlTests.DebounceDoc verbatim.
-    // Kept in step with fixtures/animator-substrate/debounce.yaml, including WHY the Active clip holds a
-    // float `Level` rather than the bool output: a parameter curve writes only Float parameters, and binding
-    // a parameter in any clip hands it to the animation system so nothing else can write it. This document
-    // must stay clean under RuleNonFloatParamCurve — it is compiled for real by several tests.
+    // Kept in step with fixtures/animator-substrate/debounce.yaml. The Active clip holds a float `Level` rather
+    // than the bool output: a parameter curve writes only Float parameters, and binding a parameter in any clip
+    // hands it to the animation system so nothing else can write it.
     //
-    // Both of the fixture's drivers are here, and the Idle one is load-bearing: no clip binds `Debounced`,
-    // so the parameter is writable, and without a reset on the way back to Idle the output would LATCH true
-    // after release.
+    // Idle's driver is load-bearing: no clip binds `Debounced`, so the parameter is writable, and without a
+    // reset on the way back to Idle the output would LATCH true after release.
     public const string DebounceDoc = @"schema: 1
 controller: Debounce_Fx
 basis: avatar-root
@@ -64,13 +60,11 @@ _notes: { source: hand-authored }
         Assert.AreEqual(ControllerRole.Fx, doc.Role);
         Assert.AreEqual("mem://debounce", doc.SourcePath);
 
-        // defaults
         Assert.IsTrue(doc.Defaults.WriteDefaults);
         Assert.AreEqual(0f, doc.Defaults.TransitionDuration);
         Assert.IsFalse(doc.Defaults.TransitionHasExitTime);
         Assert.AreEqual(TransitionInterruption.None, doc.Defaults.Interruption);
 
-        // parameters (shorthand)
         Assert.AreEqual(3, doc.Parameters.Count);
         Assert.AreEqual("RawInput", doc.Parameters[0].Name);
         Assert.AreEqual(AnimParamType.Bool, doc.Parameters[0].Type);
@@ -78,7 +72,6 @@ _notes: { source: hand-authored }
         Assert.AreEqual("Debounced", doc.Parameters[1].Name);
         Assert.AreEqual(AnimParamType.Bool, doc.Parameters[1].Type);
 
-        // layer
         Assert.AreEqual(1, doc.Layers.Count);
         var layer = doc.Layers[0];
         Assert.AreEqual("Debounce", layer.Name);
@@ -101,7 +94,6 @@ _notes: { source: hand-authored }
         Assert.IsNotNull(pending.Motion);
         Assert.AreEqual("timer", pending.Motion.Clip);
         Assert.AreEqual(2, pending.Transitions.Count);
-        // the unconditional (timer-elapsed) transition carries an explicit exitTime
         var unconditional = pending.Transitions[0];
         Assert.AreEqual("Active", unconditional.To);
         Assert.AreEqual(0, unconditional.When.Count);
@@ -114,7 +106,6 @@ _notes: { source: hand-authored }
         Assert.AreEqual("driver", active.Behaviours[0].Kind);
         Assert.IsTrue(active.Behaviours[0].Fields.ContainsKey("set"));
 
-        // clips
         Assert.AreEqual(2, doc.Clips.Count);
         var timer = doc.Clips.Find(c => c.Name == "timer");
         Assert.IsNotNull(timer);
@@ -122,9 +113,8 @@ _notes: { source: hand-authored }
         Assert.AreEqual(0.2f, timer.Seconds.Value, 1e-6f);
         var hold = doc.Clips.Find(c => c.Name == "hold_on");
         Assert.IsNotNull(hold);
-        Assert.AreEqual(1f, hold.Sets["Level"]);   // a float AAP, not the bool output — see DebounceDoc
+        Assert.AreEqual(1f, hold.Sets["Level"]);
 
-        // reserved note (underscore-prefixed) never becomes a typed field
         Assert.IsTrue(doc.ReservedNotes.ContainsKey("_notes"));
     }
 
@@ -244,8 +234,6 @@ parameters:
     [Test]
     public void Mute_On_Entry_Ladder_Throws()
     {
-        // Entry transitions honor no mute/solo (the entry-emit path never reads them); accepting the field
-        // would silently drop it. Refuse it there, mirroring the canTransitionToSelf precedent.
         const string doc =
             "schema: 1\ncontroller: Bad_Fx\nbasis: avatar-root\nrole: fx\n" +
             "layers:\n  - name: L\n    states:\n      Idle: { motion: ~ }\n" +
@@ -255,9 +243,6 @@ parameters:
         var ex = Assert.Throws<SchemaException>(() => AnimatorSchemaYaml.Parse(doc, "test"));
         StringAssert.Contains("mute", ex.Message);
     }
-
-    // Tree fields are honored only on their own kind (build/decode); a misplaced one would silently erase
-    // through compile→decompile, so the parser refuses it rather than accept-and-drop.
 
     [Test]
     public void Normalized_On_NonDirect_Tree_Throws()
@@ -295,9 +280,6 @@ parameters:
     [Test]
     public void CanTransitionToSelf_On_State_Transition_Throws()
     {
-        // A state rung's canTransitionToSelf is derived from its target (on exactly when `to:` is its own
-        // state), so an authored value could only contradict the target — fail loud instead (allowSelf
-        // defaults false for state lists).
         const string doc =
             "schema: 1\ncontroller: Bad_Fx\nbasis: avatar-root\nrole: fx\n" +
             "layers:\n" +
@@ -374,10 +356,8 @@ note: |
         StringAssert.Contains("block scalar", ex.Message.ToLowerInvariant());
     }
 
-    // ---- right-anchored condition grammar (verbatim-prefix param) ---------------------------------
-    // op and value are the LAST two space-separated tokens; everything before is the parameter, verbatim.
-    // Separators are strict single spaces. Each case wraps ONE flow-list `when:` element (authored with its
-    // own quoting) into a minimal document and inspects the bound Condition — or the SchemaException.
+    // Condition grammar: op and value are the LAST two space-separated tokens; everything before is the
+    // parameter, verbatim. Separators are strict single spaces.
 
     private static Condition ParseWhenElement(string element)
     {
@@ -410,7 +390,6 @@ note: |
     [Test]
     public void Condition_TabBearingParam_RightSplits()
     {
-        // A tab INSIDE the param name (not a separator) survives verbatim — only single spaces separate tokens.
         var c = ParseWhenElement("X\tY is true");
         Assert.AreEqual("X\tY", c.Param);
         Assert.AreEqual(CondOp.Is, c.Op);
@@ -419,7 +398,6 @@ note: |
     [Test]
     public void Condition_OpLookalikeParam_RightSplits()
     {
-        // The param name itself ends in "is true"; the right-anchor rule peels only the LAST op + value.
         var c = ParseWhenElement("X is true is true");
         Assert.AreEqual("X is true", c.Param);
         Assert.AreEqual(CondOp.Is, c.Op);
@@ -454,7 +432,6 @@ note: |
     [Test]
     public void Condition_TabSeparated_ThrowsShapeError()
     {
-        // Tabs are not separators, so a tab-"separated" condition has no space-split op/value — a shape error.
         var ex = Assert.Throws<SchemaException>(() => ParseWhenElement("A\tis\ttrue"));
         StringAssert.Contains("op and value are the last two", ex.Message);
     }

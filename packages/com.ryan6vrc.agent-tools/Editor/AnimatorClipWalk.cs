@@ -5,16 +5,13 @@ using UnityEngine;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// The single motion-slot traversal the clip tools share (one grammar): every <see cref="AnimationClip"/>
-    /// an <see cref="AnimatorController"/> references, discovered by walking states (recursing
-    /// sub-state-machines at any depth), <see cref="BlendTree"/> children (recursing nested trees), AND
-    /// synced-layer per-state override motions (<see cref="AnimatorControllerLayer.GetOverrideMotion"/>).
-    /// Deduped, insertion-order-stable.
+    /// The single motion-slot traversal the clip tools share: every <see cref="AnimationClip"/> an
+    /// <see cref="AnimatorController"/> references across states, nested blend trees and synced-layer
+    /// override motions. Deduped, insertion-order-stable.
     ///
-    /// Deliberately does NOT read <c>controller.animationClips</c>: deriving the copy-set, the retarget walk,
-    /// and the residual scan from ONE traversal makes them self-consistent by construction, so a clip Unity's
-    /// aggregate might omit cannot be silently skipped. (On 2022.3 the two agree, but the tools no longer
-    /// depend on that.)
+    /// Deliberately does NOT read <c>controller.animationClips</c>: tools deriving their clip sets from one
+    /// traversal stay consistent with each other, and a clip Unity's aggregate might omit cannot be silently
+    /// skipped.
     /// </summary>
     public static class AnimatorClipWalk
     {

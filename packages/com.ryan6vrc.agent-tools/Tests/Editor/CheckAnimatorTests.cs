@@ -9,20 +9,15 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 
-// Characterization guard for the CheckAnimator extraction refactor (T1). There were no prior CheckAnimator
-// tests — this pins the observable end-to-end contract (summary tokens + verdict) through the extracted
-// CollectUnresolvedBindings path, so a behavior drift in the shared helper is caught. Explicit basis keeps
-// broken-binding at error-tier, so one unresolved binding must FAIL.
+// CheckAnimator's end-to-end contract: summary tokens and verdict through Run.
 //
-// CheckAnimator.Run resolves scene paths against the ACTIVE scene (its internal FindByHierarchyPath), which
-// no preview scene can stand in for — so the fixtures live in the active scene and are torn down in place.
-// Nothing is saved: Ryan's real scene file is never written, and the temp controller/clip + emitted RunLog
-// are deleted in TearDown.
-public class CheckAnimatorRefactorTests
+// Run resolves scene handles through SceneHandle.Resolve, whose path and name rungs search the ACTIVE scene,
+// which no preview scene can stand in for — so the fixtures live in the active scene and are torn down in place.
+public class CheckAnimatorTests
 {
-    private const string TmpDir = "Assets/AgentLintRefactorTmp";
-    private const string AssetPath = TmpDir + "/RefactorTest.controller";
-    private const string AvatarName = "LintRefactorAvatar";
+    private const string TmpDir = "Assets/AgentCheckAnimatorTmp";
+    private const string AssetPath = TmpDir + "/CheckAnimatorTest.controller";
+    private const string AvatarName = "CheckAnimatorAvatar";
 
     private GameObject _avatar;
     private string _logPath;
@@ -41,15 +36,12 @@ public class CheckAnimatorRefactorTests
     [Test]
     public void ExplicitBasis_oneResolvingOneBroken_reportsBrokenBinding1_andFails()
     {
-        // Scene: an avatar root with a single child the resolving binding will hit.
         _avatar = new GameObject(AvatarName);
         var child = new GameObject("Resolvable");
         child.transform.SetParent(_avatar.transform);
 
-        // Controller with a state whose clip carries two float bindings: "Resolvable" (hits the child) and
-        // "Ghost" (hits nothing). Saved to a temp asset so Lint's YAML/asset-path reads have a real path.
         if (!AssetDatabase.IsValidFolder(TmpDir))
-            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+            AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
 
         // SetEditorCurve (not clip.SetCurve) so each path yields EXACTLY one binding — SetCurve on a
@@ -80,27 +72,23 @@ public class CheckAnimatorRefactorTests
             "no other rule should fire: " + result);
     }
 
-    // Emit-summary regression: an error-tier rule that fires must show its own non-zero count in the
-    // one-line summary, not just in the offender body. nonFloatBlendParam was added to the verdict and
-    // the CompileController refusal but initially omitted from the summary format string, so a
-    // nonFloatBlendParam-only failure printed all-zero counts under a FAIL verdict (council-review #1).
     [Test]
     public void ExplicitBasis_nonFloatBlendParam_showsCountInSummary_andFails()
     {
         if (!AssetDatabase.IsValidFolder(TmpDir))
-            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+            AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
         controller.AddParameter("IntSpeed", AnimatorControllerParameterType.Int);
 
-        // A blend tree keyed on the declared Int — the exact trap: the tree reads 0 and cannot respond.
+        // A blend tree keyed on a declared Int reads 0 and cannot respond.
         var tree = new BlendTree { name = "BadTree", blendType = BlendTreeType.Simple1D, blendParameter = "IntSpeed" };
         AssetDatabase.AddObjectToAsset(tree, controller);
         controller.layers[0].stateMachine.AddState("S").motion = tree;
         EditorUtility.SetDirty(controller);
         AssetDatabase.SaveAssets();
 
-        LogAssert.ignoreFailingMessages = true;   // Emit logs the FAIL verdict via Debug.LogError.
-        // Null roots ⇒ the broken-binding rule is skipped (no basis root), isolating this rule.
+        LogAssert.ignoreFailingMessages = true;
+        // Null roots skip the broken-binding rule (no basis root), isolating this rule.
         var result = CheckAnimator.Run(controller, "explicit", null, null, null);
         _logPath = ExtractLogPath(result);
 
@@ -110,14 +98,14 @@ public class CheckAnimatorRefactorTests
             "a non-float blend parameter is an error-tier defect: " + result);
     }
 
-    // The Lint door is the OTHER half of the error-tier wiring: its verdict and its summary format string each
-    // enumerate the counters by name, so a rule can be correct inside ControllerRules and still report PASS
-    // here. CompileController's door has its own guard per rule; this is Lint's.
+    // CheckAnimator's door is the OTHER half of the error-tier wiring: its verdict and its summary format string
+    // each enumerate the counters by name, so a rule can be correct inside ControllerRules and still report PASS
+    // here. CompileController's door has its own guard per rule; this is CheckAnimator's.
     [Test]
     public void ExplicitBasis_nonFloatParamCurve_showsCountInSummary_andFails()
     {
         if (!AssetDatabase.IsValidFolder(TmpDir))
-            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+            AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
         controller.AddParameter("Flag", AnimatorControllerParameterType.Bool);
 
@@ -131,25 +119,24 @@ public class CheckAnimatorRefactorTests
         EditorUtility.SetDirty(controller);
         AssetDatabase.SaveAssets();
 
-        LogAssert.ignoreFailingMessages = true;   // Emit logs the FAIL verdict via Debug.LogError.
+        LogAssert.ignoreFailingMessages = true;
         var result = CheckAnimator.Run(controller, "explicit", null, null, null);
         _logPath = ExtractLogPath(result);
 
         StringAssert.Contains("nonFloatParamCurve=1", result,
             "the firing rule's count must reach the summary, not only the offender body: " + result);
         StringAssert.Contains("=> FAIL", result,
-            "a parameter curve on a Bool is an error-tier defect at the Lint door too: " + result);
+            "a parameter curve on a Bool is an error-tier defect at the CheckAnimator door too: " + result);
     }
 
     [Test]
     public void ExplicitBasis_driverOnAnimatedParam_showsCountInSummary_andFails()
     {
         if (!AssetDatabase.IsValidFolder(TmpDir))
-            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+            AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
         controller.AddParameter("Held", AnimatorControllerParameterType.Float);
 
-        // A float parameter curve on one state, and a driver writing that same parameter on another.
         var clip = new AnimationClip { name = "HoldsHeld" };
         AnimationUtility.SetEditorCurve(clip,
             EditorCurveBinding.FloatCurve("", typeof(Animator), "Held"),
@@ -170,21 +157,16 @@ public class CheckAnimatorRefactorTests
         EditorUtility.SetDirty(controller);
         AssetDatabase.SaveAssets();
 
-        LogAssert.ignoreFailingMessages = true;   // Emit logs the FAIL verdict via Debug.LogError.
+        LogAssert.ignoreFailingMessages = true;
         var result = CheckAnimator.Run(controller, "explicit", null, null, null);
         _logPath = ExtractLogPath(result);
 
         StringAssert.Contains("driverOnAnimatedParam=1", result,
             "the firing rule's count must reach the summary, not only the offender body: " + result);
         StringAssert.Contains("=> FAIL", result,
-            "a driver op on a clip-bound parameter is an error-tier defect at the Lint door too: " + result);
+            "a driver op on a clip-bound parameter is an error-tier defect at the CheckAnimator door too: " + result);
     }
 
-    // basis=auto BUG-FIX (not merely visibility): under a VRCFury FullController with rewriteBindings,
-    // CheckAnimator must apply those rules before resolving, so the (demoted) broken-binding COUNT is
-    // truthful. Without the fix, a path a declared rule relocates reads as unresolvable and inflates the
-    // count with false sample offenders — the carried-doll-FX ~66-false-positive case, at unit scale. Verdict
-    // stays PASS (auto still demotes — the D1 error-tier decision is CheckAvatar's charter, not imported here).
     [Test]
     public void AutoBasis_vrcfRewriteBindings_countIsTruthful()
     {
@@ -192,9 +174,9 @@ public class CheckAnimatorRefactorTests
         var prop = new GameObject("Prop"); prop.transform.SetParent(_avatar.transform);
         var nested = new GameObject("Nested"); nested.transform.SetParent(prop.transform);
         var armature = new GameObject("Armature"); armature.transform.SetParent(nested.transform);
-        var bone = new GameObject("Bone"); bone.transform.SetParent(armature.transform); // Prop/Nested/Armature/Bone
+        var bone = new GameObject("Bone"); bone.transform.SetParent(armature.transform);
 
-        if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+        if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
         var clip = new AnimationClip { name = "RwClip" };
         var curve = AnimationCurve.Linear(0, 0, 1, 1);
@@ -218,24 +200,17 @@ public class CheckAnimatorRefactorTests
         StringAssert.Contains("=> PASS", result, "auto-basis still demotes broken-binding to advisory (PASS): " + result);
     }
 
-    // orphanSubAsset detection (migrated from the deleted orphan-sweep tests when the mutating other half of
-    // this rule was removed in favor of the Decompile→Compile round-trip). This is the coverage that would
-    // otherwise be lost: that CheckAnimator NAMES a controller sub-asset reachable
-    // from no layer. SweepTestDummySmb (its own same-named file, relocated here for assembly visibility) is a
-    // StateMachineBehaviour, so it exercises the SMB arm of the five-type filter; HideInHierarchy guards the
-    // regression a reintroduced IsSubAsset gate would cause (Unity hides a controller's own sub-objects, so
-    // such a gate would silently drop the real dead weight this rule exists to name).
+    // OrphanTestSmb exercises the SMB arm of the five-type filter. HideInHierarchy matches a controller's own
+    // sub-objects, for which AssetDatabase.IsSubAsset returns false, so a reintroduced IsSubAsset gate fails here.
     [Test]
     public void OrphanSubAsset_hiddenSmb_isReported()
     {
         if (!AssetDatabase.IsValidFolder(TmpDir))
-            AssetDatabase.CreateFolder("Assets", "AgentLintRefactorTmp");
+            AssetDatabase.CreateFolder("Assets", "AgentCheckAnimatorTmp");
         var controller = AnimatorController.CreateAnimatorControllerAtPath(AssetPath);
-        controller.layers[0].stateMachine.AddState("A"); // reachable content the orphan must not shadow
+        controller.layers[0].stateMachine.AddState("A");
 
-        // The orphan: an SMB reachable from no state machine. Sub-assets only exist on a saved asset, so it
-        // is added after the controller is on disk. SMBs are ScriptableObjects — CreateInstance, not new().
-        var orphan = ScriptableObject.CreateInstance<SweepTestDummySmb>();
+        var orphan = ScriptableObject.CreateInstance<OrphanTestSmb>();
         orphan.name = "ORPHAN_SMB";
         AssetDatabase.AddObjectToAsset(orphan, controller);
         orphan.hideFlags = HideFlags.HideInHierarchy;
@@ -243,23 +218,23 @@ public class CheckAnimatorRefactorTests
         AssetDatabase.SaveAssets();
         AssetDatabase.ImportAsset(AssetPath);
 
-        // Orphan is advisory-tier → verdict PASS → Debug.Log (no error), so no LogAssert is needed.
+        // An orphan is advisory-tier, so the verdict is a PASS logged without an error and needs no LogAssert.
         var result = CheckAnimator.Run(controller, "explicit", null, null, null);
         _logPath = ExtractLogPath(result);
 
-        Assert.Contains("SweepTestDummySmb 'ORPHAN_SMB'", OrphanTokens(result),
+        Assert.Contains("OrphanTestSmb 'ORPHAN_SMB'", OrphanTokens(result),
             "CheckAnimator must name the hidden orphan sub-asset (regression: a reintroduced IsSubAsset gate hides it): " + result);
     }
 
     // Parse the emitted RunLog markdown for orphanSubAsset "Type 'name'" tokens (advisory line shape:
-    // "- **orphanSubAsset** <Where> — <Detail>"). Reads the file at the in-band "| log=" path.
+    // "- **orphanSubAsset** <Where> — <Detail>").
     private static List<string> OrphanTokens(string result)
     {
         var tokens = new List<string>();
         string rel = ExtractLogPath(result);
         if (string.IsNullOrEmpty(rel)) return tokens;
         string proj = Application.dataPath;
-        proj = proj.Substring(0, proj.Length - "Assets".Length); // project root (dataPath ends in /Assets)
+        proj = proj.Substring(0, proj.Length - "Assets".Length);
         string abs = proj + rel;
         if (!File.Exists(abs)) return tokens;
         const string mark = "**orphanSubAsset**";
@@ -287,7 +262,6 @@ public class CheckAnimatorRefactorTests
             .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
             .FirstOrDefault(t => t.FullName == fullName);
 
-    // Minimal real-VRCFury FullController: controllers=[ctrl], rootObjOverride=go, and the given rewriteBindings.
     private static void AddVrcfFullControllerWithRewrite(GameObject go, AnimatorController ctrl, params (string from, string to, bool delete)[] rules)
     {
         var vt = Resolve("VF.Model.VRCFury");

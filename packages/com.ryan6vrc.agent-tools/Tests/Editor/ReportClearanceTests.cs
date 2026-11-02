@@ -11,10 +11,9 @@ using Ryan6Vrc.AgentTools.Editor;
 using VRC.Dynamics;
 using VRC.SDK3.Dynamics.PhysBone.Components;
 
-// ReportClearance proof obligations, over a synthetic rig in a throwaway Single scene (mirrors
-// ReportGimmickTests): a body SMR whose vertices form a known ring, one physbone chain of known joint
-// positions and radius, and one capsule collider at a known offset — so every printed distance is a number
-// the test computed by hand, not one the tool computed twice.
+// ReportClearance over a synthetic rig: a body SMR whose vertices form a known ring, one physbone chain of
+// known joint positions and radius, and one capsule collider at a known offset, so every printed distance is a
+// number the test computed by hand, not one the tool computed twice.
 [Category("ReportClearance")]
 public class ReportClearanceTests
 {
@@ -57,7 +56,6 @@ public class ReportClearanceTests
         return go;
     }
 
-    // A body: a ring of vertices of radius `ringR` at height `y` around the world Y axis, skinned to `bone`.
     private SkinnedMeshRenderer Body(string name, Transform bone, float ringR, float y, int n = 64)
     {
         var go = Child(_root, name, Vector3.zero);
@@ -219,8 +217,7 @@ public class ReportClearanceTests
 
     // A simulated joint inside the ring: root at (0.09, 0.10, 0) with its child 0.10 below at (0.09, 0, 0),
     // radius 0.03 → the child's gap is 0.01, slack −0.02 → insideBodyCm=2.0 and the summary counts it, with
-    // no collider at all. The root joint is never counted (the anchor is not simulated), and a chain with no
-    // collider prints `—` for rest contact rather than a clean zero.
+    // no collider at all.
     [Test]
     public void ChainInsideBodyAtRestIsCountedWithoutAnyCollider()
     {

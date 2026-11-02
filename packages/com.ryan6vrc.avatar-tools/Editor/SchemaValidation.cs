@@ -3,16 +3,12 @@ using System.Collections.Generic;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// Document-level validation over a parsed <see cref="AnimDocument"/>. This is the second gate after the
-    /// parser: the parser throws on malformed <em>text</em> (unknown fields, bad values); this <em>reports</em>
-    /// semantic defects that are representable in a well-formed model. Most "refused constructs" (synced
-    /// layers, trigger params, mirror/cycleOffset param binding, ...) are refused by construction — the model
-    /// has no field to express them — so this pass does not re-check them.
+    /// Document-level validation over a parsed <see cref="AnimDocument"/>, the second gate after the parser: the
+    /// parser throws on malformed <em>text</em>; this <em>reports</em> semantic defects a well-formed model can
+    /// represent, each as one line <c># &lt;rule&gt;: &lt;detail&gt; (at &lt;location&gt;)</c>.
     ///
-    /// <para><see cref="Validate"/> is a PURE function: it NEVER throws. Each offender is a single line
-    /// <c># &lt;rule&gt;: &lt;detail&gt; (at &lt;location&gt;)</c>. An empty list means no document-level defect.</para>
-    ///
-    /// System.* only (no Unity API) so it can be exercised outside the editor.
+    /// System.* only, with no Unity API and no System.IO: whatever needs the AssetDatabase or ControllerRules is
+    /// ControllerEmit's.
     /// </summary>
     public static class SchemaValidation
     {
@@ -21,23 +17,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var errors = new List<string>();
             if (doc == null) return errors;
 
-            // Rule 1 — schema version. Every real document declares schema: 1; 0/unset/other all fail.
             if (doc.Schema != 1)
                 errors.Add($"# schema-version: unsupported schema {doc.Schema} (supported: 1) (at document)");
 
-            // Rule 1b — reserved parameter names. The compiler injects these (the seconds-only carrier), so an
-            // authored document must not declare one or emission would collide on a duplicate parameter.
             foreach (var p in doc.Parameters)
                 if (p != null && p.Name == ReservedNames.CarrierParam)
                     errors.Add($"# reserved-param: '{ReservedNames.CarrierParam}' is reserved for the compiler's seconds-only carrier and cannot be declared (at document)");
 
-            // Rule 6 — base-fx layer floor. The base-FX index rule addresses layers 0-2, so fewer than three
-            // layers cannot satisfy it.
             if (doc.Role == ControllerRole.BaseFx && doc.Layers.Count < 3)
                 errors.Add($"# base-fx-floor: base-fx controller declares {doc.Layers.Count} layer(s) but needs at least 3 (indices 0-2) (at document)");
 
-            // name -> declared type. Conditions on names absent from this map are another lint's concern (the
-            // controller-level undeclared-param check), so they are skipped here rather than flagged.
+            // Names absent from this map are skipped throughout: the compile's undeclared-param lint owns them.
             var paramTypes = new Dictionary<string, AnimParamType>();
             foreach (var p in doc.Parameters)
                 if (p != null && p.Name != null && !paramTypes.ContainsKey(p.Name))
@@ -47,19 +37,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var c in doc.Clips)
                 if (c != null && c.Name != null) clipNames.Add(c.Name);
 
-            // Shared trees. A `shared:` naming no entry is a dangling reference; an entry nothing names is
-            // dead weight the lazy emit would never build, so it is refused rather than silently ignored.
-            // A SINGLY-referenced entry is legal and compiles normally — the next decompile re-inlines it,
-            // which is documented asymmetry, not an error (refusing it would bite an author trimming a shared
-            // tree down to its last consumer, with hand-inlining the body as the only remedy).
             var treeNames = new HashSet<string>();
             foreach (var t in doc.Trees)
                 if (t != null && t.Name != null) treeNames.Add(t.Name);
-            // LIVENESS IS TRANSITIVE, and that is the whole subtlety. A flat tally that credits a reference
-            // from inside ANY trees: body lets a self-edge — or a mutually-referencing clique — sustain its
-            // own count: nothing refuses it, and emission (lazy, driven only from state motions) never builds
-            // it, so a declared object leaves the controller with no diagnostic at all. So: seed from the
-            // STATE motions, then propagate through the bodies of trees already known live.
+            // Liveness seeds from the state motions, then propagates through live bodies: a flat tally over every
+            // trees: body would let a self-edge or clique sustain itself, and lazy emission, driven only from state
+            // motions, would drop it with no diagnostic. The rule is docs/animator-schema.md §shared trees.
             var byName = new Dictionary<string, BlendTreeSpec>();
             foreach (var t in doc.Trees)
                 if (t != null && t.Name != null && !byName.ContainsKey(t.Name)) byName[t.Name] = t;
@@ -88,8 +71,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var ch in t.Children)
                     if (ch != null) Reach(ch.Motion);
             }
-            // A dangling `shared:` is worth naming wherever it sits, so scan every body for unknown names —
-            // a dead tree's typo is still a typo, and the entry earns its own unreferenced-tree line too.
+            // The worklist never visits a dead tree, so scan every body: a dangling `shared:` in one still reports.
             foreach (var t in doc.Trees)
                 if (t != null) foreach (var ch in t.Children)
                     if (ch != null) SharedRefsIn(ch.Motion, unknownShared, treeNames);
@@ -109,11 +91,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 CheckTreeAxes(t, $"tree '{t.Name}'", paramTypes, errors);
             }
 
-            // Rule 7 — the menu tree. Keyed on the WIRE type, not the animator type: emission lists the
-            // expression parameter as `vrc.type ?? type` (ControllerEmit.EmitVrcParameters), and a menu
-            // control is read by VRChat against that listed type. Validating against the animator type
-            // would let every `vrc: { type: … }` override through unchecked — a radial on a float-on-the-
-            // animator/bool-on-the-wire param compiles clean and yields a knob carrying only 0 and 1.
+            // Menu checks key on the WIRE type `vrc.type ?? type` (ControllerEmit.EmitVrcParameters), which is what
+            // VRChat reads a control against. Keying on the animator type would let a radial on a float-on-the-
+            // animator/bool-on-the-wire param compile clean and yield a knob carrying only 0 and 1.
             if (doc.Menu != null)
             {
                 var wireTypes = new Dictionary<string, AnimParamType>();
@@ -133,25 +113,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string ln = layer.Name ?? "(unnamed)";
                 var root = layer.Root;
 
-                // Rule 4 — default-state existence (checked only against the layer's own root machine, which is
-                // where a top-level default: names its target).
+                // Only the root's bare-name `default:` is checked here; ControllerEmit refuses a bad nested one.
                 if (!string.IsNullOrEmpty(root.DefaultState) && !MachineHasMember(root, root.DefaultState))
                     errors.Add($"# dangling-default: layer '{ln}' default '{root.DefaultState}' names no state or submachine (at layer '{ln}')");
 
-                // Rules 3 & 5 — condition op/type + inline-clip reference integrity, recursing submachines.
                 WalkMachine(root, ln, paramTypes, clipNames, errors);
             }
 
             return errors;
         }
 
-        // Rooted in the filesystem sense, spelled without System.IO (Path.IsPathRooted is System.IO, which
-        // this file deliberately does not take): a leading '/' or '\', or a Windows drive prefix "X:".
         private static bool IsRootedIconPath(string p)
             => p[0] == '/' || p[0] == '\\' || (p.Length >= 2 && p[1] == ':' && char.IsLetter(p[0]));
 
-        // Rule 7 carrier: one menu page and, recursively, its sub-menus. `where` is the authored path
-        // (menu / menu 'Colors' / …) so an offender in a nested page names the page it sits on.
         private static void CheckMenu(List<MenuControl> controls, string where,
             Dictionary<string, AnimParamType> wireTypes, HashSet<string> scratch, List<string> errors)
         {
@@ -166,7 +140,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (string.IsNullOrEmpty(c.Name))
                     errors.Add($"# menu-unnamed: a {c.Kind.ToString().ToLowerInvariant()} control has no name (at {where})");
 
-                // A bare sub-menu drives nothing; every other kind is meaningless without a parameter.
                 if (c.Param == null)
                 {
                     if (c.Kind != MenuControlKind.SubMenu)
@@ -174,8 +147,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 else
                 {
-                    // A scratch param is excluded from the emitted VRCExpressionParameters, so VRChat never
-                    // sees the name and the control is inert on the avatar — a defect the built menu cannot show.
                     if (scratch.Contains(c.Param))
                         errors.Add($"# menu-scratch-param: {w} drives '{c.Param}', declared scratch: — scratch params are kept out of the params asset, so the control would be inert (at {w})");
 
@@ -194,12 +165,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // Icon SHAPE only. Whether the file is there, and whether it imported as a Texture2D, is
-                // ControllerEmit's to answer — this validator is System.*-only and cannot reach the
-                // AssetDatabase. What it can rule out is the two spellings that resolve nowhere by
-                // construction: an empty string, and a rooted path (a drive letter or a leading separator),
-                // which is neither a project path nor document-relative and would bake one machine's layout —
-                // a drive, a home directory, a checkout name — into a document that gets COMMITTED.
+                // Icon shape only; ControllerEmit.ResolveIcon owns whether the file exists and imported as a
+                // Texture2D. A rooted path is neither a project path nor document-relative, and would bake one
+                // machine's layout into a committed document.
                 if (c.Icon != null)
                 {
                     if (c.Icon.Trim().Length == 0)
@@ -212,15 +180,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // Rule 3 & 5 carrier: walk one state machine's ladders, states, and nested submachines.
         private static void WalkMachine(StateMachine sm, string layer,
             Dictionary<string, AnimParamType> paramTypes, HashSet<string> clips, List<string> errors,
             StateMachine layerRoot = null)
         {
             layerRoot = layerRoot ?? sm;
 
-            // `defaultState:` is root-relative, so one predicate serves every nesting level — unlike `default:`,
-            // whose local-name scope is why rule 4 only ever checked the layer root.
             if (!string.IsNullOrEmpty(sm.DefaultStatePath) && !RootHasStateAtPath(layerRoot, sm.DefaultStatePath))
                 errors.Add($"# dangling-default-state: layer '{layer}' defaultState '{sm.DefaultStatePath}' names no state reachable from the layer root (at layer '{layer}')");
 
@@ -239,8 +204,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var sub in sm.Machines)
             {
                 if (sub == null) continue;
-                // onExit conditions are authored on the PARENT (this machine), so they are validated here
-                // rather than inside the recursion — same undeclared-param / type rules as any other ladder.
                 foreach (var t in sub.OnExit) CheckConditions(t, layer, $"onExit of '{sub.Name}'", paramTypes, errors);
                 if (sub.Machine != null) WalkMachine(sub.Machine, layer, paramTypes, clips, errors, layerRoot);
             }
@@ -248,23 +211,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (sm.Layout != null)
                 foreach (var key in sm.Layout.Nodes.Keys)
                 {
-                    // MachineHasMember unescapes for itself, so it takes the ESCAPED key — `raw` exists only for
-                    // the canonicality comparison below. Passing `raw` here would unescape twice, and
-                    // UnescapeSegment is not idempotent for a name carrying a literal backslash: a state named
-                    // `A\B` escapes to `A\\B`, unescapes once to `A\B`, and a second pass strips it to `AB` — a
-                    // spurious fatal on the tool's own output.
+                    // MachineHasMember unescapes for itself, so it takes the escaped key. UnescapeSegment is not
+                    // idempotent: `A\\B` unescapes to `A\B`, and a second pass strips that to `AB`.
                     var raw = AddressPath.UnescapeSegment(key);
                     if (!MachineHasMember(sm, key))
                         errors.Add($"# dangling-layout: layer '{layer}' layout node '{key}' names no state or submachine of its machine (at layer '{layer}')");
-                    // A non-canonical key (e.g. a '/'-named node written literally instead of escaped) resolves to
-                    // a real member here but MISSES emit's EscapeSegment lookup, silently grid-dropping the authored
-                    // position. Reject it at this fatal gate so the loss is fail-loud, not a silent regrid.
+                    // A non-canonical key (a '/'-named node written literally) resolves to a real member here but
+                    // misses emit's EscapeSegment lookup, which would silently drop the authored position to the grid.
                     else if (AddressPath.EscapeSegment(raw) != key)
                         errors.Add($"# unescaped-layout: layer '{layer}' layout node '{key}' must be canonically escaped as '{AddressPath.EscapeSegment(raw)}' (at layer '{layer}')");
                 }
         }
 
-        // Rule 3 — operator must be legal for the declared parameter type.
         private static void CheckConditions(Transition t, string layer, string origin,
             Dictionary<string, AnimParamType> paramTypes, List<string> errors)
         {
@@ -273,21 +231,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string loc = $"layer '{layer}' {origin} → '{target}'";
             foreach (var c in t.When)
             {
-                if (c.Param == null || !paramTypes.TryGetValue(c.Param, out var type)) continue; // undeclared -> skip
+                if (c.Param == null || !paramTypes.TryGetValue(c.Param, out var type)) continue;
                 if (!OpValidForType(c.Op, type))
                     errors.Add($"# condition-op-type: param '{c.Param}' ({TypeToken(type)}) cannot use operator '{OpToken(c.Op)}' (at {loc})");
             }
         }
 
-        // `subject`/`at` are the two halves of a location. A motion lives either in a state — subject
-        // "state 'S'", at "layer 'L' state 'S'" — or, since `trees:`, in a shared tree, which belongs to no
-        // layer and no state: subject and at are both "tree 'T'". Without the second form a trees: body would
-        // report `at layer '' state ''`, and the offender string is what these rules exist to produce.
-
-        // The `shared:` names directly under one motion, recursing INLINE tree children only — never through a
-        // `shared:` itself, whose own body is walked once from doc.Trees by the liveness worklist. Stopping at
-        // the reference is what keeps a cycle terminating here. Any name not declared under trees: is appended
-        // to `unknown` (deduped) for the dangling-shared rule.
+        // The `shared:` names directly under one motion. Recurses inline tree children only, never through a
+        // `shared:`, so a cycle terminates here.
         private static List<string> SharedRefsIn(MotionRef m, List<string> unknown, HashSet<string> declared)
         {
             var found = new List<string>();
@@ -308,7 +259,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return found;
         }
 
-        // Rule 5 — every inline-clip reference must name a declared clip; recurse blend-tree children.
         private static void CheckMotionClips(MotionRef m, string subject, string at,
             HashSet<string> clips, List<string> errors)
         {
@@ -320,10 +270,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (child != null) CheckMotionClips(child.Motion, subject, at, clips, errors);
         }
 
-        // Rule 7 — a blend-tree axis must be a Float animator param. Unity silently freezes a non-float axis
-        // at its first child (the value never reaches the float channel the tree reads — no error anywhere),
-        // so this is a fatal gate. 1D/2D read Tree.Param (+ ParamY when 2D); Direct reads each child's
-        // DirectWeight. Undeclared axes are skipped — the controller-level undeclared-param check owns those.
+        // Unity silently freezes a non-float blend-tree axis at its first child, with no error anywhere.
         private static void CheckBlendAxes(MotionRef m, string at,
             Dictionary<string, AnimParamType> paramTypes, List<string> errors)
         {
@@ -353,16 +300,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static void RequireFloatAxis(string param, string at,
             Dictionary<string, AnimParamType> paramTypes, List<string> errors)
         {
-            if (string.IsNullOrEmpty(param)) return;                    // no axis param here
-            if (!paramTypes.TryGetValue(param, out var type)) return;   // undeclared -> other lint's concern
+            if (string.IsNullOrEmpty(param)) return;
+            if (!paramTypes.TryGetValue(param, out var type)) return;
             if (type != AnimParamType.Float)
                 errors.Add($"# blend-axis-type: param '{param}' ({TypeToken(type)}) is a blend-tree axis but must be float; declare it 'type: float' and sync int via 'vrc: {{ type: int }}' (at {at})");
         }
 
-        // `name` arrives ESCAPED (an addressing form — a '/' in a name is '\/'), while States/Machines carry the
-        // raw literal, so it must be unescaped before comparison. Without that a state legitimately named "A/B"
-        // decodes to `default: A\/B` and then fails its own recompile with a spurious dangling-default; the
-        // layout check already unescapes for the same reason.
+        // `name` arrives escaped (a '/' in a name is '\/') while States and Machines carry the raw literal.
         private static bool MachineHasMember(StateMachine sm, string name)
         {
             string raw = AddressPath.UnescapeSegment(name);
@@ -371,13 +315,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return false;
         }
 
-        // `defaultState:` existence — a ROOT-RELATIVE path, so it needs its own walk and must NOT be folded into
-        // MachineHasMember: that predicate is shared with the layout check, whose very next step asserts a key is
-        // canonically escaped. Teaching it to accept paths would let an unescaped '/'-bearing layout key resolve
-        // as a member and slip past that assertion, silently re-gridding a hand-placed node.
-        //
-        // Segment count comes from AddressPath.Split (unescaped separators only) — never Contains('/'), which
-        // would read an escaped single name like "A\/B" as a two-segment path.
+        // `defaultState:` is a root-relative path. Segment count comes from AddressPath.Split (unescaped
+        // separators only), never Contains('/'), which would read the escaped single name `A\/B` as two segments.
         private static bool RootHasStateAtPath(StateMachine root, string path)
         {
             if (path.Length > 0 && path[0] == '/') path = path.Substring(1);
@@ -397,8 +336,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return false;   // a sub-machine leaf is a real error too — Unity's default is a STATE reference
         }
 
-        // Float equality is invalid in Unity animator conditions, so Float allows only Greater/Less. Int is a
-        // discrete compare (no Is/IsNot). Bool is Is/IsNot only.
+        // Float equality is invalid in Unity animator conditions, so Float allows only Greater/Less.
         private static bool OpValidForType(CondOp op, AnimParamType type)
         {
             switch (type)

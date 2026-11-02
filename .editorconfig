@@ -1,8 +1,6 @@
 root = true
 
-# Markdown prose wraps one line per paragraph (soft-wrap): each paragraph and
-# list item is a single physical line, so a mid-paragraph edit touches one line
-# instead of reflowing a block. Long lines are intentional — do not hard-wrap.
+# Markdown: one physical line per paragraph or list item. Do not hard-wrap.
 [*.md]
 max_line_length = off
 insert_final_newline = true

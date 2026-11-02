@@ -9,41 +9,29 @@ using UnityEngine.SceneManagement;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
-    /// <summary>
-    /// Minimal, dependency-free observability harness for the AI-assisted VRChat workflow.
-    ///
-    /// Dumps the selected GameObject(s) -> components -> serialized fields (and optionally the
-    /// active scene hierarchy) to JSON under Assets/Agent/Snapshots/, so a coding agent
-    /// (Claude Code) can read the live project state as context without manual copy/paste.
-    ///
-    /// Uses SerializedObject iteration, so it captures *any* component generically — including
-    /// VRC Avatar Descriptor, PhysBones/colliders/contacts, VRCFury, and Modular Avatar — with
-    /// no per-type code. Object references are recorded by type + name + asset/scene path.
-    ///
-    /// This is an INSPECTION tool only. It never mutates the project.
-    /// </summary>
+    /// <summary>Dumps GameObjects, their components and serialized fields to JSON under the snapshot directory, by a generic
+    /// <c>SerializedObject</c> walk with no per-type code. That file is its only write.
+    /// Contract: docs/unity-tools.md.</summary>
     [AgentTool]
     public static class AgentInspector
     {
         private const string SnapshotDir = RunLogFormat.SnapshotDir;
-        private const int MaxDepth = 6;        // recursion guard for nested serialized data (property nesting + child-GameObject recursion)
-        private const int MaxArrayElements = 64; // truncation guard for large arrays
+        private const int MaxDepth = 6;        // caps both property nesting and child-GameObject recursion
+        private const int MaxArrayElements = 64;
 
-        // Asset-expansion bounds — a THIRD axis alongside MaxDepth. internal so AgentSelfTest sizes its
-        // fixtures from these constants rather than copying magic numbers that would drift.
+        // Asset-expansion bounds, separate from MaxDepth. AgentSelfTest sizes its fixtures from these.
         internal const int MaxAssetDepth = 8;      // asset-hop depth: how many asset boundaries the walk has crossed
         internal const int MaxExpandedAssets = 64; // walk-wide expansion budget (one shared counter per Snapshot call)
 
-        /// <summary>Mutable state carried by reference through the private walk. One per entry-point call.</summary>
         private sealed class WalkState
         {
             public bool FollowAssets;
             public readonly HashSet<string> Dumped = new HashSet<string>(); // "guid:localId" keys already inlined
-            public int Budget;           // remaining expansions; starts at MaxExpandedAssets
+            public int Budget;
             public int SkippedForBudget; // ref *sites* left unexpanded due to Budget==0 (walk-wide, signaled at top level)
         }
 
-        // ----- Selection-driven entry points (read the Editor Selection; SnapshotSelection also used by AgentSelfTest) -----
+        // ----- Selection-driven entry points -----
 
         public static void SnapshotSelection()
         {
@@ -119,20 +107,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             WriteSnapshot(w, "scene_" + Sanitize(scene.name));
         }
 
-        // ----- Agent entry point (path-addressed; the entries above read the Editor Selection) ---------
+        // ----- Agent entry point (path-addressed) -----
 
         /// <summary>
-        /// Snapshot the GameObject at a root-relative hierarchy path in the active scene
-        /// (e.g. "Avatar/Armature/Hips"). Duplicate-named siblings refuse rather than resolving to
-        /// one of them; the refusal names each match. Returns a one-line summary ending with the snapshot
-        /// path in-band (<c>… => OK | log=&lt;path&gt;</c>).
-        ///
-        /// <paramref name="followAssets"/> is the agent door: when on, any objectReference resolving
-        /// to a saved ScriptableObject asset gets a generic <c>SerializedObject</c> dump inlined as a
-        /// <c>fields</c> object under the ref stub, recursively — bounded (asset-hop depth + walk-wide
-        /// budget) and cut-signaled, each followed asset named by path + GUID. Off (default) leaves the
-        /// walk structure unchanged. The <c>guid</c>/<c>fileId</c> identity fold-in on asset refs is
-        /// unconditional either way.
+        /// Snapshots the GameObject at a root-relative hierarchy path in the active scene
+        /// (e.g. "Avatar/Armature/Hips"). Duplicate-named siblings refuse, naming each match. Returns a
+        /// one-line summary ending with the snapshot path (<c>… => OK … | log=&lt;path&gt;</c>).
+        /// <paramref name="followAssets"/> inlines each saved-ScriptableObject ref's fields under its stub,
+        /// recursively, bounded and cut-signaled.
         /// </summary>
         public static string Run(string hierarchyPath, bool includeChildren = true, bool followAssets = false)
         {
@@ -156,7 +138,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             w.BeginArray();
             WriteGameObject(w, go, includeChildren, st);
             w.EndArray();
-            // Walk-wide budget cut — cannot be signaled inline, so surface the site count here.
+            // The walk-wide count of refs skipped for budget; each site also carries budgetSkipped.
             if (st.SkippedForBudget > 0) w.Prop("assetsTruncated", st.SkippedForBudget);
             w.EndObject();
 
@@ -166,25 +148,17 @@ namespace Ryan6Vrc.AgentTools.Editor
                  + " | log=" + path;
         }
 
-        // A whole-hierarchy snapshot of a complex vendor avatar runs past the agent harness's file-read cap
-        // (measured: 639KB), and the caller learns that only when the Read fails — after paying for the walk.
-        // The artifact is deliberately NOT truncated: its completeness is what it is for. Instead the summary
-        // reports the size and, past the cap, names the narrower doors that would fit.
-        //
-        // ReadCapBytes is a FOREIGN constant — a property of the harness reading the file, not of Unity, the
-        // asset, or this tool, so nothing here can detect it drifting. Two guards follow from that: the size is
-        // reported unconditionally (a drifted threshold then costs a missing hint, never a false claim), and the
-        // hint is worded as approximate, because the real limit is not purely byte-shaped.
+        // The agent harness's file-read cap, a FOREIGN constant nothing here can detect drifting. So the size is
+        // reported unconditionally (a drifted threshold costs a missing hint, never a false claim) and the hint
+        // is worded as approximate, because the real limit is not purely byte-shaped.
         private const long ReadCapBytes = 256 * 1024;
 
-        /// <summary>Byte size of the written artifact, plus the narrower-door hint when it lands past the read
-        /// cap. Measured from DISK, not from the string's length: the file is UTF-8 and Japanese asset names are
-        /// routine here, so a char count under-reports bytes and would promise a fit that fails.</summary>
+        /// <summary>Byte size of the written artifact, plus the narrower-door hint when it lands past the read cap.</summary>
         internal static string SizeNote(string path, string hierarchyPath, bool includeChildren, bool followAssets = false)
         {
             long bytes;
             try { bytes = new FileInfo(path).Length; }
-            catch { return ""; } // the artifact is already written; a stat failure must not sink the call
+            catch { return ""; }
             string note = " bytes=" + bytes;
             if (bytes <= ReadCapBytes) return note;
             return note + " (past the ~" + (ReadCapBytes / 1024) + "KB read cap — narrow it: "
@@ -209,8 +183,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (prefab != null)
                 w.Prop("prefabSource", AssetDatabase.GetAssetPath(prefab));
             w.Prop("isPrefabInstance", PrefabUtility.IsPartOfPrefabInstance(go));
-            // This dump is the flattened result. Only the outermost root can be handed to the door that reads
-            // the chain level by level (a nested root answers with the outermost's lists from a scene).
+            // Only the outermost root can be handed to ReportPrefab: from a scene, a nested root answers with the
+            // outermost's lists.
             if (PrefabUtility.IsOutermostPrefabInstanceRoot(go))
                 w.Prop("prefabOverridesDoor", "ReportPrefab.Run(\"" + GetHierarchyPath(go.transform) + "\")");
 
@@ -230,7 +204,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             else if (includeChildren && go.transform.childCount > 0)
             {
-                // Hit MaxDepth — signal the cut rather than dropping children silently.
                 w.Prop("childrenTruncated", go.transform.childCount);
             }
             w.EndObject();
@@ -247,30 +220,22 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             w.Prop("type", comp.GetType().FullName);
-            // Components are only ever reached through the scene hierarchy, never inside an asset,
-            // so their fields dump at asset depth 0.
             WriteFields(w, comp, st, 0);
             w.EndObject();
         }
 
-        /// <summary>Emit a <c>fields</c> object from <paramref name="target"/>'s top-level visible
-        /// properties (WriteProperty recurses within each). Shared by WriteComponent and the SO-asset
-        /// expansion in WriteObjectRef so an expanded asset reads exactly like a component. The whole
-        /// body — including <c>new SerializedObject(target)</c> — is guarded: a throw on a corrupt or
-        /// partially-imported object degrades to a localized <c>fieldsError</c> on this one ref, with
-        /// balanced braces, instead of unwinding to the enclosing (uncaught) walk and aborting the whole
-        /// snapshot. If the throw lands mid-loop (the <c>fields</c> object already open), the catch
-        /// closes it first so the JSON stays parseable either way.</summary>
+        /// <summary>Emits <paramref name="target"/>'s visible properties as a <c>fields</c> object. A throw degrades
+        /// to a <c>fieldsError</c> instead of aborting the snapshot; the catch closes whatever the walk left open,
+        /// so the JSON stays parseable.</summary>
         private static void WriteFields(JsonWriter w, UnityEngine.Object target, WalkState st, int assetDepth)
         {
-            bool fieldsOpened = false;
+            int depth = w.Depth;
             try
             {
                 var so = new SerializedObject(target);
                 var it = so.GetIterator();
                 w.PropName("fields");
                 w.BeginObject();
-                fieldsOpened = true;
                 bool enterChildren = true;
                 while (it.NextVisible(enterChildren))
                 {
@@ -283,7 +248,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             catch (Exception e)
             {
-                if (fieldsOpened) w.EndObject(); // close the open fields object before the scoped error
+                w.UnwindTo(depth);
                 w.Prop("fieldsError", e.Message);
             }
         }
@@ -311,7 +276,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 case SerializedPropertyType.ObjectReference: WriteObjectRef(w, p.objectReferenceValue, st, assetDepth); break;
                 case SerializedPropertyType.ExposedReference: WriteObjectRef(w, p.exposedReferenceValue, st, assetDepth); break;
                 case SerializedPropertyType.AnimationCurve:
-                    // WriteDynamics' field-set form, so a curve read here is the value a write takes back.
                     w.Value(p.animationCurveValue != null ? WriteDynamics.FormatCurve(p.animationCurveValue) : "null"); break;
                 case SerializedPropertyType.Bounds:       w.Value(p.boundsValue.ToString()); break;
                 default:
@@ -375,14 +339,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (o is Component c) w.Prop("scenePath", GetHierarchyPath(c.transform));
             if (o is GameObject g) w.Prop("scenePath", GetHierarchyPath(g.transform));
 
-            // Identity fold-in — sub-asset-safe. One call resolves both handles; built-in resources
-            // return an all-zero GUID → emit neither (and never expand). Gated on a non-empty assetPath
-            // too, so guid/fileId mark real ASSETS only — a saved scene-object ref (Component/GameObject
-            // into a saved scene) also resolves a GUID, but has no assetPath and must not get an
-            // asset-shaped handle. fileId (localId) distinguishes sub-assets that share one file GUID
-            // (AddObjectToAsset), so it is load-bearing for both dedup and edit-addressability.
-            // TryGet first so guid/localId are definitely assigned before the gates (assetPath before
-            // guid is just ordering; the compiler needs the out-call unconditional).
+            // guid/fileId mark real assets only: a ref with no assetPath (a scene object) or an all-zero GUID gets
+            // neither, and never expands. fileId distinguishes sub-assets sharing one file GUID, so the dedup key
+            // needs it too.
             bool haveId = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(o, out string guid, out long localId)
                           && !string.IsNullOrEmpty(assetPath)
                           && !string.IsNullOrEmpty(guid) && guid != "00000000000000000000000000000000";
@@ -392,34 +351,26 @@ namespace Ryan6Vrc.AgentTools.Editor
                 w.Prop("fileId", localId);
             }
 
-            // Bounded, cycle-safe SO-asset expansion — opt-in via followAssets. Filter: saved
-            // ScriptableObject asset only (structurally excludes meshes/textures/materials/clips/
-            // controllers → no overlap with ReportController/ReportClip, and scene objects → no
-            // double-walk with the GameObject recursion). haveId already implies a non-empty assetPath.
             if (haveId && st.FollowAssets && o is ScriptableObject)
             {
                 string key = guid + ":" + localId;
                 if (st.Dumped.Contains(key))
                 {
-                    // 1. Already dumped — highest priority; guarantees cycle/DAG termination.
                     w.Prop("alreadyDumped", true);
                 }
                 else if (assetDepth >= MaxAssetDepth)
                 {
-                    // 2. Asset-hop cap. Does not consume budget nor enter Dumped — the asset may
-                    //    still expand on a shallower branch.
+                    // Consumes no budget and stays out of Dumped: the asset may still expand on a shallower branch.
                     w.Prop("assetDepthCapped", true);
                 }
                 else if (st.Budget == 0)
                 {
-                    // 3. Budget exhausted. Signal at the cut point (walk-wide count surfaces at top level).
                     st.SkippedForBudget++;
                     w.Prop("budgetSkipped", true);
                 }
                 else
                 {
-                    // 4. Expand. Key enters Dumped BEFORE the dump, so cycle-safety survives a throw
-                    //    inside WriteFields (a later revisit sees the key and stubs).
+                    // The key enters Dumped BEFORE the dump, so cycle-safety survives a throw inside WriteFields.
                     st.Dumped.Add(key);
                     st.Budget--;
                     WriteFields(w, o, st, assetDepth + 1);
@@ -452,16 +403,34 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Tiny dependency-free JSON writer ----------------------------------------------
 
-        private class JsonWriter
+        internal class JsonWriter
         {
             private readonly StringBuilder _sb = new StringBuilder();
             private readonly Stack<bool> _firstStack = new Stack<bool>();
+            private readonly Stack<char> _closers = new Stack<char>();
             private int _indent;
 
-            public void BeginObject() { Pre(); _sb.Append("{"); Push(); }
+            public void BeginObject() { Pre(); _sb.Append("{"); Push('}'); }
             public void EndObject()   { Pop(); NewLine(); _sb.Append("}"); }
-            public void BeginArray()  { Pre(); _sb.Append("["); Push(); }
+            public void BeginArray()  { Pre(); _sb.Append("["); Push(']'); }
             public void EndArray()    { Pop(); NewLine(); _sb.Append("]"); }
+
+            /// <summary>How many objects and arrays are open; the mark <see cref="UnwindTo"/> takes.</summary>
+            public int Depth => _firstStack.Count;
+
+            /// <summary>Closes everything opened past <paramref name="depth"/>, answering a name still waiting for
+            /// its value with null.</summary>
+            public void UnwindTo(int depth)
+            {
+                if (_suppressPre) Value(null);
+                while (_firstStack.Count > depth)
+                {
+                    char closer = _closers.Peek();
+                    Pop();
+                    NewLine();
+                    _sb.Append(closer);
+                }
+            }
 
             public void PropName(string name) { Pre(); _sb.Append(Quote(name)).Append(": "); _suppressPre = true; }
             public void Prop(string name, string val)  { PropName(name); Value(val); }
@@ -485,8 +454,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     NewLine();
                 }
             }
-            private void Push() { _firstStack.Push(true); _indent++; }
-            private void Pop()  { if (_firstStack.Count > 0) _firstStack.Pop(); _indent--; }
+            private void Push(char closer) { _firstStack.Push(true); _closers.Push(closer); _indent++; }
+            private void Pop()  { if (_firstStack.Count > 0) { _firstStack.Pop(); _closers.Pop(); } _indent--; }
             private void NewLine() { _sb.Append('\n').Append(new string(' ', _indent * 2)); }
 
             private static string Quote(string s)

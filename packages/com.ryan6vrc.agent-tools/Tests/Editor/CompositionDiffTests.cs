@@ -4,13 +4,9 @@ using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 
 /// <summary>
-/// The bake diff is the part of <c>ReportComposition</c> most able to lie: it is the only place the door
-/// asserts a mapping between an authored name and a built one, and every category it prints is read as a
-/// claim about what the build did. It is also pure — names in, rows out, no <c>UnityEngine.Object</c>
-/// touched — so <c>docs/verify.md</c>'s NUnit-must-not-mutate rule does not reach it and there is no excuse
-/// for leaving it to the live venue.
-///
-/// Each case below is a defect this logic actually had.
+/// The bake diff maps authored names onto built ones, and every category it prints is read as a claim about what
+/// the build did. It is pure — names in, rows out, no <c>UnityEngine.Object</c> touched — so
+/// <c>docs/verify.md</c>'s NUnit-must-not-mutate rule does not reach it.
 /// </summary>
 public class CompositionDiffTests
 {
@@ -34,8 +30,7 @@ public class CompositionDiffTests
     [Test]
     public void APrefixMustEndAtASeparator_orAnUnrelatedNameIsCalledARename()
     {
-        // `Hair/HairToggle` merely ENDS WITH `Toggle`. A bare suffix test calls that a rename and prints a
-        // confident, wrong provenance claim from the one door whose thesis is that it never makes one.
+        // `Hair/HairToggle` merely ENDS WITH `Toggle`. A bare suffix test calls that a rename.
         var rows = CompositionBake.Diff(Census(("Toggle", true)), new List<string> { "Hair/HairToggle" }, null);
         Assert.AreEqual("dropped", CategoryOf(rows, "Toggle"));
         Assert.IsTrue(rows.Any(r => r.Built == "Hair/HairToggle" && r.Category == "built-only"),
@@ -62,8 +57,8 @@ public class CompositionDiffTests
     [Test]
     public void Merged_replacesTheRowsItSummarises_soTheCountsStillSum()
     {
-        // Two authored names both resolving onto one built name. Emitting `merged` ON TOP of the two
-        // `renamed` rows double-counts one built parameter and makes the categories exceed params=.
+        // Emitting `merged` ON TOP of the two `renamed` rows double-counts one built parameter and makes the
+        // categories exceed params=.
         var rows = CompositionBake.Diff(Census(("A/P", true), ("B/P", true)),
             new List<string> { "VF1_A/P", "VF1_B/P", "Shared" }, null);
         // Construct the genuine collision: one built name both authored names are a prefixed form of.
@@ -110,7 +105,7 @@ public class CompositionDiffTests
     public void AResolutionByExclusion_disclosesWhatItExcluded_inTheRowItself()
     {
         // Exclusion deletes the evidence of a possible merge, so the surviving row must carry that where a
-        // reader checking THIS row sees it. A legend sentence cannot be checked against a specific row.
+        // reader checking THIS row sees it.
         var rows = CompositionBake.Diff(Census(("Prop/C", true), ("Sync/D/Prop/C", true)),
             new List<string> { "Sync/D/Prop/C", "VF1_Prop/C" }, null);
         var caveat = rows.First(r => r.Authored == "Prop/C").Caveat;
@@ -123,11 +118,6 @@ public class CompositionDiffTests
     [Test]
     public void AMergedRow_carriesTheExclusionCaveatOfEveryRowItReplaced()
     {
-        // The row that replaces two claims is the most confident statement the table makes, and it is assembled
-        // from rows that may each have reached their claim only because precedence excluded a rival. Emitting the
-        // generic merged surface and discarding their caveats launders exactly the disclosure the renamed branch
-        // exists to make — and silently, because the foreclosed reading vanishes with the row that named it.
-        //
         // `P` sees candidates X/P (exact-claimed, excluded) and VF_Z/P; `Z/P` sees only VF_Z/P. Both claim
         // VF_Z/P, so both rows are replaced by one merged row — and `P -> X/P` is the reading being foreclosed.
         var rows = CompositionBake.Diff(Census(("P", true), ("X/P", true), ("Z/P", true)),
@@ -141,8 +131,6 @@ public class CompositionDiffTests
     [Test]
     public void AnAmbiguousRow_alsoDisclosesWhatExclusionTrimmed()
     {
-        // Worse here than on a renamed row: `ambiguous` is the one category whose whole purpose is honesty about
-        // not knowing, so a candidate list silently trimmed by precedence makes the trimming unknowable.
         var rows = CompositionBake.Diff(Census(("P", true), ("A/P", true)),
             new List<string> { "A/P", "X/P", "Y/P" }, null);
         var row = rows.First(r => r.Authored == "P");
@@ -156,8 +144,7 @@ public class CompositionDiffTests
     {
         // The ordinary idiom of an inner parameter exposed under a name the outer avatar also declares (MA
         // `remapTo`). Both authored names resolve onto the one built name: that is a MERGE. Applying exclusion
-        // here would empty `Toggle`'s candidate set and drop it through to `dropped` — a confident false
-        // "the build removed it", from the one door whose thesis is that it never makes such a claim.
+        // here would empty `Toggle`'s candidate set and drop it through to `dropped`, a false "the build removed it".
         var rows = CompositionBake.Diff(Census(("Toggle", true), ("Hair/Toggle", true)),
             new List<string> { "Hair/Toggle" }, null);
         Assert.AreEqual(0, rows.Count(r => r.Category == "dropped"), Dump(rows));
@@ -226,8 +213,6 @@ public class CompositionDiffTests
     [Test]
     public void APartialBuiltRead_reportsUnreadRatherThanDropped()
     {
-        // The difference between "the build removed this" and "I did not see the built side". Only the
-        // first is a claim, and only a complete read may make it.
         var rows = CompositionBake.Diff(Census(("A", true)), new List<string>(), null, builtSideComplete: false);
         Assert.AreEqual("built-side-unread", CategoryOf(rows, "A"), Dump(rows));
         Assert.AreEqual(0, rows.Count(r => r.Category == "dropped"), Dump(rows));
@@ -247,9 +232,7 @@ public class CompositionDiffTests
     public void AReservedName_isLabelledAsSuch_ratherThanReadingAsAnOrphan()
     {
         // `Grounded` is declared nowhere and referenced everywhere, so no authored row can ever claim it.
-        // Left as `built-only` it reads as a dozen unexplained names the build invented. The predicate is
-        // ControllerRules.IsVrcReserved — the same one the undeclared-param rule and the controller compiler
-        // use, so no second list exists to disagree with it.
+        // Left as `built-only` it reads as a dozen unexplained names the build invented.
         var rows = CompositionBake.Diff(Census(("Real", true)), new List<string> { "Real", "Grounded" }, null);
         Assert.AreEqual("kept", CategoryOf(rows, "Real"), Dump(rows));
         Assert.IsTrue(rows.Any(r => r.Built == "Grounded" && r.Category == "vrc-reserved"), Dump(rows));
@@ -258,8 +241,6 @@ public class CompositionDiffTests
     [Test]
     public void AReservedNameTheAvatarItselfDeclares_isStillKept_notRelabelled()
     {
-        // The label is applied only to rows nothing claimed, so it can never override a verdict: an avatar
-        // that does declare a reserved name in its own parameters asset is `kept`, as measured.
         var rows = CompositionBake.Diff(Census(("Grounded", true)), new List<string> { "Grounded" }, null);
         Assert.AreEqual("kept", CategoryOf(rows, "Grounded"), Dump(rows));
         Assert.AreEqual(0, rows.Count(r => r.Category == "vrc-reserved"), Dump(rows));

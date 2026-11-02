@@ -8,21 +8,16 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 
-// F39: the report/check ASSET doors take the typed asset object; these string overloads resolve an asset
-// path OR GUID to that same object (so an agent holding only a path/GUID need not pre-LoadAssetAtPath) and
-// fail loud — echoing the handle, no `log=` trailer — on a handle that names nothing. The digest/lint
-// bodies are covered by each door's own tests; this fixture exercises only the string entry points and
-// their resolution + bad-input contract.
+// The string overloads of the report/check asset doors: they resolve a path or GUID to the typed asset and
+// fail loud, with no `log=` trailer, on a handle that names nothing. Each door's own tests cover its body.
 public class PathHandleOverloadTests
 {
     private const string Dir = "Assets/Agent/_path_handle_test";
     private string _ctrlPath, _ctrlGuid, _clipPath;
 
-    // A resolving call writes an artifact outside `Dir`, so the per-test teardown below does not reach it:
-    // ReportController/ReportClip write a Snapshot markdown, which docs/unity-tools.md declares DURABLE — the
-    // operator's own pile, pruned by nothing. Record the path each call named in its `| log=` trailer and delete
-    // exactly those; a glob over `controller_*.md` would also sweep snapshots the operator took by hand. Keying
-    // on the trailer rather than on which door wrote it also survives a door changing output channel.
+    // A resolving call writes an artifact outside `Dir`, which TearDown does not reach. Delete exactly the
+    // paths named in each `log=` trailer; a glob over `controller_*.md` would also sweep snapshots the operator
+    // took by hand.
     private static readonly List<string> Artifacts = new List<string>();
 
     [OneTimeTearDown]
@@ -32,9 +27,6 @@ public class PathHandleOverloadTests
         Artifacts.Clear();
     }
 
-    // Every door call in this fixture goes through here — including the ones that only assert on the returned
-    // summary, which still wrote their artifact, and the bad-handle ones, whose contract is that there is no
-    // trailer to record.
     private static string Track(string summary)
     {
         int i = summary.IndexOf("log=");
@@ -81,16 +73,15 @@ public class PathHandleOverloadTests
         StringAssert.DoesNotContain("log=", r);
     }
 
-    // The `log=` trailer alone did not earn this test's name: it proves a run happened, not that the caller's
-    // basis reached it. The forwarded value is only observable in the RunLog BODY — Emit renders the
-    // "basis=…" detection line there, never into the returned summary — so the body is what pins it, and a
-    // bogus token pins that the string is passed through verbatim rather than re-decided in the overload.
+    // The `log=` trailer proves a run happened, not that the caller's basis reached it. Emit renders the
+    // "basis=…" detection line only in the RunLog body, so the body pins the forwarded value, and a bogus token
+    // pins that the string is passed through verbatim rather than re-decided in the overload.
     [Test]
     public void CheckAnimator_ByPath_ForwardsBasisAndRuns()
     {
-        // basis=explicit with null roots is the descriptor-borne case — runs the rule set, no scene needed.
+        // basis=explicit with null roots runs the rule set with no scene needed.
         string r = Track(CheckAnimator.Run(_ctrlPath, "explicit"));
-        StringAssert.Contains("log=", r);                 // a real run wrote a RunLog
+        StringAssert.Contains("log=", r);
         string body = File.ReadAllText(r.Substring(r.IndexOf("log=") + "log=".Length));
         StringAssert.Contains("basis=explicit", body);
 

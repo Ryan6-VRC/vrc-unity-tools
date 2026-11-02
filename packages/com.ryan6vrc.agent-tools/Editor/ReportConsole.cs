@@ -6,36 +6,23 @@ using System.Text;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Read-only digest of the Unity Editor console — every line of every entry.
+    /// Read-only digest of the Unity Editor console, every line of every entry. The MCP
+    /// <c>read_console</c> door returns only an entry's first line, so a build warning whose payload is
+    /// a list (VRCFury names each dropped binding and its source clip in the body) arrives there as its
+    /// header alone.
     ///
-    /// This exists because the MCP <c>read_console</c> door returns only an entry's FIRST line: it
-    /// reads the whole message out of Unity and then discards lines 2..N. A build warning whose
-    /// payload is a list (VRCFury names each dropped binding and its source clip in the body)
-    /// arrives there as its header alone — the count survives and the diagnosis does not.
+    /// Unity's <c>LogEntry.message</c> holds the body and callstack concatenated, and
+    /// <c>LogEntry.callstackTextStartUTF16</c> is the exact index where the callstack begins, so the split
+    /// reads that number and never guesses which lines look like stack frames.
     ///
-    /// Unity hands over each entry whole. <c>LogEntry.message</c> holds the body and the callstack
-    /// concatenated, and <c>LogEntry.callstackTextStartUTF16</c> is the exact index where the
-    /// callstack begins — so the two are separated by reading a number Unity already computed, never
-    /// by guessing at which lines look like stack frames. Guessing is what loses payload lines; there
-    /// is no heuristic here to get wrong.
-    ///
-    /// What it does NOT hand over is the whole console: this enumerates the Console *window's* rows,
-    /// so its filters bound the read. `GetCountsByType` is not filtered, so the gap is detectable
-    /// and is reported as a count (see <see cref="ConsoleFilterNote"/>).
-    ///
-    /// INSPECTION ONLY. It does not write to the console it reads — no door here logs, because a
-    /// logging console reader pollutes its own next read (and an error it logs is indistinguishable
-    /// from a real one to `PlayGate` and to any "console is clean" check). The return value is the
-    /// only channel. The one caveat is indirect: past the inline budget the digest spills through
-    /// `RunLogFormat.WriteRunLog`, whose asset import can make Unity's own importers log. Nothing this
-    /// door writes lands in the console; something it triggers may.
-    /// Clearing is not mirrored here; `read_console`'s `clear` action was its own.
+    /// Nothing it writes lands in the console, but past the inline budget the digest spills through
+    /// `RunLogFormat.WriteRunLog`, whose asset import can make Unity's own importers log.
+    /// Contract: docs/unity-tools.md.
     /// </summary>
     [AgentTool]
     public static class ReportConsole
     {
-        /// <summary>Inline character budget. Past this the digest spills to a Snapshot artifact and the
-        /// summary carries its path in-band, so a noisy console cannot blow out the caller's context.</summary>
+        /// <summary>Inline character budget for the entries; past it <see cref="Run"/> spills them to a Snapshot.</summary>
         private const int InlineBudget = 12000;
 
         // ----- Public API ---------------------------------------------------------------------
@@ -46,39 +33,20 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// the summary ends with the artifact path in-band (<c>… =&gt; OK | log=&lt;path&gt;</c>).
         /// </summary>
         /// <param name="types">Comma-separated subset of <c>error</c>/<c>warning</c>/<c>log</c>, or
-        /// <c>all</c>. Anything else is a bare <c>[ReportConsole] FAIL: …</c> naming it.</param>
+        /// <c>all</c>; empty means all. Anything else is a bare <c>[ReportConsole] FAIL: …</c> naming it.</param>
         /// <param name="filterText">Keep only entries whose text contains this (ordinal, case-sensitive).
-        /// The whole ENTRY is matched — body and callstack — not just the header, so a frame name is a
-        /// valid search term. A match also exempts the entry from <paramref name="stripBenign"/>.</param>
-        /// <param name="count">Maximum ROWS returned, taken from the newest end. Clamped to 1..500. With
-        /// <paramref name="collapseDuplicates"/> on, a row can stand for several identical entries, so the
-        /// returned window may reach further back in time than <paramref name="count"/> entries.</param>
-        /// <param name="includeStackTrace">Include each entry's callstack. On by default: for an
-        /// exception the frames are the diagnosis, and withholding them by default would reproduce the
-        /// header-only read this tool exists to replace.</param>
-        /// <param name="stripBenign">Drop known-benign console noise and name the counts in the summary.
-        /// On by default, and that default is load-bearing: Unity types these entries as genuine errors
-        /// (VRCFury routes build progress through <c>VF.Exceptions</c>, which really does carry
-        /// <c>kScriptingException</c>), so no amount of faithful type-reading separates them from real
-        /// ones, and an unfiltered error read during a build buries the diagnosis it was run to find.
-        /// This is not a tidiness default — it was added because the noise repeatedly cost real sessions.
-        /// It stays honest by never being silent: the summary names every label and count it removed, so
-        /// a dropped entry is always visible as a number even when its text is gone. An entry kept
-        /// BECAUSE it matched <paramref name="filterText"/> is exempt — filtering for noise by name and
-        /// then having it stripped would defeat the filter.</param>
-        /// <param name="collapseDuplicates">Fold byte-identical entries (body + callstack) into one row carrying
-        /// a repeat count. On by default, on the same reasoning as <paramref name="stripBenign"/>: a flood of one
-        /// repeated message spends the whole <paramref name="count"/> budget teaching one fact (5,672 identical
-        /// entries returned 60 verbatim copies in a measured session), and the collapse is never silent — the
-        /// summary carries <c>collapsed=</c> and each folded row carries <c>×N</c>. Two bounds worth knowing.
-        /// It keeps the LAST occurrence, because <paramref name="count"/> clamps from the newest end and an
-        /// oldest-representative row could be clamped away, erasing a recurrence from a read taken to see it.
-        /// And a filtered read is exempt WHOLESALE — passing <paramref name="filterText"/> disables collapse for
-        /// that call rather than per entry, so the two cannot be combined — which is what keeps the tagged-probe
-        /// idiom (`emulator.md`: log a tagged line every N frames, read it back by tag) returning its whole
-        /// series, since there the identical repeats ARE the signal. Repeats need not be adjacent: a group folds
-        /// onto its newest position, so a read taken to establish SEQUENCE should pass false. Distinct from Unity's own Console "Collapse"
-        /// toggle, which hides entries from this read entirely and shows up as <c>UNREACHED=</c>.</param>
+        /// Body and callstack are both matched, so a frame name is a valid search term. A match exempts the
+        /// entry from <paramref name="stripBenign"/>, and any filter turns <paramref name="collapseDuplicates"/>
+        /// off for the whole call.</param>
+        /// <param name="count">Maximum rows returned, from the newest end, clamped to 1..500.</param>
+        /// <param name="includeStackTrace">Include each entry's callstack.</param>
+        /// <param name="stripBenign">Drop known-benign console noise (<see cref="BenignLabel"/>), naming every
+        /// label and count in the summary.</param>
+        /// <param name="collapseDuplicates">Fold byte-identical entries into one row carrying a repeat count;
+        /// the summary carries <c>collapsed=</c> and each folded row carries <c>×N</c>. Repeats need not be
+        /// adjacent and a group folds onto its newest position, so a read taken to establish sequence should
+        /// pass false. Distinct from Unity's own Console "Collapse" toggle, which hides entries from this read
+        /// entirely and shows up as <c>UNREACHED=</c>.</param>
         public static string Run(
             string types = "all",
             string filterText = null,
@@ -130,9 +98,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             int matched = kept.Count;
-            // Rows carry their own repeat count so the pairing survives the clamp below — a parallel list
-            // would have to be trimmed in lockstep, and the one that got out of step would misattribute a
-            // count to the wrong message.
             var rows = CollapseDuplicates(kept, collapseDuplicates && !filtering, out int collapsed);
             if (rows.Count > count) rows.RemoveRange(0, rows.Count - count);
 
@@ -143,12 +108,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (rows[i].Value > 1) body.Append("    (×").Append(rows[i].Value).Append(" identical, collapsed)\n");
             }
 
-            // Neither a stripped entry nor one Unity declined to hand over is absorbed into a
-            // clean-looking count: both are named here, so nothing this door removed is invisible.
-            // The Console window's own filter state comes first because it bounds everything after
-            // it — a `scanned=` computed under a search filter is a view, not the console.
-            // One number per stage: scanned -> matched -> collapsed -> shown. `collapsed` is rows REMOVED, not a
-            // before/after pair — `matched` already carries the before.
+            // One number per stage: scanned -> matched -> collapsed -> shown. `collapsed` is rows removed, not a
+            // before/after pair; `matched` already carries the before.
             string summary = "[ReportConsole]" + ConsoleFilterNote(scanned)
                 + " scanned=" + scanned + " matched=" + matched
                 + (collapsed > 0 ? " collapsed=" + collapsed : "") + " shown=" + rows.Count
@@ -180,11 +141,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         public enum EntryKind { Log, Warning, Error }
 
         /// <summary>Fold byte-identical entries into one row carrying its repeat count, keeping each group's
-        /// LAST occurrence in that occurrence's position. Keeping the last is the load-bearing half: `count`
-        /// clamps from the newest end, so an oldest-representative row for a message that recurred a second ago
-        /// could be clamped away entirely — the recurrence would vanish from a read taken to see it.
-        /// Identity is body + callstack, so two entries that differ only in where they were thrown stay apart.
-        /// Pure over its input, so both properties are assertable without a console.</summary>
+        /// last occurrence in that occurrence's position: `count` clamps from the newest end, so an
+        /// oldest-representative row for a message that recurred a second ago could be clamped away, and the
+        /// recurrence would vanish from a read taken to see it. Identity is body + callstack, so two entries
+        /// that differ only in where they were thrown stay apart.</summary>
         internal static List<KeyValuePair<Entry, int>> CollapseDuplicates(List<Entry> kept, bool enabled, out int collapsed)
         {
             var rows = new List<KeyValuePair<Entry, int>>();
@@ -198,16 +158,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             var counts = new Dictionary<string, int>();
             foreach (var e in kept)
             {
-                var key = e.Body + " " + e.Stack;
+                var key = e.Body + "\0" + e.Stack;
                 int seen;
                 counts[key] = counts.TryGetValue(key, out seen) ? seen + 1 : 1;
             }
-            // Walk backwards so the FIRST time a key is seen from the newest end is its last occurrence, then
-            // restore chronological order — the row lands where its newest instance sat.
             var emitted = new HashSet<string>();
             for (int i = kept.Count - 1; i >= 0; i--)
             {
-                var key = kept[i].Body + " " + kept[i].Stack;
+                var key = kept[i].Body + "\0" + kept[i].Stack;
                 if (!emitted.Add(key)) { collapsed++; continue; }
                 rows.Add(new KeyValuePair<Entry, int>(kept[i], counts[key]));
             }
@@ -217,10 +175,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Console read (reflection into UnityEditor.LogEntries) ---------------------------
 
-        /// <summary>Read every console entry, oldest first. Returns false with a caller-facing reason when
-        /// the internal API has drifted — a rename upstream must fail loud, never read as an empty console.
-        /// <paramref name="unreadable"/> counts rows Unity refused to hand over, so they can be reported
-        /// rather than silently skipped.</summary>
+        /// <summary>Read every row the Console window exposes, oldest first. Returns false with a caller-facing
+        /// reason when the internal API has drifted. <paramref name="unreadable"/> counts rows Unity refused to
+        /// hand over.</summary>
         private static bool TryReadEntries(out List<Entry> entries, out int unreadable, out string error)
         {
             entries = null;
@@ -256,10 +213,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             var list = new List<Entry>();
-            // StartGettingEntries is invoked OUTSIDE the try: if it throws, it never acquired the
-            // console lock, and a finally that called EndGettingEntries anyway would be an unbalanced
-            // end on the one API whose imbalance this pairing exists to prevent. Everything after a
-            // successful Start — the cast included — belongs inside, so drift cannot strand the lock.
+            // StartGettingEntries stays outside the try: if it throws, it never acquired the console lock,
+            // and a finally calling EndGettingEntries would be an unbalanced end. Everything after a successful
+            // Start, the cast included, belongs inside, so drift cannot strand the lock.
             object rawTotal;
             try
             {
@@ -299,9 +255,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             catch (Exception ex)
             {
-                // Field types drifting under us (mode becoming uint, say) would otherwise escape as a
-                // raw TargetInvocationException, which through execute_code reads as an opaque MCP
-                // failure rather than this door's named FAIL. Fail loud, in the documented shape.
+                // Field-type drift (mode becoming uint, say) would otherwise surface through execute_code as an
+                // opaque MCP failure rather than this door's named FAIL.
                 error = "console reflection failed during read: " + ex.Message;
                 return false;
             }
@@ -314,11 +269,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             return true;
         }
 
-        // ----- Pure helpers (unit-tested directly) ---------------------------------------------
+        // ----- Helpers ------------------------------------------------------------------------
 
         /// <summary>Split <paramref name="full"/> at the callstack index Unity reported. An index of 0 or
-        /// one outside the string means Unity recorded no callstack, and the whole message is body — the
-        /// safe direction, since a body line is never discarded for looking like a frame.</summary>
+        /// one outside the string means Unity recorded no callstack, and the whole message is body.</summary>
         public static void SplitAt(string full, int stackStart, out string body, out string stack)
         {
             full = full ?? string.Empty;
@@ -329,13 +283,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return;
             }
             // Remove at most the ONE separator newline on each side. TrimEnd/TrimStart would eat a run,
-            // silently deleting a blank line the payload meant to contain — a small version of exactly
-            // the loss this tool exists to end.
+            // silently deleting a blank line the payload meant to contain.
             body = TrimOneNewlineEnd(full.Substring(0, stackStart));
             stack = TrimOneNewlineEnd(TrimOneNewlineStart(full.Substring(stackStart)));
         }
 
-        /// <summary>Drop one trailing newline (CRLF counts as one), never a run.</summary>
         private static string TrimOneNewlineEnd(string s)
         {
             if (s.EndsWith("\r\n", StringComparison.Ordinal)) return s.Substring(0, s.Length - 2);
@@ -344,7 +296,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return s;
         }
 
-        /// <summary>Drop one leading newline (CRLF counts as one), never a run.</summary>
         private static string TrimOneNewlineStart(string s)
         {
             if (s.StartsWith("\r\n", StringComparison.Ordinal)) return s.Substring(2);
@@ -353,10 +304,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return s;
         }
 
-        // LogEntry.mode bit flags, mirroring UnityEditor.ConsoleWindow.Mode. This is the authoritative
-        // source for an entry's type; Unity's own console classifies the same way. (It is not a fix for
-        // VRCFury's build-progress chatter reading as an error — that really does carry kScriptingException,
-        // so it is genuinely error-typed here too. Judge build health from log text, as verify.md says.)
+        // LogEntry.mode bit flags, mirroring UnityEditor.ConsoleWindow.Mode: the authoritative source for an
+        // entry's type.
         private const int ModeError = 1 << 0;
         private const int ModeAssert = 1 << 1;
         private const int ModeFatal = 1 << 4;
@@ -369,19 +318,16 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const int ModeScriptingException = 1 << 17;
         private const int ModeScriptingAssertion = 1 << 21;
 
-        // Bits 13, 20 and 22 are deliberately absent. They read as StickyError / GraphCompileError /
-        // VisualScriptingError in ConsoleWindow.Mode, but Unity's LogMessageFlags names 13 and 22
-        // kStickyLog and kStacktraceIsPostprocessed — and bit 22 is measurably set on an ordinary
-        // Debug.LogException, which is not a Visual Scripting entry. Two enums overlay this one int
-        // with different meanings, so the name is not evidence. Measured over a live console, adding
-        // them changes no classification (every such entry already carries bit 8 or 17), so they buy
-        // nothing and would promote a log to an error if the LogMessageFlags reading is the right one.
+        // Bits 13, 20 and 22 stay out. They read as StickyError / GraphCompileError / VisualScriptingError in
+        // ConsoleWindow.Mode, but Unity's LogMessageFlags names 13 and 22 kStickyLog and
+        // kStacktraceIsPostprocessed, and bit 22 is measurably set on an ordinary Debug.LogException. Two enums
+        // overlay this one int, so the name is not evidence, and adding them would promote a log to an error
+        // if the LogMessageFlags reading is the right one.
         private const int ErrorMask = ModeError | ModeAssert | ModeFatal | ModeAssetImportError
             | ModeScriptingError | ModeScriptCompileError | ModeScriptingException | ModeScriptingAssertion;
         private const int WarningMask = ModeAssetImportWarning | ModeScriptingWarning | ModeScriptCompileWarning;
 
-        /// <summary>Map a <c>LogEntry.mode</c> bitfield to its console type. Error bits win over warning
-        /// bits — under-reporting severity is the dangerous direction.</summary>
+        /// <summary>Map a <c>LogEntry.mode</c> bitfield to its console type.</summary>
         public static EntryKind ClassifyMode(int mode)
         {
             if ((mode & ErrorMask) != 0) return EntryKind.Error;
@@ -392,24 +338,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>
         /// Report how many entries the console holds that this read could not reach, else "".
         ///
-        /// The problem: <c>StartGettingEntries</c>/<c>GetEntryInternal</c> enumerate the Console
-        /// *window's* rows, and Unity exposes no unfiltered enumerator — every row accessor indexes
-        /// that same view. So the window's LogLevel toggles, Collapse and search box all bound the
-        /// read. Measured on a console holding 8 entries: 6 with Log hidden, and <b>0 with a search
-        /// filter set</b>, at which point an unannotated digest reads <c>scanned=0 … =&gt; OK</c> and
-        /// certifies a console full of errors as clean.
-        ///
-        /// The fix: <c>GetCountsByType</c> is <b>not</b> filtered — measured, it held 4/2/2 across
-        /// every state above while the enumerable count fell 8 → 6 → 0. So the true total is readable
-        /// even when the entries are not, and the gap is reported as a NUMBER rather than inferred
-        /// from flags. That distinction is the point: this is an outcome check, so it catches any
-        /// narrowing — including a mechanism this code never enumerated — where a flag-reading check
-        /// only catches the ones it thought to look for. The flags are still appended, as the cause.
-        ///
-        /// Reported, never corrected: clearing the operator's filters would mutate UI state this door
-        /// has no business touching. When the hidden entries themselves are needed,
-        /// <c>Application.consoleLogPath</c> (Editor.log) is the unfiltered text of record — process-
-        /// wide, unstructured and cross-session, so a fallback rather than a second door.
+        /// <c>StartGettingEntries</c>/<c>GetEntryInternal</c> enumerate the Console window's rows and Unity
+        /// exposes no unfiltered enumerator, so the window's LogLevel toggles, Collapse and search box all
+        /// bound the read: under a search filter an unannotated digest reads <c>scanned=0 … =&gt; OK</c> over
+        /// a console full of errors. <c>GetCountsByType</c> is not filtered, so the gap is reported as a
+        /// number, which catches any narrowing where reading the flags catches only the ones it looks for.
+        /// The gap is never corrected: clearing the operator's filters would mutate UI state.
         /// </summary>
         /// <param name="enumerated">How many entries this read actually saw.</param>
         public static string ConsoleFilterNote(int enumerated)
@@ -438,9 +372,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 + ConsoleFilterCause(les, S) + " — THIS IS A FILTERED VIEW";
         }
 
-        /// <summary>The Console window's narrowing settings, as the likely cause of a gap. Best-effort
-        /// and never the finding itself: the count discrepancy is what is asserted, this only explains
-        /// it, so a cause this code cannot name still leaves the gap reported.</summary>
+        /// <summary>The Console window's narrowing settings, as the likely cause of a gap. Best-effort: the
+        /// count discrepancy is the finding.</summary>
         private static string ConsoleFilterCause(Type les, BindingFlags S)
         {
             try
@@ -467,34 +400,28 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>
         /// The label of the known-benign noise family matching this entry, or null when it is signal.
-        /// <paramref name="full"/> is the entry's whole text (body and callstack) — several of these
-        /// families identify themselves in the stack, not the message.
+        /// <paramref name="full"/> is the entry's whole text: several families identify themselves in the
+        /// callstack, not the message.
         ///
-        /// These are substring heuristics against third-party and importer output, so they are
-        /// re-validated by reading that source, never by a green test run.
+        /// These substring heuristics against third-party and importer output are re-validated by reading
+        /// that source, never by a green test run. They match the family, not a safe subset: a real failure
+        /// from one of these sources goes with its chatter, `[MACS]` taking that package's
+        /// `Failed to apply patch` deliberately. When a family is implicated in a real failure, the
+        /// summary's count is the trace that says to re-run with <c>stripBenign: false</c>.
+        /// `ReportConsoleTests` pins the collisions by name.
         ///
-        /// They match the FAMILY, not a safe subset of it — a real failure from one of these sources is
-        /// dropped along with its chatter. `[MACS]` takes that package's `Failed to apply patch` too
-        /// (deliberately: the whole source is noise here); the others match the callstack as well
-        /// as the body, so an exception routed through one of those frames goes with them. That is the
-        /// accepted cost of a default-on strip, and the reason the summary always reports the counts:
-        /// when one of these families is implicated in a real failure, the count is the trace that says
-        /// to re-run with <c>stripBenign: false</c>. `ReportConsoleTests` pins the collisions by name.
-        ///
-        /// A family keys on the TARGET it fails against, never the patching LIBRARY: NDMF, MA and VRCFury
-        /// all Harmony-patch from <c>[InitializeOnLoadMethod]</c> (measured 2026-08-13), so a
-        /// <c>HarmonyLib</c>-keyed family would strip a failed VRCFury patch by default.
+        /// A family keys on the target it fails against, never the patching library: NDMF, MA and VRCFury
+        /// all Harmony-patch at startup, so a <c>HarmonyLib</c>-keyed family would strip a failed VRCFury
+        /// patch by default.
         /// </summary>
         public static string BenignLabel(string full)
         {
             string s = full ?? string.Empty;
             // Third-party load chatter (com.mcardellje.macs), Error-typed and Log-typed alike.
             if (s.Contains("[MACS]")) return "MACS third-party load noise";
-            // MACS's Harmony patch failure at startup: a bare HarmonyLib exception carrying NO [MACS]
-            // token, so it keys on the patch target it names. That target is a real UnityEditor API our
-            // own tooling calls, so the co-token is what scopes this to a failing patch application rather
-            // than to any error mentioning it. MACS is a human/UI convenience no agent workflow reaches
-            // (operator, 2026-08-13) — hence the whole source is noise.
+            // MACS's Harmony patch failure at startup: a bare HarmonyLib exception carrying NO [MACS] token,
+            // so it keys on the patch target it names. That target is a real UnityEditor API, so the co-token
+            // scopes this to a failing patch application rather than any error mentioning it.
             if (s.Contains("DestroyBlendTreeRecursive") && s.Contains("not found in method"))
                 return "MACS Harmony startup patch failure";
             // Bare "inconsistent result" would eat unrelated errors — require an importer co-token.
@@ -516,7 +443,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return " benign-stripped=[" + string.Join(", ", parts.ToArray()) + "]";
         }
 
-        /// <summary>Parse the <c>types</c> filter into a bit mask over <see cref="EntryKind"/>.</summary>
         private static bool TryParseTypes(string types, out int mask, out string bad)
         {
             mask = 0;
@@ -538,7 +464,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
             }
             if (unknown.Count > 0) { bad = string.Join(", ", unknown.ToArray()); return false; }
-            if (mask == 0) { bad = types; return false; } // "" / "," names no type; don't quietly mean `all`
+            if (mask == 0) { bad = types; return false; } // "," names no type; don't quietly mean `all`
             return true;
         }
 
@@ -553,7 +479,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             body.Append('\n').Append(e.Body).Append('\n');
             if (!string.IsNullOrEmpty(e.Stack))
             {
-                // Withheld frames are counted, never silently absent — the caller can see there is more.
                 if (includeStackTrace) body.Append("--- stack ---\n").Append(e.Stack).Append('\n');
                 else body.Append("[+").Append(CountLines(e.Stack)).Append(" stack lines]\n");
             }

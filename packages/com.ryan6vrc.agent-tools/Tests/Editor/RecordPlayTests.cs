@@ -5,12 +5,10 @@ using Ryan6Vrc.AgentTools.Editor;
 using UnityEngine;
 using UnityEngine.TestTools;
 
-// RecordPlay's testable core. NUnit cannot enter play mode, so nothing here records a take: the recording
-// itself is proven by execute_code in a real play session (docs/verify.md §Test venue). What is asserted is
-// the two pieces a caller's input passes through before anything is read, each of which fails quietly in a
-// live run: a column spec that parses to the wrong target records a real-looking column of the wrong thing,
-// and a parameter name matched to the wrong prefixed name does the same. The emulator names the door reflects
-// are EmulatorBindingCanaryTests'.
+// NUnit cannot enter play mode, so the recording itself is proven by execute_code in a real play session
+// (docs/verify.md §Test venue). The column spec and the parameter-name match are pinned here because either
+// one going wrong records a real-looking column of the wrong thing in a live run. The emulator names the door
+// reflects are EmulatorBindingCanaryTests'.
 public class RecordPlayTests
 {
     private static List<RecordPlay.Col> Parse(string spec)

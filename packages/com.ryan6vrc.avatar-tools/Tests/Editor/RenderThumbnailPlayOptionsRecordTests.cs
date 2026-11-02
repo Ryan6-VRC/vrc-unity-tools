@@ -1,21 +1,13 @@
-// Pins the Enter-Play-Mode Options record codec RenderThumbnailPlay writes to SessionState — the pair of
-// pure decisions that a domain reload separates, and that the live path therefore cannot prove agree.
-//
-// Why these exist as their own cases rather than riding along: the record is written in one Begin and read
-// by whatever Begin runs after a recompile wiped the statics. A batchmode test can't provoke that reload, so
-// a writer and a parser that disagreed on the format would present as "no record survived" — which is the
-// recoverable-looking symptom whose end state is the operator's project settings cemented to our forced
-// both-reload-disabled pair. Nothing in an end-to-end run can fail on that; only a direct round-trip can.
-// Same omission shape as ImportPackage.NameMatches before F36: a pure decision inside a boundary the suite
-// legitimately can't exercise, riding on its untestable caller instead of carrying its own case.
+// Pins the Enter-Play-Mode Options record codec RenderThumbnailPlay writes to SessionState. One Run writes the
+// record and whatever Run follows a domain reload reads it, which a batchmode test can't provoke, so a writer
+// and parser that disagreed would present only as "no record survived", whose end state is the operator's
+// project settings cemented to the forced both-reload-disabled pair. Only a direct round-trip can fail on that.
 using NUnit.Framework;
 using UnityEditor;
 using Ryan6Vrc.AvatarTools.Editor;
 
 public class RenderThumbnailPlayOptionsRecordTests
 {
-    // The load-bearing one: every pair the writer can emit must come back out of the parser unchanged.
-    // "No writer can emit a malformed record" is an assertion the code comment makes; this is what keeps it true.
     [TestCase(true, EnterPlayModeOptions.None)]
     [TestCase(false, EnterPlayModeOptions.None)]
     [TestCase(true, EnterPlayModeOptions.DisableDomainReload)]
@@ -34,8 +26,7 @@ public class RenderThumbnailPlayOptionsRecordTests
         Assert.AreEqual(opts, gotOpts, "options survived the round-trip");
     }
 
-    // A malformed record is rejected WHOLE. Restoring half a settings pair is worse than refusing to restore,
-    // because the operator's other half is then silently replaced by a default.
+    // Restoring half a settings pair would silently replace the operator's other half with a default.
     [TestCase("", TestName = "OptionsRecord_rejects_empty")]
     [TestCase(null, TestName = "OptionsRecord_rejects_null")]
     [TestCase("1", TestName = "OptionsRecord_rejects_missingOptionsField")]
@@ -54,8 +45,8 @@ public class RenderThumbnailPlayOptionsRecordTests
         Assert.AreEqual(default(EnterPlayModeOptions), opts, "a rejected record leaves no half-applied options");
     }
 
-    // "|3" parses arity-wise but its enabled field is not "1" — that is a legitimate false, not a rejection.
-    // Pinned separately from the malformed set so the arity rule and the flag rule can't be conflated.
+    // A wrong-valued enabled field parses as a legitimate false, not a rejection: the arity rule and the flag
+    // rule are separate.
     [Test]
     public void OptionsRecord_enabledField_isExactlyOne_notTruthiness()
     {
@@ -69,9 +60,8 @@ public class RenderThumbnailPlayOptionsRecordTests
         Assert.IsFalse(enabled, "only the literal '1' means enabled — the writer emits nothing else");
     }
 
-    // Begin's `optsChanged` inverts this: when the operator is ALREADY both-reload-disabled we changed
-    // nothing, and End must not claim to restore anything. Getting it wrong is how a forced pair gets
-    // mistaken for the operator's own setting.
+    // Run's `optsChanged` inverts this: when the operator is ALREADY both-reload-disabled we changed nothing,
+    // and its summary must not promise a restore on End.
     [Test]
     public void IsBothReloadDisabled_requiresEnabled_andBothFlags()
     {
@@ -88,9 +78,15 @@ public class RenderThumbnailPlayOptionsRecordTests
         Assert.IsFalse(RenderThumbnailPlay.IsBothReloadDisabled(true, EnterPlayModeOptions.None));
     }
 
-    // The pair ApplyForcedOptions writes must be the pair IsBothReloadDisabled recognises. Reads the
-    // production constant rather than restating it — a second copy here would keep passing after
-    // ApplyForcedOptions was narrowed to one flag, which is precisely the drift this claims to guard.
+    [Test]
+    public void OptionsEndRow_claimsARestoreOnlyWhenRunChangedThePair()
+    {
+        StringAssert.Contains("restored", RenderThumbnailPlay.OptionsEndRow(false, EnterPlayModeOptions.None));
+        StringAssert.Contains("left as found", RenderThumbnailPlay.OptionsEndRow(true, RenderThumbnailPlay.ForcedOptions));
+    }
+
+    // Reads the production constant rather than restating it: a second copy here would keep passing after
+    // ForcedOptions was narrowed to one flag.
     [Test]
     public void ForcedPair_isRecognisedAsAlreadyForced()
     {

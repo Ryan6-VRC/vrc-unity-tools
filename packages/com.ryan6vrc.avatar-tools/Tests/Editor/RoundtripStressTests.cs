@@ -11,16 +11,14 @@ using UnityEngine.TestTools;
 
 namespace Ryan6Vrc.AvatarTools.Tests
 {
-    // Synthetic round-trip stress fixtures spanning the whole schema vocabulary. Three arms, named by test
-    // prefix rather than by letter (the prefix is the index a reader greps):
+    // Synthetic round-trip stress fixtures spanning the whole schema vocabulary. Three arms, by test prefix:
     //  Fixpoint_*            in-vocabulary breadth via hand-authored YAML — a clean textual fixpoint.
     //  Refusal_* / Funnel_*  out-of-vocabulary constructs — DecompileController FAIL, no yaml written.
-    //  Widen_* / Faithful_*  constructs that USED to be refusals. For a widen the assertion is the VALUE
-    //                        read back off the recompiled object, because a widen that silently reset to
-    //                        Unity's default would still reach a clean fixpoint.
-    // Decode-side TOLERANCES (mixed write-defaults, an empty timeParameter) are ControllerDecompile.Walk's
-    // decisions, not this door's: they are witnessed in-memory in ControllerDecompileTests, never recompiled
-    // here — a compile round adds ~0.2s and re-proves nothing about the tolerance.
+    //  Widen_* / Faithful_*  edge constructs that round-trip. For a widen the assertion is the VALUE read
+    //                        back off the recompiled object, because a widen that silently reset to Unity's
+    //                        default would still reach a clean fixpoint.
+    // Decode-side TOLERANCES (mixed write-defaults, an empty timeParameter) are ControllerDecompile.Walk's:
+    // witness them in memory in ControllerDecompileTests, not by recompiling here.
     public class RoundtripStressTests
     {
         private const string TestRoot = "Assets/Agent/Scratch/stress_tests";
@@ -29,9 +27,9 @@ namespace Ryan6Vrc.AvatarTools.Tests
         [SetUp]
         public void SetUp() => AnimatorTestHelpers.EnsureFolder(TestRoot);
 
-        // Per-test deletion is load-bearing, not hygiene: several cases assert a refusal writes NO .yaml, so
-        // the root has to start empty. No AssetDatabase.Refresh() on either side — CreateFolder registers the
-        // folder AND writes its .meta, and DeleteAsset closes its own import.
+        // Several cases assert a refusal writes NO .yaml, so the root has to start empty for each test. No
+        // AssetDatabase.Refresh() on either side: CreateFolder registers the folder AND writes its .meta, and
+        // DeleteAsset closes its own import.
         [TearDown]
         public void TearDown()
         {
@@ -59,9 +57,8 @@ namespace Ryan6Vrc.AvatarTools.Tests
         }
 
         // decode(C0)==decode(C1) proves fixpoint STABILITY, not that the authored arrangement or the authored
-        // VALUES survived — a sign flip, a dropped layout block, or a leaked auto-generated name is stable and
-        // therefore invisible to the equality above. Each fixture's highest-risk authored detail is pinned
-        // here, on the FIRST decode, so no case needs a second compile of a fixture this one already built.
+        // VALUES survived: a sign flip, a dropped layout block, or a leaked auto-generated name is stable. Each
+        // fixture's highest-risk authored detail is pinned here, on the FIRST decode.
         private static void AssertAuthoredValuesSurvived(string fixture, string yamlA, AnimatorController c0)
         {
             switch (fixture)
@@ -74,8 +71,8 @@ namespace Ryan6Vrc.AvatarTools.Tests
                 case "blendtrees.yaml":
                     StringAssert.Contains("timeScale: -1", yamlA, "the negative child timeScale survives decode (no sign flip)");
                     // This fixture's blend trees are deliberately unnamed, so the layer's own "- name: Trees"
-                    // must be the document's ONLY `name:` key — an auto-named tree (the positional
-                    // <State>_BlendTree / <parent>_<i> default) surfacing as an authored name raises the count.
+                    // must be the document's ONLY `name:` key; an auto-named tree surfacing as an authored
+                    // name raises the count.
                     Assert.AreEqual(1, Regex.Matches(yamlA, "name:").Count,
                         "only the layer's own 'name:' key appears — zero blend-tree name keys");
                     break;
@@ -100,13 +97,10 @@ namespace Ryan6Vrc.AvatarTools.Tests
         // ── Refusal_* / Funnel_*: programmatic refusal coverage ──────────────────────────────────
         // Each seeds ONE out-of-vocabulary construct; DecompileController must FAIL naming it and write no yaml.
         //
-        // SCOPE RULE — do not regrow this arm. A CONSTRUCT's refusal is proven at ControllerDecompile.Walk,
-        // in memory, for ~1ms per case (ControllerDecompileTests). The DOOR has exactly ONE refusal branch —
-        // DecompileController's `if (walk.Refusals.Count > 0) return Fail(…)` — so a case here re-proves that
-        // single branch plus the artifact grammar (the FAIL names the offender, no .yaml is written), at the
-        // cost of a real CreateAnimatorControllerAtPath + SaveAssets + Decompile + artifact delete (~0.2s).
-        // A case earns its place here only by being the sole witness for its construct; add the construct at
-        // Walk instead.
+        // Do not regrow this arm: add a new construct's refusal at ControllerDecompile.Walk, in memory
+        // (ControllerDecompileTests). The door has one refusal branch, so a case here re-proves that branch plus
+        // the artifact grammar (the FAIL names the offender, no .yaml is written) at the cost of a real controller
+        // save and decompile. A case earns its place here only by being the sole witness for its construct.
         private void AssertRefuses(string tag, System.Action<AnimatorController> seed, string expectedToken)
         {
             string ctrlPath = TestRoot + "/Refuse_" + tag + ".controller";
@@ -135,17 +129,13 @@ namespace Ryan6Vrc.AvatarTools.Tests
                 s.mirrorParameterActive = true; s.mirrorParameter = "m";
             }, "mirror");
 
-        // ── Widen_*: constructs that were once refusals ──────────────────────────────────────────
-        // Transition offset and sub-machine onExit transitions used to be named refusals here. Both now
-        // round-trip, so what has to be pinned is the VALUE surviving a real compile, not the wording of a
-        // FAIL: a widen whose value silently resets to Unity's default would still reach a clean fixpoint.
+        // ── Widen_*: transition offset and sub-machine onExit ────────────────────────────────────
         // Each seeds the construct on a real controller, decodes, recompiles, and reads the value back off
         // the recompiled object.
-        // `yaml` is the decode of the HAND-SEEDED controller — the vendor-shaped input, and where to assert the
-        // construct reached the schema at all. Fixpoint is asserted between the first and second COMPILED
-        // generations, not against `yaml`: a hand-built controller is free to differ from what the compiler
-        // emits (it may carry no default at all, which the compiler always writes), and the Fixpoint_* arm's
-        // contract is defined from compiled input for that reason. The returned controller is generation 1.
+        // `yaml` is the decode of the HAND-SEEDED controller, where to assert the construct reached the schema
+        // at all. Fixpoint is asserted between the first and second COMPILED generations, not against `yaml`: a
+        // hand-built controller may carry no default at all where the compiler always writes one. The returned
+        // controller is generation 1.
         private AnimatorController SeedAndRoundTrip(string tag, System.Action<AnimatorController> seed, out string yaml)
         {
             string name = "Widen_" + tag;
@@ -179,8 +169,8 @@ namespace Ryan6Vrc.AvatarTools.Tests
                 "the recompiled transition carries the offset, not Unity's 0 — a reset would still fixpoint");
         }
 
-        // The pose-picker shape the widen exists for: one clip, speed 0, two states told apart ONLY by their
-        // incoming offset. Zeroing it collapses both onto frame 0, so the two offsets must stay distinct.
+        // The pose-picker shape: one clip, speed 0, two states told apart ONLY by their incoming offset. Zeroing
+        // it collapses both onto frame 0, so the two offsets must stay distinct.
         [Test]
         public void Widen_TransitionOffset_keeps_two_pose_picker_edges_distinct()
         {
@@ -214,9 +204,9 @@ namespace Ryan6Vrc.AvatarTools.Tests
                 sub.AddState("Inner");
                 var dst = root.AddState("Dst");
                 // AddStateMachineTransition, not AddStateMachineExitTransition + destinationState: the latter
-                // leaves isExit set, so the object claims both a destination and an exit, and the decoder
-                // (isExit first) reads it as a plain exit. That is a contradictory object no Inspector can
-                // author — the two real shapes are a targeted edge (here) and an exit edge (next test).
+                // leaves isExit set, so the object claims both a destination and an exit, which the decoder
+                // refuses as contradictory. The two real shapes are a targeted edge (here) and an exit edge
+                // (next test).
                 var t = root.AddStateMachineTransition(sub, dst);
                 t.AddCondition(AnimatorConditionMode.If, 0, "g");
             }, out string yaml);
@@ -249,16 +239,6 @@ namespace Ryan6Vrc.AvatarTools.Tests
             Assert.IsTrue(root2.GetStateMachineTransitions(sub2)[0].isExit);
         }
 
-        // A repeated driver write is refused for EVERY change type — no Set/Add asymmetry and no widen. The
-        // rationale lives at the call site (ControllerDecompile.DetectDriverOrderLoss): the schema CAN
-        // represent such a driver, so the refusal is about not NORMALIZING someone else's controller, not
-        // about representability.
-        //
-        // The counterexample that killed the tolerance, kept as a fixture because it is why the refusal is
-        // unconditional. Every Copy sits in ONE bucket, so a read-after-write between two writes to the same
-        // parameter can never trip the interleave check — and the name-keyed bucket hoists the second write
-        // ahead of the read (a Dictionary overwrite keeps the original insertion slot), so C would come back
-        // holding D's value instead of B's. Single-change-type, so nothing about the list looks disordered.
         [Test]
         public void Repeated_driver_Copy_refuses_though_a_single_bucket_never_interleaves()
         {
@@ -277,13 +257,12 @@ namespace Ryan6Vrc.AvatarTools.Tests
 
         // NOTE: "unsupported SMB type" is NOT witnessable here. AddStateMachineBehaviour<T> needs T's MonoScript
         // in a runtime-valid assembly; a StateMachineBehaviour declared in this Editor-only test asmdef is
-        // rejected ("Can't find monoscript") and no-ops, so the seed would decode clean. Same category as the
-        // (also excluded) "unsupported motion type" — see the round-trip stress task notes.
+        // rejected ("Can't find monoscript") and no-ops, so the seed would decode clean.
 
         // A condition param whose TRAILING space collides with the single-space separator is unrepresentable
-        // in condition position — the decompile self-check renders + re-splits it and refuses (named + located)
-        // rather than emit YAML its own recompile would reject. A TRAILING space is the only unrepresentable
-        // case; interior-whitespace and flow-delimiter params are faithful (Faithful_* below).
+        // in condition position: the decompile self-check renders and re-splits it, and refuses rather than emit
+        // YAML its own recompile would reject. Interior-whitespace and flow-delimiter params are faithful
+        // (Faithful_* below).
         [Test] public void Refusal_ConditionParamTrailingSpace() =>
             AssertRefuses("trailingspaceparam", rc =>
             {
@@ -293,20 +272,15 @@ namespace Ryan6Vrc.AvatarTools.Tests
                 a.AddTransition(b).AddCondition(AnimatorConditionMode.If, 0, "Fan ");
             }, "does not survive");
 
-        // Funnel line-break guard: a literal newline in ANY emitted string field tears the line-based YAML, so
-        // the serializer throws and the door surfaces a named FAIL. ONE site witnesses it, because
-        // AnimatorSchemaEmit's block-key writer is literally `Key(s) => ScalarStr(s)` — a state name, a param
-        // name and a behaviour string field all reach the same CheckNoLineBreak, so a second site re-walks the
-        // identical call.
+        // A literal newline in ANY emitted string field tears the line-based YAML, so the serializer throws and
+        // the door surfaces a named FAIL. One site is enough: a state name, a param name and a behaviour string
+        // field all reach the same AnimatorSchemaEmit.CheckNoLineBreak.
         [Test] public void Funnel_LineBreakInParamName_Fails() =>
             AssertRefuses("lbparam", rc =>
                 rc.AddParameter(new AnimatorControllerParameter { name = "Bad\nName", type = AnimatorControllerParameterType.Bool }),
                 "line break");
 
-        // ── Faithful_*: condition params that were once refused ──────────────────────────────────────
-        // A condition parameter carrying spaces or a flow delimiter is FAITHFUL — no rename, no refusal: it
-        // decompiles cleanly and the emitted condition reaches a textual fixpoint (the comma param emits as
-        // ONE quoted scalar).
+        // ── Faithful_*: condition params with spaces or a flow delimiter, no rename and no refusal ──
         private void AssertConditionParamRoundtrips(string tag, string paramName, bool quotedInYaml)
         {
             string ctrlName = "CondRT_" + tag + "_Fx";
@@ -339,8 +313,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
 
         // ── faceTrackingSets (com.vrchat.avatars >= 3.10.6) ──────────────────────────────────────
         // The Fixpoint_* contract through the real doors, for the one behaviour kind the TestCase list above cannot
-        // carry: below 3.10.6 the component does not exist and this is a same-named twin that skips. The value
-        // assertion reads the recompiled object, because a field reset to its default would still fixpoint.
+        // carry: below 3.10.6 the component does not exist and this is a same-named twin that skips.
 #if VRC_FT_SETS_PRESENT
         [Test]
         public void Fixpoint_FaceTrackingSets_Four_Entry_Forms()
@@ -351,7 +324,7 @@ namespace Ryan6Vrc.AvatarTools.Tests
             Assert.AreEqual(yamlA, FixpointOracle.Decode(c1), "DecompileController -> CompileController -> DecompileController fixpoint");
             StringAssert.Contains("=> PASS", CheckAnimator.Run(c1, "explicit", null, null, null));
             // ReportController is the independent reader; compare only its rendering of this behaviour, the one
-            // block this test owns (the rest of the digest is the other fixpoint suites').
+            // block this test owns.
             string FtLines(AnimatorController c) => string.Join("\n", ControllerGraphDigest.Of(c).Split('\n')
                 .Where(l => l.TrimStart().StartsWith("- FaceTrackingBlendshapesSet") || l.TrimStart().StartsWith("- set=")));
             string ft0 = FtLines(c0);

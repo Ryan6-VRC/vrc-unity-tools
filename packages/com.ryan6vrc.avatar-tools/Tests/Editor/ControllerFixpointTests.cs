@@ -7,68 +7,40 @@ using Ryan6Vrc.AvatarTools.Editor;
 using UnityEngine;
 using VRC.SDK3.Avatars.ScriptableObjects;
 
-// Direct coverage of ControllerFixpoint's comparison logic — the vrc-patterns gate's mechanism, which had
-// none. Everything here is constructed in-process: menus via CreateInstance (no asset, no import), entry
-// shapes as real directories under the OS temp dir. Nothing boots the gate.
+// Direct coverage of ControllerFixpoint's comparison logic, the vrc-patterns gate's mechanism. Fixtures are
+// in-process and import nothing: menus and params via CreateInstance, entry shapes as real directories
+// under the OS temp dir. Nothing boots the gate.
 //
-// WHAT THIS FILE DOES NOT COVER, stated because a suite that looks uniform is read as uniform:
-//
-// RunGate's own composition is only partly covered. Which directories it gates and what it calls them are
-// pinned (EnumerateEntries, EntryLabel) alongside the exit expression (GateExit), but the wiring that FEEDS
-// that expression — `entryFailed = true` at each of its three sites, and the failedEntries/prefabFailed
-// counters — stays inside RunGate, which ends in EditorApplication.Exit and so has no unit door short of
-// lifting the loop bodies too. That was declined as more surgery than the coverage is worth, not judged
-// impossible. The extractions moved the *computing* half out and left that *failing* half behind, so
-// deleting any one `entryFailed = true` still logs FAIL and exits 0 with this whole suite green.
-//
-// What covers it instead is an end-to-end gate run against a scratch copy of vrc-patterns with injected
-// drift, recorded in the PR that made each change. Do not read a green run here as "the gate fails when it
-// should". Two rounds exist, and the second is not a re-run of the first:
-//   - the PR that added this file: baseline exit 0; a renamed state, a deleted built menu, and an unclaimed
-//     built controller each exit 1 with a named FAIL line;
-//   - the PR that made entry enumeration recursive: three nested entries perturbed IN ONE RUN, expecting
-//     19/22 rather than three separate 21/22s — because the arithmetic recursion newly exercises is that a
-//     CHILD entry's failure increments failedEntries by one and does NOT fail its parent, and that a
-//     parent+child pair is neither collapsed nor double-counted. Three isolated runs prove none of that.
+// NOT COVERED: the wiring that feeds GateExit. `entryFailed = true` at each of its sites and the
+// failedEntries/prefabFailed counters stay inside RunGate, which ends in EditorApplication.Exit and has no
+// unit door, so deleting any one `entryFailed = true` still logs FAIL and exits 0 with this suite green. Do
+// not read a green run here as "the gate fails when it should"; only an end-to-end gate run against a
+// scratch copy of vrc-patterns with injected drift shows that. Perturb several nested entries in one such
+// run: a child's failure must add one to failedEntries and must not fail its parent.
 //
 // Check(), CompileToTemp, ImportCommittedAsset, Decode, and CheckPrefabIntegrity are boundary-bound
-// (AssetDatabase, a real compile) and stay out. Decode's fixpoint property is owned next door by
-// FixpointOracle + FixpointAcceptanceTests + RoundtripStressTests, deliberately not re-litigated here.
+// (AssetDatabase, a real compile) and stay out. Decode's fixpoint property is owned by FixpointOracle,
+// FixpointAcceptanceTests and RoundtripStressTests.
 //
-// FIXTURE VENUE: the temp dir, and nothing else. Every helper covered here (ParseControllerName,
-// IsGuidConsumer, the orphan trio, the diff pair) touches no AssetDatabase, so an imported seed would buy
-// nothing and cost an import per case. There is no asset fixture at all — the icon leg that needed one is
-// no longer covered, for the reason the admission rule below gives.
+// ADMISSION RULE: a case earns its place iff breaking the line it pins leaves the gate green or
+// unattributable, AND no other case here fails on that same edit. Three categories are deliberately absent:
+//   - MenuDiff's `style`, `labels` and `icon` legs: the schema cannot author the first two and the gate
+//     cannot see an icon (animator-schema.md §menu).
+//   - Known divergences and gaps, which fail only when someone FIXES the thing; they live in
+//     ControllerFixpoint.cs beside the code they describe.
+//   - Null-coalescing legs for a hand-edited asset: built/ is generated and nobody hand-maintains it.
 //
-// Menus are DESTROYED in TearDown — see the _made field for why that is load-bearing rather than tidiness.
-//
-// ADMISSION RULE, and it is what sets this file's size: a case earns its place iff breaking the line it
-// pins leaves the gate green or unattributable, AND no other case here fails on that same edit. Three
-// categories sit outside it and are deliberately absent, so their absence is not read as an oversight.
-// Three MenuDiff legs cannot differ AT THE GATE, and are compared but not pinned — for two distinct
-// reasons, so do not collapse them. The schema cannot author `style` or `labels` at all (animator-schema.md
-// §menu), so the emitter writes neither side. `icon` IS authorable: it is unpinnable for a different
-// reason — a library entry spells it document-relative and the gate host loads no entry's assets/, so both
-// sides resolve to "" ("the gate cannot see an icon", same doc). Reaching that leg cost this suite's only
-// imported-asset fixture, to pin a comparison the gate itself cannot exercise. Known divergences and known
-// gaps are design records rather than guards — they fail only when someone FIXES the thing — so they live
-// in ControllerFixpoint.cs beside the code they describe. And null-coalescing legs for a hand-edited
-// asset model a shape the class header rules out: built/ is generated and nobody hand-maintains it.
-//
-// ASSERTIONS ARE EXACT-STRING on every case that carries an offender address. MenuDiff's whole output is an
-// address plus a reason; a Does.Contain assertion would let the address construction rot untouched.
+// Cases that check a MenuDiff, ParamsDiff or ForeignProjectPathLines address assert the exact string: a
+// Does.Contain assertion would let the address construction rot untouched.
 public class ControllerFixpointTests
 {
     // ── Fixture plumbing ────────────────────────────────────────────────────────────────────────────
 
     string _tmp;
 
-    // Every menu built by a case is tracked and destroyed here. This is LOAD-BEARING, not hygiene: an earlier
-    // revision let the CreateInstance'd VRCExpressionsMenu objects leak, and the ~50 survivors broke 48
-    // UNRELATED tests in this assembly — ControllerEmit's AddStateMachineBehaviour started returning null, so
-    // controller-emit and decompile suites failed with NullReferenceExceptions pointing at production code
-    // this change never touched. Measured: leak → 551/600; destroy → 600/600, with nothing else altered.
-    // If you add a case that creates a ScriptableObject, register it.
+    // Every ScriptableObject a case creates must be registered here for TearDown to destroy. A leaked SDK
+    // ScriptableObject makes AddStateMachineBehaviour return null and fails unrelated suites in this assembly
+    // with NullReferenceExceptions (see EmitResult.DestroyUnpersisted).
     readonly List<UnityEngine.Object> _made = new List<UnityEngine.Object>();
 
     [SetUp]
@@ -78,10 +50,6 @@ public class ControllerFixpointTests
         Directory.CreateDirectory(_tmp);
     }
 
-    // The destroy loop is in a finally because the recursive delete above it CAN throw — a transient lock or
-    // AV scan on Windows raises IOException/UnauthorizedAccessException. Ordered the other way, one flaky
-    // temp delete would skip the destroy and leak the whole case's menus, reproducing the 48-failure cascade
-    // described on _made. A bad delete must cost this one test, not the suites downstream of it.
     [TearDown]
     public void TearDown()
     {
@@ -97,8 +65,6 @@ public class ControllerFixpointTests
         }
     }
 
-    // An entry dir under the temp venue. Files are written, never imported — these helpers read the
-    // filesystem directly, so an AssetDatabase round trip would only slow the case down.
     string Dir(params string[] segments)
     {
         var full = Path.Combine(new[] { _tmp }.Concat(segments).ToArray());
@@ -129,9 +95,6 @@ public class ControllerFixpointTests
         return m;
     }
 
-    // Every field the caller does not set stays at its SDK default, so a case's diff is exactly the field it
-    // varied. `value` defaults to 1f, not 0f — measured by SdkDefaults_AreWhatTheFixturesAssume below rather
-    // than asserted from the SDK's source, which is not on disk here.
     static VRCExpressionsMenu.Control Ctl(
         string name,
         VRCExpressionsMenu.Control.ControlType type = VRCExpressionsMenu.Control.ControlType.Toggle,
@@ -145,8 +108,6 @@ public class ControllerFixpointTests
             value = value,
         };
 
-    // Registered in _made for the same reason menus are — a leaked ScriptableObject in this assembly is what
-    // broke 48 unrelated tests, and a VRCExpressionParameters leaks exactly as readily as a menu.
     VRCExpressionParameters Params(params VRCExpressionParameters.Parameter[] ps)
     {
         var p = ScriptableObject.CreateInstance<VRCExpressionParameters>();
@@ -155,8 +116,6 @@ public class ControllerFixpointTests
         return p;
     }
 
-    // Every field the caller does not set stays at its SDK default, so a case's diff is exactly the field it
-    // varied — the same contract Ctl above holds to.
     static VRCExpressionParameters.Parameter Prm(
         string name,
         VRCExpressionParameters.ValueType valueType = VRCExpressionParameters.ValueType.Bool,
@@ -199,8 +158,6 @@ public class ControllerFixpointTests
 
     // ── MenuDiff: the per-control legs, and the address transition ──────────────────────────────────
 
-    // The name leg is addressed POSITIONALLY (menu[i]) because a name mismatch is what makes the name
-    // useless as an address; every leg after it uses the name. Pinning both halves of that switch.
     [Test]
     public void MenuDiff_ControlNameDiffers_AddressedByIndexNotName()
     {
@@ -233,8 +190,6 @@ public class ControllerFixpointTests
         Assert.AreEqual("menu 'Hat': value 1 vs 2", ControllerFixpoint.MenuDiff(a, b, "menu"));
     }
 
-    // The loop bound and the index-in-address together: three controls, the only difference in the LAST.
-    // A single-control fixture cannot distinguish `i < ac.Count` from `i < ac.Count - 1`.
     [Test]
     public void MenuDiff_LastControlIsCompared()
     {
@@ -245,9 +200,8 @@ public class ControllerFixpointTests
 
     // ── MenuDiff: subParameters ─────────────────────────────────────────────────────────────────────
     //
-    // Covered where `labels`, `style` and `icon` are not, and the difference is authorability: a radial's
-    // knob rides subParameters[0] (ControllerEmit), so this array is a function of the yaml and can drift.
-    // The other three the emitter never writes — see MenuDiff's own header for why they are compared anyway.
+    // Covered where `labels`, `style` and `icon` are not: a radial's knob rides subParameters[0]
+    // (ControllerEmit), so this array is a function of the yaml and can drift.
 
     [Test]
     public void MenuDiff_SubParameterCountDiffers()
@@ -285,9 +239,6 @@ public class ControllerFixpointTests
             ControllerFixpoint.MenuDiff(a, b, "menu"));
     }
 
-    // The recursion's address is the parent CONTROL ("menu 'More'"), not the parent PAGE ("menu") — the
-    // difference between passing `w` and passing `where` down, and the whole point of addressing a nested
-    // offender. Asserted as a literal full string at two levels deep.
     [Test]
     public void MenuDiff_NestedDiff_AddressedByParentControlChain()
     {
@@ -305,9 +256,6 @@ public class ControllerFixpointTests
     }
 
     // ── MenuPresence: whether MenuDiff is called at all ────────────────────────────────────────────
-    //
-    // MenuDiff at full branch coverage proves the comparator correct and says nothing about whether the
-    // caller invokes it. These four cases are that decision.
 
     [Test]
     public void MenuPresence_BothPresent_Compares()
@@ -325,13 +273,9 @@ public class ControllerFixpointTests
         Assert.IsNull(msg);
     }
 
-    // The two asymmetric cases carry DIFFERENT remediations — one says delete or restore, the other says
-    // regenerate — so the message is asserted, not just the verdict: told the wrong one, an author does the
-    // wrong thing. The expected strings are duplicated from the implementation deliberately rather than
-    // routed through a shared constant; a constant would still catch a mis-wired branch but would make a
-    // REWRITE of either message invisible, and the wording is the part that instructs a human. This file is
-    // the declared review invariant for that pair (tool-design.md §Duplication: a managed echo names its
-    // canon, which is MenuPresence).
+    // The two asymmetric cases carry different remediations, so the message is asserted as well as the verdict.
+    // The expected strings are duplicated from MenuPresence, their canon, as a managed echo (tool-design.md
+    // §Duplication): a shared constant would make a rewrite of either message invisible.
     [Test]
     public void MenuPresence_CommittedOnly_FailsTellingAuthorToDeleteOrRestore()
     {
@@ -349,10 +293,6 @@ public class ControllerFixpointTests
     }
 
     // ── GateExit: the only thing gate.ps1 actually reads ───────────────────────────────────────────
-    //
-    // Every [gate] FAIL line this tool logs is decoration if this returns 0 anyway. The failing-half wiring
-    // around it (entryFailed, the two counters) still has no unit door and is covered only by the end-to-end
-    // acceptance run described in the file header — but the expression itself is now pinned.
 
     [Test]
     public void GateExit_NothingFailed_IsZero()
@@ -362,8 +302,6 @@ public class ControllerFixpointTests
     public void GateExit_AnEntryFailed_IsOne()
         => Assert.AreEqual(1, ControllerFixpoint.GateExit(1, 0));
 
-    // The prefab-integrity pass is the only one guarding hand-authored content, so its failures must reach
-    // the exit code independently of the document passes — an && flipped to || would discard exactly this.
     [Test]
     public void GateExit_OnlyPrefabIntegrityFailed_IsOne()
         => Assert.AreEqual(1, ControllerFixpoint.GateExit(0, 1));
@@ -382,7 +320,6 @@ public class ControllerFixpointTests
     public void ModelImporterOffense_ReadableWithLegacy_Passes()
         => Assert.IsNull(ControllerFixpoint.ModelImporterOffense(ModelMeta("1", "1", "1")));
 
-    // Normals None (2) is the other setting the panel accepts; the legacy flag is irrelevant there.
     [Test]
     public void ModelImporterOffense_NormalsNoneWithoutLegacy_Passes()
         => Assert.IsNull(ControllerFixpoint.ModelImporterOffense(ModelMeta("1", "2", "0")));
@@ -392,7 +329,6 @@ public class ControllerFixpointTests
         => Assert.AreEqual("Read/Write disabled (isReadable: 0); blendshape normals = Calculate without legacy",
             ControllerFixpoint.ModelImporterOffense(ModelMeta("0", "1", "0")));
 
-    // An unreadable setting cannot be shown to pass, so a stripped field fails rather than defaulting clean.
     [Test]
     public void ModelImporterOffense_FieldAbsent_Fails()
         => Assert.AreEqual("isReadable absent",
@@ -403,16 +339,9 @@ public class ControllerFixpointTests
         => Assert.IsNull(ControllerFixpoint.ModelImporterOffense(new[] { "fileFormatVersion: 2", "TextureImporter:", "  isReadable: 0" }));
 
     // ── ForeignProjectPathLines: the committed-prefab provenance predicate ──────────────────────────
-    //
-    // Pure text in, offender handles out — no AssetDatabase, no live object, so the whole predicate is
-    // unit-reachable even though its caller (CheckPrefabIntegrity) is boundary-bound and stays out of this
-    // file. What is NOT covered here is the wiring: that CheckPrefabIntegrity calls this and folds its count
-    // into offenderCount sits behind that same boundary, exactly like the missing-script and anchor-seam
-    // checks beside it.
 
     // The leak shape this exists for: a cached `<guid>|<path>` reference back-filled with the inspecting
-    // project's own layout. Exact-string on the handle — the line number and the echoed text ARE the fix
-    // instruction's address, and a Does.Contain assertion would let either rot.
+    // project's own layout.
     [Test]
     public void ForeignProjectPathLines_BackFilledProjectPath_IsReportedWithItsLine()
         => CollectionAssert.AreEqual(
@@ -420,17 +349,14 @@ public class ControllerFixpointTests
             ControllerFixpoint.ForeignProjectPathLines(
                 "  m_Name: Thing\n  id: 8f0a|Assets/Somewhere/Thing.fbx\n  m_Enabled: 1\n"));
 
-    // Line numbers are 1-based (an editor's gutter) and every hit is reported, not just the first — six
-    // such lines in one prefab is the case that motivated the check.
     [Test]
     public void ForeignProjectPathLines_EveryHitIsReported_OneBasedLineNumbers()
         => CollectionAssert.AreEqual(
             new[] { "line 1: a: Assets/One", "line 3: c: Assets/Three" },
             ControllerFixpoint.ForeignProjectPathLines("a: Assets/One\nb: clean\nc: Assets/Three"));
 
-    // The case the test above LOOKS like it covers and does not: a word ending in "Assets" followed by
-    // a slash. `Assets/` must start a path segment, or a project's own MyAssets/ folder is a hard FAIL
-    // carrying a diagnostic about a VRCFury back-fill that never happened.
+    // `Assets/` must start a path segment, or a project's own MyAssets/ folder is a hard FAIL carrying a
+    // diagnostic about a VRCFury back-fill that never happened.
     [Test]
     public void ForeignProjectPathLines_WordEndingInAssetsWithSlash_DoesNotFire()
     {
@@ -438,7 +364,6 @@ public class ControllerFixpointTests
         Assert.IsEmpty(ControllerFixpoint.ForeignProjectPathLines("path: MyProjectAssets/Sub/x.mat"));
     }
 
-    // …while a real segment boundary still fires, whatever precedes it.
     [Test]
     public void ForeignProjectPathLines_AssetsAtSegmentBoundary_Fires()
     {
@@ -448,8 +373,8 @@ public class ControllerFixpointTests
 
     // ── MenuBeside: the re-derived filename convention ─────────────────────────────────────────────
     //
-    // CompileController builds the same path independently (emitDir + "/" + name + "_Menu.asset"). These
-    // cases are what keeps the two copies in step; if the compiler's formula moves, one of them fails.
+    // CompileController builds this path independently. These cases pin this copy against literals and
+    // MenuEmitTests pins the compiler's, so drift in either goes red.
 
     [Test]
     public void MenuBeside_DerivesMenuAssetBesideController()
@@ -475,15 +400,11 @@ public class ControllerFixpointTests
 
     // ── EnumerateEntries / EntryLabel: which directories the gate gates, and what it calls them ────
     //
-    // DELIBERATELY NOT COVERED HERE: that entries are found at depth 1, 2 and 3, and the ordinal sort. The
-    // end-to-end gate run over vrc-patterns names all 22 entries by root-relative path in its log, which is
-    // that assertion against the real corpus rather than a fixture imitating it. What the corpus cannot
-    // exercise is the two prunes (nothing in the library ships a controller.yaml under a reserved or dot
-    // directory) and the leaf-name collision, so those are the cases here.
+    // Deep discovery and the ordinal sort are left to the end-to-end gate run over vrc-patterns, whose log
+    // names every entry by root-relative path.
 
-    // Checked at EVERY segment, not the leaf: this fixture's candidate entry is .git/refs/x, and no segment
-    // below .git starts with a dot. A leaf-name filter over SearchOption.AllDirectories therefore finds it
-    // and walks the whole of .git, while looking equivalent to this.
+    // The candidate entry is .git/refs/x because no segment below .git starts with a dot, so a leaf-name
+    // filter over SearchOption.AllDirectories finds it where a check at every segment does not.
     [Test]
     public void EnumerateEntries_DotDirectoryAndItsDescendants_ArePruned()
     {
@@ -491,8 +412,6 @@ public class ControllerFixpointTests
         Assert.IsEmpty(ControllerFixpoint.EnumerateEntries(_tmp));
     }
 
-    // built/ and assets/ are reserved inside an entry, so a controller.yaml under either is content — a
-    // vendor sample, a stashed document — not an entry. Gating one invents a phantom Pattern.
     [Test]
     public void EnumerateEntries_ControllerYamlUnderReservedDir_IsNotAnEntry()
     {
@@ -504,16 +423,9 @@ public class ControllerFixpointTests
             "only the entry itself — a controller.yaml under built/ or assets/ is content");
     }
 
-    // The reserved-name compare is OrdinalIgnoreCase, and this is the case that pins it. IT NEEDS ITS OWN
-    // PARENT: NTFS is case-insensitive, so creating "assets" and then "Assets" beside it returns the FIRST
-    // directory rather than making a second — a mis-cased fixture added to the test above is silently the
-    // lowercase one, and the assertion passes against an ordinal implementation. Measured, not reasoned:
-    // Directory.CreateDirectory("e/assets") then ("e/Assets") leaves e holding exactly { "assets" }, while
-    // ("f/Assets") alone leaves f holding literally { "Assets" }.
-    //
-    // What it defends, on Windows specifically: IsGuidConsumer probes with Directory.Exists, which is
-    // case-insensitive there, so an ordinal compare here would let this directory read as reserved for tier
-    // derivation while this walk descended into it and gated a phantom Pattern inside it.
+    // This case needs its own parent: NTFS is case-insensitive, so creating "Assets" beside an existing
+    // "assets" returns the first directory, and a mis-cased fixture added to the test above is silently the
+    // lowercase one and passes against an ordinal compare.
     [Test]
     public void EnumerateEntries_MisCasedReservedDir_IsStillReserved()
     {
@@ -524,8 +436,6 @@ public class ControllerFixpointTests
             "a mis-cased Assets/ is the same directory to IsGuidConsumer's probe, so this walk must agree");
     }
 
-    // The shape the whole recursion exists for (object-sync/ holds object-sync/y/). A walk that stopped
-    // descending once it found an entry passes every other case in this section and still misses it.
     [Test]
     public void EnumerateEntries_EntryNestedInsideAnEntry_YieldsBoth()
     {
@@ -535,10 +445,6 @@ public class ControllerFixpointTests
             ControllerFixpoint.EnumerateEntries(_tmp).ToArray());
     }
 
-    // THE INVARIANT THE OTHER TWO DO NOT COMPOSE, and the reason this helper exists at all. Both cases
-    // above pass against an EntryLabel that fell back to Path.GetFileName more eagerly — and that
-    // implementation collapses vrc-patterns' two object-sync entries onto one address, in a gate whose
-    // failure message is its product.
     [Test]
     public void EntryLabel_TwoEntriesSharingALeafName_GetDistinctLabels()
     {
@@ -586,13 +492,8 @@ public class ControllerFixpointTests
         Assert.IsFalse(ControllerFixpoint.IsGuidConsumer(_tmp));
     }
 
-    // The PREFAB half of the same top-level-only read, and it is load-bearing in a way the assets/ case below
-    // is not: EnumerateEntries' recursion rests on a parent never reading as a GUID-consumer because of a
-    // CHILD entry's prefab, and this is the only case that pins it. Widen the *.prefab glob at the head of
-    // IsGuidConsumer's || to AllDirectories and a nested Module's prefab promotes its parent Pattern, which
-    // then fails for a missing built controller it was never meant to ship — while the case below, and every
-    // other test here, stays green. The natural way to close the gap below is to widen BOTH globs in that one
-    // expression, which is exactly the edit this forbids.
+    // Only this case pins the top-level read: widen the *.prefab glob to AllDirectories and a nested Module's
+    // prefab promotes its parent Pattern, which then fails for a built controller it was never meant to ship.
     [Test]
     public void IsGuidConsumer_PrefabOneLevelDown_IsNotSeen()
     {
@@ -603,13 +504,9 @@ public class ControllerFixpointTests
 
     // ── Orphan detection ───────────────────────────────────────────────────────────────────────────
 
-    // Each helper builds its OWN HashSet with StringComparer.Ordinal, so the choice is made three times and
-    // nothing else here distinguishes it from OrdinalIgnoreCase — every other fixture claims either the
-    // exact name or a wholly different one, and stays green either way. One case covers all three rather
-    // than three near-identical ones: what needs pinning is the comparer, and it is the same decision in
-    // each. Load-bearing on Windows specifically, where the filesystem WILL hand back a built artifact whose
-    // name differs from the claim only by case — an ignore-case comparer then reads it as claimed and the
-    // orphan pass, the only net for a stale artifact, goes quiet.
+    // Every other fixture claims either the exact name or a wholly different one, so this case alone pins the
+    // Ordinal comparer each helper builds. On Windows a built artifact can differ from its claim only by case;
+    // an ignore-case comparer reads it as claimed and the orphan pass goes quiet.
     [Test]
     public void OrphanClaimsAreOrdinal_AcrossAllThreeHelpers()
     {
@@ -645,8 +542,6 @@ public class ControllerFixpointTests
         Assert.IsEmpty(ControllerFixpoint.OrphanMenus(built, new[] { "FX" }).ToList());
     }
 
-    // The reported name is the ASSET's stem (FX_Menu), while the claim is checked against the controller
-    // name (FX) — the caller appends ".asset" to what comes back.
     [Test]
     public void OrphanMenus_UnclaimedMenu_ReportsAssetStemNotControllerName()
     {
@@ -666,9 +561,9 @@ public class ControllerFixpointTests
         => Assert.IsNull(ControllerFixpoint.ParamsDiff(
             Params(Prm("A"), Prm("B")), Params(Prm("A"), Prm("B")), "params"));
 
-    // THE CASE THIS WHOLE PASS EXISTS FOR. A `scratch:` flip or a reserved-name change drops (or adds) exactly
-    // one entry, so it always lands on the count leg and never reaches the per-index loop. The count leg must
-    // therefore NAME the parameter — a bare "104 vs 103" is the byte-compare diagnostic this pass rejects.
+    // A `scratch:` flip or a reserved-name change drops or adds an entry, so it lands on the count leg and
+    // never reaches the per-index loop. The count leg must therefore name the parameter: a bare "104 vs 103"
+    // names no offender.
     [Test]
     public void ParamsDiff_DroppedParam_CountLegNamesTheOffender()
         => Assert.AreEqual(
@@ -683,10 +578,8 @@ public class ControllerFixpointTests
             ControllerFixpoint.ParamsDiff(
                 Params(Prm("Toggle")), Params(Prm("Toggle"), Prm("Extra")), "params"));
 
-    // Equal length, differing names: addressed by INDEX, because no name is agreed yet. Same transition
-    // MenuDiff makes, and the reason a reorder reports the way the next case says it does.
-    // Lengths differ but the name SETS match, so both difference lists come back empty. Without its own leg
-    // this emits "dropped (none), added (none)" and names nothing — the diagnostic this whole pass rejects.
+    // Lengths differ but the name sets match, so both difference lists come back empty. Without its own leg
+    // this emits "dropped (none), added (none)".
     [Test]
     public void ParamsDiff_DuplicatedName_SaysSoRatherThanNamingNothing()
         => Assert.AreEqual(
@@ -705,8 +598,6 @@ public class ControllerFixpointTests
             ControllerFixpoint.ParamsDiff(
                 Params(Prm("Hat")), Params(Prm("Hat", valueType: VRCExpressionParameters.ValueType.Int)), "params"));
 
-    // networkSynced earns its own case where the other scalars share one: this is the field that costs a sync
-    // bit on the built avatar, so a silent flip here is the regression with consequences beyond legibility.
     [Test]
     public void ParamsDiff_NetworkSyncedDiffers_AddressedByName()
         => Assert.AreEqual("params 'Hat': networkSynced True vs False",
@@ -719,17 +610,12 @@ public class ControllerFixpointTests
             ControllerFixpoint.ParamsDiff(
                 Params(Prm("Hat", saved: true)), Params(Prm("Hat")), "params"));
 
-    // The fourth scalar. It carried no case of its own until now — its only coverage was a NaN record that
-    // pinned this comparison MISFIRING rather than working, so retiring that record would have left the leg
-    // bare. A finite pair is what the emitter actually produces.
     [Test]
     public void ParamsDiff_DefaultValueDiffers_AddressedByName()
         => Assert.AreEqual("params 'Hat': defaultValue 0 vs 1",
             ControllerFixpoint.ParamsDiff(
                 Params(Prm("Hat")), Params(Prm("Hat", defaultValue: 1f)), "params"));
 
-    // The loop bound and the index-in-address together — a single-entry fixture cannot distinguish
-    // `i < ap.Length` from `i < ap.Length - 1`.
     [Test]
     public void ParamsDiff_LastParamIsCompared()
         => Assert.AreEqual("params 'C': networkSynced False vs True",
@@ -737,8 +623,7 @@ public class ControllerFixpointTests
                 Params(Prm("A"), Prm("B"), Prm("C")),
                 Params(Prm("A"), Prm("B"), Prm("C", networkSynced: true)), "params"));
 
-    // ParamsPresence: whether ParamsDiff is called at all. The two Fail legs must be DISTINGUISHABLE, which is
-    // the whole reason the refusal strings live in the helper rather than at the call site.
+    // ParamsPresence: whether ParamsDiff is called at all.
 
     [Test]
     public void ParamsPresence_NeitherSideHasOne_Skips()
@@ -766,9 +651,8 @@ public class ControllerFixpointTests
                         "wrongly emptied the list", msg);
     }
 
-    // Must NOT be a bare "regenerate built/". A document that emitted nothing and now emits something can be
-    // a `scratch:` flipped off or a name leaving the reserved set, where regenerating launders the change —
-    // the same trap the ParamsDiff call site refuses. The two Fail legs stay distinguishable by lead clause.
+    // Must NOT be a bare "regenerate built/". A document that emitted nothing and now emits something can be a
+    // `scratch:` flipped off or a name leaving the reserved set, where regenerating launders the change.
     [Test]
     public void ParamsPresence_FreshOnly_FailsWithTheOtherMessage()
     {
@@ -780,14 +664,12 @@ public class ControllerFixpointTests
                         "commits it as though reviewed", msg);
     }
 
-    // ParamsBeside: the re-derived filename convention. This case is the ONLY thing keeping this copy in step
-    // with CompileController's own formula — see the helper's header for why they are not shared.
+    // ParamsBeside: this case pins this copy of CompileController's filename formula against literals; see the
+    // helper's header for why it is not shared.
 
     [Test]
     public void ParamsBeside_DerivesParamsAssetBesideController()
         => Assert.AreEqual("a/b/FX_Parameters.asset", ControllerFixpoint.ParamsBeside("a/b/FX.controller"));
-
-    // OrphanParams: a committed params asset whose controller no document claims.
 
     [Test]
     public void OrphanParams_ClaimedParams_IsNotAnOrphan()
@@ -808,10 +690,8 @@ public class ControllerFixpointTests
 
     // ── The committed-.meta presence guard ──────────────────────────────────────────────────────────
     //
-    // The importer around this is AssetDatabase-bound and stays out of this suite (see the header). The
-    // CONDITION is pure filesystem, so it gets a door here — otherwise the guard is verified once by a
-    // one-off end-to-end gate run and never again, which is the failure mode this file's header already
-    // records for `entryFailed = true`: delete the line and everything stays green.
+    // The importer around this is AssetDatabase-bound and stays out of this suite; only the condition is pure
+    // filesystem.
 
     [Test]
     public void MissingCommittedMeta_PassesWhenTheMetaIsThere()
@@ -830,9 +710,8 @@ public class ControllerFixpointTests
         Assert.IsNotNull(msg, "a .meta-less import mints a fresh GUID and every structural comparison still "
             + "passes — presence is the only thing that can catch it");
         StringAssert.Contains(asset, msg, "the offender must be named: the gate line is all the reader gets");
-        // The obvious remedy is the wrong one, and saying so is the point of the message — regenerating
-        // built/ mints a new GUID too and turns the gate green on the break. Same shape as the params-diff
-        // message and ForeignProjectPathLines.
+        // The obvious remedy is the wrong one: regenerating built/ mints a new GUID too and turns the gate green
+        // on the break.
         StringAssert.Contains("Do NOT", msg, "the message must refuse the fix that launders the defect");
     }
 

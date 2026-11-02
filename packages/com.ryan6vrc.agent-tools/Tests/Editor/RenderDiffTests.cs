@@ -3,12 +3,9 @@ using NUnit.Framework;
 using UnityEngine;
 using Ryan6Vrc.AgentTools.Editor;
 
-// Pixel-buffer diff helper verified on hand-built small buffers so expected values are obvious.
-// The load-bearing guarantee under test is EXACT rgb compare (no silent tolerance): a 1-LSB delta counts —
-// the band-mask trap this design deliberately avoids.
+// The load-bearing guarantee under test is EXACT rgb compare with no silent tolerance: a 1-LSB delta counts.
 public class RenderDiffTests
 {
-    // Solid fill of a w*h buffer, alpha 255.
     static Color32[] Fill(int w, int h, Color32 c)
     {
         var px = new Color32[w * h];
@@ -55,7 +52,6 @@ public class RenderDiffTests
         int w = 8, h = 8;
         var a = Fill(w, h, Black);
         var b = Fill(w, h, Black);
-        // Block x in [2,4], y in [3,6] => 3 wide, 4 tall = 12 pixels.
         int x0 = 2, y0 = 3, bw = 3, bh = 4;
         for (int y = y0; y < y0 + bh; y++)
             for (int x = x0; x < x0 + bw; x++)
@@ -73,7 +69,6 @@ public class RenderDiffTests
         int w = 4, h = 4;
         var a = Fill(w, h, new Color32(100, 100, 100, 255));
         var b = Fill(w, h, new Color32(100, 100, 100, 255));
-        // Exactly 1 LSB different in the green channel of one pixel.
         b[5] = new Color32(100, 101, 100, 255);
 
         bool identical = RenderDiff.Compare(a, b, w, h, out int changed, out RectInt bbox);

@@ -14,15 +14,11 @@ namespace Ryan6Vrc.AgentTools.Editor
     public static class WriteDynamics
     {
         [Serializable] public class Table { public Scale[] scales = new Scale[0]; public Node[] nodes = new Node[0]; public Move[] moves = new Move[0]; public PhysBoneSet[] physbones = new PhysBoneSet[0]; public ColliderSet[] colliders = new ColliderSet[0]; public ConstraintRow[] constraints = new ConstraintRow[0]; }
-        /// <summary>Multiplies the length fields of every physbone and collider hosted or rooted at or under <c>under</c>
-        /// (<c>.</c> or the root's own name for the root itself) by <c>factor</c>. No default factor: JsonUtility reads an
-        /// omitted one as 0, which is refused with 1.</summary>
+        /// <summary>No default factor: JsonUtility reads an omitted one as 0, which is refused with 1.</summary>
         [Serializable] public class Scale { public string under; public float factor; }
         [Serializable] public class Node { public string parent, name, rotation = ""; public bool physbone; public NodeCollider collider = new NodeCollider(); }
         [Serializable] public class NodeCollider { public string shape = "", position = "0,0,0", rotation = "0,0,0"; public float radius = 0.05f, height = 0.2f; }
         [Serializable] public class Move { public string physbone; public string from; public string[] to = new string[0]; }
-        /// <summary><c>create</c> adds a physbone on the bone <c>physbone</c> names, before the moves run, optionally a copy of the
-        /// physbone <c>copy</c> names less its <c>rootTransform</c> and <c>parameter</c>; <c>remove</c> destroys the one it names.</summary>
         [Serializable] public class PhysBoneSet { public string physbone; public string[] set = new string[0]; public bool create, remove; public string copy = ""; }
         [Serializable] public class ColliderSet { public string collider; public string[] set = new string[0]; }
         [Serializable] public class ConstraintRow { public string target; public string type = "VRCRotationConstraint"; public Source[] sources = new Source[0]; public float globalWeight = 1f; public bool locked = true; public bool remove; }
@@ -43,8 +39,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return _pump == null && s.Contains("=> PENDING") ? s.Replace("=> PENDING", "=> FAIL") + " | torn down before the hosts re-activated (play exit or domain reload); re-check the hosts named above" : s;
         }
 
-        /// <summary>A host deactivated on frame <paramref name="armed"/> re-activates once a later frame has run: a physbone
-        /// takes a live field set only after its host GameObject has been inactive across a frame boundary.</summary>
+        /// <summary>A host deactivated on frame <paramref name="armed"/> re-activates once a later frame has run.</summary>
         internal static bool CycleDue(int armed, int now) => now > armed;
 
         public static string Run(string root, string table, bool whatIf = false)
@@ -87,8 +82,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             finally { if (isPrefab) PrefabUtility.UnloadPrefabContents(go); }
         }
 
-        /// <summary>Resolves and validates every row and returns the writes as one action over objects resolved here,
-        /// so nothing is looked up again once writing starts. Returns the first refusal, or null.</summary>
+        /// <summary>Validates the move, physbone, collider and constraint rows and returns their writes as one action.
+        /// Returns the first refusal, or null.</summary>
         static string Plan(Transform root, Table t, bool play, List<string> log, List<VRCPhysBoneBase> named, List<(string, VRCConstraintBase)> baked, out Action writes)
         {
             string err; writes = null; var steps = new List<Action>();
@@ -196,11 +191,10 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>A live field set lands on the component but reaches the solver only after its host GameObject has been
         /// inactive across a frame boundary; toggling the component or the GameObject within one frame, or the chain's root
-        /// GameObject when the host is a separate holder, leaves the chain on its old fields. A component toggle split across
-        /// frames applied on a bare rig but not on a composed avatar, so it is not the route. Every active host goes inactive
+        /// GameObject when the host is a separate holder, leaves the chain on its old fields. Every active host goes inactive
         /// now and back on the first later frame, off <c>update</c> (never <c>delayCall</c>, which an unfocused editor does not
-        /// pump), and the result lands in <see cref="Status"/>. Everything under a host cycles with it, so a physbone the table
-        /// never named re-initialises too and is counted as collateral.</summary>
+        /// pump). Everything under a host cycles with it, so a physbone the table never named re-initialises too and is
+        /// counted as collateral.</summary>
         static string CycleHosts(Transform root, string handle, string summary, List<VRCPhysBoneBase> named, List<string> log)
         {
             var hosts = named.Select(p => p.gameObject).Distinct().ToList();
@@ -233,13 +227,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             return pending + "\n" + string.Join("\n", log.Take(12)) + (log.Count > 12 ? "\n… " + (log.Count - 12) + " more rows in the log" : "");
         }
 
-        /// <summary>The sentence ParseTable's factor refusals end on, and every Preview or Write summary of a table that
-        /// carries scales.</summary>
         internal const string NotRerunnable = "a scale multiplies what it finds, so re-running the table scales again";
 
         static readonly string[] PhysBoneLengths = { "radius", "endpointPosition" }, ColliderLengths = { "radius", "height", "position" };
 
-        /// <summary>A factor within float noise of 1 changes nothing and is refused with it.</summary>
         internal static bool IsUnitFactor(float f) => Mathf.Abs(f - 1f) < 1e-6f;
 
         /// <summary>A scale row's <c>under</c>: <c>.</c> is the root itself, and so is the root's own name unless it
@@ -257,11 +248,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <summary>How a scale row's path is printed: the root as <c>.</c> with its name, never an empty path.</summary>
         static string Label(Transform root, Transform t) => t == root ? ". (the root '" + root.name + "')" : PathOf(root, t);
 
-        /// <summary>The planning half of the scales, pure over transforms: which row reaches which target. A target is a
-        /// component's host and its effective root (its <c>rootTransform</c>, else the host), and a row reaches it when
-        /// either sits at or under the row's path, the host first, so a holder-hosted physbone is reached through the
-        /// chain it roots. Refuses a path that resolves to nothing, a row that reaches no target, and a target two rows
-        /// reach, which would scale twice. Returns the first refusal, or null with <paramref name="plan"/> holding
+        /// <summary>Which scale row reaches which target, pure over transforms. A row reaches a target when its host or
+        /// its effective root sits at or under the row's path, the host first, so a holder-hosted physbone is reached
+        /// through the chain it roots. Returns the first refusal, or null with <paramref name="plan"/> holding
         /// (row, target index, reached through the root) in row order.</summary>
         internal static string PlanScales(Transform root, Scale[] rows, IList<(Transform host, Transform effRoot)> targets, out List<(int row, int target, bool byRoot)> plan)
         {
@@ -284,11 +273,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return null;
         }
 
-        /// <summary>The first rows to apply, ahead of the nodes, so every later row's value is absolute: each row multiplies
-        /// physbone <c>radius</c> and <c>endpointPosition</c> and collider <c>radius</c>, <c>height</c> and <c>position</c> on
-        /// every component <see cref="PlanScales"/> gives it. Curves, angles and stiffness are ratios and stay. Written
-        /// through SerializedObject into the caller's Undo group, one log line per component in the table's own
-        /// <c>field=value</c> form, before -> after, naming the root it was reached through when that was not its host.</summary>
+        /// <summary>Applied ahead of the nodes, so every later row's value is absolute. Curves, angles and stiffness are
+        /// ratios and stay unscaled.</summary>
         static string ScaleRows(Transform root, Scale[] rows, List<string> log)
         {
             if (rows.Length == 0) return null;
@@ -317,9 +303,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         static string Num(float v) => v.ToString("0.######", CultureInfo.InvariantCulture);
         static string Vec(Vector3 v) => Num(v.x) + "," + Num(v.y) + "," + Num(v.z);
 
-        /// <summary>Creates each absent node (an existing one is left alone): an empty child at the parent's origin,
-        /// world <c>rotation</c> as <c>x,y,z</c> Euler (blank keeps the parent's), with an optional bare physbone and an
-        /// optional collider on itself. Undo-registered, so the caller's group revert removes them.</summary>
+        /// <summary>Creates each absent node as an empty child at the parent's origin, <c>rotation</c> a world <c>x,y,z</c>
+        /// Euler (blank keeps the parent's).</summary>
         static string MakeNodes(Transform root, Node[] nodes, List<string> log, out int made)
         {
             made = 0;
@@ -349,10 +334,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return null;
         }
 
-        /// <summary>Creates each <c>create</c> row's physbone on the bone it names, before the moves resolve, so a move row
-        /// may split it: a bare one, or a copy of the <c>copy</c> physbone less the two fields that name the donor's own
-        /// chain (<c>rootTransform</c>, so it roots at its host; <c>parameter</c>, which one animator name cannot serve
-        /// twice). A bone that already hosts or roots a physbone is refused. Undo-registered like the nodes.</summary>
+        /// <summary>Runs before the moves resolve, so a move row may split what it creates. A copy clears the two fields that
+        /// name the donor's own chain: <c>rootTransform</c>, so it roots at its host, and <c>parameter</c>, which one animator
+        /// name cannot serve twice.</summary>
         static string MakePhysBones(Transform root, PhysBoneSet[] rows, List<string> log)
         {
             var pbType = TypeCache.GetTypesDerivedFrom<VRCPhysBoneBase>().First(x => !x.IsAbstract);
@@ -371,7 +355,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>One copy per destination, on the original's holder when it used one (the vendor's idiom), else on
-        /// the bone. A fan-out drops <c>parameter</c>: one animator name cannot serve several chains.</summary>
+        /// the bone.</summary>
         static void MovePhysBone(VRCPhysBoneBase pb, Transform[] tos, Dictionary<Transform, VRCPhysBoneBase> copies)
         {
             bool onHolder = pb.rootTransform != null && pb.rootTransform != pb.transform;
@@ -410,9 +394,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>The rotation offset each locked row's constraint holds after its write, as an angle: a locked row's Activate
-        /// bakes the gap between target and sources into it, so a large one says the sources sit in a far-off frame.
-        /// <c>RotationOffset</c> where the type has one (rotation, aim, look-at), else the largest per-source
-        /// <c>ParentRotationOffset</c> (parent); a position or scale constraint has none and is skipped.</summary>
+        /// bakes the gap between target and sources into it, so a large one says the sources sit in a far-off frame.</summary>
         static string BakedOffsets(List<(string target, VRCConstraintBase con)> baked, List<string> log)
         {
             var deg = new List<float>();
@@ -432,8 +414,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return deg.Count == 0 ? "" : " | baked |rotationOffset| deg mean=" + deg.Average().ToString("0.00", CultureInfo.InvariantCulture) + " max=" + deg.Max().ToString("0.0", CultureInfo.InvariantCulture) + " over " + deg.Count;
         }
 
-        /// <summary>Writes one <c>field=value</c> onto a SerializedObject (unapplied). Floats, ints, bools, enums by
-        /// name, Vector3 as <c>x,y,z</c>, an object ref as a root-relative path, a ref array as <c>;</c>-separated paths.</summary>
+        /// <summary>Writes one <c>field=value</c> onto a SerializedObject, unapplied. An object ref takes a root-relative
+        /// path, a ref array <c>;</c>-separated paths.</summary>
         internal static string SetProp(Transform root, SerializedObject so, string kv)
         {
             int eq = kv.IndexOf('='); string key = kv.Substring(0, eq).Trim(), val = kv.Substring(eq + 1).Trim();
@@ -472,10 +454,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return "'" + path + "' carries nothing assignable to '" + p.propertyPath + "'";
         }
 
-        /// <summary>A curve value is keys, comma-separated, times strictly increasing. A <c>time:value</c> key is joined
-        /// to its neighbours by straight lines (linear tangents both sides): <c>0:0.47,0.5:0.47,1:1</c>. A
-        /// <c>time:value:inTangent:outTangent</c> key carries its own tangents (<c>0:0:0:0,1:1:2:0</c>), the form
-        /// <see cref="FormatCurve"/> prints for a key whose tangents are not linear. Empty clears the curve (no keys).
+        /// <summary>Parses a field set's curve value, whose form docs/unity-tools.md owns. Empty clears the curve (no keys).
         /// Pure.</summary>
         internal static string ParseCurve(string s, out AnimationCurve curve)
         {
@@ -501,11 +480,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return null;
         }
 
-        /// <summary>A curve in <see cref="ParseCurve"/>'s form, so a read hands a write its exact value: <c>time:value</c>
-        /// where a key's tangents are the ones ParseCurve would give it, <c>time:value:inTangent:outTangent</c> where
-        /// they are not. Weighted tangents and a non-default wrap mode are what the form cannot carry, so a curve
-        /// holding either ends in a bracketed note ParseCurve refuses, rather than reading back as a different curve.
-        /// Pure.</summary>
+        /// <summary>A curve in <see cref="ParseCurve"/>'s form, so a read hands a write its exact value. Weighted tangents and
+        /// a non-default wrap mode are what the form cannot carry, so a curve holding either ends in a bracketed note
+        /// ParseCurve refuses, rather than reading back as a different curve. Pure.</summary>
         internal static string FormatCurve(AnimationCurve c)
         {
             if (c == null || c.length == 0) return "";

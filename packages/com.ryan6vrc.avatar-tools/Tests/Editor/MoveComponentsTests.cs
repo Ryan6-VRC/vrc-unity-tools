@@ -7,9 +7,8 @@ using Ryan6Vrc.AvatarTools.Editor;
 using VRC.Dynamics;
 using VRC.SDK3.Dynamics.PhysBone.Components;
 
-// A resolvable non-VRC Component whose VrcComponentTable.Lookup is null (no row) — the "resolved type, but
-// no table anchor" refusal branch needs one, and every type the SDK ships has a row. TypeCache resolves it
-// by simple name after compile, exactly as a real MA/VRCFury type would.
+// A resolvable Component with no VrcComponentTable row, for the no-anchor refusal. TypeCache resolves it by
+// simple name, as it would a real MA or VRCFury type.
 namespace MoveComponentsTests_Ns
 {
     public class RcNoAnchorProbe : MonoBehaviour { }
@@ -17,18 +16,11 @@ namespace MoveComponentsTests_Ns
 
 public class MoveComponentsTests
 {
-    // ── Type-level no-anchor refusal (the headline new behavior) ────────────────────────────────
-
     [Test]
     public void Run_fails_loud_on_resolvable_type_with_no_table_anchor()
     {
-        // RcNoAnchorProbe resolves (it's a real Component) but has no VRC table row → no anchor →
-        // relocating it would change behavior → categorical FAIL, BEFORE any mutation, naming the type.
-        // This is exactly how Relocate refuses MA/VRCFury/NDMF and Unity built-in constraints.
         var inst = new GameObject("Inst");
         var root = inst.transform;
-        // The refusal's FAIL summary is emitted via Debug.LogError — expected, or the runner flags an
-        // unhandled error log.
         LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
         var summary = MoveComponents.Run(inst, root, new[] { "RcNoAnchorProbe" }, "X");
         StringAssert.Contains("=> FAIL", summary);
@@ -37,15 +29,12 @@ public class MoveComponentsTests
         Object.DestroyImmediate(inst);
     }
 
-    // ── Inbound-ref rewire (whatIf side only: the execute side mutates live objects, the forbidden
-    //    NUnit venue per docs/verify.md — it is verified behaviorally via execute_code instead) ────
-
+    // whatIf side only: the execute side mutates live objects, which docs/verify.md forbids in NUnit.
     [Test]
     public void Run_whatIf_predicts_inbound_ref_rewire_for_referenced_colliders()
     {
-        // The regression this guards: relocation re-creates the component, so a physbone's
-        // colliders[] entry pointing at a relocated collider went null when the original was
-        // destroyed. Execute now rewires such refs; whatIf must predict the same count.
+        // Relocation re-creates the component, so a physbone's colliders[] entry pointing at a relocated
+        // collider needs rewiring; whatIf must predict the count execute rewires.
         var inst = new GameObject("Inst");
         var bone = new GameObject("Bone"); bone.transform.SetParent(inst.transform);
         var col  = bone.AddComponent<VRCPhysBoneCollider>();
@@ -66,10 +55,9 @@ public class MoveComponentsTests
     [Test]
     public void Run_fails_loud_on_unresolved_type_name()
     {
-        // A name that resolves to no Component at all is also a loud FAIL (the other refusal path).
         var inst = new GameObject("Inst");
         var root = inst.transform;
-        LogAssert.Expect(LogType.Error, new Regex("=> FAIL")); // refusal logs its FAIL summary — expected
+        LogAssert.Expect(LogType.Error, new Regex("=> FAIL"));
         var summary = MoveComponents.Run(inst, root, new[] { "NoSuchComponentTypeXyz" }, "X");
         StringAssert.Contains("=> FAIL", summary);
         StringAssert.Contains("NoSuchComponentTypeXyz", summary);

@@ -6,11 +6,8 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 
-// Exercises the extracted ControllerRules.Run door directly on an IN-MEMORY (unsaved) controller — the shape
-// a future compiler hands it, with no CheckAnimator basis resolution and no asset I/O. The saved-asset surface
-// (and the byte-identical Emit rendering) is already characterized end-to-end by CheckAnimatorRefactorTests
-// through the Lint door; this pins only the raw Run contract, including the roots-empty broken-binding skip
-// the compiler relies on.
+// Pins the raw ControllerRules.Run contract on an in-memory, unsaved controller, the shape CompileController hands
+// it, including the roots-empty broken-binding skip. CheckAnimatorTests covers CheckAnimator end to end.
 public class ControllerRulesTests
 {
     private AnimatorController _controller;
@@ -33,7 +30,6 @@ public class ControllerRulesTests
     [Test]
     public void Run_On_InMemory_Controller_Fires_Undeclared_And_Shadow()
     {
-        // Unsaved, in-memory controller (no asset path) — the compiler-door shape.
         _controller = new AnimatorController();
         _controller.AddParameter("Declared", AnimatorControllerParameterType.Bool);
         _controller.AddLayer("Base");
@@ -42,13 +38,11 @@ public class ControllerRulesTests
         var a = sm.AddState("A");
         var b = sm.AddState("B");
 
-        // A transition condition references a parameter that is NOT declared → undeclaredParam.
         var tr = a.AddTransition(b);
         tr.AddCondition(AnimatorConditionMode.If, 0f, "UndeclaredParam");
 
-        // Entry ladder: an unconditional entry followed by a second entry — the second is unreachable.
-        sm.AddEntryTransition(a); // unconditional (no conditions)
-        sm.AddEntryTransition(b); // shadowed by the earlier unconditional entry
+        sm.AddEntryTransition(a);
+        sm.AddEntryTransition(b);
 
         var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: true, pathRewrite: null);
 
@@ -60,9 +54,8 @@ public class ControllerRulesTests
     [Test]
     public void Run_Flags_NonFloat_BlendParameter_As_Error()
     {
-        // The measured trap: a blend tree evaluates only Float parameters — a name-matched Int reads 0
-        // silently and the tree never leaves its zero branch. Declared-Int blend param must FAIL; a
-        // declared-Float one must not; an UNDECLARED one belongs to undeclaredParam, not this rule.
+        // Measured: a blend tree evaluates only Float parameters, so a name-matched Int reads 0 silently and
+        // the tree never leaves its zero branch.
         _controller = new AnimatorController();
         _controller.AddParameter("IntSpeed", AnimatorControllerParameterType.Int);
         _controller.AddParameter("FloatSpeed", AnimatorControllerParameterType.Float);
@@ -144,14 +137,10 @@ public class ControllerRulesTests
     [Test]
     public void Run_Does_Not_Flag_ExitTime_From_Motionless_State()
     {
-        // A motionless state with an exit-time transition is a VALID timer idiom, not a dead transition:
-        // an empty state has a default 1s length and its normalizedTime advances in real time, so the
-        // transition fires on schedule (proven by manual Animator.Update; shipped VRCFury Action-layer timer
-        // states rely on it). The rule must leave it alone — neither error nor advisory.
         _controller = new AnimatorController();
         _controller.AddLayer("Base");
         var sm = _controller.layers[0].stateMachine;
-        var a = sm.AddState("A");   // no motion assigned → motionless, but exit-time still advances
+        var a = sm.AddState("A");
         var b = sm.AddState("B");
 
         var tr = a.AddTransition(b);
@@ -166,12 +155,8 @@ public class ControllerRulesTests
     }
 
     // ----- nonFloatParamCurve -----------------------------------------------------------------------
-    // A parameter curve writes only Float parameters: measured, a clip curve on a Bool or Int leaves the
-    // parameter at its declared default while still BINDING it — which hands the parameter to the animation
-    // system and locks out every other writer (menu, contact, driver, script). See docs/runtime.md.
+    // Ground truth: docs/runtime.md §Animator evaluation.
 
-    /// <summary>A controller whose single state plays a clip carrying one animator-parameter curve on
-    /// <paramref name="param"/>, declared as <paramref name="type"/>.</summary>
     private static AnimatorController WithParamCurve(string param, AnimatorControllerParameterType type)
     {
         var c = new AnimatorController();
@@ -215,8 +200,6 @@ public class ControllerRulesTests
     [Test]
     public void NonFloatParamCurve_Ignores_A_Float_Parameter_Curve()
     {
-        // The legal AAP idiom, and the reason the parameter-curve surface exists at all. If this fires, the
-        // rule is refusing the construct it exists to protect.
         _controller = WithParamCurve("Smoothed", AnimatorControllerParameterType.Float);
 
         var r = ControllerRules.Run(_controller, new List<GameObject>(), brokenBindingIsError: false, pathRewrite: null);
@@ -228,10 +211,8 @@ public class ControllerRulesTests
     [Test]
     public void NonFloatParamCurve_Ignores_Humanoid_Muscle_And_Tdof_Curves()
     {
-        // Muscle and TDOF curves use the SAME path-less Animator binding shape as a parameter curve. The
-        // discriminator is that their property names no declared parameter, so a rig full of them stays
-        // silent with no muscle allowlist. A Bool parameter is declared alongside to prove the rule was
-        // armed and simply found nothing to say.
+        // Muscle and TDOF curves use the same path-less Animator binding shape as a parameter curve; only
+        // their property naming no declared parameter tells them apart. The declared Bool keeps the rule armed.
         _controller = new AnimatorController();
         _controller.AddParameter("Flag", AnimatorControllerParameterType.Bool);
         _controller.AddLayer("Base");
@@ -253,8 +234,6 @@ public class ControllerRulesTests
     [Test]
     public void NonFloatParamCurve_Reports_Each_Parameter_Once()
     {
-        // Two clips writing one offending parameter is a single defect to fix — the first-site-per-parameter
-        // convention Rule 2 already uses.
         _controller = WithParamCurve("Flag", AnimatorControllerParameterType.Bool);
         var second = new AnimationClip { name = "writes_Flag_again" };
         UnityEditor.AnimationUtility.SetEditorCurve(
@@ -269,13 +248,8 @@ public class ControllerRulesTests
     }
 
     // ----- driverOnAnimatedParam ---------------------------------------------------------------------
-    // The animation system owns a clip-bound parameter unconditionally, so a driver op on one is dead in
-    // both directions: a READ yields the parameter's declared default rather than the animated value, and a
-    // WRITE reaches no animator reader. Measured; see docs/runtime.md.
+    // Ground truth: docs/runtime.md §Animator evaluation.
 
-    /// <summary>A controller with a float parameter curve-written by a clip on one state, plus a driver on a
-    /// second state performing <paramref name="opType"/> against <paramref name="driverParam"/> (as the Copy
-    /// SOURCE when <paramref name="asCopySource"/>, else as the destination).</summary>
     private static AnimatorController WithCurveAndDriver(string curveParam, string driverParam,
         VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType opType, bool asCopySource)
     {
@@ -324,8 +298,6 @@ public class ControllerRulesTests
     [Test]
     public void DriverOnAnimatedParam_Fires_On_A_Copy_Source_Read()
     {
-        // The read direction, which is the easy one to leave uncovered: a rule that inspects only an op's
-        // destination passes a dead `Copy` FROM a bound parameter, because the destination is innocent.
         _controller = WithCurveAndDriver("Held", "Held",
             VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Copy, asCopySource: true);
 
@@ -340,7 +312,6 @@ public class ControllerRulesTests
     [Test]
     public void DriverOnAnimatedParam_Ignores_A_Driver_On_A_Param_No_Clip_Binds()
     {
-        // The legal shape, and the repair every offender is pointed at: drive a parameter nothing animates.
         _controller = WithCurveAndDriver("Held", "Free",
             VRC.SDKBase.VRC_AvatarParameterDriver.ChangeType.Set, asCopySource: false);
 
@@ -352,8 +323,6 @@ public class ControllerRulesTests
     [Test]
     public void DriverOnAnimatedParam_Ignores_A_BlendTree_Read_Of_The_Same_Param()
     {
-        // Load-bearing negative control: a blend tree reading a clip-written float is the assemble idiom the
-        // whole AAP surface exists for. If this ever fires, the rule is breaking what it exists to protect.
         _controller = new AnimatorController();
         _controller.AddParameter("Held", AnimatorControllerParameterType.Float);
         _controller.AddLayer("Base");
@@ -380,9 +349,7 @@ public class ControllerRulesTests
     public void DriverOnAnimatedParam_Fires_On_A_Synced_Layer_Override_Driver()
     {
         // Run() excludes synced layers from the state/machine topology, so a rule walking only that topology
-        // cannot see a driver installed as a synced layer's per-state BEHAVIOUR override — though such a driver
-        // is as dead as any other. The clip side of this hole is closed by reading clips through
-        // AnimatorClipWalk (which walks override MOTIONS); this pins the driver side.
+        // cannot see a driver installed as a synced layer's per-state behaviour override.
         _controller = new AnimatorController();
         _controller.AddParameter("Held", AnimatorControllerParameterType.Float);
         _controller.AddLayer("Base");
@@ -425,20 +392,13 @@ public class ControllerRulesTests
 
     // ── IsVrcReserved: the built-in exempt set ─────────────────────────────────────────────────────
     //
-    // Two consumers, one predicate: the undeclared-param rule exempts these names, and CompileController's
-    // VRCExpressionParameters emitter uses the same answer to keep built-ins out of the emitted params
-    // asset. A name missing here is therefore both a false FAIL and a parameter the emitter publishes onto
-    // an avatar that already owns it.
+    // The undeclared-param rule and the compiler's VRCExpressionParameters emitter (ControllerEmit) share this
+    // predicate, so a missing name is both a false FAIL and a parameter published onto an avatar that owns it.
 
-    // `IsAnimatorEnabled` is documented thinly enough to read as an author-declared name; it is a VRChat
-    // built-in, carried by VRCFury's own VRChatGlobalParams (FullControllerBuilder.cs), which short-circuits
-    // param prefixing for it. Pinned so the emitter's exemption cannot be dropped by a tidying pass.
     [Test]
     public void IsVrcReserved_IsAnimatorEnabled_IsABuiltIn()
         => Assert.IsTrue(ControllerRules.IsVrcReserved("IsAnimatorEnabled"));
 
-    // Its neighbour in both VRCFury's VRChatGlobalParams and av3emulator's builtin table. Exempting one
-    // and not the other left the identical latent false-FAIL a single name over.
     [Test]
     public void IsVrcReserved_PreviewMode_IsABuiltIn()
         => Assert.IsTrue(ControllerRules.IsVrcReserved("PreviewMode"));
@@ -447,8 +407,6 @@ public class ControllerRulesTests
     public void IsVrcReserved_AnAuthoredName_IsNotReserved()
         => Assert.IsFalse(ControllerRules.IsVrcReserved("IsAnimatorEnabledToo"));
 
-    // Ordinal set membership — an exact-case match or nothing. A near-miss must NOT be exempted, or a real
-    // undeclared-parameter typo would pass the rule silently.
     [Test]
     public void IsVrcReserved_IsCaseSensitive()
         => Assert.IsFalse(ControllerRules.IsVrcReserved("isAnimatorEnabled"));

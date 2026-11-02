@@ -1,11 +1,8 @@
 using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 
-// RunLogFormat.Cell — the one hardened markdown-cell encoder the report tools converge on. A value read off
-// an asset can carry structural characters (CR/LF, pipe, backslash, backtick, Unicode line separators) that
-// would break the table row/column or inject a heading into the LLM-consumed RunLog. These pin that every
-// such character is neutralized, most importantly the backslash-before-pipe case a naive `Replace("|","\|")`
-// silently mishandles.
+// RunLogFormat.Cell: a value read off an asset can carry characters that would break a table row or column or
+// inject a heading into the RunLog.
 public class RunLogFormatTests
 {
     [Test]
@@ -15,12 +12,9 @@ public class RunLogFormatTests
         Assert.AreEqual("", RunLogFormat.Cell(""));
     }
 
-    // CR/LF/tab must not survive as physical control characters (they would break the row) and the pipe must
-    // be escaped (column break). A crafted name with a newline + "## injected" must not leave a physical
-    // heading line. The backtick is the deliberate exception, asserted here alongside the escapes it is
-    // contrasted with: most call sites wrap the value in a code span, where backslash escapes are inert —
-    // "\`" would neither keep the span closed nor render cleanly, just add a stray char. Structural safety
-    // comes from the row/column handling, so a passed-through backtick stays cosmetic.
+    // The backtick deliberately passes through: most call sites wrap the value in a code span, where backslash
+    // escapes are inert, so "\`" would only add a stray char. Structural safety comes from the row/column
+    // handling, so a passed-through backtick stays cosmetic.
     [Test]
     public void Cell_escapesRowAndColumnBreakers()
     {
@@ -33,9 +27,8 @@ public class RunLogFormatTests
         Assert.AreEqual("a`b", RunLogFormat.Cell("a`b")); // backtick passes through untouched
     }
 
-    // The defect this shared encoder exists to fix: a backslash immediately before a pipe. Without escaping the
-    // backslash, "a\|b" → "a\\|b", where GFM reads "\\" as an escaped backslash and the pipe is left BARE (a
-    // column break). The pipe must stay escaped — an ODD run of backslashes must precede it.
+    // Without escaping the backslash, "a\|b" becomes "a\\|b", where GFM reads "\\" as an escaped backslash and
+    // leaves the pipe BARE, a column break.
     [Test]
     public void Cell_escapesBackslashBeforePipe()
     {
@@ -46,8 +39,7 @@ public class RunLogFormatTests
         Assert.IsTrue(run % 2 == 1, "pipe must be escaped (odd backslash run precedes it), was '" + bp + "'");
     }
 
-    // U+2028 / U+2029 (Zl/Zp line/paragraph separators) are line breaks that char.IsControl does NOT catch;
-    // they must still collapse to a space so nothing survives that reads as a line break.
+    // U+2028 / U+2029 are line breaks that char.IsControl does NOT catch.
     [Test]
     public void Cell_neutralizesUnicodeLineSeparators()
     {

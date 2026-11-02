@@ -4,11 +4,8 @@ using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 using UnityEngine;
 
-// The pure parts of WriteDynamics, DrivePhysBones and ReportClipping: table, curve and pose parsing, the ramp and jitter windows, the stale-status line (including the defaults a
-// caller relies on by omission, which JsonUtility only honours through field initialisers), the closest-point primitive
-// under the clipping measure, its crossing length, its region and group bucketing and their tables, the frame gate on a live field set's host cycle, and the drive's restore record, whose writer and reader sit a domain reload apart. The
-// writes and the drive mutate live objects, so they are proven by execute_code on a real avatar (docs/verify.md §Test
-// venue), not here.
+// The pure parts of WriteDynamics, DrivePhysBones and ReportClipping. The writes and the drive mutate live objects,
+// so they are proven by execute_code on a real avatar (docs/verify.md §Test venue), not here.
 public class DynamicsDoorsTests
 {
     [Test]
@@ -121,8 +118,7 @@ public class DynamicsDoorsTests
         StringAssert.Contains(named, WriteDynamics.ParseTable(json, out _));
     }
 
-    // A scale multiplies what it finds, so a factor that silently did nothing, or a default standing in for an omitted
-    // one, would be a wrong answer with no error. JsonUtility fills an omitted float with 0, so 0 is the omission.
+    // JsonUtility fills an omitted float with 0, so 0 is the omission.
     [TestCase("{\"scales\":[{\"under\":\"Armature\"}]}", "omitted, zero or negative")]
     [TestCase("{\"scales\":[{\"under\":\"Armature\",\"factor\":0}]}", "omitted, zero or negative")]
     [TestCase("{\"scales\":[{\"under\":\"Armature\",\"factor\":-1.2}]}", "omitted, zero or negative")]
@@ -149,7 +145,6 @@ public class DynamicsDoorsTests
         Assert.AreEqual(0, t.scales.Length, "a table without scales has none");
     }
 
-    // The planning half of the scales, over bare transforms: which row reaches which component.
     static WriteDynamics.Scale[] Rows(params (string under, float factor)[] r)
         => r.Select(x => new WriteDynamics.Scale { under = x.under, factor = x.factor }).ToArray();
 
@@ -212,8 +207,6 @@ public class DynamicsDoorsTests
         Assert.AreEqual(0, t.colliders.Length);
     }
 
-    // A physbone curve crosses JsonUtility as a string: time:value keys joined by straight lines, the shape a hand-keyed
-    // radius curve took (flat to mid-chain, then rising to full radius at the tip).
     [Test]
     public void Curve_timeValueKeys_joinLinearly()
     {
@@ -416,8 +409,8 @@ public class DynamicsDoorsTests
         return d;
     }
 
-    // A crossing ranks above any vertex count, since a vertex count reads zero through a shallow one; the standoff is the
-    // mean over the signed vertices not behind, and a bucket with none has no gap, not a zero one.
+    // A crossing ranks above any vertex count, since a vertex count reads zero through a shallow one. A bucket with no
+    // signed vertex in front has no gap, not a zero one.
     [Test]
     public void Table_ordersByCrossingThenBehind_capsWithASum_andMeansTheGapOverVerticesInFront()
     {

@@ -9,14 +9,10 @@ using VRC.Core;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
-    /// <summary>Reflection into the SDK's live-content API, isolated here so the doors never hard-reference
-    /// it — mirroring <see cref="CauReflect"/>'s contract: every lookup is guarded, a missing member yields
-    /// a named failReason and a false return, never a throw.
-    ///
-    /// The members are PUBLIC statics on a public type (<c>VRC.SDKBase.Editor.Api.VRCApi</c>), so this is
-    /// reflection for optionality and version-drift tolerance, not to reach anything private. Behaviour is
-    /// asserted from black-box measurement against the live API; the contract lives in
-    /// <c>docs/unity-tools.md</c> §Publish.</summary>
+    /// <summary>Reflection into the SDK's live-content API, so the doors never hard-reference it: the
+    /// <c>Try</c> methods turn a missing member into a named failReason and a false return, never a throw.
+    /// The members are public statics on a public type, so the reflection buys optionality and
+    /// version-drift tolerance, not access. Contract: <c>docs/unity-tools.md</c> §Publish.</summary>
     internal static class VrcApiReflect
     {
         internal const string ApiTypeName = "VRC.SDKBase.Editor.Api.VRCApi, VRC.SDKBase.Editor";
@@ -25,10 +21,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         internal static bool IsAvailable => Api != null;
 
-        /// <summary>Resolve a static method by name. <c>GetMethod(name, flags)</c> THROWS
-        /// AmbiguousMatchException the moment the SDK adds an overload, so the lookup itself is guarded —
-        /// this file's whole contract is that drift produces a named refusal, and a lookup that can throw
-        /// would break it precisely when the SDK changes.</summary>
+        /// <summary>Resolve a static method by name. <c>GetMethod(name, flags)</c> throws
+        /// AmbiguousMatchException once the SDK adds an overload, so the lookup itself is guarded.</summary>
         static bool TryMethod(string name, out MethodInfo m, out string failReason)
         {
             m = null; failReason = null;
@@ -45,9 +39,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
-        /// <summary>Invoke a resolved static and confirm the result is actually a Task. Without the type
-        /// check a drifted return value would sail through and NRE later inside the update loop, surfacing
-        /// as an unnamed failure with no route back to the real cause.</summary>
         static bool Invoke(MethodInfo m, object[] args, out object task, out string failReason)
         {
             task = null; failReason = null;
@@ -65,9 +56,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
-        /// <summary>Kick <c>VRCApi.GetAvatar(id, forceRefresh: true, ct)</c>. Always forces a refresh: the
-        /// whole point of this door is what is live NOW, and a cached record would let it report a name the
-        /// server no longer has.</summary>
+        /// <summary>Kick <c>VRCApi.GetAvatar(id, forceRefresh: true, ct)</c>.</summary>
         internal static bool TryGetAvatar(string id, out object task, out string failReason)
         {
             task = null;
@@ -75,14 +64,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return Invoke(m, new object[] { id, true, CancellationToken.None }, out task, out failReason);
         }
 
-        /// <summary>Kick <c>VRCApi.UpdateAvatarInfo(id, record, ct)</c> with a whole <c>VRCAvatar</c>.
-        ///
-        /// Posting the entire struct back is what the SDK's own control panel and CAU both do, so this door
-        /// inherits their safety envelope rather than inventing one: the SDK narrows the record to a
-        /// changes payload internally, which is why no bundle or thumbnail is ever at risk here — they are
-        /// not submitted at all. Fields that ARE submitted (description, tags, release status, styles) are
-        /// round-tripped from the read, so a concurrent writer between the read and this call is the one
-        /// case where an unrelated field can be reverted.</summary>
+        /// <summary>Kick <c>VRCApi.UpdateAvatarInfo(id, record, ct)</c> with a whole <c>VRCAvatar</c>. Why a
+        /// whole-record post is safe: <c>docs/unity-tools.md</c> §Publish.</summary>
         internal static bool TryUpdateAvatarInfo(string id, object record, out object task, out string failReason)
         {
             task = null;
@@ -96,11 +79,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// then PUTs <c>{"imageUrl": …}</c> alone. Two fields are read off <paramref name="record"/> — the
         /// name, only to label the uploaded file, and the image url, from which the SDK derives the file id
         /// the new image is stored as a VERSION of. That is why the record must be one the API just handed
-        /// back: a hand-built one has no image url, so the derivation silently takes the new-file branch.
-        ///
-        /// <paramref name="onProgress"/> is passed to keep the driver's frame budget honest — the upload
-        /// contains seconds of unconditional delay, far longer than the two JSON round trips the budget was
-        /// sized for, so progress has to count as liveness.</summary>
+        /// back: a hand-built one has no image url, so the derivation silently takes the new-file branch.</summary>
         internal static bool TryUpdateAvatarImage(string id, object record, string pathToImage,
                                                   Action<string, float> onProgress,
                                                   out object task, out string failReason)
@@ -111,11 +90,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                           out task, out failReason);
         }
 
-        /// <summary>Kick <c>POST avatars/{id}/impostor/enqueue</c> through the SDK's generic <c>Post</c>,
-        /// which rides the signed-in editor session; the SDK ships no impostor method of its own. The body
-        /// is null, so the request goes out with no content. The response is the queued job, deserialized
-        /// to a dictionary so this assembly needs no JSON reference; only its <c>state</c> is ever read,
-        /// because the job also carries the avatar and requester ids.</summary>
+        /// <summary>Kick <c>POST avatars/{id}/impostor/enqueue</c> through the SDK's generic <c>Post</c> with a
+        /// null body. The response is the queued job, as a dictionary.</summary>
         internal static bool TryEnqueueImpostor(string id, out object task, out string failReason)
         {
             task = null;
@@ -126,15 +102,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var ps = m.GetParameters();
             if (ps.Length < 2 || ps[0].ParameterType != typeof(string))
             { failReason = "VRCApi.Post's signature changed (SDK drift)"; return false; }
-            // Everything after (url, body) is optional; pass each declared default so a new trailing
-            // optional parameter does not break the call. A null for a struct default is its default value.
+            // Trailing parameters take their declared defaults, so a new optional one does not break the
+            // call. Invoke reads a null for a struct parameter as its default value.
             var args = new object[ps.Length];
             args[0] = "avatars/" + id + "/impostor/enqueue";
             for (int i = 2; i < ps.Length; i++) args[i] = ps[i].HasDefaultValue ? ps[i].DefaultValue : null;
             return Invoke(m, args, out task, out failReason);
         }
 
-        /// <summary>The queued job's <c>state</c>, the one field of it that is safe to emit.</summary>
+        /// <summary>The queued job's <c>state</c>, the one field of it that is safe to emit: the job also
+        /// carries the avatar and requester ids.</summary>
         internal static string JobState(object job)
         {
             var d = job as System.Collections.Generic.IDictionary<string, object>;
@@ -160,7 +137,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return ex?.Message;
         }
 
-        // ── Task inspection (the returned Task<VRCAvatar> is reached reflectively) ───────────────
+        // ── Task inspection (the returned Task<T> is reached reflectively) ──────────────────────
 
         internal static bool IsCompleted(object task) => (bool)task.GetType().GetProperty("IsCompleted").GetValue(task);
         internal static bool IsFaulted(object task) => (bool)task.GetType().GetProperty("IsFaulted").GetValue(task);
@@ -168,13 +145,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── API error classification ────────────────────────────────────────────────────────────
 
-        /// <summary>Find the exception in a faulted task's chain that actually carries API signal.
-        ///
-        /// Deliberately NOT "unwrap to the innermost": the SDK wraps a deserialization failure in its own
-        /// exception, so the innermost link is a Newtonsoft error and the layer holding StatusCode is gone.
-        /// Same reasoning as <see cref="UploadAvatar.FailedFromException"/> — walk the chain and stop at the
-        /// first link that can be classified, rather than blindly taking one end of it. AggregateException's
-        /// siblings are walked too, so a multi-inner fault does not lose its signal to the first branch.</summary>
+        /// <summary>The first exception in a faulted task's chain that carries API signal, not simply the
+        /// innermost: the SDK wraps a JSON failure in its own exception, so the innermost link can be a
+        /// Newtonsoft error with no status.</summary>
         static Exception FindClassifiable(Exception e, out int? statusCode, out string serverMessage)
         {
             statusCode = null; serverMessage = null;
@@ -198,9 +171,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         ///
         /// Matched by SHAPE, not by exact type name: the SDK's moderation rejection and its empty-body
         /// failure are distinct types (one derives from the base error type, one does not), and a
-        /// name-equality test would drop both — including the 422 that a refused name produces, which is
-        /// the single most likely failure this door will ever see. Anything exposing a readable StatusCode
-        /// field is classifiable, whatever it is called.</summary>
+        /// name-equality test would drop both, including the 422 that a refused name produces.</summary>
         internal static bool TryReadApiFields(Exception e, out int? statusCode, out string serverMessage)
         {
             statusCode = null; serverMessage = null;
@@ -218,18 +189,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
-        /// <summary>Classify a faulted task into the door's REFUSE text. <paramref name="forImage"/> only
-        /// changes the 422 text, whose "change the text" instruction names nothing an image call
-        /// submitted.</summary>
+        /// <summary>Classify a faulted task into the door's REFUSE text.</summary>
         internal static string DescribeFault(object task, bool forImage = false)
         {
             var ex = (Exception)task.GetType().GetProperty("Exception").GetValue(task);
             var hit = FindClassifiable(ex, out var code, out var msg);
             if (hit != null) return AvatarRecordLogic.RefuseForStatus(code, msg, forImage);
 
-            // Nothing in the chain carried API signal — fall back to the innermost message, which at least
-            // names a transport or cancellation failure. Scrubbed: an arbitrary exception string is the one
-            // place an id or URL can still reach output.
+            // No link carried API signal, so the innermost message is all there is. Scrubbed: an arbitrary
+            // exception string can carry an id or URL.
             var deepest = ex;
             while (deepest != null && deepest.InnerException != null) deepest = deepest.InnerException;
             return "VRChat API call failed: " +
@@ -243,14 +211,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         internal static string GetName(object record) => GetString(record, "Name");
 
-        /// <summary>Write one property on the BOXED <c>VRCAvatar</c>. The box matters: the record is a
-        /// struct, <c>SetValue</c> mutates the box, and that same box is what goes to
-        /// <c>UpdateAvatarInfo</c> — unboxing to a local first would silently write to a copy and post the
-        /// record back unchanged while reporting success.
-        ///
-        /// A property that is missing or read-only is an SDK-drift REFUSE, never a silent skip: the caller
-        /// asked for a change, and a door that quietly dropped it would report PASS on an edit that never
-        /// happened.</summary>
+        /// <summary>Write one property on the BOXED <c>VRCAvatar</c>. The record is a struct, <c>SetValue</c>
+        /// mutates the box, and that same box is what goes to <c>UpdateAvatarInfo</c>: unboxing to a local
+        /// first would silently write to a copy and post the record back unchanged while reporting
+        /// success.</summary>
         internal static bool TrySet(object record, string property, object value, out string failReason)
         {
             failReason = null;
@@ -270,7 +234,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
-        /// <summary>Tags as a plain array, order preserved, for reporting and comparison.</summary>
         internal static string[] GetTags(object record)
         {
             var raw = record?.GetType().GetProperty("Tags")?.GetValue(record) as System.Collections.IEnumerable;
@@ -280,9 +243,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return list.ToArray();
         }
 
-        /// <summary>Set Tags, building the exact collection type the property declares rather than assuming
-        /// it, so an SDK that changes that type produces a named refusal instead of an InvalidCastException
-        /// thrown from inside the setter.</summary>
         internal static bool TrySetTags(object record, string[] tags, out string failReason)
         {
             failReason = null;
@@ -312,15 +272,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return TrySet(record, "Tags", collection, out failReason);
         }
 
-        /// <summary>The record's caller-facing digest.
-        ///
-        /// Two different rules apply, and conflating them is what made an earlier version unusable. Ids and
-        /// URLs (<c>ID</c>, <c>AuthorId</c>, <c>AuthorName</c>, the image and asset URLs) are OMITTED
-        /// outright — <c>AuthorName</c> included, since an account identifier is barred from output just as
-        /// firmly as a blueprint id. The published TEXT fields are emitted verbatim (escaped, not scrubbed):
-        /// they are already public, and they are what a caller chains into
-        /// <see cref="UpdateAvatarRecord"/>'s <c>expectCurrentName</c> — scrubbing them would hand back a
-        /// string the expected-name check can never match, locking such an avatar out of editing entirely.</summary>
+        /// <summary>The record's caller-facing digest. Ids and URLs (<c>ID</c>, <c>AuthorId</c>,
+        /// <c>AuthorName</c>, the image and asset URLs) are OMITTED outright; an account identifier is barred
+        /// from output as firmly as a blueprint id. The published TEXT fields are emitted verbatim (escaped,
+        /// not scrubbed): a caller chains them into <see cref="UpdateAvatarRecord"/>'s
+        /// <c>expectCurrentName</c>, and a scrubbed string could never match that check.</summary>
         internal static string Digest(object record)
         {
             if (record == null) return "<null record>";
@@ -329,8 +285,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             sb.Append("name=").Append(AvatarRecordLogic.Quote(GetName(record)));
             sb.Append(" description=").Append(AvatarRecordLogic.Quote(GetString(record, "Description")));
-            // Tag VALUES, not a count: tags are writable, so the digest has to show what a caller would be
-            // overwriting — a count cannot be chained back into an edit.
             sb.Append(" tags=").Append(AvatarRecordLogic.FormatTags(GetTags(record)));
 
             Action<string> plain = key =>
@@ -347,9 +301,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             int pkgCount = 0;
             if (pkgs != null) foreach (var x in pkgs) pkgCount++;
             sb.Append(" unityPackages=").Append(pkgCount);
-            // No impostor field, deliberately. The SDK models an impostor as a package with Variant
-            // "impostor", but this record lists none even for an avatar that has one, so a count here
-            // would read 0 whether or not an impostor exists.
+            // No impostor field: this record lists no impostor package even for an avatar that has one, so
+            // a count here would read 0 either way.
 
             var img = GetString(record, "ThumbnailImageUrl");
             sb.Append(" hasThumbnail=").Append(!string.IsNullOrEmpty(img));
@@ -357,27 +310,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
     }
 
-    /// <summary>Shared async drive for the record doors.
-    ///
-    /// <c>VRCApi</c> returns Tasks that only progress while the editor's update loop runs, so the doors
-    /// cannot block: a <c>Task.ContinueWith</c> never fires and a <c>Thread.Sleep</c> starves the very pump
-    /// it is waiting on. Same Run/Status split as <see cref="UploadAvatar"/> — Run kicks and returns, the
-    /// update loop advances the state machine, Status() reports.
-    ///
-    /// One operation at a time. The in-flight Task cannot survive a domain reload, so it is deliberately not
-    /// persisted — but the FACT that an operation was interrupted is, in SessionState, because losing that
-    /// is what lets a landed write be reported as "nothing has been run".</summary>
+    /// <summary>Shared async drive for the record doors, one operation at a time. <c>VRCApi</c> returns Tasks
+    /// that only progress while the editor's update loop runs, so a door cannot block on one: a
+    /// <c>Thread.Sleep</c> starves the pump it is waiting on. Run kicks and returns, the update loop advances
+    /// the state machine, Status() reports. A domain reload destroys the in-flight Task, so only the fact of
+    /// an interruption persists, in SessionState.</summary>
     internal static class AvatarRecordDriver
     {
         internal const int FrameBudget = 4000;
         const string BreadcrumbKey = "Ryan6Vrc.AvatarRecord.pending";
-        // A GameObject name can contain anything printable, so the breadcrumb is split on a control
-        // character that cannot appear in one — a comma or pipe would corrupt the handle field.
         const char Sep = '\u001f';
 
         static bool _running;
         static string _summary;
-        static string _summaryOwner;      // which door produced _summary
+        static string _summaryOwner;
         static int _frames;
         static Action _step;
         static string _door, _handle;
@@ -386,11 +332,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         internal static bool Busy => _running;
         internal static int Frames => _frames;
 
-        /// <summary>Convert a breadcrumb that outlived its editor session into an explicit verdict.
-        ///
-        /// A domain reload (a recompile, entering play mode) mid-operation destroys the Task and every
-        /// static holding it. Without this, <c>Status()</c> would answer "idle — nothing has been run",
-        /// which is a positive false claim about a write that may already have landed.</summary>
+        /// <summary>Convert a breadcrumb that outlived its editor session into an explicit verdict, so
+        /// <c>Status()</c> does not answer "idle" about a write that may already have landed.</summary>
         [InitializeOnLoadMethod]
         static void ReconcileInterrupted()
         {
@@ -400,10 +343,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             var parts = crumb.Split(new[] { Sep }, 3);
             if (parts.Length < 3) return;
-            // An UNRECOGNISED char resolves to UpdateSent, not Reading. Reading's verdict asserts "nothing
-            // was written", and a crumb this build cannot parse is exactly the case where that claim is
-            // unfounded — a stale crumb from another version of this file. Over-reporting a write costs a
-            // reconciling read; under-reporting one hides a landed edit.
+            // An unrecognised char resolves to UpdateSent, like "w", not to Reading: Reading's verdict asserts
+            // "nothing was written", which a crumb this build cannot parse does not support.
             AvatarRecordLogic.Phase phase;
             switch (parts[1])
             {
@@ -428,16 +369,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         static void WriteBreadcrumb()
             => SessionState.SetString(BreadcrumbKey, _door + Sep + PhaseChar(_phase) + Sep + _handle);
 
-        /// <summary>Called by a door the instant its update request is handed to the API. Everything after
-        /// this point must be reported UNKNOWN rather than FAIL if the operation is lost.</summary>
+        /// <summary>Called by a door immediately BEFORE it hands its update request to the API, because the
+        /// call itself is the window to protect. From here a lost operation reports UNKNOWN rather than
+        /// FAIL.</summary>
         internal static void MarkUpdateSent()
         {
             _phase = AvatarRecordLogic.Phase.UpdateSent;
             WriteBreadcrumb();
         }
 
-        /// <summary>As above, for the image attach — a separate phase because it is the one write that is
-        /// safe to re-run blindly, and because the read door cannot see whether it landed.</summary>
+        /// <summary>As above, for the image attach.</summary>
         internal static void MarkImageSent()
         {
             _phase = AvatarRecordLogic.Phase.ImageSent;
@@ -451,17 +392,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
             WriteBreadcrumb();
         }
 
-        /// <summary>Count observable progress as liveness, resetting the frame budget.
+        /// <summary>Count observable progress as liveness, resetting the frame budget: a file upload holds
+        /// seconds of unconditional delay and a multi-part transfer, so a budget it cannot reset would time
+        /// out a healthy attach. The SDK can invoke this off the main thread, which is safe here only because
+        /// the write is a single int the tick loop re-reads.
         ///
-        /// The budget exists to catch a call that has genuinely stalled, and it was sized for two JSON round
-        /// trips. A file upload is neither: it holds seconds of unconditional delay and a multi-part
-        /// transfer, so a budget that cannot be reset would time out a healthy attach and report UNKNOWN on
-        /// a write that was still progressing. The SDK dispatches this callback off the main thread, which
-        /// is safe here only because the write is a single int the tick loop re-reads.
-        ///
-        /// Gated on the calling door still owning the driver: the progress closure is handed to the SDK
-        /// with no cancellation token, so it outlives a Finish() and an orphaned upload would otherwise
-        /// keep zeroing the counter and disarm the stall detector of whatever runs NEXT.</summary>
+        /// Gated on the calling door still owning the driver: the progress closure is handed to the SDK with
+        /// no cancellation token, so it outlives a Finish(), and an orphaned upload would otherwise keep
+        /// zeroing the counter and disarm the stall detector of whatever runs next.</summary>
         internal static void NoteProgress(string door)
         {
             if (_running && _door == door) _frames = 0;
@@ -496,8 +434,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             _frames++;
             if (_frames > FrameBudget)
             {
-                // Stage-aware: past the send point the request reached the server, so "FAIL" would be a
-                // false negative that invites a blind re-run.
                 Finish(AvatarRecordLogic.InterruptedVerdict(
                     _door, _handle, _phase,
                     "timed out after " + FrameBudget + " editor frames (keep the editor window focused — " +
@@ -512,12 +448,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        /// <summary>Poll, scoped to the asking door.
-        ///
-        /// A single shared summary crossing doors is how a caller ends up reading someone else's result:
-        /// the convention is "Run, then poll Status()", so a door that refused synchronously would
-        /// otherwise hand back the PREVIOUS door's terminal line with nothing marking it as foreign — and
-        /// on the "already in flight" refusal, that line is precisely the other operation's outcome.</summary>
+        /// <summary>Poll, scoped to the asking door, so a caller never reads another door's terminal line as
+        /// its own.</summary>
         internal static string Status(string door)
         {
             if (_running)
@@ -540,7 +472,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!_running && _summaryOwner == door) { _summary = null; _summaryOwner = null; }
         }
 
-        /// <summary>Resolve GameObject → live blueprint id, or a named refusal. The id is returned for the
+        /// <summary>Resolve GameObject → local blueprint id, or a named refusal. The id is returned for the
         /// API call and MUST NOT reach output (docs/unity-tools.md's no-blueprint-ids rule).</summary>
         internal static bool TryResolveId(GameObject avatar, out string id, out string failReason)
         {
@@ -564,12 +496,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return true;
         }
 
-        /// <summary>The refusal funnel. Named per door rather than the batch grammar's "all": these doors
-        /// act on ONE avatar, and a scope token copied from a batch tool would be a false claim.</summary>
+        /// <summary>The refusal funnel.</summary>
         internal static string Refuse(string door, string reason)
             => "[avatar-record] " + door + " => REFUSE error=" + UploadAvatarLogic.RedactIds(reason);
 
-        /// <summary>Guard shared by the record doors: the SDK present, and no other record op in flight.</summary>
         internal static string PreflightRefusal()
         {
             if (!VrcApiReflect.IsAvailable)
@@ -581,14 +511,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
     }
 
-    /// <summary>Read one avatar's LIVE VRChat record — the published name, description, tags, release
-    /// status and bundle presence as the server currently has them, not as the local scene believes.
-    ///
-    /// The trap that motivates the family (an upload cannot rename, and a re-upload republishes under the
-    /// old name) is <c>docs/unity-tools.md</c> §Publish's to explain; what matters here is the consequence:
-    /// the scene is not evidence about what is published, and this door is.
-    ///
-    /// Async: <c>Run</c> kicks and returns; poll <c>Status()</c>. No id, account name or URL enters output.</summary>
+    /// <summary>Read one avatar's LIVE VRChat record as the server holds it. Async: <c>Run</c> kicks and
+    /// returns; poll <c>Status()</c>. No id, account name or URL enters output.
+    /// Contract: <c>docs/unity-tools.md</c> §Publish.</summary>
     [AgentTool]
     public static class ReportAvatarRecord
     {
@@ -627,32 +552,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
     }
 
     /// <summary>Edit an already-uploaded avatar's published record — name, description, tags and thumbnail.
-    /// No bundle and no re-upload: the avatar itself is never rebuilt. Contract and the reasons behind each
-    /// guard: <c>docs/unity-tools.md</c> §Publish.
+    /// No bundle and no re-upload. Contract and the reasons behind each guard: <c>docs/unity-tools.md</c>
+    /// §Publish.
     ///
-    /// Every field is NULL-MEANS-UNCHANGED. For tags that makes an empty array the only way to say "clear
-    /// them", so an empty array is accepted and is not treated as an omission. A thumbnail has no such
-    /// idiom — it can be replaced but never cleared, the API having no delete-image call — so an empty
-    /// path is a caller error rather than a clear.
-    ///
-    /// AN IMAGE MAKES THIS TWO WRITES, and the door reports them separately. The metadata edit is one PUT
-    /// that never submits the bundle or the image; attaching a thumbnail is a file upload plus a second PUT
-    /// through a different API call. So a call setting both can half-succeed — the name landing while the
-    /// image does not — which closes <c>=&gt; FAIL</c> with the metadata's landing rows still shown. There
-    /// is no rollback: the remedy is re-running, which the SDK's own cleanup branches make safe.
-    ///
-    /// <paramref name="expectCurrentName"/> is required: the write targets whatever blueprintId the
-    /// GameObject's PipelineManager holds, so stating the name you believe is live turns a mis-wired id
-    /// into a refusal instead of an edit landing on the wrong published avatar. Chain it from
-    /// <see cref="ReportAvatarRecord"/>'s reported name. It is a best-effort confirmation, not an atomic
-    /// compare-and-swap — see <see cref="AvatarRecordLogic.CheckExpectedName"/> for what it does not catch.
-    ///
-    /// <c>ReleaseStatus</c> is deliberately NOT settable here. It is the one field that can make an avatar
-    /// public, and folding an irreversible visibility change into a general metadata setter is how it gets
-    /// flipped by a caller who was only fixing a typo. Same reasoning leaves <c>DeleteAvatar</c> unbuilt: a
-    /// door earns a destructive verb explicitly or not at all.
-    ///
-    /// <c>whatIf</c> reads the record and reports what WOULD change, writing nothing.</summary>
+    /// A call setting both metadata and an image can half-succeed, which closes <c>=&gt; FAIL</c> with the
+    /// metadata's landing rows still shown. There is no rollback: the remedy is re-running, which the SDK's
+    /// own cleanup branches make safe. <c>whatIf</c> reads the record and reports what WOULD change, writing
+    /// nothing.</summary>
     [AgentTool]
     public static class UpdateAvatarRecord
     {
@@ -675,8 +581,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             var tagsWhy = AvatarRecordLogic.ValidateTags(newTags);
             if (tagsWhy != null) return AvatarRecordDriver.Refuse(Door, tagsWhy);
-            // In the SYNCHRONOUS guard, not the async body: the image is attached after the metadata write,
-            // so a path rejected later would leave the name landed and the thumbnail refused.
             var imgWhy = AvatarRecordLogic.ValidateImagePath(newImagePath, System.IO.File.Exists);
             if (imgWhy != null) return AvatarRecordDriver.Refuse(Door, imgWhy);
 
@@ -694,8 +598,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string beforeImageUrl = null;
             int stage = 0;
 
-            // Kicking the image is its own step because two paths reach it: after a metadata write, and
-            // directly from the read when the call sets only an image.
             Action kickImage = () =>
             {
                 beforeImageUrl = VrcApiReflect.GetImageUrl(carriedRec);
@@ -704,9 +606,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (!VrcApiReflect.TryUpdateAvatarImage(id, carriedRec, newImagePath, progress,
                                                         out imageTask, out var imgKickWhy))
                 {
-                    // A bare Refuse would read as "nothing happened", which is false once the metadata PUT
-                    // has landed — and would send the caller back with an expectCurrentName the rename has
-                    // already invalidated. Report the partial instead.
+                    // A bare Refuse would read as "nothing happened", false once the metadata PUT has landed,
+                    // and would send the caller back with an expectCurrentName a rename has invalidated.
                     AvatarRecordDriver.Finish(writesMetadata
                         ? "[avatar-record] update handle=" + AvatarRecordLogic.Quote(handle) + " " +
                           VrcApiReflect.Digest(carriedRec) + metaLandings +
@@ -731,9 +632,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var record = VrcApiReflect.Result(getTask);
                     string liveName = VrcApiReflect.GetName(record);
 
-                    var casWhy = AvatarRecordLogic.CheckExpectedName(expectCurrentName, liveName);
-                    if (casWhy != null)
-                    { AvatarRecordDriver.Finish(AvatarRecordDriver.Refuse(Door, casWhy)); return; }
+                    var expectedNameWhy = AvatarRecordLogic.CheckExpectedName(expectCurrentName, liveName);
+                    if (expectedNameWhy != null)
+                    { AvatarRecordDriver.Finish(AvatarRecordDriver.Refuse(Door, expectedNameWhy)); return; }
 
                     if (whatIf)
                     {
@@ -749,8 +650,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             plan.Append(" tags: ")
                                 .Append(AvatarRecordLogic.FormatTags(VrcApiReflect.GetTags(record)))
                                 .Append(" -> ").Append(AvatarRecordLogic.FormatTags(newTags));
-                        // The file is named and confirmed to exist (the sync guard proved that); whether it
-                        // UPLOADS is not previewable, so the plan claims only what it checked.
                         if (newImagePath != null)
                             plan.Append(" image: would upload ").Append(AvatarRecordLogic.Quote(newImagePath));
                         AvatarRecordDriver.Finish(
@@ -761,9 +660,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
 
                     carriedRec = record;
-                    // An image-only call must NOT post the record back: an unchanged post still bumps the
-                    // server's Version and would report an edit that never happened — the same reason
-                    // CheckSomethingToDo refuses a call that sets nothing.
                     if (!writesMetadata) { kickImage(); return; }
 
                     string setWhy = null;
@@ -775,8 +671,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (newTags != null && !VrcApiReflect.TrySetTags(record, newTags, out setWhy))
                     { AvatarRecordDriver.Finish(AvatarRecordDriver.Refuse(Door, setWhy)); return; }
 
-                    // Breadcrumb BEFORE the call: the window this protects is the call itself, so marking
-                    // it afterwards would leave the one moment that matters unmarked.
                     AvatarRecordDriver.MarkUpdateSent();
                     if (!VrcApiReflect.TryUpdateAvatarInfo(id, record, out updateTask, out var upWhy))
                     { AvatarRecordDriver.Finish(AvatarRecordDriver.Refuse(Door, upWhy)); return; }
@@ -794,9 +688,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             AvatarRecordDriver.Refuse(Door, VrcApiReflect.DescribeFault(updateTask)));
                         return;
                     }
-                    // The UPDATE RESPONSE already carries the server-sanitized values, so no extra GetAvatar
-                    // round trip is needed. Reporting the SUBMITTED values here instead would misreport every
-                    // field the server rewrites.
+                    // The UPDATE RESPONSE already carries the server-sanitized values; reporting the SUBMITTED
+                    // values here instead would misreport every field the server rewrites.
                     carriedRec = VrcApiReflect.Result(updateTask);
                     var landings = new StringBuilder();
                     if (newName != null)
@@ -810,10 +703,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                 .Append(AvatarRecordLogic.FormatTags(VrcApiReflect.GetTags(carriedRec)));
                     metaLandings = landings.ToString();
 
-                    // Metadata first, image second. Either order is safe — VRCAvatarChanges carries no
-                    // imageUrl field, so a metadata write cannot clobber an image — and this order hands
-                    // the image call the PUT's own response, which is the freshly-fetched record its
-                    // file-id derivation needs.
+                    // Metadata first, image second: VRCAvatarChanges carries no imageUrl field, so a metadata
+                    // write cannot clobber an image, and the image call gets the PUT's own response as the
+                    // fresh record its file-id derivation needs.
                     if (newImagePath == null)
                     {
                         AvatarRecordDriver.Finish(
@@ -832,8 +724,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var reportRec = carriedRec;
                 if (VrcApiReflect.IsFaulted(imageTask))
                 {
-                    // A byte-identical re-attach is the workflow working, not failing: the file the server
-                    // holds already IS the requested image.
                     if (AvatarRecordLogic.IsAlreadyUploaded(VrcApiReflect.DeepestMessage(imageTask)))
                     {
                         imageRow = AvatarRecordLogic.ImageAlreadyUploadedRow();
@@ -848,16 +738,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 else
                 {
                     reportRec = VrcApiReflect.Result(imageTask);
-                    // The verdict comes from the OBSERVATION, not from matching the sentence it produces:
-                    // a re-worded diagnostic must not be able to flip a live-write verdict.
                     bool moved = !string.Equals(beforeImageUrl, VrcApiReflect.GetImageUrl(reportRec),
                                                 StringComparison.Ordinal);
                     imageRow = AvatarRecordLogic.DescribeImageLanding(moved);
                     verdict = moved ? "PASS" : "FAIL";
                 }
 
-                // The metadata rows survive a failed image half: this is a partial result, and hiding the
-                // half that landed is what would make a re-run dangerous.
                 AvatarRecordDriver.Finish(
                     "[avatar-record] update handle=" + AvatarRecordLogic.Quote(handle) + " " +
                     VrcApiReflect.Digest(reportRec) + metaLandings + " | " + imageRow + " => " + verdict);
@@ -870,19 +756,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public static string Status() => AvatarRecordDriver.Status(Door);
     }
 
-    /// <summary>Ask VRChat to generate an impostor for each of a batch of uploaded avatars, sent through the
-    /// SDK's signed-in session. Takes the same GameObjects <see cref="UploadAvatar"/> does; nothing is
-    /// built or uploaded locally.
+    /// <summary>Ask VRChat to generate an impostor for each of a batch of uploaded avatars. Contract:
+    /// <c>docs/unity-tools.md</c> §Publish.
     ///
-    /// A request is QUEUED, not built: the verdict says every request was accepted, and the impostor
-    /// itself is the server's to generate afterwards. Requests go one at a time; a rate limit stops the
-    /// batch and names every avatar left unsent, while any other failure is that avatar's alone and the
-    /// batch moves on. The server accepts a repeat request for an avatar whose earlier one is still
-    /// pending, so a re-run spends a request whether or not one is already queued.
-    ///
-    /// <c>whatIf</c> resolves every handle to a live blueprint and sends nothing; it answers synchronously.
-    /// Otherwise async: <c>Run</c> kicks and returns; poll <c>Status()</c>. No id enters output — the queued
-    /// job carries the avatar and requester ids, so only its <c>state</c> is read.</summary>
+    /// A rate limit stops the batch and names every avatar left unsent. <c>whatIf</c> resolves every handle
+    /// to its local blueprint id, sends nothing and answers synchronously; otherwise poll
+    /// <c>Status()</c>.</summary>
     [AgentTool]
     public static class RequestImpostor
     {
@@ -905,8 +784,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 handles[k] = avatars[k] != null ? avatars[k].name : "<null>";
                 if (!AvatarRecordDriver.TryResolveId(avatars[k], out ids[k], out var why)) unresolved.Add(why);
             }
-            // All or nothing before anything is sent: a partial batch here would be a caller error spending
-            // requests the caller did not mean to spend.
             if (unresolved.Count > 0)
                 return AvatarRecordDriver.Refuse(Door, string.Join("; ", unresolved));
 

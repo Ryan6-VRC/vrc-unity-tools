@@ -11,100 +11,69 @@ namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
     /// Read-only geometric digest of how a set of blendshapes on ONE mesh overlap in the vertices they
-    /// deform. Built for the F38 hazard: a base body shape left worn (e.g. <c>Shrink_stocking</c>) while a
-    /// composed outfit's <c>ShapeChanger</c> drives its own shrink over the SAME body vertices — the two
-    /// subtractions stack into an inverted limb, invisible to the render sheet and to CheckSeam/CheckAvatar.
-    ///
-    /// This is a <b>Report, not a Check</b>: it measures geometry and flags candidate pairs, but never grades
-    /// what it found — whether an overlap is a bug or a wanted coupling depends on the FX / ShapeChanger
-    /// graph the agent reads, not on the deltas. The agent supplies the candidate co-active set; the tool
-    /// returns which pairs geometrically collide, and the agent adjudicates wanted-vs-defect.
-    ///
-    /// The two tokens are different kinds of thing (CheckAvatar's grammar): a run that measured something
-    /// ends <c>=&gt; OK</c>, while bad input returns a bare trailer-less <c>FAIL:</c> — a refusal to run,
-    /// not a verdict. An empty co-active set is <c>=&gt; OK shapes=0</c>: all three sources are optional and
-    /// the tool assembles the set, so "nothing is co-active" is the answer, not a misuse.
+    /// deform, locating the double-subtraction of a worn base shape and an outfit <c>ShapeChanger</c>.
+    /// Contract: docs/unity-tools.md.
     ///
     /// Method (per <see cref="Analyze"/>): the authored per-vertex deltas of each shape's last frame
-    /// (weight-independent) define a <i>touched set</i> — vertices moved past a two-tier noise floor
-    /// (<see cref="AbsFloorMeters"/> OR <see cref="RelFrac"/> of the shape's own ~95th-pctile magnitude; the
-    /// relative tier discards stray authoring verts on messy assets). Overlap is reported as containment:
-    /// <c>|A∩B| / min(|A|,|B|)</c> — "is the smaller shape's territory swallowed by the larger", which is
-    /// exactly the double-subtraction condition. Thresholds are deliberately NOT calibrated to any one asset;
-    /// they are conservative floors, and the report leaves the judgement to the reader.
-    ///
-    /// INSPECTION ONLY — never mutates the mesh or project.
+    /// (weight-independent) define a <i>touched set</i>, the vertices moved past the larger of
+    /// <see cref="AbsFloorMeters"/> and <see cref="RelFrac"/> of the shape's own ~95th-pctile magnitude; the
+    /// relative tier discards stray authoring verts on messy assets. Overlap is containment,
+    /// <c>|A∩B| / min(|A|,|B|)</c>: whether the smaller shape's territory is swallowed by the larger.
     /// </summary>
     [AgentTool]
     public static class ReportShapeOverlap
     {
-        // ── Noise/flag knobs. Conservative floors, NOT tuned to any sampled asset — a clean vendor mesh
-        //    never fires the relative tier, but a messy one will, so both stay. The flag threshold classifies
-        //    (marks a pair for the reader's attention); it is not a verdict. ────────────────────────────────
+        // ── Noise/flag knobs: conservative floors, not tuned to any sampled asset. ──────────────────────────
         internal const float AbsFloorMeters = 0.0001f; // 0.1mm: sub-visual authoring jitter floor
-        internal const float RelFrac        = 0.10f;   // OR 10% of the shape's own p95 magnitude
+        internal const float RelFrac        = 0.10f;   // or this fraction of the shape's own p95, whichever is larger
         internal const float PercentileScale = 0.95f;  // "shape scale" = 95th-pctile of nonzero |delta|
         internal const float FlagContainment = 0.30f;  // containment ≥ this ⇒ flagged (attention, not verdict)
 
-        // ── Data the pure core returns (directly asserted by tests) ─────────────────────────────────────────
+        // ── Data the pure core returns ──────────────────────────────────────────────────────────────────────
         internal struct Footprint { public string Name; public bool Missing; public int Touched; public float P95; public float Threshold; }
         internal struct Pair { public string A; public string B; public int Intersect; public int MinFootprint; public float Containment; }
 
-        // Per-shape record of the MA ShapeChanger reaction(s) declaring it. ChangeType/Value are the LAST
-        // declared (matching ReactionTypes' last-wins), but every declaration is kept in Declares so two rows
-        // asking for different (type,value) surface as a Conflict instead of silently collapsing to last-wins.
+        // Per-shape record of the MA ShapeChanger reaction(s) declaring it. ChangeType/Value are the last
+        // declared; every declaration is kept in Declares so two rows asking for different (type,value) surface
+        // as a Conflict.
         internal class ReactionInfo
         {
             public int ChangeType;          // MA ShapeChangeType of the last declaration (Delete=0, Set=1)
             public float Value;             // Set value of the last declaration (irrelevant for Delete)
             public readonly List<(int type, float value)> Declares = new List<(int type, float value)>();
-            public bool Conflict => Declares.Distinct().Count() > 1; // 2+ differing (type,value) rows on one shape
-            // Nearest parked ancestor (activeSelf=false, not toggle-driven) above the declaring ShapeChanger,
-            // or null when the chain is clear. Set only when EVERY declaration of this shape is parked: one live
-            // declaration owns the shape, so a parked sibling is not worth annotating. Reported, never a verdict
-            // (see Covers).
+            public bool Conflict => Declares.Distinct().Count() > 1;
+            // Nearest parked ancestor (activeSelf=false, not toggle-driven) above the declaring ShapeChanger, set
+            // only when every declaration of this shape is parked: one live declaration owns the shape.
             public string InactiveAncestor;
             internal bool AnyDeclarationLive;
         }
 
-        // Minimal ingestion record fed to Analyze. Names is the ORDERED, deduped co-active union
-        // ({passed} ∪ {worn} ∪ {reaction-targeted}). ReactionTypes captures each reaction-driven shape's MA
-        // ShapeChangeType (Delete=0, Set=1); Reactions additionally carries the declared Value(s) + conflict so
-        // Emit can render the resolved-target column and surface multi-declaration conflicts.
+        // Names is the co-active union Analyze receives; Reactions carries what each shape's rows declared, for
+        // Emit's resolved-target column.
         internal class Ingested
         {
             public List<string> Names = new List<string>();
             public Dictionary<string, int> ReactionTypes = new Dictionary<string, int>();
             public Dictionary<string, ReactionInfo> Reactions = new Dictionary<string, ReactionInfo>();
-            // Scene paths of the OTHER GameObjects that ShapeChanger rows under outfitRoot resolved to. Printed only
-            // beside a reacted=0, where "the outfit reacts to nothing here" and "the outfit reacts, to a sibling — the
-            // census was pointed at the wrong mesh" otherwise read identically; a path chains straight into the next
-            // meshObject call. Descriptive, never a verdict: on a cutter-only outfit run from the avatar root the set
-            // legitimately names garment meshes, and this mesh is still the right one.
+            // Scene paths of the other GameObjects that ShapeChanger rows under outfitRoot resolved to. Printed only
+            // beside a reacted=0, where "reacts to nothing here" and "reacts, to a sibling mesh" otherwise read identically.
             public SortedSet<string> ElsewhereTargets = new SortedSet<string>(StringComparer.Ordinal);
-            // The caller's own root is inactive: reported once as a note, never charged to the rows. Turning a
-            // piece off is the prescribed way to drive this tool (`map-outfit-shapes`), so treating the root
-            // like an authored inactive ancestor would mark every declaration dead in one stroke.
+            // The caller's own root is inactive: a note, never charged to the rows, because a caller who staged
+            // the piece off would otherwise read every declaration as parked.
             public bool OutfitRootInactive;
-            // The ObjectToggle probe drifted, so toggle-driven ancestors cannot be told from genuinely-parked
-            // ones. The active-state signal is then WITHHELD rather than guessed: a wrong guess here invents
-            // MISMATCH rows, and inventing offenders is worse than the blind spot this signal closes.
+            // The ObjectToggle probe drifted, so toggle-driven ancestors cannot be told from parked ones and the
+            // active-state signal is withheld.
             public bool ActiveStateUnknown;
-            // The ShapeChanger type itself drifted, so the reaction sweep returned nothing for a reason that is
-            // NOT "nothing reacts". Withheld on the same channel as ActiveStateUnknown, because a silently-empty
-            // reacted= is the same false all-clear MeshCutters below exists to prevent — and the two MA types
-            // live in one namespace, so a realistic rename takes both at once. Neither door may confess alone.
+            // The ShapeChanger type or a member drifted, so the sweep's empty result does not mean "nothing reacts".
             public bool ReactionsUnknown;
             // Whether ANY MA MeshCutter sits under outfitRoot: the other anti-clip mechanism, which this tool
-            // cannot read and whose presence is what makes reacted=0 ambiguous. Presence, not a census —
-            // deliberately NOT scoped to this mesh (see CutterPresence).
+            // cannot read and whose presence is what makes reacted=0 ambiguous. Not scoped to this mesh (see
+            // CutterPresence).
             public CutterState MeshCutters = CutterState.NotScanned;
         }
 
         /// <summary>Whether another anti-clip mechanism is present, as far as this tool can tell.
-        /// <c>NotScanned</c> (no <c>outfitRoot</c>) and <c>DriftUnknown</c> both mean NOT ANSWERED and must stay
-        /// distinguishable from <c>Absent</c> — an unanswered question rendered as "none" is the false all-clear
-        /// this signal exists to prevent.</summary>
+        /// <c>NotScanned</c> (no <c>outfitRoot</c>) and <c>DriftUnknown</c> both mean not answered.</summary>
         internal enum CutterState { NotScanned, Absent, Present, DriftUnknown }
         internal class Analysis
         {
@@ -117,24 +86,18 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── Door ────────────────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>Digest blendshape overlap on the mesh under scene object <paramref name="meshObject"/>.
-        /// <paramref name="shapeNames"/> is the candidate co-active set the agent derived from the FX /
-        /// ShapeChanger graph. Returns a one-line summary ending with the artifact path in-band
-        /// (<c>… => OK | log=&lt;path&gt;</c>); misuse (object/mesh/names bad) is a bare
-        /// <c>[ReportShapeOverlap] FAIL: …</c> with no trailer. A shape name absent from the mesh is NOT a
-        /// failure — it is reported as <c>MISSING</c> and the resolvable shapes are still analysed.</summary>
+        /// <paramref name="shapeNames"/> and <paramref name="outfitRoot"/> feed the co-active set
+        /// (<see cref="BuildAnalyzeSet"/>).</summary>
         public static string Run(string meshObject, string[] shapeNames = null, string outfitRoot = null)
         {
             var handle = SceneHandle.Resolve(meshObject);
             if (!handle.Ok) return Fail("meshObject: " + handle.Refusal);
             var go = handle.Object;
-            var smr = ResolveMesh(go, out var why); // only returns an SMR whose mesh has blendShapeCount > 0
+            var smr = ResolveMesh(go, out var why);
             if (smr == null) return Fail(why);
             var mesh = smr.sharedMesh;
 
             var passed = shapeNames ?? Array.Empty<string>();
-            // A null/blank passed element would throw in GetBlendShapeIndex; reject it here rather than let a raw
-            // exception escape the FAIL envelope. Promoting blank names to FAIL is the honest signal for a
-            // malformed graph read (an unset shape row) — a benign MISSING would mask it.
             if (passed.Any(string.IsNullOrWhiteSpace))
                 return Fail("shape names must be non-empty — a blank entry means a malformed candidate set");
 
@@ -146,22 +109,16 @@ namespace Ryan6Vrc.AgentTools.Editor
                 outfitGO = outfitHandle.Object;
             }
 
-            // The set fed to Analyze is the co-active union: caller-passed ∪ scene-worn ∪ MA ShapeChanger
-            // reactions that write THIS mesh (weight 0 at edit time, so the caller can't see them).
             var ingested = BuildAnalyzeSet(smr, passed, outfitGO);
-            // An empty union on a mesh that RESOLVED is an answer, not misuse — a shape map needs it to
-            // rule a mesh out. Fail() would give it the bad-input envelope (bare FAIL, no RunLog), which
-            // also denies the caller the artifact the compose checkpoint asks for.
             var analysis = Analyze(mesh, ingested.Names);
             return Emit(go, smr, mesh, analysis, ingested, outfitGO != null);
         }
 
         // ── Ingestion: assemble the co-active shape-name union fed to Analyze ────────────────────────────────
 
-        /// <summary>Union of the caller-passed set, the shapes currently at nonzero weight on
-        /// <paramref name="smr"/> (read off the SMR, not the Mesh), and — when <paramref name="outfitRoot"/> is
-        /// non-null — the MA <c>ShapeChanger</c> rows under it that write <paramref name="smr"/>'s GameObject.
-        /// Order-preserving, deduped. Reaction rows also record their <c>ShapeChangeType</c> for Task 2.</summary>
+        /// <summary>Order-preserving, deduped union of the caller-passed set, the shapes at nonzero weight on
+        /// <paramref name="smr"/>, and (with <paramref name="outfitRoot"/>) the MA <c>ShapeChanger</c> rows under
+        /// it that write <paramref name="smr"/>'s GameObject.</summary>
         internal static Ingested BuildAnalyzeSet(SkinnedMeshRenderer smr, IEnumerable<string> passed, GameObject outfitRoot)
         {
             var result = new Ingested();
@@ -170,7 +127,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             if (passed != null) foreach (var n in passed) Add(n);
 
-            // Worn: shapes at nonzero weight on the RESOLVED SMR (not a re-fetched GetComponent).
             var mesh = smr.sharedMesh;
             if (mesh != null)
                 for (int i = 0; i < mesh.blendShapeCount; i++)
@@ -186,33 +142,18 @@ namespace Ryan6Vrc.AgentTools.Editor
             return result;
         }
 
-        /// <summary>Whether ANY MA <c>MeshCutter</c> sits under <paramref name="outfitRoot"/> — presence, never
-        /// a count and never a read of what one removes. It exists to make <c>reacted=0</c> legible where it
-        /// prints: a cutter anti-clips by vertex FILTER, so an outfit can be fully anti-clipped with no
-        /// ShapeChanger row at all (`outfits.md`).
+        /// <summary>Whether any MA <c>MeshCutter</c> sits under <paramref name="outfitRoot"/>: presence, never a
+        /// count or a read of what one removes.
         ///
-        /// <para><b>What <c>Absent</c> means, exactly: no cutter under <paramref name="outfitRoot"/> — NOT
-        /// "nothing cuts this mesh."</b> A cutter cuts whatever its <c>Object</c> reference names and its own
-        /// placement is unconstrained; MA explicitly supports cutters parented UNDER their target mesh (its
-        /// 1.15.0 constant-on rule), so a cutter living on the base body and cutting the torso under a dress is
-        /// a sanctioned layout this root-scoped scan cannot see. That is a real under-warn and the reason the
-        /// summary word is scoped, not absolute. The limit is inherited, not introduced here; widening it needs
-        /// a second root argument, not a tighter filter.</para>
+        /// <para><c>Absent</c> means no cutter under the root, not "nothing cuts this mesh". A cutter cuts whatever
+        /// its <c>Object</c> reference names, and MA supports cutters parented under their target mesh, so a
+        /// cutter on the base body cutting the torso under a dress is invisible to this scan. Widening it needs a
+        /// second root argument.</para>
         ///
-        /// <para>Within the root the probe deliberately OVER-warns — unscoped to the mesh, and counting a
-        /// filterless (MA-inert) cutter as present. That is the safe direction for a signal whose only job is to
-        /// stop a zero being over-read: an over-warn costs one extra look, an under-warn restores the false
-        /// all-clear. An implementer who "fixes" this by re-adding the target filter should read the three
-        /// paragraphs above first — the previous census did exactly that and was WORSE, because
-        /// <c>AvatarObjectReference.Get</c> returns null when the container has no avatar root among its
-        /// parents, so on a staging scene or an isolated prefab every row was skipped and it printed a counted
-        /// zero indistinguishable from a real one. Its filterless check was also never faithful (MA skips on an
-        /// empty resolved filter LIST, which a registered-provider miss also produces), and the interface it
-        /// pinned declares itself "Unstable API for now" upstream. One type pin replaces three.</para>
-        ///
-        /// <para>Scope of the word: this is a MeshCutter-FAMILY signal, not "geometry removal". A
-        /// <c>ShapeChanger</c> in Delete mode also removes or NaN-hides geometry, but Delete rows are ShapeChanger rows and
-        /// already land in <c>reacted=</c>.</para></summary>
+        /// <para>Within the root the probe over-warns: unscoped to the mesh, and counting a filterless (MA-inert)
+        /// cutter as present. Do not re-add a target filter: <c>AvatarObjectReference.Get</c> returns null when the
+        /// container has no avatar root among its parents, so on a staging scene or an isolated prefab every row
+        /// would be skipped and print a counted zero indistinguishable from a real one.</para></summary>
         private static CutterState CutterPresence(GameObject outfitRoot)
         {
             var mcType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarMeshCutter");
@@ -231,41 +172,25 @@ namespace Ryan6Vrc.AgentTools.Editor
             return state;
         }
 
-        /// <summary>The presence verdict, pure over its inputs so every branch is assertable without building an
-        /// MA graph (the <see cref="FindInactiveAncestor"/> pattern). The scan and the warning stay with the
-        /// caller. MA absent is the honest silent floor — <c>Absent</c>, not withheld; MA present with the type
-        /// unresolved is drift, and must never render as a clean <c>Absent</c>.</summary>
         internal static CutterState DecideCutterState(Type mcType, bool maInstalled, bool anyCutterFound)
         {
             if (mcType == null) return maInstalled ? CutterState.DriftUnknown : CutterState.Absent;
             return anyCutterFound ? CutterState.Present : CutterState.Absent;
         }
 
-        // Reflectively read MA ModularAvatarShapeChanger rows under `outfitRoot` and ingest the ShapeName of every
-        // row whose write-target resolves to `bodyGO` (the resolved body SMR's GameObject). ChangeType is captured
-        // (Delete=0, Set=1); a Delete row is ingested like any other declared shape, not dropped. This asmdef has
-        // no MA assembly reference, so everything is by-name reflection (VendorReflect.FindType).
-        //
-        // Failure doctrine (this tool exists to catch the invisible weight-0 ShapeChangers, so a silent truncation
-        // is the worst outcome): MA absent ⇒ silent no-op (the honest floor). MA PRESENT but a renamed member —
-        // OR a renamed/moved ModularAvatarShapeChanger TYPE itself — ⇒ a loud one-line drift warning + no
-        // reactions (the "reflection canary goes silently green" trap — never let an MA update quietly strip the
-        // co-active set). A single throwing component/row ⇒ warn and CONTINUE the sweep (per-component + per-row
-        // guards), so one stale/deleted ref can't drop the rest — including the very weight-0 ShapeChangers this
-        // tool exists to surface.
+        // Reflectively read MA ShapeChanger rows under `outfitRoot` and ingest the ShapeName of every row whose
+        // write-target resolves to `bodyGO`; a Delete row is ingested like any other. This asmdef has no MA assembly
+        // reference, so everything is by-name reflection. A single throwing component or row warns and the sweep
+        // continues, so one stale ref can't drop the rest of the weight-0 ShapeChangers.
         private static void IngestShapeChangers(GameObject outfitRoot, GameObject bodyGO, Ingested result, Action<string> add)
         {
             var scType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ModularAvatarShapeChanger");
             if (scType == null)
             {
-                // A null type is ambiguous: MA genuinely absent (silent — the legitimate floor) vs MA installed
-                // but the type renamed/moved (or its assembly failed to load types). Probe MA presence by the
-                // runtime assembly — far more stable than any one type's FullName — so the drifted case is loud,
-                // not a silent `=> OK` with every reaction dropped (the worst outcome for this tool).
+                // A null type means MA absent (silent), or MA installed with the type renamed or moved. The runtime
+                // assembly's name tells them apart.
                 if (VendorReflect.ModularAvatarInstalled())
                 {
-                    // The warning alone left the SUMMARY silent, so a drifted run read exactly like a clean one
-                    // (`reacted=0`, no note) — the defect the MeshCutter door is fixed for. Withhold on the line too.
                     result.ReactionsUnknown = true;
                     Debug.LogWarning("[ReportShapeOverlap] MA is installed but ModularAvatarShapeChanger did not resolve " +
                         "(type renamed/moved, or its assembly failed to load types); reactions signal WITHHELD. The co-active " +
@@ -274,8 +199,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return;
             }
 
-            // Member handles resolved once. Any null here means MA is installed but its API drifted from ours —
-            // surface it loudly rather than return a silently-empty reaction set the agent would trust.
             var shapesProp = scType.GetProperty("Shapes", BindingFlags.Public | BindingFlags.Instance);
             var csType = VendorReflect.FindType("nadena.dev.modular_avatar.core.ChangedShape");
             var objField = csType?.GetField("Object");
@@ -283,17 +206,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             var ctField = csType?.GetField("ChangeType");
             var valField = csType?.GetField("Value");
             var aorType = VendorReflect.FindType("nadena.dev.modular_avatar.core.AvatarObjectReference");
-            var getMethod = aorType == null ? null : VendorReflect.ResolveAorGetOverload(aorType); // strict pin: Get(Component)→GameObject
+            var getMethod = aorType == null ? null : VendorReflect.ResolveAorGetOverload(aorType);
             if (shapesProp == null || objField == null || nameField == null || ctField == null || valField == null || getMethod == null)
             {
-                result.ReactionsUnknown = true; // member drift withholds on the summary too — see the type-drift branch
+                result.ReactionsUnknown = true;
                 Debug.LogWarning("[ReportShapeOverlap] MA ShapeChanger reflection drift — a member (Shapes / " +
                     "ChangedShape.Object|ShapeName|ChangeType|Value / AvatarObjectReference.Get) did not resolve; reactions " +
                     "signal WITHHELD. The co-active set may be missing weight-0 ShapeChanger shapes.");
                 return;
             }
 
-            // Resolved once per run, not per row: the probe walks every ObjectToggle under the root.
             var toggleDriven = CollectToggleDriven(AvatarRootOf(outfitRoot) ?? outfitRoot);
             result.ActiveStateUnknown = toggleDriven == null;
             result.OutfitRootInactive = !outfitRoot.activeSelf;
@@ -318,7 +240,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                             // AvatarObjectReference.Get can throw (TargetInvocationException) on a stale/deleted ref.
                             var target = getMethod.Invoke(objRef, new object[] { comp }) as GameObject;
-                            if (target != bodyGO) // only rows that write the resolved body mesh
+                            if (target != bodyGO)
                             {
                                 if (target != null) result.ElsewhereTargets.Add(PathOf(target));
                                 continue;
@@ -330,7 +252,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                                     "MA may have added a shape-change mode this tool does not model.");
 
                             add(shapeName);
-                            result.ReactionTypes[shapeName] = changeType; // last-wins type (Task 1 handoff)
+                            result.ReactionTypes[shapeName] = changeType; // last-wins type
                             if (!result.Reactions.TryGetValue(shapeName, out var ri))
                             {
                                 ri = new ReactionInfo();
@@ -338,23 +260,20 @@ namespace Ryan6Vrc.AgentTools.Editor
                             }
                             ri.ChangeType = changeType;
                             ri.Value = value;
-                            // Walk stops AT the caller's root: above it, "inactive" describes how the caller
-                            // staged the scene, not how the avatar is authored. Last declaration wins, matching
-                            // ChangeType/Value above — a shape declared by both a live and a parked changer is
-                            // owned by whichever the ingest saw last, and the row names which.
-                            // MA's initial state is the last INITIALLY-ACTIVE group, not the last declared
+                            // The walk stops at the caller's root: above it, "inactive" describes how the caller
+                            // staged the scene, not how the avatar is authored.
+                            // MA's initial state is the last initially-active group, not the last declared
                             // (ReactiveObjectAnalyzer PreprocessShapes), so liveness is a disjunction over
-                            // declarations rather than last-wins. `Inverted` flips it: an inverted changer behind
-                            // a parked ancestor is exactly how "apply while the piece is off" is authored, and is
-                            // initially ACTIVE (ReactionRule.InitiallyActive ^ Inverted).
+                            // declarations. An inverted changer behind a parked ancestor is how "apply while the
+                            // piece is off" is authored, and is initially active (ReactionRule.InitiallyActive
+                            // XORs Inverted).
                             var parked = FindInactiveAncestor(comp.transform, outfitRoot.transform, toggleDriven);
                             bool inverted = ReadInverted(comp);
                             bool live = (parked == null) ^ inverted;
                             if (live) { ri.AnyDeclarationLive = true; ri.InactiveAncestor = null; }
                             else if (!ri.AnyDeclarationLive && parked != null) ri.InactiveAncestor = PathOf(parked.gameObject);
-                            // Canonicalize: MA ignores a Delete row's Value — the shape is a vertex selector, not a
-                            // weight it writes — so two Deletes with differing stale Value fields must NOT read as a
-                            // conflict; compare Delete on type only. Set keeps its value, so Set=100 vs Set=50 still conflicts.
+                            // MA ignores a Delete row's Value (the shape is a vertex selector, not a weight it
+                            // writes), so two Deletes with differing stale Value fields must not read as a conflict.
                             ri.Declares.Add((changeType, changeType == 0 ? 0f : value));
                         }
                         catch (Exception e)
@@ -374,11 +293,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Build-effective active state ─────────────────────────────────────────────────────────────────────
         //
-        // MA gates a reaction on its ancestors' active state, and the census must say so or a declaration that
-        // cannot fire reads as covering a shape it does not cover — a worn-and-undeclared shape then hides
-        // behind a dead row (the double-subtraction this tool exists to surface).
-        //
-        // The mechanism, read off MA 1.18.7 rather than assumed (canon: `nondestructive.md`):
+        // MA gates a reaction on its ancestors' active state:
         //   • ReactiveObjectAnalyzer.LocateReactions.BuildConditions walks the ShapeChanger's ancestors to the
         //     avatar root and adds ONE activeSelf ControlCondition per ancestor. It is a condition, not a drop.
         //     Its affected-object skip does NOT apply here: that skip is guarded on `affectedObject != null`
@@ -407,9 +322,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return null;
         }
 
-        /// <summary>An MA reactive component's <c>Inverted</c> flag; false when unreadable. Inverting is how
-        /// "apply while the piece is OFF" is authored and `ReactionRule.InitiallyActive` XORs it, so ignoring it
-        /// reads exactly the healthy inverted case as parked.</summary>
+        /// <summary>An MA reactive component's <c>Inverted</c> flag; false when unreadable.</summary>
         internal static bool ReadInverted(UnityEngine.Object comp)
         {
             if (comp == null) return false;
@@ -425,10 +338,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Every GameObject an MA <c>ObjectToggle</c> under <paramref name="scope"/> drives ACTIVE. MA
         /// exempts a toggle target from constant-folding, so an inactive one is a live conditional rather than a
-        /// dead branch. A row driving the object OFF is excluded — it resolves to inactive, so treating it as
-        /// "driven" would restore the blind spot this annotation exists to surface.
-        /// Returns null — never an empty set — when the probe cannot be trusted, so the caller withholds the
-        /// signal instead of reading "no toggles" off a drifted reflection.</summary>
+        /// dead branch. A row driving the object off is excluded because it resolves to inactive. Returns null,
+        /// never an empty set, when the probe cannot be trusted, so the caller withholds the signal.</summary>
         internal static HashSet<GameObject> CollectToggleDriven(GameObject scope)
         {
             var otType = VendorReflect.FindType(ObjectToggleTypeName);
@@ -482,37 +393,28 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
                 catch (Exception e)
                 {
+                    // A dropped component shrinks the driven set the same way a dropped row does.
                     Debug.LogWarning("[ReportShapeOverlap] skipped an ObjectToggle component on '" +
-                        PathOf(comp.gameObject) + "' (" + e.GetType().Name + "): " + e.Message);
+                        PathOf(comp.gameObject) + "' (" + e.GetType().Name + "): " + e.Message +
+                        " — active-state annotation withheld for this run.");
+                    return null;
                 }
             }
             return driven;
         }
 
-        /// <summary>Whether any reaction declares this shape — the MISMATCH suppression rule, used by both the
-        /// count and the row so the two can never disagree.
-        ///
-        /// **A parked ancestor does NOT release suppression, deliberately.** Proving a declaration dead needs
-        /// MA's full liveness rule, and one arm of it is out of reach here: `AnalyzeConstants` keeps a condition
-        /// alive when ANY clip binds that object's `m_IsActive`, which it evaluates against a build-time
-        /// animation index (`asc == null` outside a build, so MA itself does no constant-folding at edit time).
-        /// A predicate missing that arm flags every ancestor an FX or VRCFury toggle drives — ordinary wardrobe
-        /// layouts — and manufacturing offenders is the worse failure, which is the same reason ingestion is not
-        /// gated on active state either. So the parked chain is REPORTED (`[inactive: …]`, `inactiveDeclared=`)
-        /// for the reader to rule on, and the flag stays on the fact this tool can establish: nothing declared
-        /// it at all.</summary>
+        /// <summary>Whether any reaction declares this shape: the MISMATCH suppression rule. A parked ancestor does
+        /// not release it, because `AnalyzeConstants` keeps a condition alive when any clip binds that object's
+        /// `m_IsActive`, evaluated against a build-time animation index that no edit-time read has (`asc == null`
+        /// outside a build).</summary>
         internal static bool Covers(Ingested ingested, string shape)
             => ingested.Reactions.ContainsKey(shape);
 
-        /// <summary>A shape whose every declaration sits behind a parked ancestor — annotated and counted so the
-        /// reader sees the population without diffing the table. Not a verdict: see <see cref="Covers"/> for why
-        /// this cannot be promoted to one here.</summary>
         internal static bool IsParkedDeclaration(Ingested ingested, string shape)
             => ingested.Reactions.TryGetValue(shape, out var ri) && ri.InactiveAncestor != null;
 
         /// <summary>The nearest parked ancestor between <paramref name="from"/> (inclusive) and
-        /// <paramref name="stopAt"/> (exclusive), skipping toggle-driven ones. Null when the chain is clear.
-        /// Pure over its inputs, so every branch is assertable without building an MA graph.</summary>
+        /// <paramref name="stopAt"/> (exclusive), skipping toggle-driven ones.</summary>
         internal static Transform FindInactiveAncestor(Transform from, Transform stopAt, HashSet<GameObject> toggleDriven)
         {
             if (toggleDriven == null) return null; // signal withheld — see Ingested.ActiveStateUnknown
@@ -527,9 +429,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Pure core ─────────────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Compute touched-set footprints and pairwise containment for <paramref name="names"/> on
-        /// <paramref name="mesh"/>. Missing names are recorded (not resolved into pairs). Deterministic; no
-        /// scene or project access.</summary>
         internal static Analysis Analyze(Mesh mesh, IList<string> names)
         {
             int vc = mesh.vertexCount;
@@ -572,42 +471,28 @@ namespace Ryan6Vrc.AgentTools.Editor
                     int inter = 0;
                     for (int i = 0; i < vc; i++) if (tx[i] && ty[i]) inter++;
                     int minfp = Mathf.Min(footprint[x], footprint[y]);
-                    float cont = minfp == 0 ? 0f : (float)inter / minfp; // empty shape ⇒ undefined ⇒ 0 (reported)
+                    float cont = minfp == 0 ? 0f : (float)inter / minfp;
                     a.Pairs.Add(new Pair { A = resolved[x], B = resolved[y], Intersect = inter, MinFootprint = minfp, Containment = cont });
                 }
-            a.Pairs.Sort((p, q) => q.Containment.CompareTo(p.Containment)); // worst (most-contained) first
+            a.Pairs.Sort((p, q) => q.Containment.CompareTo(p.Containment));
             return a;
         }
 
-        /// <summary>The cutter-presence token, printed beside <c>reacted=</c> because its whole job is to
-        /// qualify that number. Reported, not judged: <c>present</c> says another mechanism is under the outfit
-        /// root, never that the mesh is correctly anti-clipped — and <c>absent</c> is scoped to that root
-        /// (<see cref="CutterPresence"/>), never "nothing cuts this mesh".
-        ///
-        /// <para>Drift takes the NOTE channel rather than a third token value. This file already spells unknown
-        /// two ways — <c>UNKNOWN(n)</c> for an out-of-range ChangeType and a bare <c>unknown</c> in the
-        /// resolved-target cell — so a third synonym at a third scope would be the break; the established
-        /// spelling for a signal we refuse to guess at is <c>| note: … WITHHELD</c>, as
-        /// <c>ActiveStateUnknown</c> uses. Tokens here stay two-valued and parseable.</para></summary>
+        /// <summary>The cutter-presence token, printed beside <c>reacted=</c> to qualify it: <c>present</c> never
+        /// says the mesh is correctly anti-clipped, and <c>absent</c> is scoped to the outfit root
+        /// (<see cref="CutterPresence"/>).</summary>
         internal static string MeshCutterPart(CutterState state)
             => state == CutterState.Present ? " meshCutters=present"
              : state == CutterState.Absent ? " meshCutters=absent"
              : ""; // NotScanned and DriftUnknown print no token — the latter rides the WITHHELD note
 
-        /// <summary>The WITHHELD notes, one per signal, in the order the summary reads them. All three drifts
-        /// are spelled the same way ON PURPOSE: the MA types live in one namespace, so a realistic rename takes
-        /// reactions and cutters together, and a reader must not have to learn which door confesses how.</summary>
         internal static string WithheldNotes(Ingested ingested)
             => (ingested.ActiveStateUnknown ? " | note: active-state signal WITHHELD (ObjectToggle probe drifted)" : "")
              + (ingested.ReactionsUnknown ? " | note: reactions signal WITHHELD (MA ShapeChanger drift)" : "")
              + (ingested.MeshCutters == CutterState.DriftUnknown
                     ? " | note: meshCutters signal WITHHELD (MA MeshCutter type drift)" : "");
 
-        // ── Output (Report envelope: summary + markdown body + WriteRunLog to Snapshots; no verdict token) ──
-        // Beyond the geometric footprint/pairwise digest, Emit renders the RESOLUTION view the de-conflict skill
-        // reads: per union shape its reaction, current static weight, resolved-target, and overlap — plus a full
-        // weight audit and the worn-but-undeclared MISMATCH flag. It stays a Report: the table states facts and
-        // marks worn-but-undeclared rows for the reader; the accept-vs-CaptureDiff decision lives in the skill.
+        // ── Output ──────────────────────────────────────────────────────────────────────────────────────────
         private static string Emit(GameObject go, SkinnedMeshRenderer smr, Mesh mesh, Analysis a, Ingested ingested,
                                    bool outfitRootPassed)
         {
@@ -615,9 +500,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             int resolved = requested - a.Missing.Count;
             int pairFlagged = a.Pairs.Count(p => p.Containment >= FlagContainment);
 
-            // reacted = union shapes declared by a reaction; worn = union shapes at nonzero static weight;
-            // mismatch = worn-but-undeclared rows (the disposition signal — NOT a subset boundary of worn, since
-            // worn also counts declared-and-worn shapes; the two fields answer different questions).
             int reacted = ingested.Reactions.Count;
             int worn = 0, mismatchCount = 0, inactiveDeclared = 0;
             foreach (var name in ingested.Names)
@@ -629,14 +511,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (isWorn && !Covers(ingested, name)) mismatchCount++;
             }
 
-            // `reacted=0` has two causes and must say which. Gated on the SCAN, not on an empty result:
-            // the common call is a caller-supplied shape set with no outfitRoot, where `shapes=2/2
-            // reacted=0` is otherwise indistinguishable from "scanned, nothing reacts". When the scan did run,
-            // `meshCutters=present|absent` prints and is itself the tell — except on MeshCutter drift, where the
-            // token withholds and its WITHHELD note carries the same "the scan ran" information instead.
+            // `reacted=0` must say whether the scan ran, so this is gated on the scan and not on an empty result.
             string emptyNote = outfitRootPassed ? "" : " | note: reactions NOT scanned — no outfitRoot passed";
-            // The scan ran and reached rows, none of them for this mesh: say where they went, so a mis-targeted
-            // census reads as one instead of as "nothing reacts". Silent once any row lands here.
             if (reacted == 0 && ingested.ElsewhereTargets.Count > 0)
                 emptyNote += " | note: no ShapeChanger row targets this mesh; rows under outfitRoot target " +
                              string.Join(", ", ingested.ElsewhereTargets);
@@ -666,11 +542,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                 "not promoted to MISMATCH because proving a declaration dead needs MA's build-time animation index (any clip " +
                 "binding the ancestor's `m_IsActive` keeps it live), which no edit-time read has; flagging without it would " +
                 "invent offenders on every FX-toggled wardrobe. Toggle-driven and inverted declarations are already excluded " +
-                "here (mechanism: `nondestructive.md`)._\n\n");
+                "here (mechanism: `ReportShapeOverlap.cs` §Build-effective active state)._\n\n");
             sb.Append("| shape | reaction | current | resolved-target | overlap | disposition |\n");
             sb.Append("| --- | --- | --- | --- | --- | --- |\n");
-            // Per-shape max containment, precomputed in one pass over the pairs (an O(1) lookup per union
-            // shape instead of re-scanning a.Pairs — which is itself O(shapes²) — for every shape).
             var maxOverlap = new Dictionary<string, float>();
             foreach (var p in a.Pairs)
             {
@@ -685,8 +559,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 float weight = idx >= 0 ? smr.GetBlendShapeWeight(idx) : 0f;
                 ingested.Reactions.TryGetValue(name, out var ri);
                 bool isWorn = present && Mathf.Abs(weight) > 0f;
-                // Worn-but-not-live-declared — still the anti-flood invariant, with a declaration behind a parked
-                // ancestor counting as no declaration rather than as cover.
                 bool mismatch = isWorn && !Covers(ingested, name);
 
                 string reactionCell, resolvedTarget;
@@ -702,7 +574,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                     reactionCell = ReactionLabel(ri.ChangeType, ri.Value);
                     resolvedTarget = ResolvedTarget(ri.ChangeType, ri.Value);
                 }
-                // Name the offender on the row, not just in the count — the ancestor IS the repair handle.
                 if (ri != null && ri.InactiveAncestor != null)
                     reactionCell += " `[inactive: " + Cell(ri.InactiveAncestor) + "]`";
 
@@ -763,9 +634,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static string Cell(string s) => RunLogFormat.Cell(s);
 
-        // MA ShapeChangeType is {Delete=0, Set=1}. Render any other value loudly as UNKNOWN(n) with an
-        // `unknown` resolved-target rather than silently defaulting to Set — a new MA mode or a corrupt
-        // serialized enum is exactly the "reflection goes silently green on MA drift" trap this tool guards.
+        // MA ShapeChangeType is {Delete=0, Set=1}.
         private static string ReactionLabel(int changeType, float value) =>
             changeType == 0 ? "Delete"
             : changeType == 1 ? "Set=" + Num(value)
@@ -773,10 +642,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static string ResolvedTarget(int changeType, float value) =>
             changeType == 0 ? "deleted" : changeType == 1 ? Num(value) : "unknown";
 
-        // Compact weight/value formatter: integral weights render clean (100, 0, 42), fractional keep up to 3 dp.
-        // A NONZERO weight must never render as "0": worn/mismatch classification is strictly `!= 0`, so a tiny
-        // residual (float noise from imperfect zeroing) is counted worn yet "0.###" would print it "0" — a row
-        // contradicting its own mismatch= count. Fall back to a round-tripping form so the magnitude stays visible.
+        // A nonzero weight must never render as "0": worn/mismatch classification is strictly `!= 0`, so a tiny
+        // residual is counted worn, and "0.###" would print it "0", a row contradicting its own mismatch= count.
         private static string Num(float v)
         {
             if (v == 0f) return "0";
@@ -784,10 +651,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return s == "0" || s == "-0" ? v.ToString("G4", CultureInfo.InvariantCulture) : s;
         }
 
-        // Resolve the SkinnedMeshRenderer carrying blendshapes from the named scene object (its mesh is .sharedMesh;
-        // weight reads come off the SMR itself). Prefer the SMR on the object; else a unique blendshape-bearing SMR
-        // among its descendants. Two or more is ambiguous — REFUSE and name them, so the agent points at the specific
-        // renderer (speak the substrate: it is a scene object it already holds during de-conflict).
         private static SkinnedMeshRenderer ResolveMesh(GameObject go, out string why)
         {
             why = null;

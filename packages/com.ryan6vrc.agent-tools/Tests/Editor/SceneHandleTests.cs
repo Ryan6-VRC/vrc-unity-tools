@@ -5,16 +5,12 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-// The one string→scene-GameObject resolver behind every string scene handle in both packages. This fixture
-// covers the resolver itself; each door's own tests cover that its envelope carries the refusal through.
+// Covers the resolver itself; each door's own tests cover that its envelope carries the refusal through.
 //
-// The out-of-scene case uses a preview scene: it is valid and loaded but never the active one, which is exactly
-// the shape the id rung has to refuse. NewScene(Additive) is not an option here — it throws on the batchmode
-// venue's unsaved untitled scene (CheckSeamTests and CheckAvatarTests both record the same wall).
+// The out-of-scene case uses a preview scene, valid and loaded but never active, because NewScene(Additive)
+// throws on the batchmode venue's unsaved untitled scene.
 //
-// Objects are built and read, never mutated — no AddComponent, no SerializedObject writes on anything torn down
-// here (docs/verify.md §Test venue: mutating a live object that is later destroyed corrupts Unity's object
-// registry at the next allocation).
+// Objects are built and read, never mutated (docs/verify.md §Test venue).
 public class SceneHandleTests
 {
     private readonly List<GameObject> _roots = new List<GameObject>();
@@ -29,8 +25,6 @@ public class SceneHandleTests
         return go;
     }
 
-    /// <summary>An object outside the active scene. A preview scene is safe scaffolding here: it is never the
-    /// active scene and cannot leak into another fixture.</summary>
     private GameObject GoInOther(string name)
     {
         if (!_otherOpen) { _other = EditorSceneManager.NewPreviewScene(); _otherOpen = true; }
@@ -121,13 +115,11 @@ public class SceneHandleTests
         Go("SH_SameRoot");
         var r = SceneHandle.Resolve("SH_SameRoot");
         Assert.That(r.Outcome, Is.EqualTo(SceneHandleOutcome.Ambiguous),
-            "first-wins across duplicate roots is silent today, in the write door included");
+            "duplicate root names must refuse as Ambiguous on the path branch, never resolve first-wins");
     }
 
-    /// <summary>The case Transform.Find swallows. A path is walked segment by segment and Find returns the FIRST
-    /// same-named child, so an outfit carrying its own Armature beside the base's made every path through it a
-    /// coin-flip — at any depth, not just at the root. The descent has to branch for the refusal to be true of
-    /// paths at all.</summary>
+    /// <summary>Transform.Find returns the FIRST same-named child, so an outfit's own Armature beside the base's
+    /// would silently pick one at any depth. The descent has to branch for the refusal to hold on paths.</summary>
     [Test]
     public void DuplicateNamedSiblings_RefuseMidPath()
     {

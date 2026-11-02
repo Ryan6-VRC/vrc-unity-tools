@@ -13,24 +13,7 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// The heavy-import door: a <c>.unitypackage</c> import whose result contract survives a
     /// transport timeout. MCP-for-Unity's transport times out on a 60–700MB
     /// <see cref="AssetDatabase.ImportPackage(string,bool)"/> and its connection-level retry can
-    /// silently re-execute the snippet. The mitigation here is on the semantics side: the RunLog
-    /// lands on disk at a STABLE, package-derived path the moment the import starts, so when the
-    /// invoking call times out the agent re-reads that same RunLog in a later cheap call (or calls
-    /// <see cref="Verify"/>) instead of re-running the multi-hundred-MB import.
-    ///
-    /// TWO-PHASE, because <c>AssetDatabase.ImportPackage(path, interactive:false)</c> is ASYNC:
-    /// completion arrives on <c>AssetDatabase.importPackageCompleted/.importPackageFailed/
-    /// .importPackageCancelled</c> on the main thread, so the invoking <c>execute_code</c> call —
-    /// which holds the main thread — CANNOT block-wait for it.
-    ///   • <see cref="Run"/> validates, pre-writes the RunLog as <c>status=pending</c>, registers
-    ///     the callbacks, kicks off the import, and returns immediately (=&gt; PENDING).
-    ///   • <see cref="Verify"/> re-reads that RunLog + walks the expected on-disk root and emits a
-    ///     PASS / PENDING / FAIL verdict. Verify is the TRUTH, not the callback — an import that
-    ///     triggers script compilation reloads the domain and drops the in-flight callback, leaving
-    ///     the RunLog stuck at <c>pending</c>. That is why the on-disk walk, not the callback, decides.
-    ///
-    /// The deterministic missing-asset / stale-remap deep-check stays <see cref="CheckPackage"/>'s job;
-    /// Verify names it rather than duplicating it.
+    /// silently re-execute the snippet. Contract: docs/unity-tools.md.
     /// </summary>
     [AgentTool]
     public static class ImportPackage
@@ -42,13 +25,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Phase 1: start the import ------------------------------------------------------
 
-        /// <summary>Validate <paramref name="packagePath"/> (exists, <c>.unitypackage</c>), pre-write the
-        /// RunLog as <c>pending</c> at a stable package-derived path, register the completion callbacks,
-        /// and start the async import — returning immediately without waiting for it. Idempotent: a
-        /// re-import overwrites the same RunLog. With <paramref name="whatIf"/> true, validate and report
-        /// the plan (including the RunLog path it WOULD write) without importing or writing anything.
-        /// Summary: <c>[ImportPackage] STARTED &lt;name&gt; =&gt; PENDING | log=&lt;path&gt;</c>. Bad input is a
-        /// bare <c>[ImportPackage] FAIL: …</c> naming the fix, with no trailer.</summary>
+        /// <summary>Pre-write the RunLog as <c>pending</c>, register the completion callbacks and start the
+        /// async import, returning immediately. With <paramref name="whatIf"/> true, validate and report the
+        /// plan without importing or writing anything.</summary>
         public static string Run(string packagePath, bool whatIf = false)
         {
             string bad = ValidatePackagePath(packagePath, requireExists: true);
@@ -59,8 +38,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             if (whatIf)
             {
-                // Plan only: no import, no file written. `wouldLog=` (not `log=`) so the trailer never
-                // points at an artifact that is not on disk.
                 var plan = $"[ImportPackage] WHATIF {name}: valid .unitypackage, would import and record => WHATIF | wouldLog={logPath}";
                 Debug.Log(plan);
                 return plan;
@@ -70,10 +47,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             try { written = WriteImportLog(logPath, packagePath, name, "pending", null); }
             catch (Exception e) { return Fail("could not pre-write RunLog at " + logPath + ": " + e.Message); }
 
-            // Register the completion callbacks BEFORE kicking off the import. Each closes over this
-            // import's expected name + RunLog path and rewrites the log in place, then unregisters the
-            // whole trio. Name-guarded so a concurrent import of a differently-named package is ignored
-            // by this handler and left for its own.
+            // Name-guarded: a concurrent import of a differently-named package is left for its own handler.
             AssetDatabase.ImportPackageCallback onDone = null;
             AssetDatabase.ImportPackageFailedCallback onFail = null;
             AssetDatabase.ImportPackageCallback onCancel = null;
@@ -108,9 +82,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             AssetDatabase.importPackageFailed += onFail;
             AssetDatabase.importPackageCancelled += onCancel;
 
-            // Async: returns before the import finishes (docs/unity.md §Sharp edges "execute_code is
-            // async-blind"). The RunLog is already on disk as `pending`, so the contract holds even if
-            // this call's transport times out here.
+            // Async: returns before the import finishes (docs/unity.md §Sharp edges).
             AssetDatabase.ImportPackage(packagePath, false);
 
             var summary = $"[ImportPackage] STARTED {name} => PENDING | log={written}";
@@ -121,13 +93,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ----- Phase 2: verify the result -----------------------------------------------------
 
         /// <summary>Re-read the import RunLog for <paramref name="packagePath"/> and, when
-        /// <paramref name="expectedRoot"/> (an <c>Assets/…</c> folder) is given, walk it: PASS when the
-        /// root exists and holds ≥1 imported asset, PENDING when the RunLog is still <c>pending</c> and
-        /// the editor is busy (import likely still running), FAIL otherwise (naming why). Without
-        /// <paramref name="expectedRoot"/>, report what the RunLog recorded (on-disk state unverified).
-        /// The on-disk walk is authoritative over the callback-written status. Summary:
-        /// <c>[ImportPackage] VERIFY &lt;name&gt; (…) =&gt; RESULT | log=&lt;path&gt;</c>; run
-        /// <c>CheckPackage.Run</c> for deep import health (missing refs / stale remap).</summary>
+        /// <paramref name="expectedRoot"/> (an <c>Assets/…</c> folder) is given, walk it.
+        /// <see cref="Decide"/> is the verdict table.</summary>
         public static string Verify(string packagePath, string expectedRoot = null)
         {
             string bad = ValidatePackagePath(packagePath, requireExists: false);
@@ -151,10 +118,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                 "[ImportPackage] VERIFY {0} (status={1}, root={2}, files={3}, busy={4}): {5} => {6}",
                 name, status ?? "none", rootLabel, fileCount, editorBusy ? "yes" : "no", reason, Token(v));
 
-            // A wrong expectedRoot is routine — seller-wrapped packages bury their content (VRCLens lands under
-            // Assets/Hirabiki/VRCLens), and nothing here can name the folder the import actually created: the
-            // completion callbacks carry only a package name, so no imported-path list exists to consult. What
-            // IS knowable is how far down the guess survives, which is enough to aim the retry.
+            // A wrong expectedRoot is routine, since seller-wrapped packages bury their content, and the
+            // completion callbacks carry only a package name, so the folder the import created is unknowable.
+            // How far down the guess survives is enough to aim the retry.
             if (v == Verdict.Fail && rootProvided && !rootExists)
                 summary += " | " + DescribeNearestExistingRoot(expectedRoot, packagePath);
 
@@ -165,12 +131,10 @@ namespace Ryan6Vrc.AgentTools.Editor
             return summary;
         }
 
-        // ----- Miss pointer (impure: walks the AssetDatabase; kept OUT of Decide) ---------------
+        // ----- Miss pointer ---------------------------------------------------------------------
 
         /// <summary>Name the deepest existing prefix of a missed <paramref name="expectedRoot"/> and what it
-        /// actually contains, so the caller can re-aim without a second round trip. Deliberately NOT inside
-        /// <c>Decide</c>: that table is pure precisely so every branch is assertable without a filesystem, and
-        /// folding a directory walk into it would trade that away. Composed here and appended to the summary.</summary>
+        /// actually contains, so the caller can re-aim without a second round trip.</summary>
         internal static string DescribeNearestExistingRoot(string expectedRoot, string packagePath,
                                                           Func<string, List<string>> listSubfolders = null)
         {
@@ -197,9 +161,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 for (int i = 0; i < children.Count && i < Cap; i++) leaves.Add(RunLogFormat.Leaf(children[i]));
                 names = string.Join(", ", leaves.ToArray()) + (children.Count > Cap ? ", +" + (children.Count - Cap) + " more" : "");
             }
-            // The path is quoted into a C# call the reader may paste, so a Windows separator would emit 	 / 
-
-            // escapes and not compile. RunLogFormat.Q is the same escaper the RunLogs use.
             string pkg = RunLogFormat.Q(packagePath);
             return children.Count == 0
                 ? "deepest existing is '" + deepest + "' containing [" + names
@@ -209,13 +170,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                   + "] — re-run Verify(" + pkg + ", expectedRoot: " + RunLogFormat.Q(deepest + "/<one of those>") + ")";
         }
 
-        // ----- Pure decision core (unit-tested against the full matrix) -----------------------
+        // ----- Pure decision core ---------------------------------------------------------------
 
         public enum Verdict { Pass, Pending, Fail }
 
-        /// <summary>The verify decision table, factored pure so every branch — including the
-        /// editor-busy PENDING one that can't be provoked in a headless test — is directly assertable.
-        /// <paramref name="status"/> is the RunLog's recorded status (null = no RunLog on disk).</summary>
+        /// <summary>The verify decision table. <paramref name="status"/> is the RunLog's recorded status
+        /// (null = no RunLog on disk).</summary>
         public static Verdict Decide(string status, bool editorBusy, bool rootProvided,
                                      bool rootExists, int importedFileCount, out string reason)
         {
@@ -237,7 +197,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return Verdict.Fail;
             }
 
-            // No expected root: trust the RunLog, and say the on-disk state is unverified.
             switch (status)
             {
                 case "completed":
@@ -263,10 +222,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- RunLog IO ----------------------------------------------------------------------
 
-        // Stable, package-derived RunLog path so Verify reconstructs the exact path Import wrote — the
-        // whole point of the transport-survivable contract. No timestamp: a re-import overwrites, and the
-        // agent always knows where to look. Keyed on the package file's leaf name (the natural handle);
-        // two distinct packages sharing a leaf name would collide — acceptable and legible.
+        // Stable so Verify reconstructs the exact path Run wrote; a re-import overwrites. Keyed on the
+        // package file's leaf name, so two distinct packages sharing a leaf name collide.
         internal static string LogPath(string packagePath) =>
             RunLogDir + "/import-package_" + RunLogFormat.Sanitize(Path.GetFileNameWithoutExtension(packagePath)) + ".json";
 
@@ -289,8 +246,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return logPath;
         }
 
-        // Callback context: swallow write failures (the callback fires later on the main thread; there is
-        // no caller to return an error to). The on-disk root walk in Verify is the truth regardless.
+        // Callback context: there is no caller to return an error to, and Verify's root walk decides
+        // regardless.
         private static void TryRewrite(string logPath, string packagePath, string name, string status, string error)
         {
             try { WriteImportLog(logPath, packagePath, name, status, error); }
@@ -300,7 +257,6 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static readonly Regex StatusRe =
             new Regex("\"status\"\\s*:\\s*\"([^\"]*)\"", RegexOptions.Compiled);
 
-        // Lightweight status read — we own the format, and a full JSON parser is not worth the dependency.
         internal static string ReadStatus(string logPath)
         {
             try
@@ -313,8 +269,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Helpers ------------------------------------------------------------------------
 
-        // Count on-disk asset files (excluding .meta) under an Assets-relative folder. "Imported files",
-        // the non-trivial signal Verify's PASS turns on.
         private static int CountImportedFiles(string assetFolder)
         {
             string full = ToFullPath(assetFolder);
@@ -327,18 +281,13 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static string ToFullPath(string assetFolder)
         {
-            // Application.dataPath = <project>/Assets; asset paths are project-relative ("Assets/…").
             string projectRoot = Directory.GetParent(Application.dataPath).FullName;
             return Path.Combine(projectRoot, assetFolder.Replace('/', Path.DirectorySeparatorChar));
         }
 
-        // MEASURED (Unity 2022.3.22f1, live import): the completed/failed/cancelled callbacks hand back the
-        // package's FULL PATH MINUS EXTENSION — `C:\vendor\Foo` for `C:\vendor\Foo.unitypackage` — not the
-        // leaf display name this once assumed. Guarding on the leaf assumption made the comparison
-        // unsatisfiable, so `completed` was never written once across 26 imports; take the leaf of whatever
-        // arrives instead. That also accepts a bare name (a leaf is its own leaf), so a Unity version or a
-        // trio member whose shape was never provoked still matches. Leaf-keyed is the handle LogPath already
-        // uses, so this adds no collision class the tool has not already accepted.
+        // Measured (Unity 2022.3.22f1, live import): a completion callback hands back the package's full
+        // path minus extension — `C:\vendor\Foo` for `C:\vendor\Foo.unitypackage` — not its leaf name.
+        // Take the leaf of whatever arrives, which also accepts a bare name.
         internal static bool NameMatches(string callbackName, string ourName) =>
             !string.IsNullOrEmpty(callbackName) &&
             string.Equals(Path.GetFileName(callbackName), ourName, StringComparison.OrdinalIgnoreCase);

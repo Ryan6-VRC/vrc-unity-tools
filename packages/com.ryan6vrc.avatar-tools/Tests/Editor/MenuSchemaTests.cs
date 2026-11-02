@@ -2,10 +2,8 @@ using System.Linq;
 using NUnit.Framework;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// Behavioral tests for the `menu:` surface — parse (AnimatorSchemaYaml) and validate (SchemaValidation).
-// Pure C# over the System.*-only model: no scene, no asset, no VRC SDK. The EMIT side needs the SDK types
-// and lives in MenuEmitTests. Run headless via tools/run-editmode-tests.ps1; not via MCP run_tests (wrong
-// venue). See docs/verify.md.
+// The parse (AnimatorSchemaYaml) and validate (SchemaValidation) half of the `menu:` surface: pure C#, with no
+// scene, asset or VRC SDK. The emit half is MenuEmitTests.
 public class MenuSchemaTests
 {
     private const string Head = @"schema: 1
@@ -26,8 +24,7 @@ layers: []
     [Test]
     public void NoMenuBlock_LeavesMenuNull()
     {
-        // The null (not empty-list) sentinel is what emit keys off to write no asset at all, so a document
-        // predating this surface must not acquire an empty menu.
+        // Emit keys off null, not an empty list, to write no asset at all.
         Assert.IsNull(AnimatorSchemaYaml.Parse(Head, "test.yaml").Menu);
     }
 
@@ -86,9 +83,8 @@ layers: []
     [Test]
     public void UnknownControlField_FailsByName()
     {
-        // `style` stands in for the whole out-of-vocabulary set on purpose: it is the neighbouring SDK field
-        // this surface deliberately does NOT author (the SDK's own control inspector never binds it), so the
-        // refusal doubles as the guard on that decision.
+        // `style` is the SDK field this surface deliberately does not author (docs/animator-schema.md §Not yet
+        // in the schema), so the refusal also guards that decision.
         var e = Assert.Throws<SchemaException>(() => Parse(@"menu:
   - toggle: A
     param: Enable
@@ -100,8 +96,6 @@ layers: []
     [Test]
     public void IconParsesOnEveryKind()
     {
-        // Every kind renders an icon, so unlike `value`/`controls` there is no kind guard to test — what
-        // matters is that none of the four rejects it.
         var doc = Parse(@"menu:
   - button: B
     param: Enable
@@ -128,8 +122,7 @@ layers: []
     [Test]
     public void NoIcon_LeavesTheFieldNull()
     {
-        // Null, not "" — emit keys off null to leave the control's icon untouched, and a document predating
-        // this surface must not acquire an empty path that then fails to resolve.
+        // Emit keys off null to leave the control's icon untouched; "" is refused as menu-icon-empty.
         Assert.IsNull(Parse("menu:\n  - toggle: A\n    param: Enable\n").Menu[0].Icon);
     }
 
@@ -176,8 +169,7 @@ layers: []
     [Test]
     public void SubMenuWithEmptyControlsList_Fails()
     {
-        // `controls: []` binds to an empty NON-null list, so a null-only guard would let through the exact
-        // dead-end page the absent-key refusal exists to prevent.
+        // `controls: []` binds to an empty non-null list, which a null-only guard would let through.
         var e = Assert.Throws<SchemaException>(() => Parse(@"menu:
   - submenu: Empty
     controls: []
@@ -188,7 +180,6 @@ layers: []
     [Test]
     public void RadialWithValue_Fails()
     {
-        // A radial writes nothing on press; accepting `value:` would silently drop it on emit.
         var e = Assert.Throws<SchemaException>(() => Parse(@"menu:
   - radial: Knob
     param: Sat
@@ -220,8 +211,6 @@ layers: []
     [Test]
     public void OverflowingPage_IsRefused()
     {
-        // Nine controls on one page. The SDK's own inspector silently truncates to MAX_CONTROLS, so this
-        // is a destructive defect, not a style note — hence an error rather than an advisory.
         var yaml = "menu:\n" + string.Concat(Enumerable.Range(0, MenuLimits.MaxControlsPerMenu + 1)
             .Select(i => $"  - toggle: T{i}\n    param: Enable\n"));
         var errs = Errors(yaml);
@@ -233,8 +222,6 @@ layers: []
     [Test]
     public void OverflowIsPerPage_NotPerTree()
     {
-        // A full page plus a sub-menu holding another full page is legal — which is the whole point of
-        // sub-menus, and the case a tree-wide count would wrongly reject.
         var page = string.Concat(Enumerable.Range(0, MenuLimits.MaxControlsPerMenu - 1)
             .Select(i => $"  - toggle: T{i}\n    param: Enable\n"));
         var inner = string.Concat(Enumerable.Range(0, MenuLimits.MaxControlsPerMenu)
@@ -256,8 +243,6 @@ layers: []
     [Test]
     public void ScratchParam_IsRefused()
     {
-        // A scratch param never reaches the params asset, so VRChat never sees the name and the control is
-        // inert on the avatar — invisible in the built menu, which is why it has to fail at compile.
         var errs = Errors(@"menu:
   - toggle: A
     param: Work
@@ -304,10 +289,6 @@ layers: []
     [Test]
     public void TypeRulesReadTheWireType_NotTheAnimatorType()
     {
-        // The params asset lists `vrc.type ?? type`, and VRChat reads the control against THAT. Validating
-        // on the animator type let every vrc-type override through unchecked: `selective-animation` ships
-        // exactly this shape (float on the animator, bool on the wire), so a radial on it would have
-        // compiled clean and yielded a knob carrying only 0 and 1.
         const string head = @"schema: 1
 controller: W_Fx
 basis: avatar-root
@@ -364,8 +345,6 @@ layers: []
     [Test]
     public void IconShapeIsValidated_ButNotItsExistence()
     {
-        // This validator is System.*-only and cannot reach the AssetDatabase, so a plausible path passes here
-        // and ControllerEmit owns whether the file is actually there (MenuEmitTests).
         CollectionAssert.IsEmpty(Errors("menu:\n  - toggle: A\n    param: Enable\n    icon: assets/nope.png\n"));
 
         var empty = Errors("menu:\n  - toggle: A\n    param: Enable\n    icon: \"\"\n");
@@ -376,8 +355,7 @@ layers: []
     [Test]
     public void ValuelessIconKey_IsRefused()
     {
-        // YAML binds a bare `icon:` to null. Reading that as "no icon" would disagree with `icon: ""`,
-        // which validation rejects — two spellings of the same authoring slip must not diverge.
+        // YAML binds a bare `icon:` to null, which must not read as "no icon" while `icon: ""` is refused.
         var e = Assert.Throws<SchemaException>(() => Parse("menu:\n  - toggle: A\n    param: Enable\n    icon:\n"));
         StringAssert.Contains("has no value", e.Message);
     }
@@ -385,9 +363,6 @@ layers: []
     [Test]
     public void IconIsTrimmed_SoSpaceCannotHideAnAbsolutePath()
     {
-        // The absolute-path refusal reads the first character, so an untrimmed leading space would smuggle
-        // a machine path past it and resurface as a bare "not found" at emit — caught, but by the wrong
-        // rule with the wrong message.
         Assert.AreEqual("assets/a.png", Parse("menu:\n  - toggle: A\n    param: Enable\n    icon: \"  assets/a.png  \"\n").Menu[0].Icon);
 
         var errs = Errors("menu:\n  - toggle: A\n    param: Enable\n    icon: \" C:/Users/x/Icon.png\"\n");
@@ -398,8 +373,6 @@ layers: []
     [Test]
     public void AbsoluteIconPath_IsRefused()
     {
-        // Neither a project path nor document-relative: it would resolve only on the machine that wrote it,
-        // and the document gets COMMITTED — so it bakes that machine's drive and checkout name into the repo.
         foreach (var p in new[] { "C:/Users/x/Icon.png", "/mnt/x/Icon.png", @"\\server\share\Icon.png" })
         {
             var errs = Errors("menu:\n  - toggle: A\n    param: Enable\n    icon: \"" + p.Replace(@"\", @"\\") + "\"\n");

@@ -13,18 +13,13 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 using VRC.SDK3.Dynamics.Constraint.Components;
 using VRC.SDK3.Dynamics.PhysBone.Components;
 
-// ReportGimmick proof obligations. One fixture per DOOR, not per repair wave: the four files this replaces
-// each re-declared `ReadReport` and `SetUp => NewScene`, and each leaked the Snapshot markdown its calls
-// wrote. Each wave keeps its own banner + narrative below; the plumbing is shared.
 public class ReportGimmickTests
 {
     [SetUp]
     public void SetUp() => EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
 
-    // Every door call writes a durable Snapshot markdown (RunLogFormat.SnapshotDir), and nothing prunes that
-    // directory — docs/unity-tools.md declares it DURABLE, the operator's own pile. A fixture that does not
-    // name what it wrote leaks one file per test into it. Recorded, never globbed: a glob over `gimmick_*.md`
-    // would also sweep snapshots the operator took by hand.
+    // Record what the door wrote and delete exactly that; a glob over `gimmick_*.md` would also sweep
+    // snapshots the operator took by hand.
     private static readonly List<string> Artifacts = new List<string>();
 
     [OneTimeTearDown]
@@ -34,8 +29,7 @@ public class ReportGimmickTests
         Artifacts.Clear();
     }
 
-    // The door's one-line summary, with the Snapshot path it names recorded for teardown. Every call in this
-    // fixture goes through here, including the ones that only read the summary — they write a file too.
+    // Every door call in this fixture goes through here, including summary-only reads: each writes a Snapshot.
     private static string Summary(string rootPath)
     {
         string summary = ReportGimmick.Run(rootPath);
@@ -59,16 +53,11 @@ public class ReportGimmickTests
         return go;
     }
 
-    // ----- §5.2 chain-subtree census -----------------------------------------------------------------
+    // ----- Chain-subtree census ----------------------------------------------------------------------
     //
-    // A partial take (keeping some of a mergeable's pieces, dropping the rest) leaves chains whose bones no
-    // surviving mesh skins and nothing else occupies. The §5.2 table listed those chains identically to
-    // running ones, so the digest could not distinguish 46 chains from the 19 still doing work.
-    //
-    // `chain subtree` is a CENSUS, not a verdict: three counts over one set. The tests below pin both
-    // polarities — that an idle chain reads all-zero, and that the load-bearing shapes which carry no skin
-    // weights (a rigid prop on the chain, a second component on the bone) read nonzero rather than joining
-    // them.
+    // Three counts over one set. The tests pin both polarities: an idle chain reads all-zero, and the
+    // load-bearing shapes which carry no skin weights (a rigid prop on the chain, a second component on the
+    // bone) read nonzero.
 
     // A chain of `length` bones descending from `parent`; returns the topmost.
     private static Transform Chain(GameObject parent, string name, int length)
@@ -86,8 +75,7 @@ public class ReportGimmickTests
         return pb;
     }
 
-    // One vertex per bone, each fully weighted to its own bone — enough for the weight walk to report every
-    // listed bone as skinned. The legacy boneWeights setter feeds the same mesh data GetAllBoneWeights reads.
+    // The legacy boneWeights setter feeds the same mesh data GetAllBoneWeights reads.
     private static SkinnedMeshRenderer Skin(GameObject host, params Transform[] bones)
     {
         var mesh = new Mesh();
@@ -108,8 +96,8 @@ public class ReportGimmickTests
         return smr;
     }
 
-    // The motivating case: the mesh that skinned this chain went out with a dropped piece. Three zeros over a
-    // non-trivial bone count is the whole signal — `bones` is what makes the two zeros mean something.
+    // The partial-take case: the mesh that skinned this chain went out with a dropped piece, leaving zero
+    // `skinned` and `hosting` over a nonzero `bones`.
     [Test]
     public void ChainSubtree_ChainNoMeshSkinsAndNothingOccupies_ReadsAllZero()
     {
@@ -135,9 +123,8 @@ public class ReportGimmickTests
         StringAssert.Contains("bones=3 skinned=2 hosting=0", report);
     }
 
-    // The false-zero this census must not produce. A chain whose payload is a RIGID renderer (charm, bell,
-    // earring) carries no skin weights at all and is fully load-bearing; `hosting` is what separates it from
-    // the orphan above, and a skin-weights-only census would have called the two identical.
+    // A rigid renderer on the chain (charm, bell, earring) carries no skin weights and is fully load-bearing;
+    // `hosting` is what separates it from the all-zero chain above.
     [Test]
     public void ChainSubtree_RigidRendererOnChain_ReadsHostingNotZero()
     {
@@ -150,8 +137,6 @@ public class ReportGimmickTests
         StringAssert.Contains("bones=2 skinned=0 hosting=1", report);
     }
 
-    // The row's own physbone is not evidence that something else uses the bone, so a self-rooted lone chain
-    // reads zero rather than counting itself.
     [Test]
     public void ChainSubtree_OwnPhysBoneIsNotCountedAsHosting()
     {
@@ -163,8 +148,6 @@ public class ReportGimmickTests
         StringAssert.Contains("bones=1 skinned=0 hosting=0", report);
     }
 
-    // Another chain's physbone on the same bone IS something else using it — the exclusion is identity-scoped
-    // to the row, not blanket-by-type.
     [Test]
     public void ChainSubtree_SecondPhysBoneOnTheBone_CountsAsHosting()
     {
@@ -177,10 +160,8 @@ public class ReportGimmickTests
         StringAssert.Contains("bones=1 skinned=0 hosting=1", report);
     }
 
-    // The scope decision, lower bound: the sweep reaches past the report root. Aim the digest at an armature
-    // and its meshes are siblings — report-root scoping would print `skinned=0` for a fully skinned chain,
-    // the exact false zero the cell exists to avoid. This rig carries no descriptor, so it also pins the
-    // outermost-ancestor fallback.
+    // Aimed at an armature, the meshes are siblings of the report root, so the sweep must reach past it. This
+    // rig carries no descriptor, so it also pins the outermost-ancestor fallback.
     [Test]
     public void ChainSubtree_MeshOutsideTheReportRoot_StillCountsAsSkinned()
     {
@@ -194,19 +175,9 @@ public class ReportGimmickTests
         StringAssert.Contains("bones=2 skinned=2", report);
     }
 
-    // The scope decision, upper bound, over one rig aimed at two levels — the same 15-line fixture served
-    // both cases as two tests.
-    //
-    // `Staging/AvatarA`: a neighbour avatar's renderer still bound to THIS avatar's bones is what duplicating
-    // an avatar and leaving a renderer pointed at the source rig produces. Under container scope it would
-    // inflate the count, and every co-hosted avatar's whole weight array would be walked to get there.
-    //
-    // `Staging`: the one invocation where no descriptor is an ancestor of the report root, so the fallback is
-    // live. Resolving the scope once from the report root landed on the container here and swept every
-    // co-hosted avatar, letting AvatarB's stale renderer inflate AvatarA's chain to skinned=2 while the
-    // legend promised the enclosing avatar. Scoping from the ROW's own physbone finds AvatarA's descriptor
-    // whichever level the report is aimed at — so one expected count covers both aims, and both directions:
-    // the local mesh's bone is counted, the neighbour's is not.
+    // AvatarB's renderer still bound to AvatarA's bones is what duplicating an avatar and leaving a renderer on
+    // the source rig produces. `Staging` is the aim with no descriptor above the report root: scope resolves from
+    // the row's own physbone, not the report root, so one expected count covers both aims.
     [TestCase("Staging/AvatarA")]
     [TestCase("Staging")]
     public void ChainSubtree_ScopeIsTheRowsOwnAvatar_WhicheverLevelIsReported(string reportRoot)
@@ -227,8 +198,6 @@ public class ReportGimmickTests
         StringAssert.Contains("bones=2 skinned=1 hosting=0", report);
     }
 
-    // rootTransform indirection: the set starts at the target, so the host carrying the component is not in
-    // it. Counting from the host instead would silently report the wrong subtree for every indirected chain.
     [Test]
     public void ChainSubtree_RootTransformIndirection_CountsFromTargetNotHost()
     {
@@ -242,26 +211,11 @@ public class ReportGimmickTests
         StringAssert.Contains("bones=3 skinned=0 hosting=0", report);
     }
 
-    // The census is verdict-free, and the legend is what keeps a reader from building the verdict anyway: a
-    // zero is not evidence, and membership is not motion.
-    //
-    // The emit is one branch (`bones.Length > 0`) shared with the table itself, so the companion no-physbones
-    // test pins the other side of it.
-    //
-    // Two assertions, because they catch different failures and NEITHER subsumes the other:
-    //
-    // (a) The emitted line equals the canon constant. This proves the legend reaches the report intact and
-    //     untruncated — but it is deliberately blind to the constant's CONTENT: both sides are the same string,
-    //     so deleting a clause from the constant keeps this green. It is a delivery check, not a content check.
-    // (b) Each load-bearing clause is present in the CONSTANT. This is what survives a reword (the wording may
-    //     change freely) while failing a deletion, which (a) cannot do. `ReportGimmick`'s own docstring states
-    //     both polarities are load-bearing: drop "all-zero is not a dead chain" and a reader deletes a
-    //     name-merged bone reading `skinned=0`; drop the membership-vs-motion clause and they read the count
-    //     as which bones the chain MOVES, which `multiChildType` and `endpointPosition` still decide.
-    //
-    // The former "nonzero is an upper bound" clause is deliberately gone and its absence is asserted: the
-    // counts are the SDK's own chain membership now, exclusions already applied, so pinning that caveat would
-    // pin one the code no longer earns. The membership-vs-motion clause is the part of it that stayed true.
+    // Two kinds of assertion, because neither subsumes the other. The equality proves the legend reaches the
+    // report untruncated, but both sides are the same string, so deleting a clause from the constant keeps it
+    // green. The clause checks survive a reword and fail that deletion: without the all-zero clause a reader
+    // deletes a name-merged bone reading `skinned=0`, and without the membership clause they read the count as
+    // which bones the chain moves.
     [Test]
     public void ChainSubtree_CensusRowIsAccompaniedByItsLegend()
     {
@@ -276,9 +230,6 @@ public class ReportGimmickTests
             "exclusions are applied now — an upper-bound caveat would be one the code no longer earns");
     }
 
-    // A rebuilt chain matched on every scalar and had lost its radius curve; no door flagged it. The row must
-    // say a curve is there — on a printed field by `~`, on any field by the `curved` cell — and carry the legend
-    // saying why that matters, while an uncurved row says plainly that nothing is curved.
     [Test]
     public void PhysBoneRow_MarksEveryCurvedField_AndCarriesTheCurveLegend()
     {
@@ -297,15 +248,8 @@ public class ReportGimmickTests
         StringAssert.Contains("the scalar times the curve", ReportGimmick.CurveLegend);
     }
 
-    // The exclusions the old hierarchy walk could not see, now applied because the set comes from the
-    // component itself. `ignoreTransforms` prunes the listed transform AND its descendants (the field's own
-    // Inspector tooltip says so), which is exactly why a hand-rolled subtraction was rejected: the descendant
-    // half is what a naive "remove the listed transforms" gets wrong, and it gets it wrong in the direction
-    // that inflates the count back toward the hierarchy walk.
-    //
-    // Hierarchy subtree here is 4 (ChainRoot, Keep, Dropped, DroppedChild). The SDK's chain is 2. Asserting
-    // the absence of `bones=4` is what makes this a real discrimination rather than a coincidence — the old
-    // implementation would have printed it.
+    // `ignoreTransforms` prunes the listed transform and its descendants (the field's Inspector tooltip), so
+    // the SDK's chain here is 2 against a hierarchy subtree of 4 (ChainRoot, Keep, Dropped, DroppedChild).
     [Test]
     public void ChainSubtree_countsTheSdkChain_notTheHierarchySubtree()
     {
@@ -323,12 +267,7 @@ public class ReportGimmickTests
         Assert.IsFalse(report.Contains("bones=4"), "the ignored transform's CHILD must be pruned with it");
     }
 
-    // `endpointPosition` is the one input that could put a transform-less member in the chain, and the cell
-    // skips such a member rather than counting it. Asserted rather than reasoned about: the SDK's `Bone` is a
-    // struct, so a transform-less entry is a null FIELD and not a null element, and whether the endpoint
-    // produces one at all is a property of the SDK rather than of this code. Measured here it does not — the
-    // count is unchanged and nothing throws — which is what makes the skip a guard against a destroyed
-    // transform rather than against the endpoint.
+    // Whether the endpoint adds a transform-less chain member is the SDK's call; this pins that it does not.
     [Test]
     public void ChainSubtree_endpointPosition_changesNoCountAndDoesNotThrow()
     {
@@ -340,9 +279,8 @@ public class ReportGimmickTests
         StringAssert.Contains("bones=3", ReadReport("Rig"));
     }
 
-    // The legend paragraph, isolated so the comparison is against the legend and nothing else: its tokens
-    // (`skinned=0`) also occur in the census CELL, so a whole-document match would pass with it deleted.
-    // Fails loud rather than returning null — an absent legend is the branch defect, not a null-deref.
+    // Isolates the legend paragraph: its tokens (`skinned=0`) also occur in the census cell, so a
+    // whole-document match would pass with the legend deleted.
     private static string LegendLine(string report) => LegendLine(report, "_`chain subtree`");
 
     private static string LegendLine(string report, string startsWith)
@@ -353,7 +291,6 @@ public class ReportGimmickTests
         return null;
     }
 
-    // No physbones ⇒ no table, so no legend and no census — the _(none)_ branch is untouched.
     [Test]
     public void ChainSubtree_NoPhysBones_NoCensusOrLegend()
     {
@@ -362,21 +299,15 @@ public class ReportGimmickTests
 
         string report = ReadReport("Rig");
         StringAssert.DoesNotContain("chain subtree", report);
-        // NOT "bones=" — the header's own `physbones=0` count contains that substring. Assert on the census
-        // cell's own shape, which nothing else in the report can produce.
+        // Not "bones=": the header's `physbones=0` count contains that substring.
         StringAssert.DoesNotContain("skinned=", report);
     }
 
-    // ----- §5.2 shared physbone target (the per-range variant stack) ---------------------------------
+    // ----- Shared physbone target (the per-range variant stack) --------------------------------------
     //
     // A vendor body-morph slider can switch between several physbones tuned per size range, all targeting one
-    // bone (docs/outfits.md). The walk is includeInactive, so they all land in the §5.2 table — and with no
-    // live state the table reads as N chains fighting over one bone.
-    //
-    // The observation states the MECHANICAL fact (physbones share one target) and renders live state; it does
-    // not gate on live state and does not name an intent. Gating would key it to scene statics, which the doc
-    // it routes to says are not authoritative on a driven property — a vendor shipping every variant enabled
-    // is still a variant set, and would have gone unnamed.
+    // bone (docs/outfits.md). The observation renders live state and never gates on it: a scene's static
+    // enable flags are not authoritative on a property an animator drives.
 
     private static VRCPhysBone Variant(GameObject parent, string name, Transform target, bool live)
     {
@@ -401,14 +332,11 @@ public class ReportGimmickTests
         StringAssert.Contains("**physbones share one target**", report);
         StringAssert.Contains("Rig/Chain", report);
         StringAssert.Contains("3 physbones", report);
-        // Naming the live member is what chains into the next step — a count alone does not.
         StringAssert.Contains("live: `Rig/PB_medium`", report);
         StringAssert.Contains("docs/outfits.md", report);
         StringAssert.Contains("observations=1", summary);
     }
 
-    // The case the dropped all-live gate used to hide. A vendor may ship every variant enabled because the
-    // WD-ON layer overwrites them at frame 1; that is still a shared target and must be named.
     [Test]
     public void SharedTarget_AllMembersLive_StillObserved()
     {
@@ -434,8 +362,6 @@ public class ReportGimmickTests
         StringAssert.Contains("live: none", report);
     }
 
-    // Liveness is relative to the REPORT ROOT. Absolute activeInHierarchy would call every member not-live
-    // the moment the avatar is parked inactive — ordinary workflow — inverting the one signal that matters.
     [Test]
     public void SharedTarget_InactiveReportRoot_LivenessStaysRelative()
     {
@@ -450,9 +376,8 @@ public class ReportGimmickTests
         StringAssert.DoesNotContain("live: none", report);
     }
 
-    // A self-rooted pair on one GameObject shares a target and is invisible to a rootTransform-only census.
-    // Its transform path is ambiguous, so the live member is named by component ordinal — otherwise the
-    // report cannot say which of the two is live, which is the whole point of naming it.
+    // A self-rooted pair is invisible to a rootTransform-only grouping, and one path names both members, hence
+    // the component ordinal.
     [Test]
     public void SharedTarget_SelfRootedPairOnOneObject_IsGroupedAndDisambiguated()
     {
@@ -467,9 +392,8 @@ public class ReportGimmickTests
         StringAssert.Contains("live: `Rig/Bone [VRCPhysBone#0]`", report);
     }
 
-    // The component's own enable flag and its object's active state are independently sufficient to stop a
-    // physbone, and vendors in the corpus use each as the discriminator — so the table carries both. The
-    // table's `active` stays the raw absolute substrate fact; only the observation is root-relative.
+    // Vendors use either flag to switch variants, so the table carries both. Its `active` is the absolute
+    // state; only the observation is root-relative.
     [Test]
     public void PhysBoneTable_CarriesEnabledAndActive()
     {
@@ -495,11 +419,10 @@ public class ReportGimmickTests
         StringAssert.Contains("observations=0", Summary("Rig"));
     }
 
-    // ----- §5.3 constraint live cell ----------------------------------------------------------------
+    // ----- Constraint live cell ---------------------------------------------------------------------
     //
-    // Each constraint family carries a second enable flag beyond the Behaviour's own — VRC `IsActive`,
-    // Unity `constraintActive` — so an inert constraint used to render identically to a running one.
-    // The live cell names WHICH flag is down, because that is what the reader acts on.
+    // Each constraint family carries a second enable flag beyond the Behaviour's own: VRC `IsActive`, Unity
+    // `constraintActive`. The live cell names which flag is down.
 
     private static GameObject Rig(out GameObject host, out GameObject src)
     {
@@ -509,9 +432,8 @@ public class ReportGimmickTests
         return root;
     }
 
-    // One constraints-table row, addressed by its type + constrained transform. The live-cell negatives must
-    // be scoped to it: `0 (` is a three-character fragment, and the physbone table's own `immobile` cell
-    // renders `0 (All)` — so a whole-document DoesNotContain held only while a fixture had no physbones.
+    // The live-cell negatives must be scoped to one row: the physbone table's `immobile` cell also renders
+    // `0 (All)`, so a whole-document DoesNotContain("0 (") holds only on a fixture with no physbones.
     private static string ConstraintRow(string report, string type, string driven)
     {
         foreach (var line in report.Split('\n'))
@@ -584,8 +506,6 @@ public class ReportGimmickTests
         StringAssert.Contains("0 (object)", ConstraintRow(report, "PositionConstraint", "Rig/Driven"));
     }
 
-    // Liveness is relative to the report root, matching the physbone path: parking the whole rig must not
-    // relabel every constraint inert.
     [Test]
     public void Constraint_InactiveReportRoot_StaysLive()
     {
@@ -600,13 +520,7 @@ public class ReportGimmickTests
         StringAssert.DoesNotContain("0 (", ConstraintRow(report, "PositionConstraint", "Rig/Driven"));
     }
 
-    // ----- Unity IConstraint widening ---------------------------------------------------------------
-    //
-    // Unity IConstraint components must land in the constraint edge-list with their per-type Axis-flag mask
-    // and NO false READ-MISS note, and the geometric feedback-loop observation must transfer to them —
-    // without routing them through the VRC-only reflection helpers. VRC-idiom regression (world anchor /
-    // hold / TargetTransform notes) is covered by the coordinator's live-corpus run, not fabricated here
-    // (headless VRC-constraint fixtures are awkward and low-value).
+    // ----- Unity IConstraint components -------------------------------------------------------------
 
     [Test]
     public void ParentConstraint_AppearsInEdgeList_WithAxisMask_NoReadMiss()
@@ -616,7 +530,6 @@ public class ReportGimmickTests
         var src = Child(root, "Src");
         var pc = driven.AddComponent<ParentConstraint>();
         pc.AddSource(new ConstraintSource { sourceTransform = src.transform, weight = 1f });
-        // Distinct partial/full masks so the assertions prove AxisFlags' letter assembly, not just the prefix.
         pc.translationAxis = Axis.X | Axis.Z;
         pc.rotationAxis = Axis.X | Axis.Y | Axis.Z;
 
@@ -627,10 +540,9 @@ public class ReportGimmickTests
         // colon form): a partial mask spells its axes, an all-on group collapses to "*".
         StringAssert.Contains("pos:XZ", report);
         StringAssert.Contains("rot:*", report);
-        // The false-READ-MISS this task exists to prevent: a Unity constraint routed through the VRC
-        // reflection helpers would resolve zero groups and emit this note.
+        // A Unity constraint routed through the VRC reflection helpers would resolve zero groups and emit
+        // this note.
         StringAssert.DoesNotContain("could not read the affected-axis mask", report);
-        // VRC-only idiom notes must NOT attach to a Unity constraint.
         StringAssert.DoesNotContain("TargetTransform indirection", report);
     }
 
@@ -639,7 +551,6 @@ public class ReportGimmickTests
     {
         var root = new GameObject("Rig");
         var driven = Child(root, "Driven");
-        // Source is a strict descendant of the driven host — the feedback-loop idiom.
         var src = Child(driven, "Inner");
         var pc = driven.AddComponent<PositionConstraint>();
         pc.AddSource(new ConstraintSource { sourceTransform = src.transform, weight = 1f });
@@ -648,10 +559,8 @@ public class ReportGimmickTests
         StringAssert.Contains("feedback loop", report);
     }
 
-    // ----- Tier-2 generic "Other components" census (F18b) -------------------------------------
+    // ----- Tier-2 generic "Other components" census -------------------------------------------
 
-    // A component outside every tier-1 family (custom gimmick script here) must still be named, with its
-    // object-reference seam (field → target name + hierarchy path) and its top-level scalar fields peeked.
     private class TierTwoProbe : MonoBehaviour
     {
         public UnityEngine.Object reference;
@@ -670,16 +579,14 @@ public class ReportGimmickTests
 
         string report = ReadReport("Rig");
         StringAssert.Contains("Other components", report);
-        StringAssert.Contains("TierTwoProbe", report);            // type
-        StringAssert.Contains("Rig/Host", report);                // host
-        StringAssert.Contains("reference", report);               // object-ref field name
-        StringAssert.Contains("Rig/Target", report);              // object-ref seam: resolved hierarchy path
-        StringAssert.Contains("peek-me", report);                 // scalar string peek
-        StringAssert.Contains("other=1", report);                 // header/summary count
+        StringAssert.Contains("TierTwoProbe", report);
+        StringAssert.Contains("Rig/Host", report);
+        StringAssert.Contains("reference", report);
+        StringAssert.Contains("Rig/Target", report);
+        StringAssert.Contains("peek-me", report);
+        StringAssert.Contains("other=1", report);
     }
 
-    // A dangling object reference (asset deleted while a field still points at it) must render broken,
-    // not collapse to invisible like a clean-empty slot — same empty-vs-dangling idiom the F11 fix uses.
     [Test]
     public void DanglingObjectRef_RendersBroken_NotDropped()
     {
@@ -696,10 +603,6 @@ public class ReportGimmickTests
         StringAssert.Contains("(broken: dangling reference)", report);
     }
 
-    // Control is one struct level below the component; its top-level scalars (name, type) surface in the
-    // shallow peek, and `parameter.name` is the documented SECOND-level boundary that must not. The same
-    // one-level branch carries ModularAvatarMergeArmature's `mergeTarget.referencePath`, which had its own
-    // test asserting nothing this one does not.
     [Test]
     public void ModularAvatarMenuItem_ControlNameAndType_SurfaceInPeek()
     {
@@ -718,25 +621,19 @@ public class ReportGimmickTests
         StringAssert.Contains("ModularAvatarMenuItem", report);
         StringAssert.Contains("MyToggleControl", report);         // control name (one struct level)
         StringAssert.Contains("Toggle", report);                  // control type enum (one struct level)
-        // Upper bound of the one-struct-level peek: parameter.name is a SECOND struct level (Control →
-        // parameter → name) and must NOT surface in-tool — it's AgentInspector's depth (design decision A).
+        // Upper bound of the one-struct-level peek: parameter.name is a second struct level (Control →
+        // parameter → name), which is AgentInspector's depth.
         StringAssert.DoesNotContain("MyDrivenParam", report);
     }
 
-    // ----- Raycasts (F2) -------------------------------------------------------------------------
+    // ----- Raycasts ------------------------------------------------------------------------------
     //
-    // Before this table a VRCRaycast fell to the tier-2 census, which reads `collisionMode = Hit Custom
-    // Layers` and then prints nothing for the mask — LayerMask has no case in the shallow peek's switch, is
-    // neither an array nor a struct with visible children, and so falls through silently. That mask is the
-    // whole discriminator of a player-masked ray, and the same peek drops a null `resultTransform` entirely
-    // (a clean-null object ref emits no line at all), which is exactly the configuration that fails silently
-    // in Unity. Both are facts here, in cells; neither is a verdict.
+    // The tier-2 census cannot carry a ray: LayerMask has no case in the shallow peek's switch and a clean-null
+    // object ref emits no line, so the mask and a null `resultTransform` would both vanish. This table renders
+    // both as cells.
     //
-    // The layer assertions are deliberately split. `0(Default)` pins the NAME annotation on a layer Unity
-    // reserves and never leaves blank; bit 31 pins only that the INDEX renders, which holds whether or not
-    // the venue's TagManager names it. Nothing here may assert a VRChat layer name — those come from the
-    // project, so the same mask reads `10(PlayerLocal)` in a venue whose layer setup has run and `10` in one
-    // whose has not, and a test pinning the name would encode the author's venue.
+    // No test here may assert a VRChat layer name: names come from the project, so the same mask reads
+    // `10(PlayerLocal)` in a venue whose layer setup has run and `10` in one whose has not.
 
     private static VRCRaycast Ray(GameObject host, string parameter, Transform result)
     {
@@ -746,8 +643,7 @@ public class ReportGimmickTests
         return r;
     }
 
-    // The report sliced to one section, so an assertion cannot be satisfied by a coincidence elsewhere in the
-    // digest — "(none)" in particular is also how every empty section renders.
+    // Slices to one section, because "(none)" is also how every empty section renders.
     private static string Section(string report, string heading)
     {
         int start = report.IndexOf(heading);
@@ -767,10 +663,8 @@ public class ReportGimmickTests
 
         string rays = Section(ReadReport("Rig"), "## Raycasts");
         StringAssert.Contains("HitCustomLayers", rays);
-        // One assertion pinning three things at once: the name annotation on a layer Unity always names,
-        // ascending index order, and the join separator. It stays venue-neutral by matching a PREFIX of the
-        // second entry — a venue that does name layer 31 renders `31(Something)` and still satisfies it,
-        // while a bare `Contains("31")` would be satisfied by any digit that drifts into the row.
+        // Pins the name annotation on a layer Unity always names, ascending index order and the separator. A
+        // prefix of the second entry stays venue-neutral: a venue naming layer 31 renders `31(Something)`.
         StringAssert.Contains("0(Default),31", rays);
     }
 
@@ -788,13 +682,8 @@ public class ReportGimmickTests
         StringAssert.Contains("layers=everything", rays); // never a 32-entry cell
     }
 
-    // The silent-death configuration: no result transform, so the component has nothing to write. The tier-2
-    // census rendered this as an ABSENT line, indistinguishable from a field that does not exist.
-    //
-    // The assertion pins the CELL, not the row. A fresh VRCRaycast defaults to an all-off mask (measured), so
-    // this very row also renders `layers=(none)` in its collision cell — a bare Contains("(none)") passes on
-    // that alone and stays green while the result column regresses to empty. Sectioning the report is not
-    // enough when the coincidence lives inside the section; the delimiters are what discriminate.
+    // The assertion pins the cell, not the row: a fresh VRCRaycast defaults to an all-off mask (measured), so
+    // this row also renders `layers=(none)` and a bare Contains("(none)") stays green with an empty result cell.
     [Test]
     public void Raycast_NoResultTransform_RendersNoneRatherThanVanishing()
     {
@@ -806,10 +695,8 @@ public class ReportGimmickTests
         StringAssert.Contains("| (none) |", rays);
     }
 
-    // The legend makes the same promise ChainSubtreeLegend does, so it earns the same pair of assertions —
-    // (a) delivered intact and untruncated, blind to content; (b) the load-bearing clauses present in the
-    // CONSTANT, which survives a reword but fails a deletion. Without (b) a prose pass can drop the layer
-    // sentence — the one the constant's own doc comment calls load-bearing — against a green suite.
+    // The same delivery and clause assertions as ChainSubtree_CensusRowIsAccompaniedByItsLegend, for the same
+    // reason.
     [Test]
     public void Raycast_TableIsAccompaniedByItsLegend()
     {
@@ -824,8 +711,6 @@ public class ReportGimmickTests
         StringAssert.Contains("not the post-build name", ReportGimmick.RaycastLegend);
     }
 
-    // The prefix is concatenated locally, the way the component does it — not traced into an animator, and
-    // not the post-build name, which VRCFury and MA rewrite.
     [Test]
     public void Raycast_ParameterPrefix_RendersTheDerivedTriple()
     {
@@ -837,8 +722,7 @@ public class ReportGimmickTests
         StringAssert.Contains("`SelectiveAnimation/Ray` + _Hit/_Ratio/_Distance", rays);
     }
 
-    // Two rays on one origin is the shipped idiom (a player ray and a world ray), so the path alone cannot
-    // identify a row — the same ambiguity HostHandle solves for physbones sharing a GameObject.
+    // Two rays on one origin is a shipped idiom (a player ray and a world ray).
     [Test]
     public void Raycast_TwoOnOneHost_DisambiguatedByComponentOrdinal()
     {
@@ -862,8 +746,6 @@ public class ReportGimmickTests
         StringAssert.Contains("0 (enabled)", Section(ReadReport("Rig"), "## Raycasts"));
     }
 
-    // Tier-1 promotion is only honest if the table replaces the census rows rather than doubling them: the
-    // count line gains raycasts=N, and `other` must not still be counting the same components.
     [Test]
     public void Raycast_CountedInHeader_AndNoLongerInTheTierTwoCensus()
     {
@@ -884,12 +766,10 @@ public class ReportGimmickTests
         var root = new GameObject("Rig");
         Child(root, "A").AddComponent<TierTwoProbe>();
         Child(root, "B").AddComponent<ModularAvatarMenuItem>();
-        // A tier-1 Unity constraint AND four Transforms are present; neither must inflate other=N.
         Child(root, "C").AddComponent<PositionConstraint>();
 
         string report = ReadReport("Rig");
-        // other counts one row per single-visit component, so a tier-1 constraint (rendered in the
-        // constraints TABLE, not the census) and the four Transforms cannot inflate it: probe + menuitem = 2.
+        // TierTwoProbe + ModularAvatarMenuItem; the tier-1 constraint and the four Transforms must not count.
         StringAssert.Contains("other=2", report);
     }
 
@@ -897,13 +777,11 @@ public class ReportGimmickTests
     //
     // A VRC constraint keeps 16 keyable source slots behind a `totalLength`, and the two runtimes disagree
     // about a slot filled past it: the editor solves every slot holding a transform, the client solves
-    // exactly the first `totalLength`. Such a slot therefore passes every play-mode check and does nothing
-    // in-game. Nothing could report it before, because the SDK's own `Sources.Count` returns `totalLength` —
-    // the constraints TABLE is built from that indexer and is structurally blind to the slot, which is why
-    // this lands as an observation with its own SerializedObject read rather than as a table cell.
+    // exactly the first `totalLength`. Such a slot passes every play-mode check and does nothing in-game.
+    // `Sources.Count` returns `totalLength`, so the constraints table cannot see the slot; this is an
+    // observation with its own SerializedObject read.
 
-    // Writes source slots and the declared length independently, which is the only way to express the
-    // defect: the public API cannot address a slot past the length (it is what `Sources.Count` hides).
+    // Goes through SerializedObject because the public API cannot address a slot past the length.
     private static void WriteSources(VRCConstraintBase c, int totalLength, params Transform[] slots)
     {
         var so = new SerializedObject(c);
@@ -937,8 +815,6 @@ public class ReportGimmickTests
         StringAssert.Contains("source1", line);
         StringAssert.Contains("Other", line);
         StringAssert.Contains("totalLength`=1", line);
-        // The fix is part of the interface, not decoration: the reader has two branches and no way to pick
-        // between them from the text alone, so the line has to offer both.
         StringAssert.Contains("raise `Sources.totalLength`", line);
         StringAssert.Contains("clear the slot", line);
     }
@@ -953,8 +829,6 @@ public class ReportGimmickTests
 
         string line = OneOffender(ReportGimmick.ScanConstraintLengths(root));
         StringAssert.Contains("already a source inside the length", line);
-        // Stated, never interpreted: a repeated slot is EVIDENCE that an edit shrank the list, but whether
-        // this one is leftover or a source someone meant to solve is intent, and the bytes are identical.
         StringAssert.DoesNotContain("residue", line);
         StringAssert.DoesNotContain("harmless", line);
     }
@@ -981,8 +855,6 @@ public class ReportGimmickTests
         WriteSources(con, 1, src.transform, other.transform);
         host.SetActive(false);
 
-        // A toggled-off layer is a composed avatar's normal resting state and the defect is serialized
-        // either way, so liveness is rendered beside the offender and never gates it out of the scan.
         string line = OneOffender(ReportGimmick.ScanConstraintLengths(root));
         StringAssert.Contains("not-live", line);
     }
@@ -997,8 +869,6 @@ public class ReportGimmickTests
         var con = host.AddComponent<VRCParentConstraint>();
         WriteSources(con, 16, slots);
 
-        // At exactly 16 the length covers every keyable slot and the overflow is empty, so the scan
-        // saw everything. Emitting the bound here would tell a reader the scan was narrower than it was.
         CollectionAssert.IsEmpty(ReportGimmick.ScanConstraintLengths(root));
     }
 
@@ -1006,8 +876,6 @@ public class ReportGimmickTests
     public void ScanConstraintLengths_NullRoot_DegradesRatherThanReadingClean()
     {
         var lines = ReportGimmick.ScanConstraintLengths(null);
-        // An empty list means scanned-and-clean everywhere else in this grammar, so the null case must not
-        // be able to borrow it.
         Assert.AreEqual(1, lines.Count);
         StringAssert.StartsWith(CheckAvatar.DegradedPrefix, lines[0]);
     }

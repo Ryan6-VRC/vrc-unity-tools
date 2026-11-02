@@ -7,88 +7,38 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 using UnityEngine.SceneManagement;
-using static Ryan6Vrc.AgentTools.Editor.CheckAnimator; // FrameKind / FrameResult / TryMaFrame / TryVrcfFrame / CollectUnresolvedBindings
+using static Ryan6Vrc.AgentTools.Editor.CheckAnimator;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Scene-scoped INSPECTION gate: classify the silent reference/identity breaks a mergeable placement
-    /// leaves on an instantiated IN-SCENE avatar root. Two are path-encoded reference breaks a base rename
-    /// (canonical <c>Body_base</c>→<c>Body_Base</c>) leaves behind; the third is a post-merge collision.
-    ///   - <b>MA scene refs</b> (the reactive family / BlendshapeSync / Mesh Settings — anything carrying
-    ///     the <c>referencePath</c>+<c>targetObject</c> <c>AvatarObjectReference</c> field pair) that no
-    ///     longer resolve → the skill retargets them in place.
-    ///   - <b>clip/controller bindings</b> (descriptor playable layers + every MA MergeAnimator / VRCFury
-    ///     FullController merged animator) that resolve to no scene object → the skill owns the vendor
-    ///     <c>.anim</c> and repaths (routed by the per-offender <c>clipAssetPath</c>).
-    ///   - <b>anchor-seam</b> (the cross-framework break, docs/nondestructive.md §Choosing a framework
-    ///     rule 1): a parameter-carrying component (contact receiver, raycast, physbone) under a <b>VRCFury
-    ///     FullController</b>, whose parameter that FullController declares, sitting under a node carrying an
-    ///     MA relocator. FullControllerBuilder renames the components it finds under itself only after MA
-    ///     has moved them, so a moved one keeps the bare name while the controller reads the renamed one,
-    ///     and no build message says so. Whether the relocator acts in a given build is NOT evaluated (each
-    ///     acts only once its target resolves). VRCFury's own <c>ArmatureLink</c> is never an offender: it
-    ///     runs after the FullController has renamed. The offender names the <b>anchor</b> → the agent keeps
-    ///     the component inside the FullController's subtree (constrain it to the anchor) or re-anchors in
-    ///     VRCFury. Merged CLIP bindings are not this class's: VRCFury resolves them against the hierarchy
-    ///     as it stood before MA ran, so a relocated one survives.
-    ///   - <b>merge-conflict</b> (NOT path-encoded — transform-identity, not a name): two+ dynamics
-    ///     components in one category (physbone/collider) that resolve to the SAME post-merge transform via
-    ///     the MA/VRCFury merge map, ≥1 of them mergeable-sourced — i.e. a mergeable's bone name-merges onto
-    ///     a base bone that already carries the same kind of component → the agent de-conflicts. A
-    ///     base↔base duplicate (none mergeable) is not a merge artifact and is dropped. Colliders never
-    ///     fight — each physbone collides with the colliders it lists — so a collider group is flagged only
-    ///     among colliders of the SAME SHAPE (<see cref="SameColliderShape"/>): a stacked duplicate, where
-    ///     distinct shapes sharing a bone are an authored composite. Constraints are not a category: both
-    ///     frameworks keep a bone carrying a component as its own transform (MA's MergeArmature retains it,
-    ///     VRCFury's ArmatureLink moves it as "Original Object"), so a merge never lands a mergeable
-    ///     constraint on the base bone. Each offender is marked <c>[live]</c>/<c>[not-live]</c> relative to
-    ///     the avatar root, so a mixed-live physbone group reads as the per-range variant set it usually is
-    ///     (docs/outfits.md) rather than N components to reconcile.
-    ///   - <b>blendshape-action</b>: a VRCFury BlendShape action, in any feature's action lists, whose shape no
-    ///     SkinnedMeshRenderer in the set VRCFury searches carries (every one under the avatar root, or the one
-    ///     renderer the action names). VRCFury's BlendshapeActionBuilder builds such an action to an empty clip
-    ///     with its warning commented out, so nothing else says so. Read from the placed scene like the first two.
+    /// Scene-scoped inspection gate: names the silent reference and identity breaks a mergeable placement
+    /// leaves on an instantiated in-scene avatar root, in five classes: MA scene refs, clip/controller
+    /// bindings, anchor-seam, merge-conflict and blendshape-action.
+    /// Contract: docs/unity-tools.md.
     ///
-    /// The first two resolve against the PLACED scene (the load-bearing model, spec D1): a to-be-merged bone
-    /// is physically present pre-bake and resolves now; a base-rename break does not. So this predicts nothing
-    /// about what the build will MOVE, and never depends on the <c>Armature.&lt;Name&gt;</c> convention.
-    /// merge-conflict is the one class that reads the merge map (what the build will MERGE), not a scene path.
-    /// <b>anchor-seam keeps the no-prediction model</b>: it asserts that a relocator component is PRESENT
-    /// between the component and its FullController — a scene state — and models nothing about where that
-    /// relocator moves its node or whether MergeArmature keeps or zips a given bone.
-    ///
-    /// Verdict is <c>PASS</c> (clean) or <c>CLASSIFY</c> (any finding) — never <c>FAIL</c> for a finding (bad
-    /// input alone bare-FAILs). No computed near-miss/absent/N-of-M SCORING: every class is a definite
+    /// Verdict is <c>PASS</c> (clean) or <c>CLASSIFY</c> (any finding), never <c>FAIL</c> for a finding (bad
+    /// input alone bare-FAILs). No computed near-miss/absent/N-of-M scoring: every class is a definite
     /// predicate (a ref resolves or it doesn't; a collision group is ≥2-with-a-mergeable or it isn't). The
     /// tool names offenders and their class; the compose agent applies discretion (findings are often
     /// intentional).
     ///
-    /// Clip-binding detection REUSES <see cref="CheckAnimator"/>'s frame-detection + binding-walk +
-    /// humanoid-curve-skip (called, not re-expressed) with the build-rewrite demotion flipped off. The
-    /// surface enumeration, the VRCF ancestor-walk, and the fail-loud frame guards are net-new here.
+    /// Clip-binding detection calls <see cref="CheckAnimator"/>'s binding walk rather than re-expressing it.
     ///
-    /// INSPECTION ONLY — mutates no scene state (scene.isDirty is unchanged across a call), writes no asset
-    /// but its own RunLog. NEVER throws: every reflective hop is guarded and degrades with a loud warning.
+    /// Inspection only: mutates no scene state and writes no asset but its own RunLog. A reflective hop that
+    /// fails degrades to a loud warning rather than a throw.
     /// </summary>
     [AgentTool]
     public static class CheckAvatar
     {
-        private const string MaObjRefTypeName = "nadena.dev.modular_avatar.core.AvatarObjectReference";
-        // One literal for both resolvers: CheckAnimator's frame walk needs the same sentinel, and CheckAvatar
-        // already depends on CheckAnimator (CollectUnresolvedBindings), so it is owned there.
         private const string MaAvatarRootSentinel = CheckAnimator.MaAvatarRootSentinel;
 
-        // Standing Notes line — quoted verbatim from the spec §Excluded edge. Carried by EVERY RunLog so the
-        // model's two known holes (anticipatory-authoring frames + build-time deletions) are stated-and-refused
-        // on every run, with zero detection code.
+        // Standing Notes lines, on every RunLog.
         private const string ExcludedEdgeLine =
             "Bindings are evaluated against the placed scene. Anticipatory-authoring frames (a binding authored " +
             "expecting a post-merge location) are not distinguished, and an unresolved binding there may be " +
             "intentional. Build-time object *deletions* (as opposed to moves) are also not visible here.";
 
-        // Two in-scene-unresolved patterns CheckAvatar surfaces honestly but does NOT auto-fix — commonly
-        // intentional, left to model discretion (spec §Known limitations). Stated on every run.
         private const string DiscretionLimitsLine =
             "Known limitations, left to model discretion (not auto-resolved): (1) an Armature-Link-relocated bone " +
             "— the mergeable's own bone animated at a base-armature path it only occupies post-merge, so it fails " +
@@ -96,28 +46,20 @@ namespace Ryan6Vrc.AgentTools.Editor
             "whose scene object carries the VRChat equivalent (VRCRotationConstraint) or vice-versa — it works at " +
             "runtime though it will not resolve here.";
 
-        // ── Conditional Notes lines + the R-H label: quoted once, here ────────────────────────────────
-        // These three are the emitted wording for three GATED behaviours, and the gate — not the phrasing — is
-        // what the tests prove. They were asserted as fragments in seven places (three of them negatives), so a
-        // rewording reddened seven tests for no behaviour change. Per docs/tool-design.md §Duplication the
-        // verbatim string lives at the canon and every other site routes to it: the tests assert these
-        // constants, and the emit sites below are their only literal.
+        // ── Conditional Notes lines + the fail-loud label ─────────────────────────────────────────────
+        // Tests assert these constants, so the emit sites below stay their only literal.
 
-        /// <summary>Fires iff a mixed-live physbone group is present (<see cref="AnyMixedLivePhysboneGroup"/>).</summary>
         internal const string VariantSetNoteLine =
             "Live state is measured relative to this avatar root. A `[not-live]` physbone on a base bone " +
             "is often one of a per-range variant set an FX layer switches between, and de-conflicting against the " +
             "wrong member is silent (docs/outfits.md §The FX controller is the authoritative map). Which member the " +
             "layer selects is a property of the graph, not of the scene's static state.";
 
-        /// <summary>Fires iff the inspected root is itself inactive, so `[live]` above reads relative, not absolute.</summary>
         internal const string InactiveRootNoteLine =
             "This avatar root is not active in the scene, so nothing under it is running; the live markers " +
             "above are relative to the root and still discriminate between hosts.";
 
-        /// <summary>Prefix on the Notes entry <see cref="SurfaceUnreflected"/> adds; the remainder is the
-        /// dynamic warning text, so only the label is a constant.</summary>
-        internal const string FailLoudNotePrefix = "fail-loud (R-H): ";
+        internal const string FailLoudNotePrefix = "fail-loud: ";
 
         /// <summary>Fires iff the inspected root carries any MA relocator, so a clean anchor-seam count
         /// reads as the scoped result it is rather than as whole-avatar confirmation.</summary>
@@ -131,7 +73,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             "bindings are not in scope: a relocated one survives, and one whose target the build destroys " +
             "is named by VRCFury's own build warning.";
 
-        /// <summary>Fires iff at least one anchor-seam offender exists.</summary>
         internal const string AnchorSeamNoteLine =
             "An anchor-seam offender is a parameter-carrying component that an MA relocator moves out of " +
             "its VRCFury FullController's subtree. The FullController renames its parameters per instance, " +
@@ -143,7 +84,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             "it there, or anchor with a VRCFury ArmatureLink, which moves after the rename " +
             "(docs/nondestructive.md §Choosing a framework).";
 
-        /// <summary>Fires iff at least one blendshape-action offender exists.</summary>
         internal const string BlendshapeActionNoteLine =
             "VRCFury builds a BlendShape action whose shape no renderer it searches carries to nothing, and says " +
             "nothing. The repair is the shape (author the key on the mesh that should carry it) or the action (name a " +
@@ -152,8 +92,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             "a mesh or shape a build step adds, and an un-upgraded legacy field (Breathing's version-0 `blendshape` " +
             "string), which VRCFury converts to an action only on upgrade.";
 
-        // The serialized VRCFury names the blendshape-action walk reads, by string only (no typed reference to
-        // VRCFury internals): the component and the action type whose builder skips a missing shape silently.
         internal const string VrcfComponentFullName = "VF.Model.VRCFury";
         internal const string VrcfBlendShapeActionFullName = "VF.Model.StateAction.BlendShapeAction";
         internal const string EditorOnlyTag = "EditorOnly";
@@ -161,12 +99,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         // The MA components that reparent a node: BoneProxyProcessor, MergeArmatureHook and
         // WorldFixedObjectProcessor SetParent the GameObject they sit on, and ReplaceObjectPass SetParents the
         // replacement (its own GameObject) into the target's place. VisibleHeadAccessoryProcessor is absent: it
-        // reparents only the clones it creates, never the node it sits on. Each
-        // acts only once its target RESOLVES, and this class does not check that — deliberately: an entry is
-        // scanned as a bare prefab where no target can resolve, so gating on resolution would report every
-        // module clean. The finding is the authored shape, not a predicted move. Membership is a type-name
-        // test and nothing more. VRCFury's ArmatureLink is absent because it is not a break: FeatureOrder
-        // runs it after FullController, so the rename has already reached the components it moves.
+        // reparents only the clones it creates. VRCFury's ArmatureLink is absent: FeatureOrder runs it after
+        // FullController, so the rename has already reached the components it moves. Each relocator acts only
+        // once its target resolves, and this class does not check that: an entry is scanned as a bare prefab
+        // where no target can resolve, so gating on resolution would report every module clean.
         internal static readonly string[] MaRelocatorTypeNames =
         {
             "nadena.dev.modular_avatar.core.ModularAvatarBoneProxy",
@@ -187,17 +123,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         };
 
         // ── Injectable seams (internal) ───────────────────────────────────────────────────────────────
-        // Real MA/VRCF types always reflect and MA's Get(Component) is always reachable in this Editor, and an
-        // absent serialized FIELD (the drift the fail-loud rail guards) can't be constructed with the live
-        // types — so the degrade/fail-loud branches are otherwise unexercisable. These delegates run
-        // UNCONDITIONALLY on the resolution hot path (no test-only conditional in production); a test swaps one
-        // in SetUp and restores it in TearDown to force a branch. Defaults are the real behaviour.
+        // A test swaps one in SetUp and restores it in TearDown to force a degrade or fail-loud branch the live
+        // MA/VRCFury types cannot reach. Defaults are the real behaviour.
 
-        // The AOR boxing/pin seams (GetBoxedValue / ResolveAorGetOverload) live in VendorReflect — one home
-        // for the vendor-invocation plumbing this scan and CheckAnimator's frame walk both resolve through.
-
-        /// <summary>Every node under the root carrying an MA relocator → its relocator label. A test swaps a
-        /// fake to exercise the walk without the live MA types.</summary>
+        /// <summary>Every node under the root carrying an MA relocator → its relocator label.</summary>
         internal static Func<GameObject, Dictionary<GameObject, string>> CollectAnchors = DefaultCollectAnchors;
 
         private static Dictionary<GameObject, string> DefaultCollectAnchors(GameObject root)
@@ -212,8 +141,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     if (full != t) continue;
                     string label = full.Substring(full.LastIndexOf('.') + 1);
-                    // One GameObject can carry two relocators (MA forbids duplicates of one type, not the
-                    // pair); name both rather than letting the second silently overwrite the first.
+                    // One GameObject can carry two relocators: MA forbids duplicates of one type, not the pair.
                     map[c.gameObject] = map.TryGetValue(c.gameObject, out var prior) ? prior + "+" + label : label;
                     break;
                 }
@@ -232,10 +160,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static (List<(Transform, Transform)>, string) DefaultResolveMergePairs(GameObject avatarGO)
         {
             var res = CheckSeam.ResolveMergeMap(avatarGO, avatarGO);
-            // ScaleBakeReason is intentionally omitted from the note: scale-at-bake doesn't change WHICH
-            // transform two components collide on (only its baked scale), so those pairs stay valid for
-            // collision detection — only genuine drift (ReflectError) or a non-resolving seam (UnresolvableReason)
-            // means the map is partial and conflicts may be under-reported.
+            // ScaleBakeReason stays out of the note: scale-at-bake changes a transform's baked scale, not which
+            // transform two components collide on, so those pairs stay valid for collision detection.
             string note = (res.ReflectError ?? res.UnresolvableReason);
             if (note != null) note = "merge map partial — some seams didn't resolve; conflicts may be under-reported (" + note + ")";
             var pairs = new List<(Transform, Transform)>();
@@ -243,8 +169,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return (pairs, note);
         }
 
-        // (category, typeName, getter, withShape) — single source of truth for the two dynamics categories,
-        // iterated by both the collector and the drift canary so the canary pins the real production strings.
+        // The drift canary iterates this too, so it pins the production strings.
         internal static readonly (string category, string typeName, string getter, bool withShape)[] DynamicsCategories =
         {
             ("physbone", "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone",         "GetRootTransform", false),
@@ -259,20 +184,16 @@ namespace Ryan6Vrc.AgentTools.Editor
             return result;
         }
 
-        // Reflect one dynamics category by typename; absent type ⇒ skip (never throw). Read the driven target via
-        // the SDK's own null-resolving getter (null return ⇒ own transform). Every per-component hop guarded — a
-        // single bad component warns loud and is skipped, never aborting the sweep.
         private static void AddCategory(GameObject avatarGO, List<(Component, Transform, string, string)> result,
             string category, string typeName, string getterName, bool withShape)
         {
             var type = VendorReflect.FindType(typeName);
-            if (type == null) return; // SDK/category absent ⇒ skip
+            if (type == null) return;
             var getter = type.GetMethod(getterName, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
             if (getter == null)
             {
-                // Type present but its getter renamed ⇒ API drift. Fail loud and skip the whole category — do
-                // NOT silently fall back to own-transform for every component (that fabricates plausible-but-wrong
-                // targets). The CI canary pins this getter, so this only fires on a live editor whose SDK drifted.
+                // Skip the whole category: falling back to own-transform for every component would fabricate
+                // plausible-but-wrong targets.
                 Debug.LogWarning("[CheckAvatar] dynamics getter '" + typeName + "." + getterName
                                + "' did not reflect (API drift) — skipping the " + category + " category.");
                 return;
@@ -294,7 +215,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        // Best-effort collider shape for agent discretion; every field guarded (never throws).
         private static string ColliderDetail(Component collider)
         {
             try
@@ -310,7 +230,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // Two colliders within this distance on every compared measure are one shape stacked twice. Vendor
         // collider values are authored at 5 mm–1 cm grain and a copied component matches to float error, so
-        // the tolerance sits an order of magnitude under the smallest intended difference.
+        // the tolerance sits under the smallest intended difference.
         internal const float SameShapeToleranceMeters = 0.002f;
 
         // A collider's shape in world metres, its local fields read through `frame`'s position and rotation
@@ -353,8 +273,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             catch { return null; }
         }
 
-        // Same kind and side, then per kind: a sphere is its centre and radius; a capsule its radius and both
-        // segment ends in either order; a plane its normal and each origin's offset from the other plane.
         // An unrecognized kind matches (fail toward flagging).
         private static bool SameColliderShape(ColliderShape x, ColliderShape y)
         {
@@ -378,18 +296,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        // Live is nullable: null means "no host to ask", which prints as neither marker — the same
-        // absent-vs-false distinction the shape cell spells `—`. Component is the host itself, kept only so a
-        // collider group can be split by shape; it is never printed.
+        // Live null means no host to ask, which prints as neither marker. Component is kept only so a collider
+        // group can be split by shape.
         private struct ConflictHost { public string Path; public string Type; public string Bone; public bool Mergeable; public string Detail; public bool? Live; public Component Component; }
         private struct MergeConflict { public string Category; public string FinalPath; public List<ConflictHost> Hosts; public int Seq; }
 
-        // Whether a dynamics component is running, measured RELATIVE TO THE AVATAR ROOT. Absolute
-        // activeInHierarchy would be wrong here: this root can itself be deactivated (parking the avatars
-        // you are not editing is ordinary workflow, and Resolve reaches an inactive root), and a shared
-        // ancestor's state cannot discriminate between members of one group anyway — it would report every
-        // host not-live at once, which is the opposite of the signal. Ancestors ABOVE the root are the
-        // subject of the one caveat line instead.
+        // Whether a dynamics component is running, relative to the avatar root. activeInHierarchy would mark every
+        // host not-live under a deactivated root, which is ordinary workflow, and a shared ancestor's state cannot
+        // discriminate between members of one group. Ancestors above the root get InactiveRootNoteLine instead.
         private static bool? IsLive(Component host, Transform root)
         {
             if (host == null) return null;
@@ -400,10 +314,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return true;
         }
 
-        // A collider group's hosts partitioned into same-shape clusters (single-linkage, so a chain of near
-        // matches joins one cluster — toward flagging), each in the group's host order, clusters ordered by
-        // their first host. Any host whose shape cannot be read keeps the whole group together. A mergeable
-        // host is read twice — at its placed root (MA) and snapped onto `final` (VRCFury align) — and a pair
+        // A collider group's hosts as same-shape clusters, single-linkage, so a chain of near matches joins one
+        // cluster (toward flagging). Any host whose shape cannot be read keeps the whole group together. A
+        // mergeable host is read at its placed root (MA) and snapped onto `final` (VRCFury align), and a pair
         // matches if any reading of one matches any reading of the other, since which framework merges it is
         // not known here.
         private static List<List<ConflictHost>> SplitByShape(List<ConflictHost> hosts, Transform final)
@@ -441,8 +354,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return false;
         }
 
-        // Scoped to what this change actually established: a PHYSBONE group carrying ≥2 hosts of mixed live
-        // state. An unrelated disabled collider must not summon a paragraph about physbone variant sets.
         private static bool AnyMixedLivePhysboneGroup(List<MergeConflict> conflicts)
         {
             foreach (var mc in conflicts)
@@ -461,11 +372,10 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Public API ──────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Classify the MA-scene-ref and clip-binding reference breaks on the in-scene avatar at
-        /// <paramref name="avatarRoot"/> (a scene hierarchy path, else numeric instance id, else name —
-        /// mirrors RenderAvatar's target resolution). Returns a one-line summary; a real run ends with the
-        /// RunLog path in-band (<c>… =&gt; PASS|CLASSIFY | log=&lt;path&gt;</c>). Bad input (root not found /
-        /// no VRCAvatarDescriptor) is a bare <c>[CheckAvatar] FAIL: …</c> with no trailer.</summary>
+        /// <summary>Classify the breaks on the in-scene avatar at <paramref name="avatarRoot"/> (a scene hierarchy
+        /// path, else numeric instance id, else name). Returns a one-line summary; a real run ends with the
+        /// RunLog path in-band (<c>… =&gt; PASS|CLASSIFY | log=&lt;path&gt;</c>). Bad input (unresolved root / no
+        /// VRCAvatarDescriptor) is a bare <c>[CheckAvatar] FAIL: …</c> with no trailer.</summary>
         public static string Run(string avatarRoot)
         {
             var handle = SceneHandle.Resolve(avatarRoot);
@@ -482,7 +392,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 (c, frame) => { var n = MaFrameUncertaintyNote(c, avatarGO, frame); if (n != null) rep.FrameUncertain.Add(n); },
                 (c, what) => SurfaceUnlintable(c, what, rep));
 
-            // ---- MA scene-ref detection (D3) — generic over EVERY component ----------------------------
+            // ---- MA scene-ref detection — generic over EVERY component ---------------------------------
             foreach (var c in avatarGO.GetComponentsInChildren<Component>(true))
             {
                 if (c == null) continue;
@@ -491,14 +401,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             // ---- Clip-binding classification (reuse CheckAnimator's walk, demotion off) -----------------
             // Dedup per unique (controller, clip, binding path, binding type): one authored curve expands to
-            // several component curves (a Transform's position x/y/z, a rotation's quaternion) that share a
-            // path+type, and a controller shared across frames is walked once per frame — all the same break.
-            // The key omits the frame, so it assumes a binding resolves consistently across the frames a
-            // controller is walked under. The one topology that breaks that — the SAME controller mounted both
-            // by a descriptor layer (avatar-root, no rewrite) AND a VRCF FullController (rewrite) — is
-            // pathological (you would double-mount one controller) and fails safe (an extra CLASSIFY for
-            // agent discretion, never a hidden break), so it is left as a known limit rather than paid for
-            // with cross-pair aggregation on the hot path.
+            // several component curves that share a path+type, and a controller shared across frames is walked
+            // once per frame. The key omits the frame, so one controller mounted by both a descriptor layer (no
+            // rewrite) and a VRCF FullController (rewrite) can add an extra CLASSIFY but never hide a break.
             var clipSeen = new HashSet<(int ctrl, int clip, string path, Type type)>();
             foreach (var p in pairs)
             {
@@ -506,7 +411,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                              p.Kind == FrameKind.VRCF ? avatarGO : null))
                 {
                     string clipAssetPath = AssetDatabase.GetAssetPath(clip);
-                    if (IsSdkProxyClip(clipAssetPath)) continue; // VRChat SDK humanoid proxy — swapped at runtime, never a scene ref
+                    if (IsSdkProxyClip(clipAssetPath)) continue;
                     if (!clipSeen.Add((p.Controller.GetInstanceID(), clip.GetInstanceID(), b.path, b.type))) continue;
                     rep.ClipBindings.Add(new Offender
                     {
@@ -521,8 +426,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
 
             // ---- anchor-seam classification ------------------------------------------------------------
-            // VRCFury FullControllers only: their frame drift was already surfaced by Enumerate above, so the
-            // walk reports only the reflection points it adds.
+            // Enumerate above already surfaced FullController frame drift, so the walk reports only the reflection
+            // points it adds.
             rep.AnchorsPresent = CollectAnchors(avatarGO);
             foreach (var hit in CollectAnchorSeams(avatarGO, rep.AnchorsPresent, (c, anchor) => SurfaceUnreflected(c, anchor, rep), reportFrameDrift: false, avatarRoot: avatarGO))
                 rep.AnchorSeams.Add(new Offender
@@ -554,9 +459,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Emit(rep);
         }
 
-        /// <summary>Prefix marking a line that is NOT a finding but a reason the scan could not be trusted —
-        /// a fail-loud reflection drift or an uncertain frame. A caller folding both into one list must treat
-        /// a degraded line as at least as serious as a finding, never as noise to filter.</summary>
+        /// <summary>Prefix marking a line that is NOT a finding but a reason the scan could not be trusted. A
+        /// caller folding both into one list must treat a degraded line as at least as serious as a finding,
+        /// never as noise to filter.</summary>
         public const string DegradedPrefix = "scan not trustworthy: ";
 
         /// <summary>Prefix marking a line that is neither a finding nor a failure but a bound on what the scan
@@ -593,8 +498,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return lines;
         }
 
-        // R-H: name the anchor loud and record it in Notes; the caller still processes the controller's
-        // bindings (never drops it), so an unreflected frame field can't yield a false PASS.
         private static void SurfaceUnreflected(Component c, string anchor, Report rep)
         {
             string msg = "[CheckAvatar] frame field '" + anchor + "' on " + c.GetType().Name + " @ " + PathOf(c.gameObject)
@@ -603,8 +506,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             rep.Notes.Add(FailLoudNotePrefix + msg.Substring("[CheckAvatar] ".Length));
         }
 
-        // A surface this door can see but cannot walk. Same fail-loud contract as above: a clean verdict
-        // that silently skipped a live merged controller is the false PASS this door exists to prevent.
         private static void SurfaceUnlintable(Component c, string what, Report rep)
         {
             string msg = "[CheckAvatar] surface @ " + PathOf(c.gameObject) + " mounts " + what
@@ -614,9 +515,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             rep.UnlintableSurfaces++;
         }
 
-        // The blendshape-action walk's fail-loud: a VRCFury field it reads did not reflect, so the actions under that
-        // component (or under every component, for the type itself) went unchecked, and a clean count must not read
-        // as coverage.
         private static void BlendshapeUnreflected(Component c, string field, Report rep)
         {
             string msg = "[CheckAvatar] VRCFury field '" + field + "' on " + c.GetType().Name + " @ " + PathOf(c.gameObject)
@@ -625,7 +523,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             rep.Notes.Add(FailLoudNotePrefix + msg.Substring("[CheckAvatar] ".Length));
         }
 
-        // The type the walk matches on is gone, which blinds the walk for every VRCFury component under the root.
         private static void BlendshapeTypeMissing(string type, int components, Report rep)
         {
             string msg = "[CheckAvatar] VRCFury type '" + type + "' does not resolve in the loaded VRCFury — no BlendShape action on any of the "
@@ -634,21 +531,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             rep.Notes.Add(FailLoudNotePrefix + msg.Substring("[CheckAvatar] ".Length));
         }
 
-        // R-K: the frame caveat that rides beside an MA MergeAnimator whose relativePathRoot did not resolve.
-        // Two shapes reach the own-GameObject fallback and BOTH get a note, because the generic scan emits an
-        // MA-scene-ref offender for both and an offender with no frame line beside it reads as a dropped ref:
-        //   - non-empty referencePath that does not resolve ⇒ the frame is a GUESS (frame-uncertain);
-        //   - empty referencePath carrying a live targetObject ⇒ the frame is CERTAIN (MA's own fallback), and
-        //     what is broken is the ref, which the inspector still shows resolved (nondestructive.md).
-        // Returns null only where there is no offender to caption: Absolute, a resolving root, or a wholly
-        // empty relativePathRoot (both halves empty — the intentional-empty the scan exempts too).
+        // The frame caveat beside an MA MergeAnimator whose relativePathRoot did not resolve. Two shapes reach
+        // the own-GameObject fallback, and both get a note because the scan emits an MA-scene-ref offender for
+        // each and an offender with no frame line reads as a dropped ref: a non-empty referencePath that does
+        // not resolve (the frame is a guess), and an empty one carrying a live targetObject (the frame is MA's
+        // own fallback; the ref is what is broken). Both halves empty is the intentional-empty the scan exempts,
+        // so it gets no caption.
         private static string MaFrameUncertaintyNote(Component c, GameObject avatarGO, FrameResult frame)
         {
             if (frame.IsAbsolute) return null;
             SerializedObject so;
-            try { so = new SerializedObject(c); } catch { return null; } // B6
+            try { so = new SerializedObject(c); } catch { return null; }
             var rel = so.FindProperty("relativePathRoot");
-            if (rel == null) // B2: field absent (drift) — surface it, don't silently treat as a confident frame
+            if (rel == null)
                 return "frame-uncertain: the MA relativePathRoot field on '" + PathOf(c.gameObject)
                      + "' did not reflect (API drift) — bindings were resolved against the fallback frame (its own GameObject).";
             var pathChild = rel.FindPropertyRelative("referencePath");
@@ -656,9 +551,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             string refPath = pathChild != null ? pathChild.stringValue : "";
             if (string.IsNullOrEmpty(refPath))
             {
-                // Both halves empty ⇒ the author wrote no root at all and meant the own-GO fallback: no
-                // offender, so no caption. A live targetObject ⇒ the scan DOES emit one, and this is its
-                // frame half — the frame is right, the ref is the silent no-op.
                 if (targetChild == null || targetChild.objectReferenceValue == null) return null;
                 return "frame-certain: bindings for the animator on '" + PathOf(c.gameObject)
                      + "' were resolved against its own GameObject — the MA relativePathRoot carries a targetObject but no"
@@ -666,33 +558,26 @@ namespace Ryan6Vrc.AgentTools.Editor
                      + " offender: the ref reads resolved in the inspector and is not there at bake, so if that targetObject"
                      + " was meant to be the frame, these bindings are counted against the wrong one.";
             }
-            if (TryResolveSceneRef(rel, c, avatarGO, out _)) return null; // resolves ⇒ confident frame
+            if (TryResolveSceneRef(rel, c, avatarGO, out _)) return null;
             return "frame-uncertain: bindings for the animator on '" + PathOf(c.gameObject)
                  + "' were resolved against the fallback frame (its own GameObject) because the MA relativePathRoot '"
                  + refPath + "' did not resolve — see the matching MA-scene-ref offender. These bindings are counted, not dropped.";
         }
 
-        // ── MA scene-ref detection (D3) — never throws ────────────────────────────────────────────────
+        // ── MA scene-ref detection ────────────────────────────────────────────────────────────────────
 
-        // Walk serialized properties generically (precedent: RemapReferencesByPath). A property carrying both
-        // a referencePath(string) child and a targetObject(objref) child is an AvatarObjectReference. The
-        // intentional-empty exemption (MISSING-vs-EMPTY, as CheckPackage's clean-zero) is BOTH halves empty:
-        // an empty referencePath carrying a live targetObject is the silent no-op nondestructive.md names —
-        // Get(Component) returns null on the empty path whatever targetObject holds, while the inspector's
-        // editor-side resolver reads targetObject first, so the ref reads correct in the UI and is not there
-        // at bake. Exempting on the path alone hid exactly that class.
-        // What "not there" costs is the CONSUMER's business and this walk is generic, so the offender says
-        // only that no path was written: the reactive family / BlendshapeSync / Mesh Settings resolve nothing,
-        // while a MergeAnimator or MergeBlendTree relativePathRoot silently falls back to the component's own
-        // GameObject (MergeAnimatorProcessor / MergeBlendTreePass) — a relocated binding frame rather than a
-        // dropped ref, and harmless only where the author meant that fallback. Only MergeAnimator gets the
-        // R-K frame-caption (MaFrameUncertaintyNote) alongside that offender — TryMaFrame's type gate
-        // (CheckAnimator.cs) excludes MergeBlendTree, so its offender here carries no frame line today; read
-        // it as the same relocated-frame class anyway, not as uncaptioned-because-broken. If that gate is
-        // ever widened, MaFrameUncertaintyNote's hardcoded so.FindProperty("relativePathRoot") (lowercase)
-        // won't find it — ModularAvatarMergeBlendTree's field is RelativePathRoot (PascalCase), and
-        // FindProperty is case-sensitive, so it would silently take the field-drift branch on a field that is
-        // actually present.
+        // A property carrying both a referencePath(string) child and a targetObject(objref) child is an
+        // AvatarObjectReference. Only BOTH halves empty is exempt: an empty referencePath carrying a live
+        // targetObject is the silent no-op nondestructive.md §Reference hardening names.
+        // What that costs is the consumer's business and this walk is generic, so the offender says only that no
+        // path was written: the reactive family / BlendshapeSync / Mesh Settings resolve nothing, while a
+        // MergeAnimator or MergeBlendTree relativePathRoot silently falls back to the component's own GameObject
+        // (MergeAnimatorProcessor / MergeBlendTreePass). Only MergeAnimator gets a frame caption
+        // (MaFrameUncertaintyNote): TryMaFrame's type gate (CheckAnimator.cs) excludes MergeBlendTree, so read
+        // its captionless offender as the same relocated-frame class. If that gate is ever widened,
+        // MaFrameUncertaintyNote's hardcoded so.FindProperty("relativePathRoot") (lowercase) won't find it:
+        // ModularAvatarMergeBlendTree's field is RelativePathRoot (PascalCase), and FindProperty is
+        // case-sensitive, so it would silently take the field-drift branch on a field that is actually present.
         private static void ScanSceneRefs(Component c, GameObject avatarGO, Report rep)
         {
             SerializedObject so;
@@ -714,12 +599,10 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var targetGO = targetChild.objectReferenceValue as GameObject;
                 if (string.IsNullOrEmpty(refPath) && targetGO == null) continue; // unset by design
 
-                if (TryResolveSceneRef(it.Copy(), c, avatarGO, out _)) continue; // resolved ⇒ not an offender
+                if (TryResolveSceneRef(it.Copy(), c, avatarGO, out _)) continue;
                 rep.SceneRefs.Add(new Offender
                 {
                     Kind = "MA-scene-ref",
-                    // Parenthesized so the targetObject-only offender can never read as a path the agent
-                    // should go looking for: the defect IS that no path was written.
                     Path = string.IsNullOrEmpty(refPath)
                          ? "(unset referencePath; targetObject '" + PathOf(targetGO) + "' only — write the path)"
                          : refPath,
@@ -728,16 +611,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        // Resolve an AvatarObjectReference property. Authoritative path: box it (guarded — boxedValue THROWS
-        // for unsupported shapes, R-J) and invoke the pinned Get(Component), which returns null on an empty
-        // referencePath BEFORE it looks at targetObject and only then lets a live targetObject win, and only
-        // one sitting under the avatar root. (The static Get(SerializedProperty) overload the inspector uses
-        // has the opposite order and no empty-path guard — it keeps the IsChildOf gate, which is why an
-        // out-of-avatar targetObject resolves under NEITHER overload. That split is the silent no-op
-        // nondestructive.md names, and mirroring the wrong one here is what made this scan blind to it.)
-        // Every reflective hop is guarded: on any failure/drift, warn loud
-        // naming the broken anchor and self-resolve from the SerializedProperty CHILDREN in that same order.
-        // Never throws.
+        // Resolve an AvatarObjectReference property. Authoritative path: box it (boxedValue THROWS for
+        // unsupported shapes) and invoke the pinned Get(Component), which returns null on an empty referencePath
+        // BEFORE it looks at targetObject, then lets a live targetObject win only under the avatar root. The
+        // static Get(SerializedProperty) overload the inspector uses has the opposite order and no empty-path
+        // guard but keeps the IsChildOf gate, so an out-of-avatar targetObject resolves under NEITHER overload.
+        // On any reflective failure, warn naming the broken anchor and self-resolve from the SerializedProperty
+        // children in that same order.
         private static bool TryResolveSceneRef(SerializedProperty aor, Component host, GameObject avatarGO, out string refPath)
         {
             var pathChild = aor.FindPropertyRelative("referencePath");
@@ -761,26 +641,19 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             else if (reason == null) reason = "boxedValue was null";
 
-            // ---- Guarded self-resolve from the children already located --------------------------------
             Debug.LogWarning("[CheckAvatar] scene-ref resolve degraded on " + PathOf(host.gameObject)
                            + " (" + reason + ") — self-resolving from serialized children (empty referencePath first, then an in-avatar targetObject, then the path).");
 
             var targetGO = targetChild != null ? targetChild.objectReferenceValue as GameObject : null;
-            if (string.IsNullOrEmpty(refPath)) return false;    // empty path ⇒ null, whatever targetObject holds
-            // B3: a live targetObject wins — but only under the avatar root. BOTH MA overloads gate on
-            // IsChildOf (Get(Component) against FindAvatarTransformInParents, Get(SerializedProperty) against
-            // the same root), so a targetObject pointing outside the avatar resolves to NOTHING at bake.
-            // Accepting it here was a false negative on the one path that exists to survive MA API drift.
+            if (string.IsNullOrEmpty(refPath)) return false;
             if (targetGO != null && targetGO.transform.IsChildOf(avatarGO.transform)) return true;
-            if (refPath == MaAvatarRootSentinel) return true;                                       // avatar root itself
+            if (refPath == MaAvatarRootSentinel) return true;
             return avatarGO.transform.Find(refPath) != null;
         }
 
-        // ── Clip-binding walk (REUSE — CheckAnimator.CollectUnresolvedBindings, demotion off) ────────────
-        // The demotion (BrokenBindingIsError = !buildRewrite) lives in CheckAnimator.Emit, NOT in the walk —
-        // CollectUnresolvedBindings returns raw unresolved pairs, so calling it directly IS the "demotion
-        // off" behaviour: under D1 every unresolved-in-scene binding is a real, non-advisory clip-binding
-        // offender (mapped to CLASSIFY, never FAIL).
+        // ── Clip-binding walk ─────────────────────────────────────────────────────────────────────────
+        // CollectUnresolvedBindings returns raw unresolved pairs and the build-rewrite demotion lives in
+        // CheckAnimator's verdict, so every unresolved-in-scene binding here is an offender (CLASSIFY, never FAIL).
         private static IEnumerable<(AnimationClip clip, EditorCurveBinding binding)> CollectUnresolvedBindingsCalled(
             AnimatorController controller, List<GameObject> roots, Func<string, string> pathRewrite,
             GameObject absoluteRoot)
@@ -788,21 +661,18 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // VRChat SDK proxy animations (Packages/com.vrchat.*/…/ProxyAnim/proxy_*.anim) are humanoid-muscle
         // placeholders the SDK swaps at runtime; their bone-path bindings never resolve to a scene object and
-        // are never a real break. Anchored to the SDK PACKAGE, not the folder name alone: a proxy's identity
-        // is its SDK location, and this is the one skip that could HIDE a break — so it must not fire on a
-        // user asset that merely shares a `ProxyAnim` folder name (fail-loud: when unsure, surface).
+        // are never a real break. Anchored to the SDK package, not the folder name alone, because this skip
+        // could hide a break: a user asset that merely shares a `ProxyAnim` folder name still surfaces.
         private static bool IsSdkProxyClip(string clipAssetPath)
             => !string.IsNullOrEmpty(clipAssetPath)
                && clipAssetPath.StartsWith("Packages/com.vrchat.", StringComparison.OrdinalIgnoreCase)
                && clipAssetPath.IndexOf("/ProxyAnim/", StringComparison.OrdinalIgnoreCase) >= 0;
 
         // ── Anchor-seam walk ─────────────────────────────────────────────────────────────────────────────
-        // For every VRCFury FullController under the root: the parameters it declares, then every
-        // parameter-carrying component under its mount whose parameter names one of them, then the nearest MA
-        // relocator between that component and the mount. The mount and everything above it are excluded: a
-        // relocator there moves the FullController's whole subtree, component included, so the builder still
-        // finds it. A mount on the avatar root is skipped whole: every MA destination lies under it. Nested
-        // FullControllers each report their own.
+        // A relocator on the mount or above it moves the FullController's whole subtree, component included, so
+        // the builder still finds it; only a relocator between the component and the mount counts. A mount on the
+        // avatar root is skipped whole: every MA destination lies under it. Nested FullControllers each report
+        // their own.
         internal struct AnchorSeamHit
         {
             public Component FullController;
@@ -889,16 +759,12 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // ── BlendShape-action walk ───────────────────────────────────────────────────────────────────────
-        // Every VRCFury component under the root, and every managed reference anywhere in its feature whose type leaf
-        // is BlendShapeAction (a Toggle's states, but also Talking, Blinking, a Puppet stop, a SmoothLoop's nested
-        // states). The search set is VRCFury's own: VRCFuryBuilder.Run first strips every object below the avatar root
-        // that is tagged EditorOnly or carries a DeleteDuringUpload feature (EditorOnlyUtils), then BlendshapeActionBuilder
-        // takes every remaining SkinnedMeshRenderer, inactive included, when allRenderers is on, else the one renderer
-        // named and only if it is one of those. The action is an offender when no renderer in that set has the shape on
-        // its sharedMesh; an action on a stripped component never builds, so it is not swept. Read by SerializedObject
-        // and type-name leaf, never a typed reference. A field that does not reflect goes to onUnreflected and the
-        // actions it covers are skipped; a missing action type goes to onTypeMissing with the number of components it
-        // blinds, and nothing is swept.
+        // Every managed reference anywhere in a VRCFury feature whose type leaf is BlendShapeAction (a Toggle's
+        // states, but also Talking, Blinking, a Puppet stop, a SmoothLoop's nested states). The search set is
+        // VRCFury's own: of what StrippedAtBuild leaves, BlendshapeActionBuilder takes every SkinnedMeshRenderer,
+        // inactive included, when allRenderers is on, else the one renderer named and only if it is one of those.
+        // An action on a stripped component never builds, so it is not swept. Read by SerializedObject and
+        // type-name leaf, never a typed reference.
         internal struct BlendshapeActionHit
         {
             public Component Host;      // the VRCFury component
@@ -917,7 +783,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var c in root.GetComponentsInChildren<Component>(true))
                 if (c != null && c.GetType().FullName == VrcfComponentFullName && !StrippedAtBuild(c.transform, root.transform)) fury.Add(c);
             if (fury.Count == 0) return hits;
-            // The leaf this walk matches must still exist, or a VRCFury rename reads as "no actions": blind, so loud.
+            // The leaf this walk matches must still exist, or a VRCFury rename would read as "no actions".
             if (VendorReflect.FindType(VrcfBlendShapeActionFullName) == null) { onTypeMissing(VrcfBlendShapeActionFullName, fury.Count); return hits; }
             var skins = new List<SkinnedMeshRenderer>();
             foreach (var smr in root.GetComponentsInChildren<SkinnedMeshRenderer>(true))
@@ -990,10 +856,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static string Leaf(string typeName)
             => string.IsNullOrEmpty(typeName) ? "" : typeName.Substring(typeName.LastIndexOf('.') + 1);
 
-        // ── Merge-conflict scan (pure grouping core) ─────────────────────────────────────────────────
-        // Merge-conflict scan: two dynamics components (grouped within a category) that resolve to the same
-        // POST-MERGE transform, where ≥1 is mergeable-sourced (its raw target name-merges onto a shared bone).
-        // CLASSIFY-style; never throws (degrades to a loud Note).
+        // ── Merge-conflict scan ───────────────────────────────────────────────────────────────────────
         private static void ScanMergeConflicts(GameObject avatarGO, Report rep)
         {
             try
@@ -1004,8 +867,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 var map = new Dictionary<Transform, Transform>();
                 foreach (var (merge, baseT) in pairs)
                 {
-                    if (merge == null || baseT == null) continue;   // Check()-parity null guard (extracted body lacks it)
-                    if (!map.ContainsKey(merge)) map[merge] = baseT; // first-wins (safe for detection)
+                    if (merge == null || baseT == null) continue;
+                    if (!map.ContainsKey(merge)) map[merge] = baseT;
                 }
 
                 var targets = CollectDynamicsTargets(avatarGO);
@@ -1043,13 +906,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                         });
                     }
                 }
-                // groups is a Dictionary (non-deterministic iteration) — sort for a byte-stable RunLog, unlike
-                // the List-ordered maSceneRef/clipBinding blocks. Host order within a group is already stable.
-                // FinalPath is not unique — two distinct final bones can share a hierarchy path (Unity allows
-                // duplicate sibling names) — so tiebreak on the first host's path (List.Sort is unstable) to keep
-                // the order total and the RunLog byte-stable; every group has ≥2 hosts, so Hosts[0] is safe. Two
-                // shape clusters of one group can still share that first path (several colliders on one
-                // GameObject), so the last key is emission order, which follows the component walk.
+                // Dictionary iteration is unordered and List.Sort unstable, so the key is total for a byte-stable
+                // RunLog: FinalPath can repeat (Unity allows duplicate sibling names), the first host's path can too
+                // (several colliders on one GameObject), and emission order breaks that last tie.
                 rep.MergeConflicts.Sort((x, y) =>
                 {
                     int c = string.CompareOrdinal(x.Category, y.Category);
@@ -1068,7 +927,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        // Follow merge→base transitively (accessory→outfit→base); cycle-guarded. Not in map ⇒ own final.
         private static Transform ResolveFinal(Transform target, Dictionary<Transform, Transform> map)
         {
             var seen = new HashSet<Transform>();
@@ -1088,9 +946,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             int blendshapeAction = rep.BlendshapeActions.Count;
             string result = (maSceneRef > 0 || clipBinding > 0 || anchorSeam > 0 || mergeConflict > 0 || blendshapeAction > 0) ? "CLASSIFY" : "PASS";
 
-            // On the SUMMARY, not just the body — a bare `=> PASS` would read as coverage this run lacks.
-            // Not folded into the verdict: a gap in reach is not a reference break, and blurring them would
-            // make CLASSIFY stop meaning "an offender is named below".
             string unlintablePart = (rep.UnlintableSurfaces > 0
                 ? string.Format(CultureInfo.InvariantCulture, " unlintableSurfaces={0}", rep.UnlintableSurfaces) : "")
                 + (rep.UnlintableActions > 0
@@ -1142,8 +997,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 sb.Append("- **merge-conflict** category=`").Append(mc.Category)
                   .Append("` final=`").Append(mc.FinalPath).Append("`\n");
-                // Both states are spelled, like [mergeable]/[base]: emitting only the negative would make
-                // an all-live report byte-identical to one from a build that never evaluated liveness.
                 foreach (var h in mc.Hosts)
                     sb.Append("  - ").Append(h.Mergeable ? "[mergeable] " : "[base] ")
                       .Append(h.Live == null ? "" : h.Live == true ? "[live] " : "[not-live] ").Append(h.Path)
@@ -1169,8 +1022,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                     "physbone pair may already be resolved — verify against a build. VRCFury has no such pass and neither " +
                     "framework prunes colliders; same-shape colliders and non-exact/non-zip-merged MA physbone pairs are the " +
                     "residue this check exists for.\n");
-            // Scope before repair: an avatar carrying relocators gets the scope line whether or not anything
-            // fired, so a zero count is never read as whole-avatar confirmation (the corpus-silence rule).
             if (rep.AnchorsPresent != null && rep.AnchorsPresent.Count > 0)
                 sb.Append("- ").Append(AnchorSeamScopeLine).Append('\n');
             if (rep.AnchorSeams.Count > 0)
@@ -1187,7 +1038,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return res;
         }
 
-        // ── Bad-input refusal (bare FAIL, no trailer — family discipline) ───────────────────────────────
+        // ── Bad-input refusal (bare FAIL, no trailer) ─────────────────────────────────────────────────
 
         private static string Refuse(string why)
         {
@@ -1207,7 +1058,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Host;          // component/site label
             public string Animator;      // clip-binding only
             public string Clip;          // clip-binding only
-            public string ClipAssetPath; // clip-binding only — AssetDatabase.GetAssetPath(clip); DISTINCT from Path (routing, R-E)
+            public string ClipAssetPath; // clip-binding only — what the compose agent routes on; distinct from Path
             public string Carrier;       // anchor-seam only — the parameter-carrying component's type name
             public string Parameter;     // anchor-seam only — the parameter it writes, which the build leaves bare
             public string Anchor;        // anchor-seam only — scene path of the relocated node (what a repair moves)
@@ -1225,8 +1076,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             public readonly List<Offender> AnchorSeams = new List<Offender>();
             public readonly List<MergeConflict> MergeConflicts = new List<MergeConflict>();
             public readonly List<Offender> BlendshapeActions = new List<Offender>();
-            public readonly List<string> FrameUncertain = new List<string>(); // R-K frame caveats (uncertain AND certain-but-captioned)
-            public readonly List<string> Notes = new List<string>();          // R-H fail-loud + degrade notes
+            public readonly List<string> FrameUncertain = new List<string>(); // frame caveats (uncertain AND certain-but-captioned)
+            public readonly List<string> Notes = new List<string>();          // fail-loud + degrade notes
             public int UnlintableSurfaces;                                    // surfaces mounting a controller this door cannot walk
             public int UnlintableActions;                                     // VRCFury components whose BlendShape actions went unchecked
         }

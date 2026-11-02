@@ -5,9 +5,6 @@ using Ryan6Vrc.AvatarTools.Editor;
 
 public class RemapReferencesByPathTests
 {
-    // Armature-root rename fixture: root / Armature / Hips / Chain(x2). The only segment whose NAME differs
-    // vendor↔owned is the armature root (skinning preserves the bones below); the rename map carries that
-    // one correspondence, and every ref crossing the armature resolves under it.
     static GameObject MakeArmatureTree(string rootName, string armatureName)
     {
         var root = new GameObject(rootName);
@@ -18,20 +15,15 @@ public class RemapReferencesByPathTests
         return root;
     }
 
-    // NOTE: these tests assert the read-only resolver's DECISION (IndexedPath.FindByIndexedPath /
-    // RemapReferencesByPath.Counterpart) rather than Remap's SerializedObject write-through. Building +
-    // reading + destroying plain GameObject hierarchies is NUnit-safe; mutating a SerializedObject via
-    // Remap and then DestroyImmediate-ing its GameObject crashes the Editor. Remap's result aggregation
-    // (remapped/nulled counts, renameWarnings population) is therefore not asserted here — it is verified
-    // when a transplant runs on a real avatar via execute_code (the operator's gate; see docs/verify.md).
-    // The one decision with no read-only equivalent is the KNOWN COVERAGE GAP note further down.
+    // These tests assert the read-only resolver's DECISION (IndexedPath.FindByIndexedPath /
+    // RemapReferencesByPath.Counterpart), not Remap's SerializedObject write-through: NUnit must not mutate
+    // what it later destroys (docs/verify.md §Test venue). Remap's result aggregation (remapped/nulled counts,
+    // renameWarnings population) is therefore not asserted here; a transplant on a real avatar via execute_code
+    // verifies it.
 
     [Test]
     public void RenameMap_resolves_ref_across_renamed_armature_root_and_disambiguates_dup()
     {
-        // Same fixture as the (removed) mutating test: rename map {Armature ⇒ Armature.1} plus a ref
-        // crossing the renamed root and a ref to the 2nd of two duplicate-named "Chain" siblings deeper
-        // in the tree.
         var src = MakeArmatureTree("SRC", "Armature");
         var dst = MakeArmatureTree("DST", "Armature.1");
         var hips = src.transform.Find("Armature/Hips");
@@ -50,20 +42,19 @@ public class RemapReferencesByPathTests
     }
 
     [Test]
-    public void NoMap_leaves_renamed_root_ref_unresolved_exactly_as_today()
+    public void NoMap_leaves_renamed_root_ref_unresolved()
     {
-        // Absent map: "Armature" (src) has no counterpart under DST (only "Armature.1" exists), so the
-        // indexed path is missing and resolution returns null — a plain missing path, not the A1
-        // ambiguous-rename guard (which never fires with a null map).
+        // "Armature" has no counterpart under DST, so the indexed path is plainly missing and resolution returns
+        // null without the ambiguous-rename guard, which never fires with a null map.
         var src = MakeArmatureTree("SRC", "Armature");
         var dst = MakeArmatureTree("DST", "Armature.1");
         var hips = src.transform.Find("Armature/Hips");
 
         var hit = IndexedPath.FindByIndexedPath(src.transform, dst.transform, hips, null, out var failReason);
         Assert.IsNull(hit);
-        Assert.IsNull(failReason, "a plain missing path is not the A1 ambiguous-rename guard");
+        Assert.IsNull(failReason, "a plain missing path is not the ambiguous-rename guard");
 
-        // Counterpart with a null map returns null on the same input (byte-identical to today).
+        // Counterpart with a null map returns null on the same input.
         Assert.IsNull(RemapReferencesByPath.Counterpart(src.transform, dst.transform, hips));
 
         Object.DestroyImmediate(src); Object.DestroyImmediate(dst);
@@ -97,11 +88,10 @@ public class RemapReferencesByPathTests
     }
 
     [Test]
-    public void A1_count_mismatch_resolves_to_null_with_ambiguous_rename_reason()
+    public void Count_mismatch_resolves_to_null_with_ambiguous_rename_reason()
     {
-        // src has 1 'Armature'; dst has 2 'Armature.1' → mapped-name occurrence is ambiguous, so the A1
-        // guard resolves to null (never a wrong sibling) and names the reason. Read-only: no SerializedObject
-        // mutation, so building + destroying these hierarchies is NUnit-safe.
+        // src has 1 'Armature'; dst has 2 'Armature.1', so the mapped-name occurrence is ambiguous and the
+        // count-equality guard (IndexedPath.GuardRename) resolves to null and names the reason.
         var src = new GameObject("SRC");
         var sArm = new GameObject("Armature"); sArm.transform.SetParent(src.transform, false);
         var sHips = new GameObject("Hips"); sHips.transform.SetParent(sArm.transform, false);
@@ -133,12 +123,9 @@ public class RemapReferencesByPathTests
     [Test]
     public void Resolves_basic_and_duplicate_siblings_by_indexed_path()
     {
-        // Same fixture as the (removed) mutating test: a plain child and the 2nd of two duplicate-named
-        // "B" siblings. KNOWN COVERAGE GAP: the orphan case (a ref NOT under srcRoot, which Remap leaves
-        // untouched) is intentionally dropped here and is NOT covered by any NUnit test — the read-only
-        // resolver returns null for an out-of-tree target, which cannot distinguish "leave unchanged"
-        // from "clear". That behavior is verified only when a real transplant runs on an avatar via
-        // execute_code (the operator's gate — see docs/verify.md).
+        // KNOWN COVERAGE GAP: the orphan case (a ref NOT under srcRoot, which Remap leaves untouched) has no NUnit
+        // test: the read-only resolver returns null for an out-of-tree target, which cannot distinguish "leave
+        // unchanged" from "clear". Only a real transplant on an avatar via execute_code verifies it.
         var src = MakeTree("SRC");
         var dst = MakeTree("DST");
         var a = src.transform.Find("A");
@@ -150,7 +137,6 @@ public class RemapReferencesByPathTests
         Assert.AreEqual(dst.transform.Find("A"), hitA, "basic");
         Assert.AreEqual(dst.transform.GetChild(2), hitB2, "dup-sibling -> 2nd B, not 1st");
 
-        // The absent-counterpart floor, on the same fixture: an empty dst resolves the same path to null.
         var empty = new GameObject("EMPTY");
         Assert.IsNull(IndexedPath.FindByIndexedPath(src.transform, empty.transform, a),
             "no counterpart under dst → null, never a nearest-match guess");

@@ -8,58 +8,40 @@ using UnityEngine.SceneManagement;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// The venue-independent spine shared by both <see cref="RenderThumbnail"/> (edit mode) and
-    /// <see cref="RenderThumbnailPlay"/> (play mode): the camera solve (framing → distance/oblique/aim),
-    /// the capture core (sRGB RT → ReadPixels → empty-frame guard → PNG), head-facing extraction, and the
-    /// pose/expression/target resolvers both front-ends resolve <em>identically</em>. Nothing here touches a
-    /// bake, a preview scene, a playable graph, or the emulator — that split is what makes play a MODE of
-    /// one tool rather than a fork of it. A front-end owns only how the avatar is produced, posed, and how
-    /// its expression is applied; the geometry and the pixels are here, computed once.
+    /// The venue-independent spine of <see cref="RenderThumbnail"/> (edit mode) and
+    /// <see cref="RenderThumbnailPlay"/> (play mode): camera solve, capture, head-facing extraction and the
+    /// pose/expression resolvers. A front-end owns only how the avatar is produced and posed and how its
+    /// expression is applied; nothing here touches a bake, a preview scene, a playable graph or the emulator.
+    /// Contract: docs/unity-tools.md.
     /// </summary>
     internal static class RenderThumbnailCore
     {
-        /// <summary>The bundled pose vocabulary is this folder's <c>RTPose_*.anim</c> glob — there is no
-        /// hard-wired name list. Poses are added by dropping files here, and the unknown-pose error
-        /// enumerates the glob, so the advertised vocabulary cannot drift from what actually ships.</summary>
         internal const string PosesFolder = "Packages/com.ryan6vrc.avatar-tools/Editor/Poses";
 
-        // Framing = the SUBJECT HEIGHT the frame covers, in meters at ReferenceViewHeight; the camera
-        // distance is solved from it and the FOV, so the two are independent knobs. AimDrop lowers the aim
-        // below the view point as a fraction of that span: the anchor (the eyes) sits near the TOP of the
-        // subject, not its center, so one coefficient cannot serve three spans.
+        // Framing = the subject height the frame covers, in metres at ReferenceViewHeight; the camera distance
+        // is solved from it and the FOV. AimDrop lowers the aim below the view point as a fraction of that span,
+        // because the eyes sit near the top of the subject.
         //
-        // FACE framings (bust, half) are a FIXED subject height in metres — a face is ~one absolute size
-        // across stylized anime avatars regardless of how tall the viewpoint sits — scaled only by the
-        // avatar's ROOT scale, so a tall viewpoint no longer zooms the shot out and framing reads
-        // consistently across bodies. Some crown crop is DESIRABLE (a thumbnail reads small; a tight frame
-        // reads as deliberate) so these do not chase full crown clearance. FULL is different: it is a BODY
-        // frame, so it still tracks viewpoint height — a taller body needs a taller span to seat the feet —
-        // via the per-framing follow at the camera solve below.
+        // Bust and half are fixed subject heights scaled only by root scale, because a face is about one size
+        // across stylized avatars however tall the viewpoint sits; they crop the crown on purpose. Full is a
+        // body frame and also tracks viewpoint height, so a taller body still seats its feet.
         private const float ReferenceViewHeight = 1.6f;
         private const float BustSpan = 0.34f, BustAimDrop = 0.12f;
         private const float HalfSpan = 0.60f, HalfAimDrop = 0.18f;
         private const float FullSpan = 2.00f, FullAimDrop = 0.37f;
-        // How much FULL framing tracks viewpoint height (bust/half never track — face-sized and fixed).
-        // 1 = full spans proportionally to the viewpoint so the feet stay seated on a tall body. Measured
-        // across four bodies (viewpoints 1.04–1.36): the face framings hold size and full seats the feet.
-        // Left as a dial for an unusually proportioned body.
+        // How far full's span tracks viewpoint height: 1 = proportional.
         private const float ViewHeightFollow = 1f;
 
-        // Camera angles, degrees. The camera tracks the posed head ONE-FOR-ONE (no follow coefficient): at
-        // any partial coefficient the face-to-lens angle becomes a function of the pose, sweeping frontal to
-        // looking-away across one library; at 1:1 it is exactly DefaultOblique everywhere, which is the
-        // point. DefaultOblique then sets the shot's obliquity — measured, the bundled poses barely twist the
-        // torso, so obliquity has to come from the camera. ObliqueDeadband resolves the near-frontal poses
-        // (many turn the head only a few degrees) to one consistent side instead of letting retarget noise pick.
+        // Camera angles, degrees. Yaw tracks the posed head one-for-one: any partial coefficient makes the
+        // face-to-lens angle a function of the pose, and at 1:1 it is DefaultOblique everywhere.
         private const float DefaultOblique = 13f;
         private const float ObliqueDeadband = 5f;
         private const float PitchFollow = 0.5f;
-        private const float MaxTrackYaw = 60f;    // guards a user clip, never reached by the bundled poses
-        private const float MaxCamPitch = 20f;    // ditto: PitchFollow peaks near 15 deg on this library
-        // Caller camera knobs — ranges the shared validator refuses outside. Each is RELATIVE to the framing
-        // token (zoom scales its span, headroom shifts its aim, pitch offsets its head-follow), so no knob can
-        // author the camera outright. The head-follow term keeps its own ±MaxCamPitch clamp and only the
-        // total widens to MaxTotalPitch: at default knobs every clip frames exactly as it did before them.
+        private const float MaxTrackYaw = 60f;
+        private const float MaxCamPitch = 20f;
+        // Caller camera knobs, refused outside these ranges by ValidateCameraKnobs. Each is relative to the
+        // framing token (zoom scales its span, headroom shifts its aim, pitch offsets its head-follow), so no
+        // knob authors the camera outright.
         internal const float MinZoom = 0.6f, MaxZoom = 1.6f;
         internal const float MaxPitchOffset = 20f;
         internal const float MaxHeadroom = 0.3f;
@@ -67,24 +49,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private const float LateralOffset = 0.06f; // fraction of span, looking-room in the landscape frame
         internal const float MinFov = 10f, MaxFov = 90f;
 
-        // Solid background when no bg override is passed (a preview scene has no skybox; SolidColor clear
-        // is the deterministic backdrop). A named, neutral mid-dark gray.
+        // Backdrop when no bg override is passed: a preview scene has no skybox.
         internal static readonly Color DefaultBackground = new Color(0.23f, 0.23f, 0.24f);
-        private const int RampHeight = 256;       // gradient ramp texture, 1 x N, stretched by the blit
+        private const int RampHeight = 256;
 
-        // Empty-frame guard: a pixel counts as "drawn" when it differs from ITS OWN ROW's column-0 pixel by
-        // more than this per-channel byte delta (~0.06 of 255). Sampling the rendered image per row — rather
-        // than computing the expected background — is what keeps this color-space-agnostic and correct under
-        // a gradient; a computed reference in a Linear project writing an sRGB target reads the whole
-        // background as "drawn" and defeats the guard. Genuinely boolean: the fail condition is ZERO drawn
-        // pixels, so there is no tuned fraction here to drift.
+        // Empty-frame guard: a pixel counts as drawn when it differs from its own row's column-0 pixel by more
+        // than this per-channel byte delta.
         private const int SilhouetteChannelThreshold = 16;
 
         // ===== Camera solve =====
 
-        /// <summary>The camera placement produced by <see cref="SolveCamera"/>: everything the front-end
-        /// needs to seat the capture camera and the (edit-mode) light rig, plus the resolved
-        /// <see cref="CamYaw"/> for the verdict so a saturated clamp is visible rather than silent.</summary>
+        /// <summary><see cref="SolveCamera"/>'s result. The resolved angles go in the verdict so a saturated
+        /// clamp is visible.</summary>
         internal struct CameraSolution
         {
             internal Vector3 Position;
@@ -95,11 +71,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Solve the capture camera from the posed geometry — pure, venue-independent. The camera tracks the
-        /// head one-for-one, then adds the oblique; the aim drops below the view point and laterally away
-        /// from the gaze; the distance is solved from the span and FOV. Identical for both front-ends: the
-        /// only difference between edit and play is how <paramref name="viewpoint"/>/<paramref name="headYaw"/>
-        /// were produced (AnimationMode sample vs Base-layer injection + settle).
+        /// Solve the capture camera from the posed geometry. Pure and identical for both front-ends: they differ
+        /// only in how <paramref name="viewpoint"/> and <paramref name="headYaw"/> were produced.
         /// </summary>
         internal static CameraSolution SolveCamera(
             string framingToken, float span, float aimDrop, float fov, float? yaw,
@@ -107,45 +80,36 @@ namespace Ryan6Vrc.AvatarTools.Editor
             float rootLossyScaleY, float viewPositionY, float rootEulerY,
             float zoom = 1f, float pitch = 0f, float headroom = 0f)
         {
-            // The deadband decides the oblique's side for the near-frontal poses (many of the bundled clips
-            // turn the head only a few degrees) rather than letting retarget noise pick, which would swing the
-            // camera 2*DefaultOblique and shoot the same pose from opposite sides on two avatars.
+            // ObliqueDeadband holds near-frontal poses to one side; letting retarget noise pick would swing the
+            // camera 2*DefaultOblique and shoot one pose from opposite sides on two avatars.
             float obliqueSign = headYaw < -ObliqueDeadband ? -1f : 1f;
-            // ONE shot offset drives both the orbit and the looking-room, so an explicit yaw cannot orbit
-            // the camera one way while the lateral aim opens the other — which is what keying the offset
-            // off headYaw did: yaw:-30 against a +10 head turn shifted the subject INTO its own gaze.
+            // One shot offset drives both the orbit and the looking-room, so an explicit yaw cannot orbit the
+            // camera one way while the lateral aim opens the other.
             float shotOffset = yaw ?? (DefaultOblique * obliqueSign);
-            // Zero is its own case, not a tie broken toward positive: at yaw:0 the camera tracks the head
-            // exactly, so the face is dead-on the lens and there is no gaze in frame to leave room for.
+            // Zero gets no lateral shift: at yaw:0 the face is dead-on the lens, with no gaze in frame to leave
+            // room for.
             float lateralSign = shotOffset > 0f ? 1f : (shotOffset < 0f ? -1f : 0f);
             float camYaw = Mathf.Clamp(headYaw, -MaxTrackYaw, MaxTrackYaw) + shotOffset;
-            // Negated: a positive rotation about +X lowers the camera, and a chin-RAISED pose has to be
-            // shot from slightly ABOVE (from below it is a nostril shot).
-            // `pitch` is an elevation (positive = camera higher), so it SUBTRACTS here: camPitch is a rotation
-            // about +X, where positive lowers the camera.
+            // A positive rotation about +X lowers the camera. The head term is negated because a chin-raised
+            // pose is shot from slightly above (from below it is a nostril shot); the elevation `pitch` subtracts.
             float camPitch = Mathf.Clamp(
                 Mathf.Clamp(-headPitch * PitchFollow, -MaxCamPitch, MaxCamPitch) - pitch,
                 -MaxTotalPitch, MaxTotalPitch);
 
-            // Angles apply in the posed clone's root basis so an avatar sitting rotated in the scene still
-            // photographs frontally — the case that matters most on the floor path, where no sampling
-            // overwrites root rotation.
+            // Angles apply in the root's basis so an avatar sitting rotated in the scene still photographs
+            // frontally.
             Quaternion orbit = Quaternion.AngleAxis(camYaw, Vector3.up) * Quaternion.AngleAxis(camPitch, Vector3.right);
             Vector3 screenRight = rootRot * (orbit * Vector3.left);   // left: the camera looks back along -forward
 
-            // bust/half are fixed subject heights (root-scaled only); full is a body frame and tracks
-            // viewpoint so the feet stay seated. framingToken is already lowercased by the caller.
+            // framingToken is already lowercased by the caller.
             float viewFollow = framingToken == "full" ? ViewHeightFollow : 0f;
             float scaledSpan = span * rootLossyScaleY
                 * Mathf.Lerp(1f, viewPositionY / ReferenceViewHeight, viewFollow) / zoom;
             float distance = (scaledSpan * 0.5f) / Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
 
-            // Aim below the view point (the eyes sit near the TOP of the subject, not its centre) and
-            // laterally away from the side the face is turned, which opens looking-room in a landscape
-            // frame that would otherwise waste its width on a vertical subject.
+            // Aim below the view point and laterally off the gaze, opening looking-room in a landscape frame.
             // Vector3.up, not the root's up: camera roll stays world-level below, so the drop that decides
             // where the head sits in frame has to share that basis. Divergent only for a tilted root.
-            // headroom raises the aim by a fraction of the span, opening the frame above the head.
             Vector3 aim = viewpoint
                         - Vector3.up * (scaledSpan * (aimDrop - headroom))
                         + screenRight * (scaledSpan * LateralOffset) * -lateralSign;
@@ -155,9 +119,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 Position = pos,
                 Rotation = Quaternion.LookRotation(aim - pos, Vector3.up),
-                // The rig is camera-relative by construction; without this, orbiting lights a yawed shot from
-                // behind. Edit mode applies it to its 3-point holder; play mode uses the scratch scene's own
-                // lights and ignores it.
+                // Keeps the rig camera-relative; without this, orbiting lights a yawed shot from behind.
                 LightHolderRotation = Quaternion.Euler(0f, rootEulerY + camYaw, 0f),
                 CamYaw = camYaw,
                 CamElevation = -camPitch,
@@ -165,8 +127,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>Yaw of a direction in degrees, signed about +Y: 0 = +Z, positive toward +X (which is
-        /// screen-LEFT for a camera on the +Z side). Taken off the forward vector rather than eulers so
-        /// there is no wrap or gimbal question, and so it matches the measured pose-angle table.</summary>
+        /// screen-LEFT for a camera on the +Z side).</summary>
         internal static float YawOf(Vector3 dir) => Mathf.Atan2(dir.x, dir.z) * Mathf.Rad2Deg;
 
         /// <summary>Elevation of a direction in degrees. Positive = pointing up (chin raised).</summary>
@@ -174,14 +135,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Mathf.Asin(Mathf.Clamp(dir.normalized.y, -1f, 1f)) * Mathf.Rad2Deg;
 
         /// <summary>
-        /// Head facing as a DELTA FROM BIND, in the root's basis, extracted off the forward vector.
-        /// Unity does not normalize humanoid bone axes, so anything derived from where the bone's own +Z
-        /// points is rig-dependent. Take the DELTA ROTATION FIRST, then extract once — extracting an angle
-        /// from each forward vector and subtracting is NOT equivalent: it cancels a constant offset but not
-        /// the axis dependence, and it fails hardest on the most common convention (a bone whose +Z runs UP
-        /// the neck — how Blender authors orient a bone, most of the VRChat population): subtract-form yields
-        /// yaw 0.0 (tracking silently dead) and inverts pitch (a chin-up pose shot from below). The delta
-        /// form returns the true 30/+20 for every rest orientation, including arbitrary skew.
+        /// Head facing as a delta from bind, in the root's basis. Unity does not normalize humanoid bone axes, so
+        /// anything read off where the bone's own +Z points is rig-dependent. Take the delta rotation first, then
+        /// extract once: extracting an angle from each forward vector and subtracting fails on a bone whose +Z
+        /// runs up the neck (how Blender authors orient a bone, most of the VRChat population), yielding yaw 0
+        /// and inverted pitch.
         /// </summary>
         internal static void HeadFacing(Quaternion rootRot, Transform headBone, Quaternion restHeadLocal,
             out float headYaw, out float headPitch)
@@ -189,34 +147,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
             HeadFacing(Quaternion.Inverse(rootRot) * headBone.rotation, restHeadLocal, out headYaw, out headPitch);
         }
 
-        /// <summary>
-        /// The scene-free half of the overload above, taking the posed head rotation already expressed in the
-        /// root's basis. Split out so the invariance-to-rest-orientation property — the whole reason the delta
-        /// form exists — can be pinned against a VARYING rest orientation: reaching this math through the
-        /// Transform door needs a live bone, and an EditMode fixture that builds one to read it back courts the
-        /// object-registry corruption `docs/verify.md` §Test venue documents. Callers with a bone use the
-        /// overload above; nothing else should compute `posedHeadLocal` itself.
-        /// </summary>
+        /// <summary>The scene-free half of the overload above, taking the posed head rotation already in the
+        /// root's basis, so a test can vary the rest orientation without a live bone (`docs/verify.md` §Test
+        /// venue).</summary>
         internal static void HeadFacing(Quaternion posedHeadLocal, Quaternion restHeadLocal,
             out float headYaw, out float headPitch)
         {
             Vector3 deltaFwd = (posedHeadLocal * Quaternion.Inverse(restHeadLocal)) * Vector3.forward;
-            headYaw = YawOf(deltaFwd);      // Atan2 already yields [-180,180]
+            headYaw = YawOf(deltaFwd);
             headPitch = PitchOf(deltaFwd);
         }
 
         // ===== Capture core =====
 
-        /// <summary>The thumbnail resolution, declared once for every front-end. Both venues must ship the same
-        /// pixel size — an edit-mode and a play-mode shot of one avatar are compared and used interchangeably —
-        /// so this is a property of the shared spine, not a per-front-end choice, and `Capture` takes no size
-        /// parameter to stop a second copy appearing at a call site. Any doc stating the resolution echoes here.</summary>
         internal const int CaptureWidth = 1200;
         internal const int CaptureHeight = 900;
 
-        /// <summary>The outcome of a <see cref="Capture"/>: whether anything drew, the PNG bytes (null when
-        /// nothing drew — the front-end fails loud rather than writing a blank), and where the view point
-        /// landed in the frame (reported, not gated — a bad crop is visible in the PNG).</summary>
+        /// <summary>The outcome of a <see cref="Capture"/>. <c>Png</c> is null when nothing drew, and the front-end
+        /// fails loud rather than writing a blank. <c>HeadViewport</c> is where the view point landed: reported,
+        /// not gated, since a bad crop is visible in the PNG.</summary>
         internal struct CaptureResult
         {
             internal int Drawn;
@@ -225,13 +174,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Render an already-positioned, already-culled <paramref name="cam"/> to a sRGB target at
-        /// <see cref="CaptureWidth"/>×<see cref="CaptureHeight"/> and
-        /// read it back: optional gradient backdrop, off-screen render, empty-frame guard, PNG encode. Owns the
-        /// full lifecycle of the RT/readback texture/gradient ramp/command buffer so a throw mid-capture leaks
-        /// nothing. The front-end configures the camera (clear, background = <paramref name="bgTop"/>,
-        /// cullingMask, fov, scene) and supplies the view point to project; everything from the render down is
-        /// identical across venues.
+        /// Render an already-positioned, already-culled <paramref name="cam"/> to an sRGB target and read it back:
+        /// optional gradient backdrop, empty-frame guard, PNG encode. The front-end configures the camera (clear,
+        /// background = <paramref name="bgTop"/>, cullingMask, fov, scene) and supplies the view point to project.
         /// </summary>
         internal static CaptureResult Capture(Camera cam, Color bgTop, Color bgBottom, Vector3 viewpoint)
         {
@@ -267,18 +212,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 cam.targetTexture = rt;
                 cam.pixelRect = new Rect(0, 0, W, H);
                 // A bespoke Camera.Render() compiles a cold shader variant synchronously only while
-                // ShaderUtil.allowAsyncCompilation is false. It is false at rest but has been observed true at
-                // an edit-mode capture, which then drew the flat #00FFFF placeholder under an OK verdict. The
-                // project pref (EditorSettings.asyncShaderCompilation, RenderAvatar's lever) does not reach
-                // this path. Pinned for the render only. There is deliberately no pixel scan behind it: a
-                // saturated cyan emission renders exact #00FFFF too, and a thumbnail is judged by eye before use.
+                // ShaderUtil.allowAsyncCompilation is false. It can be true at an edit-mode capture, which then
+                // draws the flat #00FFFF placeholder under an OK verdict. The project pref
+                // (EditorSettings.asyncShaderCompilation, RenderAvatar's lever) does not reach this path. No pixel
+                // scan backs this pin, because a saturated cyan emission renders exact #00FFFF too.
                 bool allowAsyncWas = ShaderUtil.allowAsyncCompilation;
                 ShaderUtil.allowAsyncCompilation = false;
                 try { cam.Render(); }
                 finally { ShaderUtil.allowAsyncCompilation = allowAsyncWas; }
 
-                // Where the face landed, while the camera still exists. The VIEW POINT, not the aim — the camera
-                // is aimed exactly at the aim by construction, so projecting that would print (0.5,0.5) forever.
+                // The view point, not the aim: the camera looks exactly at the aim, so projecting that always
+                // prints (0.5,0.5).
                 Vector3 headViewport = cam.WorldToViewportPoint(viewpoint);
 
                 tex = new Texture2D(W, H, TextureFormat.RGBA32, false);
@@ -294,11 +238,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     RenderTexture.active = prevActive;
                 }
 
-                // ---- Empty-frame guard: did ANYTHING draw? ----
-                // Reference = each row's own column-0 pixel of the read-back texture, NOT a computed color.
-                // Sampling the render is what keeps this color-space-agnostic (a computed reference in a Linear
-                // project writing an sRGB target reads the whole background as "drawn" and defeats the guard),
-                // and per-row is what makes it exact under a vertical gradient, which is constant along a row.
+                // Reference = each row's own column-0 pixel of the read-back texture, not a computed color: a
+                // computed reference in a Linear project writing an sRGB target reads the whole background as
+                // drawn and defeats the guard, and a vertical gradient is constant along a row.
                 Color32[] pixels = tex.GetPixels32();
                 int drawn = 0;
                 for (int y = 0; y < H; y++)
@@ -337,10 +279,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>Validate the camera knobs, after <c>fov</c> itself has passed. Null when valid, else the
-        /// refusal reason. Ranges are written <c>!(lo &lt;= x &amp;&amp; x &lt;= hi)</c> so NaN is refused too.
-        /// The joint bound keeps the camera no closer than the closest shot the fov bound already allowed
-        /// (fov 90 at zoom 1): distance goes as 1/(zoom·tan(fov/2)), and closer puts it inside the hair,
-        /// which renders as hair interior and still passes the empty-frame guard.</summary>
+        /// refusal reason. The range tests are negated so NaN is refused too. The joint bound holds the camera no
+        /// closer than fov 90 at zoom 1: closer puts it inside the hair, which renders as hair interior and still
+        /// passes the empty-frame guard.</summary>
         internal static string ValidateCameraKnobs(float fov, float zoom, float pitch, float headroom)
         {
             var ic = CultureInfo.InvariantCulture;
@@ -369,11 +310,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ===== Framing / background / token helpers (pure) =====
 
         /// <summary>The subject height a named framing covers, in metres, and how far below the view point
-        /// to aim, as a fraction of that span. Throws for anything else. The face framings (bust/half) are
-        /// taken as absolute metres scaled only by the avatar's root scale; full additionally tracks the
-        /// avatar's viewpoint height (see the per-framing follow at the camera solve).
-        /// <para>NOT a dolly distance — that was the v1 quantity, and it was calibrated to a fixed 60° FOV.
-        /// A span is FOV-independent: the camera distance is solved from the two.</para></summary>
+        /// to aim, as a fraction of that span. Throws for anything else.</summary>
         internal static void FramingGeometry(string framing, out float span, out float aimDrop)
         {
             switch ((framing ?? "").Trim().ToLowerInvariant())
@@ -388,10 +325,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>Parses a backdrop: <c>#RRGGBB</c>/<c>#RRGGBBAA</c> gives one color in both outs (solid),
-        /// <c>#TOP:#BOTTOM</c> gives a vertical two-stop gradient. Hex only — a leading '#' is required even
-        /// though <see cref="ColorUtility.TryParseHtmlString"/> would otherwise also accept some CSS color
-        /// names, which this tool's contract deliberately excludes. The ':' is unambiguous against
-        /// <c>#RRGGBBAA</c>, so the two forms cannot be confused.</summary>
+        /// <c>#TOP:#BOTTOM</c> gives a vertical two-stop gradient. A leading '#' is required because
+        /// <see cref="ColorUtility.TryParseHtmlString"/> also accepts some CSS color names, which this tool
+        /// refuses.</summary>
         internal static bool TryParseBg(string s, out Color top, out Color bottom)
         {
             top = default; bottom = default;
@@ -411,10 +347,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// The bundled poses: readable name (the file name minus <c>RTPose_</c>) to asset path, sorted so
-        /// the unknown-pose error is stable. The folder IS the vocabulary — adding a pose is dropping a
-        /// file, and the error is derived from disk, so what the tool advertises cannot drift from what
-        /// ships.
+        /// The bundled poses: readable name (the file name minus <c>RTPose_</c>) to asset path, sorted so the
+        /// unknown-pose error is stable. Adding a pose is dropping an <c>RTPose_*.anim</c> file in
+        /// <see cref="PosesFolder"/>; no name list is hard-wired.
         /// </summary>
         internal static SortedDictionary<string, string> BundledPoses()
         {
@@ -424,8 +359,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var guid in AssetDatabase.FindAssets("t:AnimationClip", new[] { PosesFolder }))
             {
                 string path = AssetDatabase.GUIDToAssetPath(guid);
-                // FindAssets descends child folders; a Poses/Archive/RTPose_Old.anim must not become
-                // advertised vocabulary, so the glob is pinned to this folder exactly.
+                // FindAssets descends child folders; a clip under a Poses/ subfolder must not become vocabulary.
                 if (System.IO.Path.GetDirectoryName(path).Replace('\\', '/') != PosesFolder) continue;
                 string file = System.IO.Path.GetFileNameWithoutExtension(path);
                 if (!file.StartsWith("RTPose_", StringComparison.OrdinalIgnoreCase)) continue;
@@ -435,9 +369,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Fold a name to its match key: lowercase, drop every non-alphanumeric character. This is what
-        /// makes <c>hand-on-hip</c>, <c>hand_on_hip</c> and <c>HandOnHip</c> one token, for both pose
-        /// names and FX state names.
+        /// Fold a pose or FX state name to its match key, so <c>hand-on-hip</c>, <c>hand_on_hip</c> and
+        /// <c>HandOnHip</c> are one token.
         /// </summary>
         internal static string NormalizeToken(string s)
         {
@@ -453,10 +386,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Resolve <paramref name="pose"/> to a clip: null/empty =&gt; floor (<paramref name="clip"/> null,
         /// no error); a clip asset path or 32-hex GUID loads directly; anything else is matched (via
         /// <see cref="NormalizeToken"/>) against <see cref="BundledPoses"/>, first match wins.
-        /// <para>The one guard that has to stay: a clip that is not <c>isHumanMotion</c> would not retarget
-        /// across rigs, and <c>SampleAnimationClip</c> is a SILENT no-op for it on a humanoid — so without
-        /// this the verdict would claim <c>pose=&lt;name&gt;</c> over an unposed avatar. Unlike the
-        /// expression side, nothing downstream catches it.</para>
+        /// <para>A clip that is not <c>isHumanMotion</c> is refused: it would not retarget across rigs, and
+        /// <c>SampleAnimationClip</c> is a silent no-op for it on a humanoid, so the verdict would claim a pose
+        /// over an unposed avatar.</para>
         /// </summary>
         internal static bool ResolvePose(string pose, out AnimationClip clip, out string err)
         {
@@ -515,10 +447,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// 32-hex GUID loads directly; anything else is matched (via <see cref="NormalizeToken"/>)
         /// against the state names of the baked FX controller's layers. Null with a null
         /// <paramref name="err"/> means no expression was asked for.
-        /// <para>Resolving on the baked avatar rather than the source asset is the whole mechanism: the
-        /// bake renames and merges blendshapes, so a pre-bake clip can bind names the baked avatar no
-        /// longer has, while a state name survives. This makes no judgement about what "is" an
-        /// expression — it resolves the name the caller chose. Choosing is the caller's job.</para>
+        /// <para>Resolving on the baked avatar is the mechanism: the bake renames and merges blendshapes, so a
+        /// pre-bake clip can bind names the baked avatar no longer has, while a state name survives.</para>
         /// </summary>
         internal static AnimationClip FindExpressionClip(GameObject baked, string expression, out string err)
         {
@@ -549,10 +479,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-            // Two different failures, and conflating them costs real time: the caller's answer to "that
-            // name doesn't exist" is to try another name, and every retry is a full SDK bake that can
-            // wedge the editor on a hook's modal dialog. Say which it is. (A blend-tree state is not
-            // walked into — that would be re-growing the traversal heuristics this path exists without.)
+            // Two distinct errors: the answer to "no such name" is another name, and every retry is a full SDK
+            // bake that can wedge the editor on a hook's modal dialog. A blend-tree state is not walked into.
             err = nameMatched
                 ? "state '" + expression + "' matched but holds no clip (blend tree, or empty) — pass a "
                   + "clip asset path/GUID instead"
@@ -586,28 +514,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // ----- Session RunLogs ------------------------------------------------------------------
-        // Both thumbnail doors used to write no RunLog at all — they borrowed RunLogFormat.Sanitize for a temp
-        // PNG name and nothing else. So the fitting sweep's "which doors were driven" signal was blind to both
-        // arcs, and End()'s restore claim rested on its own return string with no artifact behind it.
-        //
-        // Routed through RunLogFormat.WriteRunLog for the dir ownership and the in-band `| log=` trailer. Its
-        // failure contract is inherited deliberately: a write failure REWRITES the verdict to
-        // `=> FAIL: write failed` rather than returning a verdict with no trailer. A verdict that cannot be
-        // recorded is not one this family asserts.
-
         /// <summary>Write one session-verb RunLog and return <paramref name="summary"/> with the trailer.</summary>
         internal static string WriteSessionLog(string kind, string label, string summary, string body)
             => Ryan6Vrc.AgentTools.Editor.RunLogFormat.WriteRunLog(
                 Ryan6Vrc.AgentTools.Editor.RunLogFormat.RunLogDir,
                 kind + "_" + Ryan6Vrc.AgentTools.Editor.RunLogFormat.Sanitize(label), summary, body, ".md");
 
-        /// <summary>Re-attach a capture's trailers after logging, `png=` first.
-        ///
-        /// A verdict carrying `png=` must never be handed to <see cref="WriteSessionLog"/>: that writer's failure
-        /// path truncates at the last <c>"=&gt; "</c> and substitutes <c>=&gt; FAIL: write failed</c>, so a locked or
-        /// full RunLog path would rewrite a SUCCESSFUL capture into a failure and drop the `png=` token
-        /// <c>UploadAvatar</c> consumes. A capture's outcome does not depend on whether its log was written, so
-        /// only the <c>| log=</c> trailer is contingent — this splices the two back in the contracted order.</summary>
+        /// <summary>Re-attach a capture's trailers after logging, `png=` first. A verdict carrying `png=` must
+        /// never reach <see cref="WriteSessionLog"/>: on a failed write that writer truncates at the last
+        /// <c>"=&gt; "</c> and substitutes <c>=&gt; FAIL: write failed</c>, turning a successful capture into a
+        /// failure and dropping the `png=` token <c>UpdateAvatarRecord</c> consumes. Only the <c>| log=</c> trailer
+        /// depends on the write.</summary>
         internal static string SpliceTrailers(string logged, string verdictWithoutPng, string pngPath)
         {
             const string marker = " | log=";
@@ -618,8 +535,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>Make the RunLog dir visible to the AssetDatabase BEFORE play is entered.
         /// <c>PublishArtifact</c> falls back to a full <c>AssetDatabase.Refresh()</c> on the first write into a
-        /// dir the database has never seen, and a refresh during play can import and reload the domain — ending
-        /// the very session being logged. Paying that refresh at Begin, out of play, defuses it.</summary>
+        /// dir the database has never seen, and a refresh during play can import and reload the domain, ending
+        /// the session being logged.</summary>
         internal static void EnsureRunLogDirImported()
         {
             System.IO.Directory.CreateDirectory(Ryan6Vrc.AgentTools.Editor.RunLogFormat.RunLogDir);

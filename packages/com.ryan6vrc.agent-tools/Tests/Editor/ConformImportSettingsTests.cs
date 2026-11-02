@@ -4,20 +4,8 @@ using UnityEditor;
 using UnityEngine;
 using Ryan6Vrc.AgentTools.Editor;
 
-// ConformImportSettings proof obligations. Every row is asserted against a REAL importer on a synthesized
-// asset rather than a mocked predicate, because the whole tool exists to move on-disk importer state — a
-// unit test over the predicate alone would pass while the .meta write silently failed to persist, which is
-// the exact failure the tool's disk re-read guards against.
-//
-// Fixture assets are generated, not committed: the repo keeps no binaries (docs/LAYOUT.md), and all three
-// importer types can be produced from bytes — PNG via EncodeToPNG, a plain-text .obj (Unity assigns it a
-// ModelImporter), and a hand-written RIFF/WAV header. Measured on 2022.3.22f1: each lands as a genuine
-// offender with default import settings, which is why the arrange steps mostly do nothing.
-//
-// What is deliberately NOT asserted: that a write which fails to persist reports NOT-PASS. Provoking a
-// non-persisting importer would mean finding an asset type whose setter lies, and pinning one here would
-// bake in an assumption about Unity internals this suite cannot justify. The disk re-read is asserted
-// positively instead — the reported count comes back from the importer, not from the write call.
+// Every row is asserted against a real importer on an asset generated from bytes, not committed, because a test
+// over a mocked predicate would pass while the .meta write failed to persist.
 [Category("ConformImportSettings")]
 public class ConformImportSettingsTests
 {
@@ -30,7 +18,6 @@ public class ConformImportSettingsTests
         if (!AssetDatabase.IsValidFolder(TmpDir)) AssetDatabase.CreateFolder("Assets", TmpName);
     }
 
-    // Scene objects and in-memory materials the avatar-scope tests build; destroyed after each test.
     private readonly System.Collections.Generic.List<Object> _sceneObjects = new System.Collections.Generic.List<Object>();
     private System.Func<string, bool> _isConformable;
 
@@ -67,11 +54,6 @@ public class ConformImportSettingsTests
     [Test]
     public void OverBroadRoots_AreRefusedByName()
     {
-        // The folder string is the only bound on a write that is partly lossy, so the roots are the one input
-        // that must not be trusted: `Assets` would clamp every oversize cap in the project, and a `Packages`
-        // write is discarded by the next `vrc-get resolve` anyway.
-        // `Packages` alone is not a valid asset folder, so it is refused one guard earlier with the
-        // invalid-folder message — refused either way, which is what matters.
         foreach (var root in new[] { "Assets", "Assets/", "Packages", "Packages/com.vrchat.avatars" })
         {
             var s = ConformImportSettings.Run(root);
@@ -128,8 +110,7 @@ public class ConformImportSettingsTests
     public void OversizeCapOnSmallSource_IsConformed_AndNotReportedAsCappedBelowSource()
     {
         // The SDK's predicate is importer-only, so a 64px source with a 16384 cap is an offender whose
-        // correction loses nothing. Reporting it off the row id rather than the real source dimensions would
-        // fire here, and a report that fires on every hit is one nobody reads.
+        // correction loses nothing.
         var path = WritePng("smallsource.png");
         var ti = (TextureImporter)AssetImporter.GetAtPath(path);
         ti.maxTextureSize = 16384;
@@ -174,16 +155,13 @@ public class ConformImportSettingsTests
         Assert.That(s, Does.Contain("=> PASS"),
             "this row writes through a reflected private member — a setter that fails to dirty the .meta lands as NOT-PASS");
         Assert.That(s, Does.Not.Contain("CAPPED BELOW SOURCE"));
-        // The only row whose write goes through reflection is the only one worth reading back through it.
         Assert.That(ReadLegacyFlag(path), Is.True, "the reflected write must reach disk, not just return");
     }
 
     [Test]
     public void LegacyNormalsRow_NeverClaimsAResolutionLossOrARenderDebt()
     {
-        // Nothing to compare against: the upload is blocked without this fix, so no build carrying the old
-        // setting ever shipped, and the only alternative remedy (importBlendShapeNormals off Calculate) is a
-        // different authoring decision this door does not make. A warning here would be undischargeable.
+        // The upload is blocked without this fix, so no shipped build holds the old setting to compare against.
         WriteObj("normals-only.obj");
         var s = ConformImportSettings.Run(TmpDir, whatIf: true);
         Assert.That(s, Does.Contain("legacy-blendshape-normals=1"));
@@ -325,7 +303,7 @@ public class ConformImportSettingsTests
     [Test]
     public void AvatarScope_CollectsMeshesTheWayTheSdkDoes_ThenConformsOnlyThose()
     {
-        // Four unreadable OBJs; the SDK panel's mesh walk reaches three of them.
+        // Five unreadable OBJs; the SDK panel's mesh walk reaches four of them.
         var filterMesh = WriteObj("filter.obj");        // MeshFilter on an active child
         var skinnedMesh = WriteObj("skinned.obj");      // SkinnedMeshRenderer on an INACTIVE child (walked)
         var particleMesh = WriteObj("particle.obj");    // ParticleSystemRenderer mesh (walked, despite "skinned" wording)
@@ -395,7 +373,7 @@ public class ConformImportSettingsTests
         // this fixture asset unconformable and the plumbing behind the predicate is what gets asserted.
         _isConformable = ConformImportSettings.IsConformable;
         ConformImportSettings.IsConformable = path => path != mesh;
-        UnityEngine.TestTools.LogAssert.ignoreFailingMessages = true; // a NOT-PASS verdict is logged at error level by design
+        UnityEngine.TestTools.LogAssert.ignoreFailingMessages = true; // a NOT-PASS verdict is logged at error level
 
         var preview = ConformImportSettings.Run(root, whatIf: true);
         Assert.That(preview, Does.Contain("NOT CONFORMABLE HERE"));

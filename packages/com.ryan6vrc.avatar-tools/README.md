@@ -2,8 +2,24 @@
 
 > Part of the [Atelier](https://github.com/Ryan6-VRC/atelier) workspace — a code reference, not a standalone product. The docs that govern this code live in the meta-repo.
 
-Agent-callable Unity Editor build tools for owning (making editable copies of) vendor VRChat avatars and the mergeables that compose them. Provides a composable transplant pipeline: package-graph inspection; tool-by-tool transfer of materials, humanoid rig, and avatar descriptor; a **component-transplant kit** — `CopyComponents` / `MoveComponents` / `GraftHierarchy` over a shared core — that reproduces, relocates, and grafts components selected by type-name (VRC dynamics on a base; Modular Avatar / VRCFury / NDMF on any mergeable that attaches to it); and a clean-FX builder. It also carries standalone clip/material utilities — expression-clip normalizer, material remapper, constrained hierarchy duplicate — each with a **Tools → Ryan6VRC** menu/window door and an agent-callable `Run(...)`.
+Agent-callable Unity Editor build tools for owning (making editable copies of) vendor VRChat avatars and the mergeables that compose them.
 
-**Editor-only.** All code lives in an Editor assembly; nothing ships to builds.
+The package's callables are indexed in the meta-repo `TOOLS.md`; per-tool contracts live in the meta-repo's `docs/unity-tools.md` §Avatar tools (the controller tools in `docs/animator.md`).
 
-**SDK-gated.** The assembly is compiled only when `VRC_SDK_VRCSDK3` is defined (i.e., the VRChat Avatars SDK is present in the project).
+The assembly compiles only when `VRC_SDK_VRCSDK3` is defined (the VRChat Avatars SDK is present in the project).
+
+## Install
+
+Install `com.ryan6vrc.agent-tools` alongside it: this package's assembly references it, and UPM will not pull it in.
+
+`Packages/manifest.json`:
+
+```jsonc
+// Local checkout (editable):
+"com.ryan6vrc.avatar-tools": "file:../../vrc-unity-tools/packages/com.ryan6vrc.avatar-tools",
+
+// Or by git URL:
+"com.ryan6vrc.avatar-tools": "https://github.com/Ryan6-VRC/vrc-unity-tools.git?path=packages/com.ryan6vrc.avatar-tools"
+```
+
+Unity 2022.3+. MIT licensed.

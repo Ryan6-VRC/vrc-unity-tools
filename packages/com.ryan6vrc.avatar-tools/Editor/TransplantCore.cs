@@ -10,12 +10,8 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// Shared engine for the component-transplant tools (CopyComponents / MoveComponents /
-    /// GraftHierarchy). Tool-agnostic primitives only: type-name resolution, the session identity
-    /// maps (<see cref="SessionMap"/>), the depth-N transforms-only scaffold builder
-    /// (<see cref="ScaffoldBuilder"/>), and the shared RunLog/whatIf helpers. The deep-tier VRC
-    /// descriptors live in <see cref="VrcComponentTable"/>; the generic indexed-path remap lives in
-    /// <see cref="RemapReferencesByPath"/> (both called, never duplicated here).
+    /// Tool-agnostic primitives the avatar-tools writers share: the ownership predicate, asset copy,
+    /// type-name resolution and the RunLog helpers.
     /// </summary>
     public static class TransplantCore
     {
@@ -24,15 +20,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── Ownership predicate ───────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Per-asset, path-based ownership predicate shared by the clip-repath tools (RepathClips /
-        /// OwnControllerClips). An asset is READ-ONLY (returns false) iff its normalized forward-slash path
-        /// is, at a segment boundary, under <c>Assets/Vendor</c> OR under <c>Packages</c> (the latter covers
-        /// the VRChat SDK proxy gesture clips CleanController keeps) — i.e. the path equals that prefix exactly or
-        /// starts with it + "/". Everything else is WRITABLE (returns true), including a null/empty path (an
-        /// in-memory asset carries no vendor provenance to protect; the write-landed read-back is the real
-        /// safety net). Provenance is a property of each <em>reference</em>, not of a folder (LAYOUT.md) — an
-        /// owned controller can legitimately reference vendor clips, so this is called per asset, not per
-        /// controller. Matches on the raw asset path; <c>Assets/VendorFoo</c> is writable (segment-safe).
+        /// False for an asset under <c>Assets/Vendor</c> or <c>Packages</c>, matched at a segment boundary. A
+        /// null or empty path is writable: an in-memory asset carries no vendor provenance. Provenance is a
+        /// property of each <em>reference</em>, not of a folder (docs/LAYOUT.md), and an owned controller can
+        /// reference vendor clips, so call this per asset, not per controller.
         /// </summary>
         public static bool IsWritableAsset(string assetPath)
         {
@@ -123,7 +114,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── Type-name resolution ──────────────────────────────────────────────────────────────────
 
         /// <summary>Outcome of <see cref="ResolveTypes"/>: the resolved types plus the names that
-        /// could not be resolved to exactly one type (unknown OR ambiguous — both fail loud).</summary>
+        /// could not be resolved to exactly one type (unknown or ambiguous).</summary>
         public struct TypeResolution
         {
             public List<Type> resolved;
@@ -131,13 +122,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Resolve component type-name strings to <see cref="Type"/>s. A name matches a type by
-        /// <c>type.Name</c> OR <c>type.FullName</c> over <see cref="TypeCache.GetTypesDerivedFrom{T}"/>
-        /// (Component), plus an exact full-name lookup across loaded assemblies as a backstop. A name
-        /// resolving to MORE THAN ONE distinct type across loaded assemblies FAILS LOUD — it lands in
-        /// <see cref="TypeResolution.unresolved"/> annotated with the candidates (disambiguate with the
-        /// full name). Names resolve without the package referencing MA/VRCF/NDMF assemblies because
-        /// TypeCache scans every loaded assembly.
+        /// Resolve component type names by <c>type.Name</c> or <c>type.FullName</c>. TypeCache scans every
+        /// loaded assembly, so MA, VRCF and NDMF names resolve without the package referencing them. A name
+        /// matching more than one type lands in <see cref="TypeResolution.unresolved"/> with its candidates;
+        /// disambiguate with the full name.
         /// </summary>
         public static TypeResolution ResolveTypes(string[] names)
         {
@@ -160,9 +148,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var t in components)
                     if (t.Name == name || t.FullName == name) matches.Add(t);
 
-                // Exact full-name backstop (a full-name-only Component type TypeCache might not surface;
-                // Reflection's GetType requires a namespace-qualified name, so simple names are always
-                // carried by TypeCache above, never this branch).
+                // Exact full-name backstop for a Component type TypeCache might not surface.
                 foreach (var asm in assemblies)
                 {
                     Type t = null;
@@ -191,11 +177,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Shared RunLog / whatIf helpers ────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Write <paramref name="log"/> as JSON to <see cref="RunLogDir"/> (the package's RunLog
-        /// envelope shape, with <c>kind</c> a parameter), refresh the asset DB, and return the path.
-        /// <paramref name="label"/> is sanitized into the file name.
-        /// </summary>
         public static string WriteRunLog(RunLog log, string label)
         {
             Directory.CreateDirectory(RunLogDir);
@@ -232,10 +213,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return path;
         }
 
-        /// <summary>
-        /// One-line PASS/FAIL summary: <c>[kind] label: k1=v1, k2=v2 offenders=[...] => RESULT</c>.
-        /// Reusable by every tool's Run.
-        /// </summary>
+        /// <summary>One-line PASS/FAIL summary: <c>[kind] label: k1=v1, k2=v2 offenders=[...] => RESULT</c>.</summary>
         public static string Summary(RunLog log, string label)
         {
             var counts = new StringBuilder();
@@ -248,8 +226,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             string offenders = log.offenders.Count > 0
                 ? " offenders=[" + string.Join("; ", log.offenders) + "]"
                 : "";
-            // notes = loud force-override records; warnings = named-but-still-PASS signals (e.g. "stale
-            // move?"). Surfaced on the one-line verdict so they don't hide in the RunLog JSON.
+            // A warning names a signal without failing the run. Notes and warnings reach the one-line verdict so
+            // they don't hide in the RunLog JSON.
             string notes = log.notes.Count > 0
                 ? " notes=[" + string.Join("; ", log.notes) + "]"
                 : "";
@@ -265,10 +243,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Write the RunLog, build the one-line summary with the RunLog path folded onto its tail,
-        /// log it at the right severity (PASS → Log, else LogError), and return the summary. The
-        /// single tail every transplant tool's Run funnels through — hoisted out of the three
-        /// byte-identical local copies (CopyComponents / MoveComponents / GraftHierarchy).
+        /// The tail of a tool's Run: writes the RunLog, logs the summary with the RunLog path appended (PASS →
+        /// Log, else LogError), and returns it.
         /// </summary>
         public static string Finish(RunLog log, string label)
         {
@@ -280,12 +256,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Vendor-leak sweep, shared by every tool that creates copied components: any ObjectReference on
-        /// a created component still pointing INTO the vendor source (<paramref name="vendorRoot"/> or a
-        /// descendant) is a ref the remap failed to rebind. Each is recorded as a named offender on
-        /// <paramref name="log"/>; the leak count is returned so the caller can fold it into its PASS/FAIL
-        /// verdict (a non-zero count is a real tool fault). Null entries in <paramref name="created"/> are
-        /// skipped.
+        /// Records as an offender every ObjectReference on a created component still pointing into
+        /// <paramref name="vendorRoot"/> or a descendant, a ref the remap failed to rebind. Returns the leak
+        /// count and leaves <see cref="RunLog.result"/> alone: the caller folds the count into its verdict.
         /// </summary>
         public static int SweepVendorLeaks(IEnumerable<Component> created, Transform vendorRoot, RunLog log)
         {
@@ -313,10 +286,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// Recursively ensure every segment of an Assets/-relative folder path exists, via
-        /// <see cref="AssetDatabase.CreateFolder"/> per segment — a plain
-        /// <c>Directory.CreateDirectory</c> would leave the AssetDatabase blind to the new folders
-        /// until an import. The single copy the folder-creating tools share.
+        /// Create every missing segment of an Assets/-relative folder path via
+        /// <see cref="AssetDatabase.CreateFolder"/>; a plain <c>Directory.CreateDirectory</c> would leave the
+        /// AssetDatabase blind to the new folders until an import.
         /// </summary>
         public static void EnsureFolderExists(string assetPath)
         {
@@ -341,21 +313,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sb.Append(items.Count > 0 ? "\n  ]" : "]");
         }
 
-        // ── Helpers — package RunLog convention; canonical impl: agent-tools RunLogFormat ───────────
+        // ── Helpers ─────────────────────────────────────────────────────────────────────────────────
 
         public static string Sanitize(string s) => RunLogFormat.Sanitize(s);
 
         public static string Q(string s) => RunLogFormat.Q(s);
 
-        /// <summary>Path basename. Null or empty → "". Otherwise <c>TrimEnd('/')</c> then the substring after
-        /// the last '/' (the whole trimmed string if none). The RunLog-label leaf helper the tools converge on.</summary>
         public static string Leaf(string assetPath) => RunLogFormat.Leaf(assetPath);
     }
 
     /// <summary>
-    /// Identity maps recorded as the engine copies in dependency order: vendor component → our copy,
-    /// and vendor transform → our transform (including recreated/scaffolded GOs). Every reference on
-    /// every copy is later rebound by: map-hit → mapped target; else path-remap; else flag.
+    /// Identity maps recorded during a copy: vendor component → our copy, and vendor transform → our
+    /// transform, scaffolded GameObjects included. A hit outranks path remap when references rebind.
     /// </summary>
     public sealed class SessionMap
     {
@@ -389,23 +358,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
     }
 
     /// <summary>
-    /// Mints a minimal transforms-only GameObject chain from the nearest existing mapped ancestor down
-    /// to a target host, reusing any GO already present at the target indexed path (never duplicating),
-    /// bounded by the destination reach root. The depth-N generalization of the depth-1
-    /// leaf-anchor recreate (used by leaf-recreate, <c>force</c>, and graft). Each created GO gets the
-    /// vendor's verbatim LOCAL position/rotation/scale and is registered with
-    /// <see cref="Undo.RegisterCreatedObjectUndo"/>.
+    /// Mints the minimal transforms-only GameObject chain from the nearest existing ancestor down to a
+    /// target host, reusing any GameObject already at the target indexed path.
     /// </summary>
     public static class ScaffoldBuilder
     {
         /// <summary>
         /// Ensure the destination host for <paramref name="vendorHost"/> exists under
-        /// <paramref name="ourRoot"/> (the destination reach root) and return it. Walks the vendor's
-        /// root→host segment chain; at each level reuses the dst child at the same indexed path or mints
-        /// a transforms-only GO with the vendor segment's verbatim local TRS. Records every level into
-        /// <paramref name="session"/> (vendor transform → dst transform). Returns <paramref name="ourRoot"/>
-        /// when the host IS the vendor root; null when out of reach or unrepresentable — see the overload
-        /// taking <c>out string failReason</c> for the named reason (callers surface it).
+        /// <paramref name="ourRoot"/> and return it, recording every chain level into
+        /// <paramref name="session"/>. Each level reuses the dst child at the same indexed path or mints one
+        /// with the vendor segment's verbatim local TRS. Null when out of reach or unrepresentable; the
+        /// overload taking <c>out string failReason</c> names the reason.
         /// </summary>
         public static Transform EnsureHost(Transform vendorRoot, Transform ourRoot, Transform vendorHost,
                                            SessionMap session = null, string undoName = "Transplant",
@@ -413,17 +376,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             => EnsureHost(vendorRoot, ourRoot, vendorHost, out _, session, undoName, vendorToOwned);
 
         /// <summary>
-        /// As <see cref="EnsureHost(Transform,Transform,Transform,SessionMap,string)"/>, but on a null
-        /// return sets <paramref name="failReason"/> to a named reason the caller folds into its offender
-        /// message. Null is returned (and a reason set) when:
-        ///   - an argument is null, or <paramref name="vendorHost"/> is not under <paramref name="vendorRoot"/>
-        ///     (out of reach); OR
-        ///   - a chain level's occurrence index is UNREPRESENTABLE on the dst: the dst parent currently has
-        ///     FEWER same-named children than the vendor segment's occurrence index, so minting here would
-        ///     land the GO at a LOWER occurrence than vendor[idx]. Recording that into the SessionMap would
-        ///     make a re-run's indexed-path recompute mismatch (re-scaffold a duplicate / bind the wrong
-        ///     sibling). Minting is correct ONLY when the existing same-name count == idx (append at exactly
-        ///     occurrence idx); we FAIL LOUD rather than mint at the wrong index.
+        /// As <see cref="EnsureHost(Transform,Transform,Transform,SessionMap,string,IDictionary{string,string})"/>,
+        /// but on a null return sets <paramref name="failReason"/>. A level mints only when the dst parent's
+        /// same-name count equals the vendor segment's occurrence index. A lower count fails loud: the GameObject
+        /// would land below its vendor occurrence, and a re-run's indexed-path recompute would re-scaffold a
+        /// duplicate or bind the wrong sibling.
         /// </summary>
         public static Transform EnsureHost(Transform vendorRoot, Transform ourRoot, Transform vendorHost,
                                            out string failReason,
@@ -443,7 +400,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return null;
             }
 
-            // Root-exclusive vendor chain, top → host.
             var chain = new List<Transform>();
             for (var p = vendorHost; p != null && p != vendorRoot; p = p.parent) chain.Add(p);
             chain.Reverse();
@@ -451,16 +407,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             Transform curDst = ourRoot;
             foreach (var seg in chain)
             {
-                // Destination lookup/mint uses the MAPPED name (vendorToOwned: vendorName ⇒ ownedName); the
-                // occurrence index is counted on the SOURCE side in the SAME resolving-to-mapped space as the
-                // dest lookup (symmetric with the A1 guard), so a mapped-key child and a literal-mapped sibling
-                // never collapse onto one dest occurrence. Null/non-funneling map ⇒ mapped == seg.name and this
-                // reduces to same-name indexing — byte-identical to today.
                 string mapped = IndexedPath.Substitute(seg.name, vendorToOwned);
                 int idx = IndexedPath.SiblingIndexAmongResolvingTo(seg, mapped, vendorToOwned);
 
-                // A1 count-equality guard (shared with FindByIndexedPath): a mapped value already present on
-                // the dst (or a non-injective slip) could silently bind the WRONG sibling → fail loud instead.
                 if (!IndexedPath.GuardRename(seg.parent, curDst, mapped, vendorToOwned, out failReason)) return null;
 
                 var existing = IndexedPath.NthChildWithName(curDst, mapped, idx);
@@ -470,9 +419,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
                 else
                 {
-                    // existing == null guarantees curDst has <= idx same-name (mapped) children. Minting is
-                    // correct ONLY when the count == idx (append at exactly occurrence idx). count < idx is an
-                    // unrepresentable occurrence (the new GO would land below vendor[idx]) → FAIL LOUD.
                     int count = IndexedPath.CountChildrenWithName(curDst, mapped);
                     if (count != idx)
                     {
@@ -482,8 +428,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                                      count + ", mismatching the vendor's; re-runs would diverge)";
                         return null;
                     }
-                    // Mint with the MAPPED name so a minted-then-reused dst hierarchy is self-consistent
-                    // (a re-run reuses 'Armature.1', never mints a parallel 'Armature').
                     var go = new GameObject(mapped);
                     Undo.RegisterCreatedObjectUndo(go, undoName);
                     go.transform.SetParent(curDst, false);
@@ -499,10 +443,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     }
 
     /// <summary>
-    /// Mutable accumulator for one tool run, serialized by <see cref="TransplantCore.WriteRunLog"/> and
-    /// summarized by <see cref="TransplantCore.Summary"/>. <see cref="counts"/> preserves insertion order
-    /// so the JSON and one-line summary read in a stable, tool-defined order. Unsealed so a tool can
-    /// subclass to carry its bespoke structured rows alongside the envelope (see <see cref="Section"/>).
+    /// Accumulator for one tool run, serialized by <see cref="TransplantCore.WriteRunLog"/> and summarized by
+    /// <see cref="TransplantCore.Summary"/>. A tool subclasses it to carry bespoke fields, and emits structured
+    /// rows through <see cref="Section"/>.
     /// </summary>
     public class RunLog
     {
@@ -519,10 +462,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         public RunLog(string kind) { this.kind = kind; }
 
-        /// <summary>Bespoke structured JSON sections (e.g. OwnMaterial's <c>slots[]</c> table), emitted
-        /// verbatim after <see cref="warnings"/> in insertion order. The value is PRE-RENDERED JSON the
-        /// tool builds with <see cref="TransplantCore.Q"/> — what you pass is exactly what lands, so the
-        /// envelope writer stays logic-free. Sections never appear in the one-line summary.</summary>
         public readonly List<KeyValuePair<string, string>> sections = new List<KeyValuePair<string, string>>();
 
         public void Count(string name, long value) => counts.Add(new KeyValuePair<string, long>(name, value));
@@ -530,18 +469,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public void Note(string msg) { if (!string.IsNullOrEmpty(msg)) notes.Add(msg); }
         public void Warning(string msg) { if (!string.IsNullOrEmpty(msg)) warnings.Add(msg); }
 
-        /// <summary>Attach a bespoke structured section: <paramref name="renderedJson"/> must be a complete
-        /// JSON value (typically an array). Emitted as <c>"name": renderedJson</c> by
-        /// <see cref="TransplantCore.WriteRunLog"/>.</summary>
+        /// <summary>Attach a section, emitted verbatim after <see cref="warnings"/> as
+        /// <c>"name": renderedJson</c>. <paramref name="renderedJson"/> must be a complete JSON value, built with
+        /// <see cref="TransplantCore.Q"/>. Sections never reach the one-line summary.</summary>
         public void Section(string name, string renderedJson)
             => sections.Add(new KeyValuePair<string, string>(name, renderedJson));
 
         /// <summary>
-        /// Enforce the reverse leg of the offenders⇔FAIL invariant: a FAIL with no named offender
-        /// backfills one from <see cref="error"/>, so a FAIL can never be emitted offenderless.
-        /// Called by <see cref="TransplantCore.Finish"/> — the single tail every tool's Run funnels
-        /// through — so the exception catch, the arg-guards, and any future FAIL are all covered at
-        /// one site.
+        /// A FAIL with no named offender backfills one from <see cref="error"/>, so no FAIL is emitted
+        /// offenderless. <see cref="TransplantCore.Finish"/> calls this; a tool that bypasses it must too.
         /// </summary>
         public void EnsureFailHasOffender()
         {

@@ -9,34 +9,18 @@ using UnityEngine;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// The CheckAnimator rule set, extracted from <see cref="CheckAnimator"/> so the SAME rules can run on an
-    /// in-memory <see cref="AnimatorController"/> (a future compiler's write-substrate door) as on a saved
-    /// asset (CheckAnimator's inspection door). <see cref="Run"/> takes the already-resolved binding-basis
-    /// <paramref name="roots"/> / <paramref name="brokenBindingIsError"/> tier flag / <paramref name="pathRewrite"/>
-    /// and returns the raw <see cref="LintResult"/> — counts, error/advisory offenders, and rule-produced
-    /// notes. CheckAnimator keeps ownership of basis resolution (auto/explicit) and of rendering the result
-    /// (summary line + RunLog markdown); ControllerRules owns only the defect detection.
-    ///
-    /// The two-tier discipline lives here: the schema-certain rules (missing motion, undeclared parameter,
-    /// non-float blend parameter, deterministic entry shadow, a dead transition, and — when
-    /// <paramref name="brokenBindingIsError"/> — a null-resolving clip binding) populate
-    /// <see cref="LintResult.Errors"/>; every heuristic populates <see cref="LintResult.Advisories"/>.
-    /// The verdict (error-tier fired ⇒ FAIL) is computed by the caller from these counts.
-    ///
-    /// The shared binding/frame helpers (<c>CollectUnresolvedBindings</c>, the <c>Try*Frame</c> detectors)
-    /// stay on <see cref="CheckAnimator"/> — they are also CheckAvatar's; the broken-binding rule calls them.
+    /// The CheckAnimator rule set, shared by the saved-asset door (<see cref="CheckAnimator"/>) and the in-memory
+    /// controller door (<c>CompileController</c>). The caller resolves the binding basis, derives the verdict and
+    /// renders the result; this class owns only defect detection. Schema-certain rules populate
+    /// <see cref="LintResult.Errors"/> and every heuristic <see cref="LintResult.Advisories"/>; the tiers are named in
+    /// docs/animator.md §Reading a controller.
     /// </summary>
     public static class ControllerRules
     {
-        // VRChat reserved/built-in animator parameters — referenced constantly, declared nowhere, so
-        // they must be exempt from undeclaredParam or the rule FAILs every real controller. This mirrors
-        // the SDK's reserved-parameter list (VRCExpressionParameters / the avatar-parameters docs); it is
-        // the source of truth, this array only tracks it. If the SDK exposes this set at compile time,
-        // prefer querying it over this literal. `IsAnimatorEnabled` and `PreviewMode` are documented
-        // thinly and are easy to mistake for author-declared names. Both are built-ins: VRCFury's own
-        // VRChatGlobalParams (FullControllerBuilder.cs) carries each and short-circuits its param
-        // prefixing for them, and av3emulator declares both as adjacent BuiltinParameterDefinitions
-        // (LyumaAv3Runtime.cs). Two independent implementations, same treatment — do not drop either.
+        // VRChat reserved/built-in animator parameters, tracking the avatar-parameters docs. `IsAnimatorEnabled`
+        // and `PreviewMode` are documented thinly and are easy to mistake for author-declared names; both are
+        // built-ins, in VRCFury's VRChatGlobalParams (FullControllerBuilder.cs) and av3emulator's
+        // BUILTIN_PARAMETERS (LyumaAv3Runtime.cs).
         private static readonly string[] VrcReservedParams =
         {
             "IsLocal", "Viseme", "Voice", "GestureLeft", "GestureRight", "GestureLeftWeight",
@@ -49,24 +33,16 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static readonly HashSet<string> VrcReservedSet = new HashSet<string>(VrcReservedParams);
 
-        /// <summary>True when <paramref name="name"/> is a VRChat reserved/built-in animator parameter
-        /// (IsLocal, Viseme, GestureLeft, …) — declared nowhere yet referenced everywhere, so avatar tooling
-        /// must exempt it. The one authoritative predicate over <see cref="VrcReservedParams"/>: the undeclared-param
-        /// rule uses it, and the compiler's VRCExpressionParameters emitter reuses it to keep built-ins out of the
-        /// emitted params asset (they cost nothing and aren't the controller's own to declare).</summary>
+        /// <summary>The one predicate over <see cref="VrcReservedParams"/>. The compiler's VRCExpressionParameters
+        /// emitter also uses it, to keep built-ins out of the emitted params asset.</summary>
         public static bool IsVrcReserved(string name) => name != null && VrcReservedSet.Contains(name);
 
         // ----- Public API ---------------------------------------------------------------------------
 
-        /// <summary>Run the v1 rule set against <paramref name="controller"/> with the binding basis already
-        /// resolved by the caller. <paramref name="roots"/> are the candidate basis roots (mount-first); an
-        /// EMPTY list skips the broken-binding rule (records a note, counts nothing) exactly as a
-        /// no-basis-root CheckAnimator run does. <paramref name="brokenBindingIsError"/> places broken bindings
-        /// at error-tier (true) or demotes them to a single collapsed advisory (false — a build-rewrite auto
-        /// site). <paramref name="pathRewrite"/> (null ⇒ identity) rewrites each binding path before
-        /// resolution (a VRCFury FullController's rewriteBindings). <paramref name="absoluteRoot"/> (null
-        /// unless the frame is a VRCFury FullController) is the avatar root a leading-`/` binding path resolves from. Returns the
-        /// raw counts + offenders + rule notes; the caller computes the verdict and renders the report.</summary>
+        /// <summary><paramref name="roots"/> are the candidate basis roots, mount first; an EMPTY list skips the
+        /// broken-binding rule and records a note. <paramref name="brokenBindingIsError"/> false demotes broken bindings
+        /// to one collapsed advisory (a build-rewrite auto site). <paramref name="absoluteRoot"/>, null unless the frame
+        /// is a VRCFury FullController, is the avatar root a leading-`/` binding path resolves from.</summary>
         public static LintResult Run(AnimatorController controller, List<GameObject> roots,
                                      bool brokenBindingIsError, Func<string, string> pathRewrite,
                                      GameObject absoluteRoot = null)
@@ -90,8 +66,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             RuleMissingMotion(states, dangling, rep);
             RuleUndeclaredParam(controller, states, machines, rep);
             RuleNonFloatBlendParam(controller, states, rep);
-            // Both parameter-write rules read the same set: which declared parameters some reachable clip
-            // animates as a parameter curve. Walked once here rather than per rule.
             var curveWritten = ParamCurveWrites(controller);
             RuleNonFloatParamCurve(controller, curveWritten, rep);
             RuleDriverOnAnimatedParam(controller, states, machines, curveWritten, rep);
@@ -111,7 +85,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Rule 1: missingMotion (error) --------------------------------------------------------
         // A state whose motion reference is present but the asset is gone. NEVER fires on a clean-empty
-        // motion (instanceID 0) — that is a standard idiom. The dangling GUID is the only surviving handle.
+        // motion (instanceID 0), a standard idiom.
         private static void RuleMissingMotion(List<StateCtx> states, List<string> dangling, LintResult rep)
         {
             foreach (var s in states)
@@ -152,8 +126,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             {
                 foreach (var t in m.Sm.anyStateTransitions) Conds(t.conditions, m.Path + " AnyState");
                 foreach (var t in m.Sm.entryTransitions) Conds(t.conditions, m.Path + " Entry");
-                // Sub-state-machine → sub-state-machine transitions carry conditions too; without this a
-                // param used only on an SM→SM transition escapes the rule (false-negative).
                 foreach (var child in m.Sm.stateMachines)
                     if (child.stateMachine != null)
                         foreach (var t in m.Sm.GetStateMachineTransitions(child.stateMachine))
@@ -195,10 +167,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // ----- Rule 2b: nonFloatBlendParam (error, deterministic) -----------------------------------
-        // A blend tree evaluates only Float parameters: a name-matched Int/Bool never errors at runtime —
-        // the tree reads 0 and sits on its zero branch forever (measured on a live avatar). Declared
-        // params only: an undeclared name is Rule 2's offender, and a VRC reserved built-in carries no
-        // declared type on this controller to assert against.
+        // A blend tree evaluates only Float parameters: a name-matched Int/Bool never errors at runtime, the
+        // tree reads 0 and sits on its zero branch forever (measured). Declared params only: an undeclared name
+        // is Rule 2's offender.
         private static void RuleNonFloatBlendParam(AnimatorController controller, List<StateCtx> states, LintResult rep)
         {
             var types = new Dictionary<string, AnimatorControllerParameterType>();
@@ -226,13 +197,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Rule 3b: nonFloatParamCurve (error) --------------------------------------------------
         // An animator-parameter curve whose parameter is declared Bool or Int. The curve emits correctly and
-        // is inert (measured, stock Unity), and it still BINDS the parameter — which hands the parameter to
-        // the animation system and locks out every writer outside it, at any writeDefaults setting and any
-        // layer weight. So the curve does nothing and silences everything else. runtime.md §Animator is the
-        // canon, including which of the locked-out writers are measured and which are reported.
-        //
-        // RuleNonFloatBlendParam one level over: a blend tree evaluates only Float parameters, and so do
-        // parameter curves.
+        // is inert (measured, stock Unity), and it still BINDS the parameter, locking out every writer outside
+        // the animation system (runtime.md §Animator evaluation).
         private static void RuleNonFloatParamCurve(AnimatorController controller,
             Dictionary<string, string> curveWritten, LintResult rep)
         {
@@ -243,9 +209,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var kv in curveWritten)
             {
                 if (!types.TryGetValue(kv.Key, out var t)) continue;
-                // Bool and Int are the measured cases. Trigger falls in here too on the same reasoning
-                // (a curve writes only Float) but was not measured — refusing it costs nothing, since a
-                // curve on a Trigger is no working idiom either way.
+                // Bool and Int are the measured cases. Trigger falls in here too, unmeasured: a curve on a
+                // Trigger is no working idiom either way.
                 if (t == AnimatorControllerParameterType.Float) continue;
 
                 rep.NonFloatParamCurve++;
@@ -283,8 +248,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         /// <summary>Every parameter a driver behaviour touches, with the direction: <c>isSource</c> is true for
         /// a <c>Copy</c>'s READ side and false for the op's write destination (set/add/copy/random all key their
-        /// destination the same way). <see cref="DriverParams"/> is the direction-blind view of this, kept so the
-        /// undeclared-param rule's offender strings are unchanged.</summary>
+        /// destination the same way).</summary>
         private static void DriverOps(StateMachineBehaviour b, string where, Action<string, string, bool> visit)
         {
             if (!(b is VRC.SDKBase.VRC_AvatarParameterDriver drv) || drv.parameters == null) return;
@@ -296,11 +260,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>Every parameter a face-tracking Blendshapes Set behaviour reads: the sourceParameter of each
-        /// Parameter-type entry. Feeds the undeclared-param rule and <see cref="CollectParamUsage"/>'s read census — an entry naming no declared parameter reads
-        /// nothing, the same certainty as a driver Copy's source. It deliberately does NOT feed
-        /// driverOnAnimatedParam: that rule's read half rests on a measurement of the driver, and whether this
-        /// behaviour's state-entry read of a clip-bound parameter sees the animated value or the declared default
-        /// has not been measured. The component first ships in com.vrchat.avatars 3.10.6.</summary>
+        /// Parameter-type entry. It deliberately does NOT feed driverOnAnimatedParam: whether this behaviour's
+        /// state-entry read of a clip-bound parameter sees the animated value or the declared default has not been
+        /// measured.</summary>
         private static void FaceTrackingSetParams(StateMachineBehaviour b, string where, Action<string, string> reff)
         {
 #if VRC_FT_SETS_PRESENT
@@ -312,19 +274,15 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         // ----- Rule 3c: driverOnAnimatedParam (error) -----------------------------------------------
-        // A driver op — either direction — on a parameter some clip param-curve-writes. Measured: the
-        // animation system owns a bound parameter unconditionally (no clip-inactive window, independent of
-        // writeDefaults and layer weight), so a driver READ yields the parameter's declared default rather
-        // than the value the clip is producing, and a driver WRITE never reaches any animator reader.
-        // Both directions matter: a dead `copy` FROM a bound parameter is the harder one to spot, because the
-        // destination looks innocent and only the source is bound.
+        // A driver op, either direction, on a parameter some clip param-curve-writes. Measured: a driver READ
+        // yields the parameter's declared default rather than the clip's value, and a driver WRITE never reaches
+        // any animator reader (runtime.md §Animator evaluation).
         private static void RuleDriverOnAnimatedParam(AnimatorController controller, List<StateCtx> states,
             List<SmCtx> machines, Dictionary<string, string> curveWritten, LintResult rep)
         {
             if (curveWritten.Count == 0) return;
 
-            // One offender per (parameter, direction): the same dead copy repeated across a ladder of states
-            // is one thing to fix, and the first site is the handle — Rule 2's convention.
+            // One offender per (parameter, direction), the first site as the handle, as in Rule 2.
             var reported = new HashSet<string>();
             Action<string, string, bool> visit = (name, where, isSource) =>
             {
@@ -356,10 +314,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (s.State != null && s.State.behaviours != null)
                     foreach (var b in s.State.behaviours) DriverOps(b, s.Path + " (driver)", visit);
 
-            // Synced layers are absent from `states`/`machines` by construction (Run skips them — they re-skin
-            // their source layer's states), but a synced layer carries its OWN per-state behaviour overrides,
-            // and a driver installed there is as dead as any other. Walking only the collected topology would
-            // reproduce on the driver side exactly the hole `ParamCurveWrites` closes on the clip side.
+            // Run skips synced layers, but a synced layer carries its OWN per-state behaviour overrides, and a
+            // driver installed there is as dead as any other.
             var layers = controller.layers;
             for (int li = 0; li < layers.Length; li++)
             {
@@ -388,12 +344,10 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>Every DECLARED parameter some reachable clip writes as an animator parameter curve, mapped to
-        /// the first clip that does — the shared input to the two parameter-write rules. Reads its clips from
-        /// <see cref="AnimatorClipWalk.CollectClips"/> rather than the caller's state list because
+        /// the first clip that does. Reads its clips from <see cref="AnimatorClipWalk.CollectClips"/> because
         /// <see cref="Run"/> skips synced layers, whose per-state override motions bind real parameters.
-        /// A parameter curve is the path-less <c>Animator</c> binding whose property names a declared parameter;
-        /// humanoid muscle and TDOF curves share that binding shape but name no parameter, so they fall out here
-        /// with no muscle allowlist to maintain.</summary>
+        /// Humanoid muscle and TDOF curves share the path-less <c>Animator</c> binding shape but name no parameter,
+        /// so they fall out with no muscle allowlist to maintain.</summary>
         private static Dictionary<string, string> ParamCurveWrites(AnimatorController controller)
         {
             var written = new Dictionary<string, string>();
@@ -415,19 +369,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>Which parameters a controller READS and which it WRITES, each mapped to every site that
-        /// does it. The traversals are the lint rules' own — the same walks, the same vendor semantics, run
-        /// for a report instead of a verdict — so a provenance table and a lint can never disagree about
-        /// where a parameter is touched.
-        ///
-        /// Reads: transition conditions (AnyState, Entry, sub-state-machine edges, state transitions), the
-        /// four per-state motion parameters, blend-tree axes and Direct children, a driver <c>Copy</c>'s
-        /// source, and a face-tracking Blendshapes Set entry's source parameter. Writes: every driver op's destination, synced-layer override drivers, and clip parameter
-        /// curves. A parameter both read and written appears in both, which is the normal case for a
-        /// latch — this is a census, not a classification.
-        ///
-        /// The clip-curve half covers DECLARED parameters only, because <see cref="ParamCurveWrites"/> is
-        /// the shared input to the write rules and an undeclared curve target is already an error there;
-        /// a caller reporting provenance should say so rather than imply the census is exhaustive.</summary>
+        /// does it: a census, not a classification, so a latch appears in both. The clip-curve half covers DECLARED
+        /// parameters only (<see cref="ParamCurveWrites"/>); a caller reporting provenance should say so rather than
+        /// imply the census is exhaustive.</summary>
         internal static ParamUsage CollectParamUsage(AnimatorController controller)
         {
             var usage = new ParamUsage
@@ -539,21 +483,15 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        // ----- Rule 3b: deadTransition — a state transition that provably can never fire ------------
-        // ONE precise shape (conservative by design — anything outside it is left alone): an outgoing
-        // state→state transition with NO conditions AND hasExitTime==false that is NOT a to-Exit transition.
-        // Unity needs a condition or an exit time to ever activate such a transition, so it is inert and
-        // silently stalls the machine. Surveyed across 144 real controllers (a live personal-avatar corpus): ZERO hits,
-        // so error-tier carries no false-positive risk — the pattern simply does not occur in working avatars.
+        // ----- Rule 3d: deadTransition — a state transition that provably can never fire ------------
+        // ONE precise shape: an outgoing state→state transition with NO conditions AND hasExitTime==false that
+        // is NOT a to-Exit transition. Unity needs a condition or an exit time to ever activate such a
+        // transition, so it is inert and silently stalls the machine.
         //
-        // NOT flagged: an exit-time transition from a MOTIONLESS (motion==null) state. An earlier draft
-        // flagged these on the theory that a motionless state's normalizedTime never advances so the exit
-        // gate can't be met — that theory is FALSE. An empty state has a default 1s length and its clock
-        // advances in real time; the transition fires normally. Proven two ways: manual Animator.Update on an
-        // empty state transitions on schedule, and shipped VRCFury Action-layer timer states (BlendOut→Restore
-        // Tracking, Idle→Refresh) rely on exactly this idiom on real avatars. Flagging it produced 16 false
-        // positives in the same 144-controller survey (9 of them also had conditions that fire the transition).
-        // Do not re-add that case. to-Exit transitions are excluded (they fire by their own rules).
+        // Do not flag an exit-time transition from a MOTIONLESS (motion==null) state: an empty state has a
+        // default 1s length and its clock advances in real time, so the transition fires on schedule (measured
+        // with manual Animator.Update), and VRCFury's tracking-control timer relies on it
+        // (TrackingConflictResolverService.cs, Idle→Refresh).
         private static void RuleDeadTransition(List<StateCtx> states, LintResult rep)
         {
             foreach (var s in states)
@@ -594,10 +532,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 rep.Notes.Add("broken-binding rule skipped: no basis root available to resolve clip bindings against.");
                 return;
             }
-            // Demoted (build-rewrite auto) bindings are collapsed into ONE advisory with a small sample:
-            // under MA/VRCFury each unresolved binding is expected pre-build (paths get rewritten), so
-            // hundreds of identical per-line advisories would only drown the digest. On the error-tier
-            // path each broken binding is a genuine named failure and gets its own line.
             var demotedSamples = new List<string>();
 
             foreach (var (clip, b) in CheckAnimator.CollectUnresolvedBindings(controller, roots, pathRewrite, absoluteRoot))
@@ -647,10 +581,8 @@ namespace Ryan6Vrc.AgentTools.Editor
         // The flag decides only a rung whose destination is its own state (a return through Exit or a
         // sub-machine re-enters either way); off, that rung never fires, and a later sibling whose condition
         // holds still fires past it. Advisory, not error: a vendor rung like this is inert unless soloed (the
-        // Detail says so then), and CompileController never emits one (it sets the flag from the target).
-        // Its usual source is a hand edit or a build from before that, made in a GUI Editor, where
-        // AddTransition on an asset-backed state defaults the flag off. A muted rung is skipped: it never
-        // fires whatever the flag, so blaming the flag would be wrong.
+        // Detail says so then). In a GUI Editor, AddTransition on an asset-backed state defaults the flag off.
+        // A muted rung is skipped: it never fires whatever the flag.
         private static void RuleDeadSelfRung(List<StateCtx> states, LintResult rep)
         {
             foreach (var s in states)
@@ -690,8 +622,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (sm == null || !reachable.Add(sm)) return;
                 // KNOWN ADVISORY BOUND: StateMachineBehaviours are marked reachable but their serialized
                 // refs are NOT followed. No standard VRC/Unity SMB holds a controller sub-asset ref, so a
-                // full SerializedObject sweep would add cost for a purely theoretical case — and this rule
-                // is advisory-tier, so even a false-positive orphan never flips the verdict.
+                // full SerializedObject sweep would add cost for a purely theoretical case.
                 if (sm.behaviours != null) foreach (var b in sm.behaviours) if (b != null) reachable.Add(b);
                 foreach (var t in sm.anyStateTransitions) if (t != null) reachable.Add(t);
                 foreach (var t in sm.entryTransitions) if (t != null) reachable.Add(t);
@@ -713,7 +644,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             // A synced layer's per-state OVERRIDE motions/behaviours (layer.GetOverrideMotion/Behaviours)
             // are distinct sub-assets NOT reachable through the source SM's own states — mark them, or an
-            // override BlendTree false-positives as an orphan. Mirrors AnimatorClipWalk's synced handling.
+            // override BlendTree false-positives as an orphan.
             void AddSyncedOverrides(AnimatorStateMachine sm, AnimatorControllerLayer layer)
             {
                 if (sm == null) return;
@@ -736,12 +667,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                     AddSm(layer.stateMachine);
             }
 
-            // No IsSubAsset gate: LoadAllAssetsAtPath is already path-scoped to this one controller, and
-            // AssetDatabase.IsSubAsset returns FALSE for HideInHierarchy sub-objects — which is what a
-            // controller's own states/machines/transitions/blend-trees are. Verified live against 67
-            // real-world controllers: of the orphan objects, ~97% were hidden (0 satisfied IsSubAsset), so
-            // an IsSubAsset gate would have hidden the real dead weight this rule exists to name (and that a
-            // Decompile→Compile round-trip strips). o != controller + the five-type filter is the real gate.
+            // No IsSubAsset gate: AssetDatabase.IsSubAsset returns FALSE for HideInHierarchy sub-objects, which is
+            // what a controller's own states/machines/transitions/blend-trees are, so it would hide the dead weight
+            // this rule exists to name. LoadAllAssetsAtPath is already path-scoped to this one controller.
             foreach (var o in AssetDatabase.LoadAllAssetsAtPath(path))
             {
                 if (o == null || o == controller) continue;
@@ -880,10 +808,8 @@ namespace Ryan6Vrc.AgentTools.Editor
     /// handle, <see cref="Detail"/> the human-readable explanation. Rendered verbatim by CheckAnimator.Emit.</summary>
     public struct LintOffender { public string Kind; public string Where; public string Detail; }
 
-    /// <summary>The raw outcome of <see cref="ControllerRules.Run"/>: per-rule counts, the error/advisory
-    /// offender lists, and any rule-produced notes (a skipped-rule caveat). The caller derives the verdict
-    /// (error-tier fired ⇒ FAIL) and renders the report. <see cref="BrokenBindingIsError"/> records the tier
-    /// the broken-binding rule ran at, so the caller can fold it into the verdict.</summary>
+    /// <summary>The raw outcome of <see cref="ControllerRules.Run"/>. <see cref="BrokenBindingIsError"/> records the
+    /// tier the broken-binding rule ran at, so the caller can fold it into the verdict.</summary>
     public sealed class LintResult
     {
         public int MissingMotion, UndeclaredParam, NonFloatBlendParam, NonFloatParamCurve, DriverOnAnimatedParam, EntryShadow, BrokenBinding, DeadTransition;

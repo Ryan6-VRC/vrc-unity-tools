@@ -1,16 +1,13 @@
-// Behavioral tests for OwnMaterial: targetPath routing (own/branch/augment) with the mode leading the
-// one-liner, copy-to-new deep copy, the in-place augment guards (owned/not-locked/not-variant), the fork
-// engine (H(O), the claimed-map collision resolutions, disk-truthful slots[]), variant flatten, locked-poi
-// detection, and every routing FAIL named with its fix. Throwaway on-disk assets under an owned scratch
-// path; assert on the returned one-line summary + the RunLog JSON. Headless via tools/run-editmode-tests.ps1.
+// Behavioral tests for OwnMaterial over throwaway on-disk assets, asserting on the returned one-line summary
+// and the RunLog JSON. In comments here, O is the owned result and H(O) its texture home.
 //
 // whatIf parity is a [TestCase] AXIS on each guard's own test, not a parallel family of "whatIf reproduces
-// X" tests: those guards all run before Run's `if (whatIf)` branch, so the parity they asserted is a
-// property of the control flow. The collision refusals are the exception — see the pair below.
+// X" tests: those guards all run before Run's `if (whatIf)` branch, so that parity is a property of the
+// control flow. The collision refusals are the exception — see the pair below.
 //
-// COST: the expensive fixtures (seed PNG imports, the locked-shader HLSL compile) are [OneTimeSetUp] and
-// live OUTSIDE the folder TearDown deletes. Per-test textures are CopyAsset of a seed. Anything added here
-// that imports an asset per test will dominate this file's runtime — mint it once.
+// COST: the expensive fixtures (seed PNG imports, the locked-shader HLSL compile) are [OneTimeSetUp] under
+// Seed, a sibling of the folder TearDown deletes. Per-test textures are CopyAsset of a seed. Anything added
+// here that imports an asset per test will dominate this file's runtime — mint it once.
 using NUnit.Framework;
 using System.IO;
 using System.Text.RegularExpressions;
@@ -27,10 +24,6 @@ public class OwnMaterialTests
     const string VendorRoot = "Assets/Vendor/OwnMatTests";
     bool _createdVendor;
 
-    // Fixtures whose COST is the import, not the content, live here — a SIBLING of Scratch, because
-    // per-test TearDown deletes Scratch and anything cached inside it gets rebuilt for every single test.
-    // Two synchronous imports (the seed PNGs) and one HLSL compile (the locked shader) for the whole
-    // fixture, instead of 29 and 3.
     const string Seed = "Assets/Agent/Scratch/OwnMatSeed";
     const string SeedA = Seed + "/SeedA.png";
     const string SeedB = Seed + "/SeedB.png";
@@ -86,9 +79,7 @@ public class OwnMaterialTests
         AnimatorTestHelpers.EnsureFolder(VendorRoot);
     }
 
-    // Standard shader has real texture slots (_MainTex, _BumpMap, _EmissionMap, _MetallicGlossMap …) and
-    // is lilToon/poi-free — plenty for guard/slot-validation/routing coverage without either package
-    // installed.
+    // Standard has real texture slots and needs neither lilToon nor Poiyomi installed.
     Material VendorMat(string name)
     {
         EnsureVendor();
@@ -98,7 +89,6 @@ public class OwnMaterialTests
         return AssetDatabase.LoadAssetAtPath<Material>(p);
     }
 
-    // An already-owned material — lives under Owned (writable), not Vendor — for branch/augment coverage.
     Material OwnedMat(string name)
     {
         AnimatorTestHelpers.EnsureFolder(Owned);
@@ -108,10 +98,8 @@ public class OwnMaterialTests
         return AssetDatabase.LoadAssetAtPath<Material>(p);
     }
 
-    // Mints a real "Hidden/Locked/…" shader asset (no poi package needed) so the in-place augment guard's
-    // locked-detection (IsLocked: shader name starts with "Hidden/Locked/") is testable without Thry.
-    // ONE-TIME: this is a real HLSL compile. It used to live under Scratch, where TearDown deleted it and
-    // defeated the path-based cache, so all three locked-shader tests paid the compile.
+    // A real "Hidden/Locked/…" shader asset, so IsLocked is testable without Poiyomi or Thry. A real HLSL
+    // compile, hence one-time.
     static Shader BuildLockedShader()
     {
         string path = LockedShaderPath;
@@ -138,13 +126,9 @@ public class OwnMaterialTests
         return AssetDatabase.LoadAssetAtPath<Shader>(path);
     }
 
-    // Real bytes on disk, so the claimed-map's cross-run byte-compare (PlanFork step c) has genuine content
-    // to compare rather than a placeholder — but sourced by CopyAsset from the pre-imported seeds instead of
-    // a fresh synchronous import per call, which is the whole file's dominant cost.
-    //
-    // ALTERNATING seeds, and every collision test depends on it: those tests mint two textures with the SAME
-    // basename back to back, and the refusal they assert only fires when the two differ in content. Two
-    // seeds is therefore the minimum, and consecutive calls within one test must never draw the same one.
+    // Real bytes on disk, because PlanFork's cross-run byte-compare reads them. ALTERNATING seeds, and the
+    // cross-run collision tests depend on it: they mint two textures with the SAME basename, and the refusal
+    // only fires when the two differ in content. Consecutive calls within one test must not share a seed.
     static int _texFill;
     Texture2D MakeTexture(string folder, string name)
     {
@@ -155,9 +139,8 @@ public class OwnMaterialTests
         return AssetDatabase.LoadAssetAtPath<Texture2D>(path);
     }
 
-    // A plain ScriptableObject "container" asset so we can embed a Texture2D as a NON-main sub-asset
-    // (AssetDatabase.IsMainAsset == false) without needing a real FBX import — the same shape an
-    // FBX-embedded texture takes for the "sub-asset — not forkable" disposition.
+    // Embeds a Texture2D as a non-main sub-asset without a real FBX import: the shape an FBX-embedded texture
+    // takes.
     class SubAssetHolder : ScriptableObject { }
 
     Texture2D SubAssetTex(string path, string subName)
@@ -173,7 +156,7 @@ public class OwnMaterialTests
         return null;
     }
 
-    // ── Arg guards (Flow step 1) — unchanged from Task 1 ────────────────────────────────────────────
+    // ── Arg guards ──────────────────────────────────────────────────────────────────────────────────
 
     // (string)null, not a bare null: NUnit binds a lone `null` to its params object[] overload and the case
     // arrives with zero arguments.
@@ -194,7 +177,7 @@ public class OwnMaterialTests
         StringAssert.Contains("=> FAIL", OwnMaterial.Run(AssetDatabase.GetAssetPath(m), Owned));
     }
 
-    // ── Slot-name validation (Flow step 2) — before any write, before routing (no mode yet) ─────────
+    // ── Slot-name validation: before any write, before routing (no mode yet) ────────────────────────
 
     [Test] public void Bad_slot_name_fails_before_any_write()
     {
@@ -203,8 +186,7 @@ public class OwnMaterialTests
         string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_NotASlot" });
         StringAssert.Contains("=> FAIL", s);
         StringAssert.Contains("_NotASlot", s);
-        // The offenders ⇔ FAIL invariant, on the cheapest refusal that produces an offender: a named
-        // offender must never ride a PASS, and a FAIL must never arrive anonymous.
+        // A FAIL names its offenders; pinned on the cheapest refusal that produces one.
         StringAssert.Contains("offenders=[", s);
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat"), "no half-made copy on a bad slot name");
         Assert.IsFalse(AssetDatabase.IsValidFolder(Owned), "no folder created before slot validation passes");
@@ -231,8 +213,7 @@ public class OwnMaterialTests
 
         string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned); // no forkTextureSlots — fork nothing
         StringAssert.Contains("=> PASS", s);
-        // Mode FIRST in the one-liner, so a wrong-mode run is catchable at a glance rather than by reading
-        // the counts. Asserted on the routing test itself: the mode and the routing are one decision.
+        // Mode leads the one-liner, so a wrong-mode run is catchable at a glance rather than by reading the counts.
         StringAssert.IsMatch(@"\[own-material\] own ", s);
 
         var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
@@ -262,7 +243,7 @@ public class OwnMaterialTests
 
         string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(b), Branched, newName: "Variant");
         StringAssert.Contains("=> PASS", s);
-        StringAssert.IsMatch(@"\[own-material\] branch ", s);   // mode-first (see the own test)
+        StringAssert.IsMatch(@"\[own-material\] branch ", s);
 
         var branched = AssetDatabase.LoadAssetAtPath<Material>(Branched + "/Variant.mat");
         Assert.IsNotNull(branched);
@@ -282,10 +263,6 @@ public class OwnMaterialTests
         StringAssert.Contains("needs an outDir", s);
     }
 
-    // whatIf as a [TestCase] axis, not a second test: this guard — like the target-exists and
-    // under-Vendor guards below — sits BEFORE the `if (whatIf)` branch in OwnMaterial.Run, so preview and
-    // execute reach it through the same statement and cannot diverge. A separate "whatIf reproduces it"
-    // test asserted a parity that the control flow already makes unbreakable.
     [TestCase(false)]
     [TestCase(true)]
     public void OutDir_resolving_to_source_fails(bool whatIf)
@@ -333,8 +310,7 @@ public class OwnMaterialTests
         StringAssert.Contains("read-only", blocked);
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<Material>(forcedOutDir + "/Dress.mat"));
 
-        // The force override is execute-only by nature: under whatIf it would PASS having written nothing,
-        // so "force proceeds and writes the target" — the thing worth pinning — has no whatIf counterpart.
+        // The force override is execute-only: under whatIf it would PASS having written nothing.
         if (whatIf) return;
         string forced = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), forcedOutDir, force: true);
         StringAssert.Contains("=> PASS", forced);
@@ -388,14 +364,11 @@ public class OwnMaterialTests
 
         string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(owned));
         StringAssert.Contains("=> PASS", s);
-        StringAssert.IsMatch(@"\[own-material\] augment ", s);   // mode-first (see the own test)
+        StringAssert.IsMatch(@"\[own-material\] augment ", s);
         string afterGuid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(owned));
         Assert.AreEqual(beforeGuid, afterGuid, "augment must not create a new asset — O resolves to S in place");
     }
 
-    // The spec calls out that `force` has NO effect on the in-place augment route (the target is the
-    // already-owned source — nothing to write-guard, so nothing to override). A force:true augment must
-    // fork identically to force:false and emit no force-override note.
     [Test] public void Force_is_inert_on_in_place_augment()
     {
         var owned = OwnedMat("Base");
@@ -407,19 +380,14 @@ public class OwnMaterialTests
         StringAssert.Contains("=> PASS", s);
         StringAssert.Contains("augment", s);
 
-        // Fork landed under H(O) exactly as a force:false augment would (Owned/Base/Body.png).
         var reloaded = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Base.mat");
         StringAssert.StartsWith(Owned + "/Base/", AssetDatabase.GetAssetPath(reloaded.GetTexture("_MainTex")));
 
-        // No copy-to-new write-guard was consulted, so no force-override note was recorded.
         string json = File.ReadAllText(ExtractLogPath(s));
         StringAssert.DoesNotContain("force", json, "force must be inert on the augment route — no override note");
     }
 
-    // ── Coverage gaps folded in from Task 1's review ────────────────────────────────────────────────
-    // The routing-FAIL side of whatIf parity is a [TestCase(false)/[TestCase(true)] axis on each guard's own
-    // test above, not a parallel set of reproductions — every one of those guards runs before Run's
-    // `if (whatIf)` branch. What stays whatIf-specific is the far side of that branch: the preview PASS.
+    // ── RunLog shape: envelope + counts + offenders/notes/warnings + slots[] ──────────────────────
 
     [Test] public void Early_argfail_serializes_null_instance_and_source()
     {
@@ -438,8 +406,6 @@ public class OwnMaterialTests
         StringAssert.Contains("\"result\": \"FAIL\"", json);
         StringAssert.Contains("\"slots\": []", json);
     }
-
-    // ── RunLog shape: envelope + counts + offenders/notes/warnings + slots[] ──────────────────────
 
     [Test] public void RunLog_carries_envelope_with_populated_instance_and_empty_slots_on_bad_slot_fail()
     {
@@ -464,7 +430,7 @@ public class OwnMaterialTests
         StringAssert.Contains("_NotASlot", json);
     }
 
-    // ── Fork engine (Task 3): H(O), the claimed-map collision resolution, disk-truthful slots[] ──────
+    // ── Fork engine: H(O), the claimed-map collision resolution, disk-truthful slots[] ───────────────
 
     [Test] public void Fork_one_slot_disk_truthful()
     {
@@ -478,9 +444,7 @@ public class OwnMaterialTests
         string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
         StringAssert.Contains("=> PASS", s);
         Assert.AreEqual(1, AnimatorTestHelpers.Count(s, "slotsForked"));
-        // Slot validation cleared: a real shader texture property must reach routing, never the
-        // slot-offender FAIL. (A requested slot needs a texture actually assigned to be forkable — an empty
-        // requested slot is an unforkable offender — which the fixture above provides.)
+        // A real shader texture property clears slot validation and reaches routing.
         StringAssert.DoesNotContain("no texture property", s);
 
         var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
@@ -504,15 +468,10 @@ public class OwnMaterialTests
         StringAssert.Contains("\"slot\": \"_MainTex\", \"requested\": true, \"disposition\": \"forked\"", json);
         StringAssert.Contains("\"disposition\": \"vendor-ref\"", json);
 
-        // Flatten never runs for a non-variant source: the copy stays parentless and the log records no
-        // flatten. (A vendor material with no parent is the overwhelmingly common own, so this is the
-        // baseline the variant-flatten tests are read against.)
         Assert.IsNull(o.parent, "non-variant stays parentless — flatten never runs");
         StringAssert.DoesNotContain("flattened variant", json, "flatten path must not run for a non-variant copy");
     }
 
-    // G48: a forked texture's OWNED copy gets streaming mip maps enabled (VRChat upload defense), while the
-    // Vendor/ source is left untouched. Source is set vendor-like (mips ON, streaming OFF) deterministically.
     [Test] public void Fork_enables_streaming_mipmaps_on_owned_copy_not_vendor()
     {
         var v = VendorMat("Dress");
@@ -520,7 +479,7 @@ public class OwnMaterialTests
         string srcPath = AssetDatabase.GetAssetPath(srcTex);
         var srcTi = (TextureImporter)AssetImporter.GetAtPath(srcPath);
         srcTi.mipmapEnabled = true;
-        srcTi.streamingMipmaps = false; // vendor-like: the state the finding names as an upload hazard
+        srcTi.streamingMipmaps = false; // vendor-like: the state the VRCSDK refuses an upload over
         srcTi.SaveAndReimport();
         v.SetTexture("_MainTex", AssetDatabase.LoadAssetAtPath<Texture2D>(srcPath));
         EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
@@ -531,7 +490,7 @@ public class OwnMaterialTests
         var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
         string ownedTexPath = AssetDatabase.GetAssetPath(o.GetTexture("_MainTex"));
         var ownedTi = (TextureImporter)AssetImporter.GetAtPath(ownedTexPath);
-        Assert.IsTrue(ownedTi.streamingMipmaps, "forked owned texture must have streaming mip maps enabled (G48)");
+        Assert.IsTrue(ownedTi.streamingMipmaps, "forked owned texture must have streaming mip maps enabled");
 
         var reSrcTi = (TextureImporter)AssetImporter.GetAtPath(srcPath);
         Assert.IsFalse(reSrcTi.streamingMipmaps, "vendor source must be left untouched (streaming still off)");
@@ -583,10 +542,9 @@ public class OwnMaterialTests
 
     [Test] public void Keywords_preserved_on_disk_after_fork()
     {
-        // An arbitrary marker string, not "_EMISSION" — the memory's array getter (mat.shaderKeywords)
-        // preserves ANY enabled keyword string verbatim, including ones outside the shader's own
-        // keywordSpace, so a synthetic marker exercises the exact array-preservation mechanism under
-        // test without depending on the Standard shader's own emission-toggle keyword semantics.
+        // An arbitrary marker, not "_EMISSION": the array getter (mat.shaderKeywords) preserves any enabled
+        // keyword string, including ones outside the shader's keywordSpace, so the test does not depend on the
+        // Standard shader's emission-toggle semantics.
         const string marker = "OWNMAT_TEST_KEYWORD";
         var v = VendorMat("Dress");
         var tex = MakeTexture(VendorRoot, "Emit");
@@ -600,7 +558,7 @@ public class OwnMaterialTests
 
         var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
         CollectionAssert.Contains(o.shaderKeywords, marker,
-            "fork must not wipe shaderKeywords (memory: unity-material-getter-clears-keywords)");
+            "fork must not wipe shaderKeywords");
     }
 
     [Test] public void Same_run_collision_refuses_and_names_occupying_dst()
@@ -620,11 +578,9 @@ public class OwnMaterialTests
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat"), "FAIL must roll back the created O");
     }
 
-    // Kept as its own test rather than folded into a whatIf axis, unlike the routing guards: the collision is
-    // raised inside BuildPlan, which the whatIf and execute paths call from OPPOSITE sides of Run's
-    // `if (whatIf)` branch. The refusal itself cannot diverge, but what must be true afterwards can and does
-    // — execute has to ROLL BACK the O it already created, while whatIf must never have created the outDir at
-    // all. Two post-conditions, two tests.
+    // Its own test, not a whatIf axis: BuildPlan raises the collision on both sides of Run's `if (whatIf)`
+    // branch, but the post-conditions differ. Execute rolls back the O it already created; whatIf must never
+    // have created the outDir.
     [Test] public void Same_run_collision_whatIf_refuses_identically()
     {
         var v = VendorMat("Dress");
@@ -651,8 +607,8 @@ public class OwnMaterialTests
         string first = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
         StringAssert.Contains("=> PASS", first);
 
-        // Augment with a NEW slot whose source shares the "Tex" basename but has different bytes — the
-        // second call's plan sees H(O)/Tex.png already on disk from the first run.
+        // A new slot whose source shares the "Tex" basename but has different bytes, with H(O)/Tex.png already
+        // on disk from the first run.
         var texB = MakeTexture(VendorRoot + "/B", "Tex");
         var owned = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
         owned.SetTexture("_DetailAlbedoMap", texB);
@@ -664,9 +620,6 @@ public class OwnMaterialTests
         StringAssert.Contains("prior run", second);
     }
 
-    // whatIf parity for the CROSS-run case (mirrors Same_run_collision_whatIf_refuses_identically): a
-    // preview that would hit an on-disk different-source collision refuses exactly as execute would, and
-    // writes nothing (the on-disk existence + byte-compare in PlanFork step c is pure read-only).
     [Test] public void Cross_run_collision_whatIf_refuses_identically()
     {
         var v = VendorMat("Dress");
@@ -677,8 +630,6 @@ public class OwnMaterialTests
         string first = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, new[] { "_MainTex" });
         StringAssert.Contains("=> PASS", first);
 
-        // A NEW slot whose source shares the "Tex" basename but has different bytes — H(O)/Tex.png is
-        // already on disk from the first run. Previewing the augment must refuse the same way.
         var texB = MakeTexture(VendorRoot + "/B", "Tex");
         var owned = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat");
         owned.SetTexture("_DetailAlbedoMap", texB);
@@ -692,7 +643,6 @@ public class OwnMaterialTests
         StringAssert.Contains("=> FAIL", second);
         StringAssert.Contains("prior run", second);
 
-        // whatIf wrote nothing: the first run's Tex.png is untouched (same GUID) and no B-sourced copy landed.
         string dstAfter = AssetDatabase.GetAssetPath(
             AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat").GetTexture("_MainTex"));
         Assert.AreEqual(dstBefore, dstAfter, "whatIf must not overwrite the prior run's forked texture");
@@ -711,8 +661,8 @@ public class OwnMaterialTests
         string dstPath = AssetDatabase.GetAssetPath(owned.GetTexture("_MainTex"));
         string dstGuid = AssetDatabase.AssetPathToGUID(dstPath);
 
-        // A second, DIFFERENT slot pointing at the SAME (still-vendor) source texA — the prior run already
-        // landed H(O)/Tex.png with texA's bytes, so this is a byte-EQUAL cross-run collision → reuse.
+        // A second slot on the same vendor source: H(O)/Tex.png already holds texA's bytes, so this is a
+        // byte-equal cross-run collision, which reuses.
         owned.SetTexture("_DetailAlbedoMap", texA);
         EditorUtility.SetDirty(owned); AssetDatabase.SaveAssets();
 
@@ -730,9 +680,8 @@ public class OwnMaterialTests
         var v = VendorMat("Dress");
         var tex = MakeTexture(VendorRoot, "Pattern");
 
-        // Re-file the same PNG bytes under a .psd extension — Unity's image decoder sniffs content by
-        // signature, not filename, so a PNG payload named ".psd" still imports as a normal Texture2D; only
-        // the leaf's EXTENSION (what the fork Warning keys off) differs from a hand-authored PSD.
+        // The same PNG bytes under a .psd extension: Unity's image decoder sniffs content, not filename, so this
+        // imports as a normal Texture2D, and only the EXTENSION, which the fork warning keys off, differs.
         string psdPath = VendorRoot + "/Pattern.psd";
         File.WriteAllBytes(psdPath, File.ReadAllBytes(AssetDatabase.GetAssetPath(tex)));
         AssetDatabase.ImportAsset(psdPath, ImportAssetOptions.ForceSynchronousImport);
@@ -767,9 +716,8 @@ public class OwnMaterialTests
         var subTex = SubAssetTex(VendorRoot + "/Holder.asset", "Embedded");
         Assert.IsNotNull(subTex, "fixture: sub-asset texture must be embedded under the holder asset");
 
-        // _MainTex left null (empty, requested); _ParallaxMap = built-in; _OcclusionMap = RenderTexture
-        // (non-Texture2D); _EmissionMap = sub-asset (embedded, e.g. inside an FBX). _DetailMask left null
-        // and NOT requested — proves an untouched empty slot isn't conflated with a requested unforkable one.
+        // _MainTex stays empty and requested. _DetailMask stays empty and NOT requested, which proves an
+        // untouched empty slot isn't conflated with a requested unforkable one.
         v.SetTexture("_ParallaxMap", Texture2D.whiteTexture);
         v.SetTexture("_OcclusionMap", rt);
         v.SetTexture("_EmissionMap", subTex);
@@ -791,11 +739,8 @@ public class OwnMaterialTests
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Dress.mat"), "FAIL must roll back the created O");
     }
 
-    // ── Coverage gaps folded in from Task 3's review ────────────────────────────────────────────────
-
     [Test] public void Untouched_slot_pointing_at_another_owned_materials_texture_reports_owned_elsewhere_with_note()
     {
-        // First material: fork a texture, so it has an owned copy under its own H(O).
         var baseMat = VendorMat("Base");
         var baseTex = MakeTexture(VendorRoot, "BaseTex");
         baseMat.SetTexture("_MainTex", baseTex);
@@ -807,8 +752,6 @@ public class OwnMaterialTests
         string ownedBaseTexPath = AssetDatabase.GetAssetPath(ownedBaseTex);
         StringAssert.StartsWith(Owned + "/Base/", ownedBaseTexPath);
 
-        // Second material: an UNtouched slot (not requested) points at the FIRST material's owned
-        // texture — a texture under a DIFFERENT owned material's H(O).
         var dress = VendorMat("Dress");
         dress.SetTexture("_BumpMap", ownedBaseTex);
         EditorUtility.SetDirty(dress); AssetDatabase.SaveAssets();
@@ -819,17 +762,13 @@ public class OwnMaterialTests
         string logPath = ExtractLogPath(s);
         string json = File.ReadAllText(logPath);
         StringAssert.Contains("\"slot\": \"_BumpMap\", \"requested\": false, \"disposition\": \"owned-elsewhere\"", json);
-        // Assert the ACTUAL note text (not the always-present "notes": [ header, and not the path alone
-        // which also appears in the slot row's sourcePath) so deleting the Note() call would fail this test.
+        // The note text itself: `"notes": [` is always present and the path alone also appears in the slot row's
+        // sourcePath, so neither would fail if the Note() call were deleted.
         StringAssert.Contains(
             "slot '_BumpMap' references another material's owned texture (shared, not requested): " + ownedBaseTexPath,
             json);
     }
 
-    // The whatIf preview PASS, whole: it reports what it WOULD fork, marks itself as a preview in both the
-    // one-liner and the artifact, and touches nothing on disk. Asserted together because they are one
-    // promise — a preview that reported honestly but left a folder behind would be just as wrong as one
-    // that wrote the material.
     [Test] public void WhatIf_own_with_fork_request_reports_slotsForked_and_creates_no_asset()
     {
         var v = VendorMat("Dress");
@@ -845,12 +784,10 @@ public class OwnMaterialTests
         Assert.IsFalse(File.Exists(Owned + "/Dress/Diffuse.png"), "whatIf must create no owned texture");
         Assert.IsFalse(AssetDatabase.IsValidFolder(Owned), "whatIf must not even create the outDir folder");
 
-        // The artifact has to say so too: a RunLog read later, out of context, is indistinguishable from an
-        // execute run's without this flag.
         StringAssert.Contains("\"whatIf\": true", File.ReadAllText(ExtractLogPath(s)));
     }
 
-    // ── Task 4: augment idempotent + additive incremental fork ────────────────────────────────────
+    // ── Augment: idempotent, additive incremental fork ────────────────────────────────────────────
 
     [Test] public void Augment_is_idempotent_and_additive()
     {
@@ -918,16 +855,14 @@ public class OwnMaterialTests
         StringAssert.Contains("would augment", json);
     }
 
-    // ── Task 5: variant flatten on copy-to-new, before the (Task 6) unlock seam ───────────────────────
+    // ── Variant flatten on copy-to-new ────────────────────────────────────────────────────────────────
 
     [Test] public void Variant_source_is_flattened_on_own()
     {
-        var parent = VendorMat("Base");             // Standard shader, under Vendor
+        var parent = VendorMat("Base");
         parent.SetFloat("_Glossiness", 0.9f);
         parent.SetOverrideTag("OwnMatTestTag", "vendor-tag-value");
-        // Texture + non-default scale/offset on the PARENT (inherited, never overridden on the variant —
-        // mirrors the inherited-_Glossiness axis) so all three of GetTexture/GetTextureScale/
-        // GetTextureOffset — the most elaborate branch in FlattenVariant — are exercised through flatten.
+        // Inherited, never overridden on the variant, so FlattenVariant must bake the texture, scale and offset.
         var mainTex = MakeTexture(VendorRoot, "Body");
         parent.SetTexture("_MainTex", mainTex);
         parent.SetTextureScale("_MainTex", new Vector2(2, 3));
@@ -935,10 +870,9 @@ public class OwnMaterialTests
         parent.EnableKeyword("_EMISSION");
         EditorUtility.SetDirty(parent); AssetDatabase.SaveAssets();
 
-        // Create + save the bare variant BEFORE setting any override on it, then set overrides on the
-        // reloaded, asset-backed instance — matches how a Variant is actually authored (Inspector edits
-        // always hit an asset-backed object; touching properties on a never-saved Variant collapses its
-        // inherited keyword state immediately, in-memory — a Unity scripting quirk unrelated to this tool).
+        // Create and save the bare variant BEFORE setting any override, then set overrides on the reloaded,
+        // asset-backed instance, as Inspector edits do: touching properties on a never-saved Variant collapses
+        // its inherited keyword state immediately, in memory, a Unity quirk unrelated to this tool.
         var variant = new Material(parent) { parent = parent };
         string vp = VendorRoot + "/Var.mat";
         AssetDatabase.CreateAsset(variant, vp); AssetDatabase.SaveAssets();
@@ -957,18 +891,14 @@ public class OwnMaterialTests
         StringAssert.Contains("=> PASS", s);
 
         var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/Flat.mat");
-        // Keyword FIRST: the first GetColor/GetFloat/GetTexture call on a freshly-loaded Material instance
-        // silently clears its shaderKeywords as a side effect (memory unity-material-getter-clears-
-        // keywords' variant exception) — IsKeywordEnabled/parent don't trigger it, but reading the keyword
-        // AFTER another property getter already has would falsely fail.
+        // Keyword FIRST: the first property getter on a freshly loaded Material clears its shaderKeywords (see
+        // FlattenVariant), so reading the keyword after one would falsely fail.
         Assert.IsTrue(o.IsKeywordEnabled("_EMISSION"), "keyword carried");
         Assert.IsNull(o.parent, "flattened to standalone");
         Assert.AreEqual(Color.red, o.GetColor("_Color"), "child override carried");
         Assert.AreEqual(0.9f, o.GetFloat("_Glossiness"), 1e-4f, "inherited value baked");
         Assert.AreEqual(2100, o.renderQueue, "renderQueue carried");
         Assert.AreEqual("vendor-tag-value", o.GetTag("OwnMatTestTag", false, ""), "override tag carried");
-        // Texture triple: GetTexture + GetTextureScale + GetTextureOffset all baked from the parent onto
-        // the standalone (the inherited texture reference plus its non-default tiling/offset).
         Assert.AreEqual(AssetDatabase.GetAssetPath(mainTex), AssetDatabase.GetAssetPath(o.GetTexture("_MainTex")),
             "inherited texture reference baked");
         Assert.AreEqual(new Vector2(2, 3), o.GetTextureScale("_MainTex"), "texture scale carried");
@@ -977,20 +907,14 @@ public class OwnMaterialTests
 
     [Test] public void Variant_undeclared_local_keyword_survives_flatten()
     {
-        // The old FlattenVariant rebuilt its keyword set ONLY by probing shader.keywordSpace.keywordNames +
-        // IsKeywordEnabled — a keyword enabled via EnableKeyword that is NOT declared in the shader's
-        // keyword space (common with Poiyomi/lilToon feature toggles) was invisible to that probe and got
-        // silently dropped on flatten. This marker is deliberately NOT a Standard-shader keyword (mirrors
-        // how Keywords_preserved_on_disk_after_fork uses OWNMAT_TEST_KEYWORD for the non-variant path) —
-        // this test fails against the keywordSpace-probe-only code and passes once the array getter
-        // (o.shaderKeywords, which preserves local overrides verbatim regardless of declared-ness) is
-        // unioned in.
+        // A keyword enabled via EnableKeyword but undeclared in the shader's keyword space (common with
+        // Poiyomi/lilToon feature toggles) is invisible to a keywordSpace probe, so this marker is deliberately
+        // NOT a Standard-shader keyword.
         const string marker = "OWNMAT_UNDECLARED_KW";
-        var parent = VendorMat("Base");              // Standard shader, under Vendor
+        var parent = VendorMat("Base");
         EditorUtility.SetDirty(parent); AssetDatabase.SaveAssets();
 
-        // Same authoring order as Variant_source_is_flattened_on_own: create + save the bare variant first,
-        // then set overrides on the reloaded, asset-backed instance.
+        // Same authoring order as Variant_source_is_flattened_on_own.
         var variant = new Material(parent) { parent = parent };
         string vp = VendorRoot + "/VarUndeclared.mat";
         AssetDatabase.CreateAsset(variant, vp); AssetDatabase.SaveAssets();
@@ -1006,9 +930,7 @@ public class OwnMaterialTests
         var o = AssetDatabase.LoadAssetAtPath<Material>(Owned + "/FlatUndeclared.mat");
         // Observe via the array getter, NOT IsKeywordEnabled: Unity's IsKeywordEnabled reports only
         // shader-DECLARED (keyword-space) keywords and returns false for an undeclared one even when it's
-        // enabled and present — o.shaderKeywords is the only observable for it (same as
-        // Keywords_preserved_on_disk_after_fork). Against the pre-fix empty-seed flatten the marker was
-        // never re-applied, so it's absent here; the union fix carries it through.
+        // enabled and present.
         CollectionAssert.Contains(o.shaderKeywords, marker,
             "flatten must union the array-getter's local overrides with the keywordSpace probe — an " +
             "undeclared EnableKeyword survives only via the array getter");
@@ -1021,19 +943,14 @@ public class OwnMaterialTests
         return summary.Substring(i + 4);
     }
 
-    // ── Task 6: locked-poi detection + Thry reflection unlock ──────────────────────────────────────
-    // TestEditor has no Poiyomi package, so Thry.ThryEditor.ShaderOptimizer can never resolve — these
-    // tests exercise the copy-to-new locked-detection + the refuse-when-Thry-absent FAIL path (named,
-    // whatIf-parity) and the shader-name-only IsLocked predicate (stale AllLockedGUIDS tag on a normal
-    // shader must NOT read as locked). Unlock success + the still-locked backstop's happy path are
-    // live-only, verified in Task 7 (AvatarProject, which has poi installed).
+    // ── Locked-poi detection and the Thry-absent refusal ───────────────────────────────────────────
+    // TestEditor has no Poiyomi package, so Thry.ThryEditor.ShaderOptimizer never resolves and these tests
+    // reach only the refuse-when-Thry-absent path. Unlock success and the still-locked backstop's happy path
+    // are live-only, in a venue with Poiyomi installed.
 
     [Test] public void Locked_source_without_thry_fails_named()
     {
-        // A REAL Hidden/Locked/… shader is what IsLocked keys on. TestEditor has no Poiyomi, so
-        // Thry.ThryEditor.ShaderOptimizer won't resolve -> FAIL naming Thry (the common real case: poi
-        // absent; the Thry-resolve check fires before the dialog guard, so the missing original-shader
-        // tag is never reached).
+        // The Thry-resolve check fires before the dialog guard, so the missing original-shader tag is never reached.
         var m = VendorMat("LockedVendor");
         m.shader = _lockedShader;
         EditorUtility.SetDirty(m); AssetDatabase.SaveAssets();
@@ -1047,8 +964,6 @@ public class OwnMaterialTests
 
     [Test] public void WhatIf_locked_without_thry_previews_fail()
     {
-        // whatIf detects on the SOURCE S, so S carries the real Hidden/Locked shader — same FAIL as
-        // execute (the Thry-resolve check runs read-only in whatIf too).
         var m = VendorMat("LockedVendor2");
         m.shader = _lockedShader;
         EditorUtility.SetDirty(m); AssetDatabase.SaveAssets();
@@ -1060,23 +975,17 @@ public class OwnMaterialTests
         Assert.IsNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/L2.mat"), "whatIf wrote nothing");
     }
 
-    // Regression for the live-found false-positive: real vendor poi materials carry a STALE non-empty
-    // AllLockedGUIDS tag while fully UNLOCKED (normal shader). Detection must NOT treat the tag as
-    // locked (only the Hidden/Locked/… shader name counts) — else the tool runs an unnecessary Thry
-    // unlock (and, with poi absent, FAILs) on a perfectly ownable material.
     [Test] public void Stale_alllockedguids_tag_with_normal_shader_is_not_locked()
     {
         var v = VendorMat("StaleTag");                    // Standard shader (normal, resolvable)
-        v.SetOverrideTag("AllLockedGUIDS", "deadbeef");   // stale tag, as unlocked vendor poi materials carry
+        v.SetOverrideTag("AllLockedGUIDS", "deadbeef");
         EditorUtility.SetDirty(v); AssetDatabase.SaveAssets();
 
         string s = OwnMaterial.Run(AssetDatabase.GetAssetPath(v), Owned, System.Array.Empty<string>(), newName: "StaleOwned");
         StringAssert.Contains("=> PASS", s);              // owned as a normal material, no Thry attempt
         Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<Material>(Owned + "/StaleOwned.mat"));
     }
-    // No separate "a normal material is unaffected by locked detection" test: every PASS in this file owns a
-    // normal Standard-shader material, so an IsLocked false positive FAILs its host test first (with poi
-    // absent there is no unlock to fall back on) — a dedicated one could only re-assert that.
+
     [Test]
     public void Own_Saves_Dirty_Source_But_Not_Unrelated_Dirty_Assets()
     {

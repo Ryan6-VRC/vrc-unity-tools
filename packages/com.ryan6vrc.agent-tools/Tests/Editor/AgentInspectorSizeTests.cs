@@ -3,18 +3,16 @@ using System.Text;
 using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 
-// AgentInspector's size note. A whole-hierarchy snapshot of a complex vendor avatar runs past the agent
-// harness's file-read cap (measured: 639KB), and the caller used to learn that only when the Read failed —
-// after paying for the walk. The artifact stays complete on purpose; the SUMMARY is what gets windowed.
-//
-// The cap is a FOREIGN constant (a property of the harness, not of Unity or the asset), so the two guards
-// below are the ones that matter: size is reported unconditionally, and it is measured in BYTES from disk.
+// AgentInspector's size note. The artifact is never truncated, so the summary is what warns a caller that a
+// Read would pass the agent harness's file-read cap. The cap is a FOREIGN constant (the harness's, not Unity's
+// or the asset's) that nothing here can detect drifting, so the guards that matter are that size is reported
+// unconditionally and measured in BYTES from disk.
 public class AgentInspectorSizeTests
 {
     private string _tmp;
 
     [SetUp]
-    public void SetUp() => _tmp = Path.Combine(Path.GetTempPath(), "d3_sizenote_" + Path.GetRandomFileName());
+    public void SetUp() => _tmp = Path.Combine(Path.GetTempPath(), "agentinspector_size_" + Path.GetRandomFileName());
 
     [TearDown]
     public void TearDown() { if (File.Exists(_tmp)) File.Delete(_tmp); }
@@ -38,15 +36,12 @@ public class AgentInspectorSizeTests
         var s = AgentInspector.SizeNote(_tmp, "Avatar/Body", includeChildren: true, followAssets: true);
 
         StringAssert.Contains("read cap", s);
-        // Must chain into an actual next call, and must match the 3-arg signature unity-tools.md documents —
-        // a hint naming a stale overload teaches the wrong door.
+        // The hint is a string, so nothing else ties it to the 3-arg Run signature unity-tools.md documents.
         StringAssert.Contains("includeChildren: false", s);
         StringAssert.Contains("followAssets: false", s);
         StringAssert.Contains("Avatar/Body", s);
     }
 
-    // A remedy that prescribes a flag already at its default is a no-op the reader pays to try — the same
-    // defect this batch fixes in CheckPackage's reimport advice.
     [Test]
     public void SizeNote_pastTheCapWithFollowAssetsAlreadyOff_doesNotPrescribeIt()
     {
@@ -59,8 +54,8 @@ public class AgentInspectorSizeTests
         StringAssert.Contains("deeper path", s);
     }
 
-    // The measurement bug this guards: the artifact is UTF-8 and Japanese vendor asset names are routine in
-    // this venue, so a char count under-reports bytes and would promise a fit that fails at Read time.
+    // The artifact is UTF-8 and Japanese vendor asset names are routine, so a char count under-reports bytes
+    // and would promise a fit that fails at Read time.
     [Test]
     public void SizeNote_multiByteContent_measuresBytesNotCharacters()
     {
@@ -76,8 +71,45 @@ public class AgentInspectorSizeTests
     [Test]
     public void SizeNote_unstattableFile_staysSilentRatherThanSinkingTheCall()
     {
-        // The artifact is already written by this point; a stat failure must not turn a good snapshot into a
-        // failed one, so the note degrades to nothing.
         Assert.AreEqual("", AgentInspector.SizeNote(_tmp + "_absent", "Avatar", true));
+    }
+}
+
+// A throw mid-walk degrades to a fieldsError, and the snapshot around it still has to parse.
+public class AgentInspectorJsonWriterTests
+{
+    private static string Compact(AgentInspector.JsonWriter w) => w.ToString().Replace("\n", "").Replace(" ", "");
+
+    [Test]
+    public void UnwindTo_closesNestedScopesInOrder_andAnswersAPendingName()
+    {
+        var w = new AgentInspector.JsonWriter();
+        w.BeginObject();
+        int depth = w.Depth;
+        w.PropName("fields");
+        w.BeginObject();
+        w.PropName("arr");
+        w.BeginArray();
+        w.BeginObject();
+        w.PropName("pending");
+
+        w.UnwindTo(depth);
+        w.Prop("fieldsError", "boom");
+        w.EndObject();
+
+        Assert.AreEqual("{\"fields\":{\"arr\":[{\"pending\":null}]},\"fieldsError\":\"boom\"}", Compact(w));
+        Assert.AreEqual(0, w.Depth);
+    }
+
+    [Test]
+    public void UnwindTo_withNothingOpenedPastTheMark_writesNothing()
+    {
+        var w = new AgentInspector.JsonWriter();
+        w.BeginObject();
+        w.UnwindTo(w.Depth);
+        w.Prop("fieldsError", "boom");
+        w.EndObject();
+
+        Assert.AreEqual("{\"fieldsError\":\"boom\"}", Compact(w));
     }
 }

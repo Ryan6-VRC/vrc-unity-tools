@@ -11,23 +11,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
     /// <summary>
     /// One deep-tier descriptor row: how the transplant engine treats one VRC component family.
-    /// Field paths are SerializedProperty names (probed in order for the casing the SDK actually
-    /// serializes). The token convention "Collection[].Field" means "iterate the Collection array
-    /// and follow Field on each element" (used for VRC constraint Sources).
+    /// Field paths are SerializedProperty names. The token "Collection[].Field" means iterate the
+    /// Collection array and follow Field on each element (VRC constraint Sources).
     /// </summary>
     public sealed class VrcComponentDescriptor
     {
-        /// <summary>The type this row is keyed on (matched up a queried component's base chain).</summary>
         public readonly Type type;
-        /// <summary>Anchor field(s), probed in order (first found wins). Used by Copy's leaf placement and Relocate's pin-and-rewire.</summary>
+        /// <summary>Anchor field(s), probed in order (first found wins), for the casing the SDK actually serializes.</summary>
         public readonly string[] anchorFieldPaths;
-        /// <summary>Hard dependencies — pull the referent or null+flag it (e.g. physbone colliders).</summary>
+        /// <summary>Hard dependencies: pull the referent, or null and flag it.</summary>
         public readonly string[] hardDepFieldPaths;
-        /// <summary>Soft dependencies — drop the entry silently if its referent is absent (e.g. ignoreTransforms).</summary>
+        /// <summary>Soft dependencies: drop the entry silently if its referent is absent.</summary>
         public readonly string[] softDepFieldPaths;
         /// <summary>True for offset-anchor leaves (collider/contact) whose missing host GO may be auto-recreated under its parent bone.</summary>
         public readonly bool leafRecreateEligible;
-        /// <summary>Copy-order topo group this row belongs to (drives the planner's seed partition / topo order).</summary>
         public readonly TopoGroup group;
 
         public VrcComponentDescriptor(Type type, string[] anchorFieldPaths, string[] hardDepFieldPaths,
@@ -43,11 +40,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
     }
 
     /// <summary>
-    /// The closed, owned deep-tier table. Looked up by walking a component's <c>GetType()</c> base
-    /// chain so a concrete subclass (e.g. <c>VRCPhysBoneCollider</c>, a concrete contact, a concrete
-    /// <c>VRCConstraint</c>) resolves to its base row. A null lookup means the type is conservative-tier
-    /// (copied type-blind, no dependency-follow / recreate / relocate). Kept VRC-SDK-only on purpose;
-    /// MA/VRCFury/NDMF never get a row.
+    /// The closed deep-tier table, looked up along a component's base chain. A null lookup means the type
+    /// is conservative-tier (copied type-blind, no dependency-follow / recreate / relocate). MA/VRCFury/NDMF
+    /// never get a row.
     /// </summary>
     public static class VrcComponentTable
     {
@@ -82,7 +77,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 group:                TopoGroup.Constraint),
         };
 
-        /// <summary>Descriptor for <paramref name="type"/>, walking its base chain; null if conservative-tier.</summary>
         public static VrcComponentDescriptor Lookup(Type type)
         {
             for (var t = type; t != null; t = t.BaseType)
@@ -91,7 +85,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return null;
         }
 
-        /// <summary>Descriptor for a component instance's runtime type; null if conservative-tier.</summary>
         public static VrcComponentDescriptor Lookup(Component component)
             => component == null ? null : Lookup(component.GetType());
 

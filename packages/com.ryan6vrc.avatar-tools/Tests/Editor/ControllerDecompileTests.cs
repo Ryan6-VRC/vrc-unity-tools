@@ -6,17 +6,12 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 
-// Behavioral tests for ControllerDecompile — the AnimatorController -> AnimDocument read direction. Like
-// ControllerEmitTests these touch the AssetDatabase (Walk reads sub-asset clips/behaviours off a persisted
-// controller, and the round-trip emits one first). Run headless via tools/run-editmode-tests.ps1 (or the
-// Test Runner window / CI); not via MCP run_tests — wrong venue (live editor). See docs/verify.md.
-// TearDown removes the scratch folder each run.
+// These touch the AssetDatabase: Walk reads sub-asset clips/behaviours off a persisted controller, and the
+// round-trip emits one first.
 public class ControllerDecompileTests
 {
     private const string ScratchFolder = "Assets/Agent/Scratch/emit";
 
-    // ControllerEmit.Build's 2-arg door mints a VRCExpressionParameters nobody persists — 28 calls in this
-    // file. See AnimatorTestHelpers.UnownedSideAssetSweep for why a survivor breaks unrelated suites.
     private readonly AnimatorTestHelpers.UnownedSideAssetSweep _paramSweep =
         new AnimatorTestHelpers.UnownedSideAssetSweep();
 
@@ -37,8 +32,6 @@ public class ControllerDecompileTests
         return 0f;
     }
 
-    // ---- Round-trip: debounce ---------------------------------------------------------------------
-
     [Test]
     public void Walk_Roundtrips_An_Emitted_Controller()
     {
@@ -57,10 +50,8 @@ public class ControllerDecompileTests
         Assert.AreEqual(0, w.Refusals.Count, "debounce is fully in-vocabulary");
         Assert.AreEqual(0, w.OrphanCount, "no orphans in a clean emit");
 
-        // Default state.
         Assert.AreEqual("Idle", w.Doc.Layers[0].Root.DefaultState);
 
-        // A transition's To + conditions: Idle -> Pending on RawInput is true.
         var idle = w.Doc.Layers[0].Root.States.First(s => s.Name == "Idle");
         var toPending = idle.Transitions.First(t => t.To == "Pending");
         Assert.AreEqual(1, toPending.When.Count);
@@ -69,13 +60,11 @@ public class ControllerDecompileTests
         Assert.AreEqual(1f, toPending.When[0].Value, 1e-6f);
         Assert.IsNull(toPending.ExitTime, "no exit time on Idle->Pending");
 
-        // Pending -> Active is the unconditional exitTime=1 transition.
         var pending = w.Doc.Layers[0].Root.States.First(s => s.Name == "Pending");
         var toActive = pending.Transitions.First(t => t.To == "Active");
         Assert.AreEqual(0, toActive.When.Count, "timer-elapsed transition is unconditional");
         Assert.AreEqual(1f, toActive.ExitTime.Value, 1e-4f);
 
-        // Active carries a driver { set: { Debounced: 1 } }.
         var active = w.Doc.Layers[0].Root.States.First(s => s.Name == "Active");
         Assert.AreEqual(1, active.Behaviours.Count);
         var drv = active.Behaviours[0];
@@ -83,22 +72,12 @@ public class ControllerDecompileTests
         var sets = (Dictionary<string, object>)drv.Fields["set"];
         Assert.AreEqual(1f, AsF(sets["Debounced"]), 1e-6f);
 
-        // Inline clips decoded: timer is seconds-only, hold_on is a Set.
         var timer = w.Doc.Clips.First(c => c.Name == "timer");
         Assert.AreEqual(0f, timer.Sets.Count + timer.Curves.Count, "timer is duration-only");
         Assert.AreEqual(0.2f, timer.Seconds.Value, 1e-3f);
         var hold = w.Doc.Clips.First(c => c.Name == "hold_on");
         Assert.AreEqual(1f, hold.Sets["Level"], 1e-6f);   // a float AAP, not the bool output — see DebounceDoc
     }
-
-    // ---- Round-trip: nesting + a non-driver behaviour ---------------------------------------------
-    // Lives in AnimatorSchemaEmitTests.Emit_Walk_Serialize_Parse_Roundtrips_Nested_With_Behaviour, not here: on
-    // the same seeded document it makes every assertion this file would (sub-machine name/states/default, the
-    // Sub/A cross-machine target, the bare same-machine target, the entry rung, the tracking Fields including
-    // rightHand's absence, refusal-free) and then carries the doc through Serialize→Parse→re-emit. A Walk-only
-    // copy here would be a prefix of it.
-
-    // ---- Orphan counting --------------------------------------------------------------------------
 
     [Test]
     public void Walk_Counts_Orphan_SubAsset_Without_Emitting_It()
@@ -107,7 +86,6 @@ public class ControllerDecompileTests
         ControllerEmit.Build(src, out var emitted);
         string path = AssetDatabase.GetAssetPath(emitted.Controller);
 
-        // Attach an unreferenced clip sub-asset: reachable from no layer state machine.
         var orphan = new AnimationClip { name = "ORPHAN", hideFlags = HideFlags.HideInHierarchy };
         AssetDatabase.AddObjectToAsset(orphan, emitted.Controller);
         AssetDatabase.SaveAssets();
@@ -119,15 +97,9 @@ public class ControllerDecompileTests
         Assert.IsFalse(w.Doc.Clips.Any(c => c.Name == "ORPHAN"), "orphan is not emitted into the Doc");
     }
 
-    // ---- Item 1: a blend-tree child's dangling motion ref is decoded, not dropped -----------------
-
     [Test]
     public void Walk_TreeChild_Dangling_Ref_Is_Marked_Unresolved_And_ReEmits()
     {
-        // Emit a controller whose tree child references a real external clip, then delete that clip so the
-        // child's m_Motion becomes a dangling guid ref (an imported-controller reality). Walk must decode it
-        // to GuidRef{Unresolved} + list the guid — NOT silently drop it — and re-emitting
-        // the decoded doc must round-trip the unresolved marker (ControllerEmit tolerates it as a null motion).
         if (!AssetDatabase.IsValidFolder("Assets/Agent")) AssetDatabase.CreateFolder("Assets", "Agent");
         if (!AssetDatabase.IsValidFolder("Assets/Agent/Scratch")) AssetDatabase.CreateFolder("Assets/Agent", "Scratch");
         if (!AssetDatabase.IsValidFolder(ScratchFolder)) AssetDatabase.CreateFolder("Assets/Agent/Scratch", "emit");
@@ -160,8 +132,6 @@ public class ControllerDecompileTests
         Assert.IsTrue(child.Motion.RefGuid.Unresolved, "marked unresolved");
         Assert.AreEqual(1, w.UnresolvedGuids.Count, "the child's guid is listed");
 
-        // Re-emit the decoded doc: ControllerEmit preserves the unresolved marker (null motion + advisory),
-        // attributed to the owning state — proving the marker survives decode -> re-emit.
         ControllerEmit.Build(w.Doc, out var r2);
         var reTree = FirstState(r2, "Owner").motion as BlendTree;
         Assert.IsNotNull(reTree);
@@ -172,8 +142,6 @@ public class ControllerDecompileTests
 
     private static AnimatorState FirstState(ControllerEmit.EmitResult r, string name) =>
         r.Controller.layers[0].stateMachine.states.First(cs => cs.state.name == name).state;
-
-    // ---- Item 3: round-trip the four behaviour kinds with no dedicated test ------------------------
 
     [Test]
     public void Walk_Roundtrips_PlayableLayer_PoseSpace_LayerControl_PlayAudio_Fields()
@@ -231,8 +199,6 @@ public class ControllerDecompileTests
         Assert.AreEqual(false, (bool)pa["stopOnExit"]);
     }
 
-    // ---- Item 4: a Set clip authored with `seconds:` keeps its length across decode ----------------
-
     [Test]
     public void Walk_Set_Clip_With_Seconds_Recovers_Length()
     {
@@ -252,7 +218,6 @@ public class ControllerDecompileTests
         Assert.AreEqual(0.5f, c2.Seconds.Value, 1e-3f, "the explicit length is recovered from the constant curve");
         Assert.AreEqual(1f, c2.Sets["P"], 1e-6f);
 
-        // Re-emit: the length survives (would collapse to MinClipLength without the recovery).
         ControllerEmit.Build(w.Doc, out var r2);
         Assert.AreEqual(0.5f, r2.Clips["c"].length, 1e-3f, "re-emitted clip keeps the declared length");
     }
@@ -260,8 +225,6 @@ public class ControllerDecompileTests
     [Test]
     public void Loop_Survives_Parse_Emit_Walk_And_Serialize()
     {
-        // `loop: true` is the clip's own loopTime: a state holding it replays with no gap. It must survive every
-        // leg, or a looping vendor clip decompiles and recompiles as a one-shot with both directions reporting OK.
         string yaml = AnimatorSchemaYamlTests.DebounceDoc.Replace("hold_on: { set: { Level: 1.0 } }", "hold_on: { loop: true, set: { Level: 1.0 } }");
         Assert.AreNotEqual(AnimatorSchemaYamlTests.DebounceDoc, yaml, "the fixture still carries the clip this test edits");
         var doc = AnimatorSchemaYaml.Parse(yaml, "mem://loop");
@@ -279,7 +242,6 @@ public class ControllerDecompileTests
     [Test]
     public void Walk_Plain_Set_Clip_Leaves_Seconds_Null()
     {
-        // A Set clip with NO authored seconds sits at MinClipLength — the recovery must NOT invent a seconds.
         var doc = new AnimDocument { Schema = 1, ControllerName = "PlainSet_Fx" };
         doc.Parameters.Add(new ParamSpec { Name = "P", Type = AnimParamType.Float });
         var clip = new ClipSpec { Name = "c" };
@@ -330,7 +292,7 @@ public class ControllerDecompileTests
     public void Walk_SelfRung_At_Flag_Off_Is_Dropped_With_A_Note()
     {
         var aState = SelfRungState(out var emitted);
-        aState.transitions[0].canTransitionToSelf = false;   // what a GUI-Editor build used to emit
+        aState.transitions[0].canTransitionToSelf = false;
         var w = ControllerDecompile.Walk(emitted.Controller);
 
         Assert.AreEqual(0, w.Refusals.Count, "a dead rung to itself is dropped, not refused");
@@ -350,12 +312,9 @@ public class ControllerDecompileTests
         Assert.IsTrue(w.Refusals.Any(m => m.Contains("to itself") && m.Contains("soloed")));
     }
 
-    // ---- mixed WD hoists to a modal layer policy + minority overrides, re-emits the same mix --
-
     [Test]
     public void Walk_MixedWD_Hoists_Modal_Policy_And_ReEmits_Same_Mix()
     {
-        // Two states, one WD-true one WD-false: a 1/1 tie, resolved to the stated tie-break (prefer true).
         var doc = new AnimDocument { Schema = 1, ControllerName = "MixedWD_Fx" };
         var layer = new Layer { Name = "L" };
         layer.Root.States.Add(new State { Name = "A", Motion = null, WriteDefaults = true });
@@ -376,13 +335,10 @@ public class ControllerDecompileTests
         Assert.IsFalse(a.WriteDefaults.HasValue, "majority state's override is cleared (inherits the layer policy)");
         Assert.AreEqual(false, b.WriteDefaults, "minority state keeps an explicit override");
 
-        // Re-emit the decoded doc: the per-state WD mix is reproduced exactly.
         ControllerEmit.Build(w.Doc, out var r2);
         Assert.IsTrue(FirstState(r2, "A").writeDefaultValues, "A re-emits WD true (from layer policy)");
         Assert.IsFalse(FirstState(r2, "B").writeDefaultValues, "B re-emits WD false (from its override)");
     }
-
-    // ---- a uniform-WD layer hoists to a policy with ZERO overrides ------------
 
     [Test]
     public void Walk_UniformWD_Hoists_Policy_With_No_Overrides()
@@ -405,8 +361,6 @@ public class ControllerDecompileTests
         Assert.IsFalse(FirstState(r2, "B").writeDefaultValues);
     }
 
-    // ---- timeParameterActive + empty timeParameter -> unbound motion time + a Note ------------
-
     [Test]
     public void Walk_Empty_TimeParameter_Normalizes_To_Null_With_Note()
     {
@@ -427,8 +381,6 @@ public class ControllerDecompileTests
     [Test]
     public void Walk_NonEmpty_TimeParameter_Binds_Without_A_Note()
     {
-        // A real motion-time binding (the vendor Shinano/CasualStroll scrubber shape) is decoded verbatim —
-        // NOT the empty-param normalization, so no Note is recorded for it.
         var c = new AnimatorController { name = "MotionTimeTP_Fx" };
         c.AddLayer("L");
         var st = c.layers[0].stateMachine.AddState("S");
@@ -443,8 +395,6 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- sibling states differing only by trailing whitespace -> a located Refusal ------------
-
     [Test]
     public void Walk_Whitespace_Sibling_States_Refuse_Naming_Both()
     {
@@ -452,19 +402,16 @@ public class ControllerDecompileTests
         c.AddLayer("L");
         var sm = c.layers[0].stateMachine;
         sm.AddState("S");
-        sm.AddState("S "); // trailing space
+        sm.AddState("S ");
 
         var w = ControllerDecompile.Walk(c);
         Assert.AreEqual(1, w.Refusals.Count(r => r.Contains("whitespace")), "one whitespace-collision refusal");
         var refusal = w.Refusals.First(r => r.Contains("whitespace"));
         StringAssert.Contains("'S'", refusal, "names the first sibling");
         StringAssert.Contains("'S '", refusal, "names the second sibling");
-        // Both states are still decoded — never silently collapsed/dedup'd.
         Assert.AreEqual(2, w.Doc.Layers[0].Root.States.Count, "both colliding states remain decoded");
         Object.DestroyImmediate(c);
     }
-
-    // ---- a layer with a null state machine -> a located Refusal (not an NRE) -----------------
 
     [Test]
     public void Walk_Null_StateMachine_Refuses()
@@ -472,12 +419,10 @@ public class ControllerDecompileTests
         var c = new AnimatorController { name = "NullSM_Fx" };
         c.layers = new[] { new AnimatorControllerLayer { name = "L", defaultWeight = 1f, stateMachine = null } };
 
-        var w = ControllerDecompile.Walk(c); // must NOT throw
+        var w = ControllerDecompile.Walk(c);
         Assert.IsTrue(w.Refusals.Any(r => r.Contains("no state machine")), "null state machine -> located refusal");
         Object.DestroyImmediate(c);
     }
-
-    // ---- an empty inline clip (zero bindings) -> a located Refusal (not silently empty) ------
 
     [Test]
     public void Walk_Empty_Inline_Clip_Refuses()
@@ -485,7 +430,7 @@ public class ControllerDecompileTests
         var c = new AnimatorController { name = "EmptyClip_Fx" };
         c.AddLayer("L");
         var st = c.layers[0].stateMachine.AddState("S");
-        st.motion = new AnimationClip { name = "empty" }; // no curve bindings
+        st.motion = new AnimationClip { name = "empty" };
 
         var w = ControllerDecompile.Walk(c);
         // Assert on the message text, not the clip NAME ("empty") — a rename must not satisfy it.
@@ -494,13 +439,10 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- a null playAudio clip entry -> a located Refusal (not an NRE) -----------------------
-
     [Test]
     public void Walk_Null_PlayAudio_Clip_Refuses()
     {
-        // Emit a playAudio behaviour (ControllerEmit adds the SMB on a persisted controller), then null out its
-        // Clips entry to model a since-deleted AudioClip — the reachable-import reality this refusal guards.
+        // A null Clips entry models a since-deleted AudioClip.
         const string yaml =
             "schema: 1\ncontroller: NullAudio_Fx\nbasis: avatar-root\nrole: fx\n" +
             "layers:\n  - name: L\n    states:\n      S:\n        motion: ~\n" +
@@ -517,19 +459,17 @@ public class ControllerDecompileTests
         pa.Clips = new AudioClip[] { null };
         EditorUtility.SetDirty(pa);
 
-        var w = ControllerDecompile.Walk(emitted.Controller); // must NOT throw
+        var w = ControllerDecompile.Walk(emitted.Controller);
         Assert.IsTrue(w.Refusals.Any(r => r.Contains("playAudio") && r.Contains("null clip")),
             "a null playAudio clip entry -> located refusal");
     }
 
-    // ---- Review #1: driver ops that interleave change-types or repeat a (type,name) -> refusals -------------
-
     [Test]
     public void Walk_Driver_Interleaved_And_Duplicate_Ops_Refuse()
     {
-        // The schema regroups an ordered driver list into name-keyed set/add/copy/random buckets — faithful
-        // ONLY when the list is already bucket-ordered with no repeated (type,name). Emit a driver, then
-        // overwrite its parameters with an interleaved + duplicated list the emitter itself never produces.
+        // The schema regroups an ordered driver list into name-keyed set/add/copy/random buckets, faithful ONLY
+        // when the list is already bucket-ordered with no repeated (type,name). The emitter never produces this
+        // list, so the test overwrites a built driver.
         const string yaml =
             "schema: 1\ncontroller: DrvOrder_Fx\nbasis: avatar-root\nrole: fx\n" +
             "parameters:\n  X: float\n  Y: float\n" +
@@ -553,8 +493,6 @@ public class ControllerDecompileTests
         Assert.IsTrue(w.Refusals.Any(r => r.Contains("repeats operation")), "the duplicate Set X -> refusal");
     }
 
-    // ---- Review #2: two DISTINCT embedded clips sharing a name -> a refusal (not a silent dedup) -----------
-
     [Test]
     public void Walk_Distinct_SameName_Embedded_Clips_Refuse()
     {
@@ -566,7 +504,7 @@ public class ControllerDecompileTests
         var s1 = sm.AddState("S1");
         var s2 = sm.AddState("S2");
         s1.motion = AddEmbeddedClip(c, "dup", 1f);
-        s2.motion = AddEmbeddedClip(c, "dup", 2f); // distinct instance, same name
+        s2.motion = AddEmbeddedClip(c, "dup", 2f);
         AssetDatabase.SaveAssets();
 
         var w = ControllerDecompile.Walk(c);
@@ -583,8 +521,6 @@ public class ControllerDecompileTests
         return clip;
     }
 
-    // ---- Review #3: a MIXED set+curve clip whose sets run past the last keyframe keeps its length ----------
-
     [Test]
     public void Walk_Mixed_Set_And_Curve_Recovers_Longer_Seconds()
     {
@@ -597,10 +533,8 @@ public class ControllerDecompileTests
         c.AddLayer("L");
         var st = c.layers[0].stateMachine.AddState("S");
         var clip = new AnimationClip { name = "mixed", hideFlags = HideFlags.HideInHierarchy };
-        // A constant Set running to t=2.0 ...
         AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve("", typeof(Animator), "SetP"),
             AnimationCurve.Constant(0f, 2.0f, 1f));
-        // ... plus a keyframed curve whose last key is only at t=1.0.
         AnimationUtility.SetEditorCurve(clip, EditorCurveBinding.FloatCurve("", typeof(Animator), "CurveP"),
             new AnimationCurve(new Keyframe(0f, 0f), new Keyframe(1.0f, 1f)));
         AssetDatabase.AddObjectToAsset(clip, c);
@@ -614,12 +548,9 @@ public class ControllerDecompileTests
         Assert.AreEqual(1, decoded.Sets.Count, "the constant binding decoded as a Set");
         Assert.AreEqual(1, decoded.Curves.Count, "the keyframed binding decoded as a Curve");
 
-        // Re-emit: the clip keeps length 2.0 (would shrink to the 1.0 curve end without the recovery).
         ControllerEmit.Build(w.Doc, out var r2);
         Assert.AreEqual(2.0f, r2.Clips["mixed"].length, 1e-3f);
     }
-
-    // ---- Review #4: exact-duplicate sibling names (states AND sub-machines) -> located refusals ------------
 
     [Test]
     public void Walk_Exact_Duplicate_Sibling_States_Refuse()
@@ -650,8 +581,6 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- Review #5: two slots dangling to the SAME missing clip each recover the guid ---------------------
-
     [Test]
     public void Walk_Two_States_Same_Dangling_Clip_Both_Recover_The_Guid()
     {
@@ -673,15 +602,15 @@ public class ControllerDecompileTests
         ControllerEmit.Build(doc, out var emitted);
         string ctrlPath = AssetDatabase.GetAssetPath(emitted.Controller);
 
-        // Rewrite BOTH states' motion refs to a guid that resolves to NOTHING — the imported "missing vendor
-        // asset" reality. (DeleteAsset is unreliable here: its guid->path cache lingers within a synchronous
-        // test, so the deleted guid still "resolves" and nothing reads as dangling.)
+        // Rewrite BOTH states' motion refs to a guid that resolves to NOTHING. DeleteAsset is unreliable here: its
+        // guid->path cache lingers within a synchronous test, so the deleted guid still "resolves" and nothing
+        // reads as dangling.
         const string missingGuid = "0123456789abcdef0123456789abcdef";
         Assert.IsEmpty(AssetDatabase.GUIDToAssetPath(missingGuid), "the fake guid must be unresolvable");
         string text = System.IO.File.ReadAllText(ctrlPath).Replace(realGuid, missingGuid);
         System.IO.File.WriteAllText(ctrlPath, text);
         AssetDatabase.ImportAsset(ctrlPath, ImportAssetOptions.ForceUpdate);
-        AssetDatabase.DeleteAsset(clipPath); // the real clip is now unreferenced
+        AssetDatabase.DeleteAsset(clipPath);
 
         var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(ctrlPath);
         var w = ControllerDecompile.Walk(controller);
@@ -690,14 +619,13 @@ public class ControllerDecompileTests
         Assert.IsNotNull(a.Motion?.RefGuid, "state A decodes a dangling guid ref");
         Assert.IsNotNull(b.Motion?.RefGuid, "state B decodes a dangling guid ref");
         Assert.AreEqual(missingGuid, a.Motion.RefGuid.Guid, "state A recovers the missing guid");
-        Assert.AreEqual(missingGuid, b.Motion.RefGuid.Guid, "state B ALSO recovers it (the old shared FIFO gave the 2nd 'unknown')");
+        Assert.AreEqual(missingGuid, b.Motion.RefGuid.Guid, "state B ALSO recovers it (each dangling slot keeps its own guid, not a shared queue)");
         Assert.AreEqual(2, w.UnresolvedGuids.Count, "both dangling slots are listed");
     }
 
-    // ---- a condition param carrying INTERIOR whitespace survives the verbatim-prefix grammar ----
-    // Under the right-anchored condition grammar a spaced param name is FAITHFUL: it decodes cleanly and
-    // survives verbatim. Only whitespace that collides with the single-space separator (a trailing space)
-    // is refused — by the decompile self-check, covered in RoundtripStressTests.
+    // A spaced condition param decodes verbatim under the right-anchored condition grammar. Only whitespace that
+    // collides with the single-space separator (a trailing space) is refused, by the decompile self-check:
+    // RoundtripStressTests.Refusal_ConditionParamTrailingSpace.
 
     [Test]
     public void Walk_Condition_Param_With_Interior_Whitespace_Is_Faithful()
@@ -719,10 +647,9 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- A sub-machine's OUTGOING (on-Exit) transition -> decoded onto the PARENT's model ----------------
-    // Formerly a located refusal (Review-2 #1). The schema now carries these as the sub-machine's onExit list;
-    // what this pins is that the edge lands on the parent's own SubMachine entry, since that is the machine it
-    // hangs off and the scope its target resolves in — decoding it onto the child would round-trip wrong.
+    // The schema carries a sub-machine's OUTGOING (on-Exit) transitions as its onExit list. The edge lands on the
+    // parent's own SubMachine entry, since that is the machine it hangs off and the scope its target resolves in;
+    // decoding it onto the child would round-trip wrong.
 
     [Test]
     public void Walk_SubMachine_Outgoing_Transition_Decodes_Onto_The_Parent()
@@ -733,14 +660,12 @@ public class ControllerDecompileTests
         var sub = root.AddStateMachine("Sub");
         root.AddStateMachineExitTransition(sub);
         var w = ControllerDecompile.Walk(c);
-        Assert.IsEmpty(w.Refusals, "an outgoing sub-machine transition is now in vocabulary");
+        Assert.IsEmpty(w.Refusals, "an outgoing sub-machine transition is in vocabulary");
         var subModel = w.Doc.Layers[0].Root.Machines.Single(m => m.Name == "Sub");
         Assert.AreEqual(1, subModel.OnExit.Count, "the edge decodes onto the parent's SubMachine entry");
         Assert.IsTrue(subModel.OnExit[0].ToExit, "an exit transition decodes as 'to: Exit'");
         Object.DestroyImmediate(c);
     }
-
-    // ---- Review-2 #2: a real state named 'Exit' addressed bare -> a located refusal -----------------------
 
     [Test]
     public void Walk_Target_Named_Exit_Refuses()
@@ -749,15 +674,13 @@ public class ControllerDecompileTests
         c.AddLayer("L");
         var sm = c.layers[0].stateMachine;
         var s = sm.AddState("S");
-        var exit = sm.AddState("Exit"); // a real state literally named 'Exit'
+        var exit = sm.AddState("Exit");
         s.AddTransition(exit);          // same-machine ⇒ bare 'Exit' target collides with the exit keyword
         var w = ControllerDecompile.Walk(c);
         Assert.IsTrue(w.Refusals.Any(r => r.Contains("reserved token 'Exit'")),
             "a bare target named 'Exit' -> located refusal");
         Object.DestroyImmediate(c);
     }
-
-    // ---- Review-2 #4: an UNSAVED controller keeps a standalone .anim as a ref (not inlined) ---------------
 
     [Test]
     public void Walk_Unsaved_Controller_Keeps_Standalone_Clip_As_Ref()
@@ -769,8 +692,6 @@ public class ControllerDecompileTests
             AnimationCurve.Constant(0f, 0.1f, 1f));
         AssetDatabase.CreateAsset(ext, clipPath);
 
-        // In-memory controller (no asset path) referencing a SAVED standalone clip: it must decode as a
-        // `ref:` (its own path), never inlined — the old guard tested the controller's path and inlined it.
         var c = new AnimatorController { name = "Unsaved_Fx" };
         c.AddLayer("L");
         var st = c.layers[0].stateMachine.AddState("S");
@@ -784,22 +705,18 @@ public class ControllerDecompileTests
         AssetDatabase.DeleteAsset(clipPath);
     }
 
-    // ---- Review-2 (docs #1 / code): an IK-pass layer is out of vocabulary -> a located refusal -----------
-
     [Test]
     public void Walk_IkPass_Layer_Refuses()
     {
         var c = new AnimatorController { name = "IkPass_Fx" };
         c.AddLayer("L");
-        var layers = c.layers;      // sm.layers returns a COPY
+        var layers = c.layers;      // c.layers returns a COPY
         layers[0].iKPass = true;
         c.layers = layers;
         var w = ControllerDecompile.Walk(c);
         Assert.IsTrue(w.Refusals.Any(r => r.Contains("IK pass")), "an IK-pass layer -> located refusal");
         Object.DestroyImmediate(c);
     }
-
-    // ---- Review-3 B: a direct state and direct sub-machine sharing a name -> a located refusal ------------
 
     [Test]
     public void Walk_State_And_SubMachine_Same_Name_Refuse()
@@ -814,8 +731,6 @@ public class ControllerDecompileTests
             "a state and a sub-machine of the same name -> located refusal");
         Object.DestroyImmediate(c);
     }
-
-    // ---- Review-3 C: a vendor entry transition carrying mute/solo -> a located refusal (read-side #3) ------
 
     [Test]
     public void Walk_Entry_Transition_With_Mute_Refuses()
@@ -832,7 +747,7 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- Review-5: the decode completeness census refuses non-default unconsumed fields -------------------
+    // ---- the decode completeness census refuses non-default unconsumed fields ---------------------------------
 
     [Test]
     public void Walk_State_CycleOffset_Refuses()
@@ -873,11 +788,11 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // Formerly a census refusal. m_TransitionOffset is now bound by the schema's `offset:`, so what has to be
-    // pinned is the opposite: it decodes to the value AND stops being swept. A widen that bound the field but
-    // left it out of StateTransitionAware would refuse its own freshly-emitted output.
+    // m_TransitionOffset is bound by the schema's `offset:`, so it decodes to the value AND stays out of the
+    // sweep: a widen that bound a field but left it out of StateTransitionAware would refuse its own
+    // freshly-emitted output.
     [Test]
-    public void Walk_Transition_Offset_Decodes_And_Is_No_Longer_Swept()
+    public void Walk_Transition_Offset_Decodes_Without_Refusal()
     {
         var c = new AnimatorController { name = "TransOff_Fx" };
         c.AddLayer("L");
@@ -887,15 +802,14 @@ public class ControllerDecompileTests
         var tr = s.AddTransition(t);
         tr.offset = 0.3f;
         var w = ControllerDecompile.Walk(c);
-        Assert.IsEmpty(w.Refusals, "a non-default transition offset is now in vocabulary");
+        Assert.IsEmpty(w.Refusals, "a non-default transition offset is in vocabulary");
         var decoded = w.Doc.Layers[0].Root.States.Single(x => x.Name == "S").Transitions[0];
         Assert.That(decoded.Offset, Is.EqualTo(0.3f).Within(1e-5f));
         Object.DestroyImmediate(c);
     }
 
-    // A zero offset must stay ABSENT from the model, not decode as an explicit 0 — the emitter only writes
-    // `offset:` when the field is set, so a decoded 0 would add a line to every transition in every vendor
-    // controller and churn the whole corpus's yaml.
+    // The emitter writes `offset:` whenever the field is set, so a decoded 0 would add a line to every transition
+    // in every vendor controller.
     [Test]
     public void Walk_Transition_Zero_Offset_Stays_Absent()
     {
@@ -912,7 +826,6 @@ public class ControllerDecompileTests
     [Test]
     public void Walk_Plain_State_And_Transition_No_Census_Refusals()
     {
-        // The census must not false-positive on a controller whose only non-defaults are consumed fields.
         var c = new AnimatorController { name = "Plain_Fx" };
         c.AddLayer("L");
         var sm = c.layers[0].stateMachine;
@@ -924,8 +837,6 @@ public class ControllerDecompileTests
             "a plain state/transition triggers no census refusal");
         Object.DestroyImmediate(c);
     }
-
-    // ---- a Direct tree's Normalized Blend Values round-trips (not swept-away) --------
 
     [Test]
     public void Walk_Direct_Tree_NormalizedBlendValues_RoundTrips()
@@ -943,13 +854,11 @@ public class ControllerDecompileTests
 
         var w = ControllerDecompile.Walk(emitted.Controller);
         Assert.IsFalse(w.Refusals.Any(r => r.Contains("NormalizedBlendValues")),
-            "normalizedBlendValues is consumed now, not swept-refused");
+            "normalizedBlendValues is consumed, not swept-refused");
         var t2 = w.Doc.Layers[0].Root.States.First(s => s.Name == "S").Motion.Tree;
         Assert.IsTrue(t2.Normalized.HasValue, "the Direct tree's normalized value is decoded");
         Assert.AreEqual(false, t2.Normalized.Value, "the explicit normalized value round-trips (would else reset to the construction default)");
     }
-
-    // ---- an unknown driver ChangeType -> refusal (not dropped from all four buckets) ------
 
     [Test]
     public void Walk_Driver_Unknown_ChangeType_Refuses()
@@ -973,8 +882,6 @@ public class ControllerDecompileTests
             "an unknown driver ChangeType -> located refusal");
     }
 
-    // ---- an unknown AnimatorConditionMode -> refusal (not approximated as Is-true) --------
-
     [Test]
     public void Walk_Unknown_ConditionMode_Refuses()
     {
@@ -991,8 +898,6 @@ public class ControllerDecompileTests
             "an unknown condition mode -> located refusal");
         Object.DestroyImmediate(c);
     }
-
-    // ---- an exotic (auto/clamped-auto) tangent shape -> a located Refusal, not a silent flatten ----
 
     [Test]
     public void ExoticTangentCurve_Refused_NotFlattened()
@@ -1020,10 +925,6 @@ public class ControllerDecompileTests
         Object.DestroyImmediate(c);
     }
 
-    // ---- a WEIGHTED zero-slope curve -> a located Refusal, not folded to flat (weights reshape the
-    //      segment and the [t,v] schema can't express them; matches the tool's weightedMode-significant
-    //      contract elsewhere — CompileClips hashes weightedMode / refuses a weighted edit) ------------
-
     [Test]
     public void WeightedZeroTangentCurve_Refused_NotFoldedToFlat()
     {
@@ -1031,8 +932,9 @@ public class ControllerDecompileTests
         c.AddLayer("L");
         var st = c.layers[0].stateMachine.AddState("S");
         var clip = new AnimationClip { name = "WeightedZero", frameRate = 60f };
-        // Both keys have zero slopes (so the value-only flat test would pass) BUT carry weighted handles
-        // with non-default weights — a weighted flat tangent still eases differently, so this must refuse.
+        // Both keys have zero slopes (so the value-only flat test would pass) BUT carry weighted handles with
+        // non-default weights: a weighted flat tangent still eases differently, and the [t,v] schema can't
+        // express weights.
         var k0 = new Keyframe(0f, 0f) { inTangent = 0f, outTangent = 0f, weightedMode = WeightedMode.Both, inWeight = 0.05f, outWeight = 0.05f };
         var k1 = new Keyframe(0.5f, 1f) { inTangent = 0f, outTangent = 0f, weightedMode = WeightedMode.Both, inWeight = 0.05f, outWeight = 0.05f };
         var curve = new AnimationCurve(k0, k1);
@@ -1048,8 +950,7 @@ public class ControllerDecompileTests
     // ---- path-"" Animator bindings: the declared-param discriminator ------------------------------
     // A muscle curve ("RightHand.Index.1 Stretched") and an AAP write share the binding shape
     // (path "", type Animator); only the declared-parameter set tells them apart. The muscle form
-    // must round-trip as "Animator.<property>" — the bare-name emit is reserved for real params
-    // (bare non-param output was doomed yaml: the compiler refused it as an undeclared binding).
+    // must round-trip as "Animator.<property>" — the bare-name emit is reserved for real params.
 
     private const string MuscleDoc =
         "schema: 1\ncontroller: MuscleRT_Gesture\nbasis: mount-root\nrole: gesture\n" +
@@ -1075,7 +976,6 @@ public class ControllerDecompileTests
             "muscle curve emits the Animator.<property> form, got: " + string.Join(", ", grip.Sets.Keys));
         Assert.IsTrue(grip.Sets.ContainsKey("Aap"), "declared param write stays bare");
 
-        // Fixpoint: serialize -> reparse -> rebuild -> rewalk reproduces the same canonical string.
         var y1 = AnimatorSchemaEmit.Serialize(w.Doc);
         var doc2 = AnimatorSchemaYaml.Parse(y1, "roundtrip");
         ControllerEmit.Build(doc2, out var emitted2);
@@ -1084,15 +984,11 @@ public class ControllerDecompileTests
         Assert.AreEqual(y1, AnimatorSchemaEmit.Serialize(w2.Doc), "muscle-binding doc is on the fixpoint");
     }
 
-    // ---- W8: driver Random carries preventRepeats ------------------------------------------------
-
     [Test]
     public void Walk_Driver_Random_PreventRepeats_Roundtrips()
     {
-        // preventRepeats is the SDK's fourth Random field (drawn by the Inspector for a Random onto an Int).
-        // It used to be dropped on decode, so a vendor's no-repeat roll came back as a plain one — a silent
-        // behavioral change, not a cosmetic one. Assert the VALUE off the recompiled object, because a decode
-        // that captured the key but reset it to the SDK default would still reach a clean textual fixpoint.
+        // Assert the VALUE off the recompiled object, because a decode that captured the key but reset it to the
+        // SDK default would still reach a clean textual fixpoint.
         const string yaml =
             "schema: 1\ncontroller: PrevRep_Fx\nbasis: avatar-root\nrole: fx\n" +
             "parameters:\n  Roll: int\n" +
@@ -1109,7 +1005,6 @@ public class ControllerDecompileTests
         var w = ControllerDecompile.Walk(emitted.Controller);
         Assert.AreEqual(0, w.Refusals.Count, "refusal: " + string.Join(" | ", w.Refusals));
 
-        // Round-trip and read the flag off the SECOND build — the hop the drop used to happen on.
         var doc2 = AnimatorSchemaYaml.Parse(AnimatorSchemaEmit.Serialize(w.Doc), "roundtrip");
         ControllerEmit.Build(doc2, out var emitted2);
         var again = (VRC.SDKBase.VRC_AvatarParameterDriver)
@@ -1120,8 +1015,8 @@ public class ControllerDecompileTests
     [Test]
     public void Walk_Driver_Random_Without_PreventRepeats_Stays_Off_The_Document()
     {
-        // The complement: false is the SDK default, so it must NOT appear in the emitted YAML — otherwise
-        // every existing document churns the first time it round-trips through this build.
+        // false is the SDK default, so it stays off the emitted YAML: writing it would churn every existing
+        // document on its first round-trip.
         const string yaml =
             "schema: 1\ncontroller: PrevRepOff_Fx\nbasis: avatar-root\nrole: fx\n" +
             "parameters:\n  Roll: int\n" +
@@ -1135,18 +1030,15 @@ public class ControllerDecompileTests
             "an unset preventRepeats must stay implicit");
     }
 
-    // ---- W8: intra-bucket driver order is a real dependency, so pin it ----------------------------
-
     [Test]
     public void Walk_Driver_BucketOrder_Survives_A_Round_Trip()
     {
-        // `Copy B<-A; Copy C<-B` reads a parameter the PREVIOUS op wrote, so the two are not commutative —
-        // and both live in the same bucket, which is exactly what DetectDriverOrderLoss's interleave check
-        // cannot see (it fires on the bucket index decreasing, i.e. across change-types). Order is carried
-        // only by Dictionary insertion-order enumeration, on four separate hops: the decode bucket, the YAML
-        // writer, the YAML reader's map, and ControllerEmit's iteration. That is a BCL implementation detail
-        // rather than a documented guarantee, so this test is the contract — swap any hop to a hash-ordered
-        // map and it fails here instead of silently rewriting what a driver does.
+        // `Copy B<-A; Copy C<-B` reads a parameter the PREVIOUS op wrote, so the two are not commutative, and both
+        // live in one bucket, where DetectDriverOrderLoss's interleave check cannot see them (it fires on the
+        // bucket index decreasing). Order is carried only by Dictionary insertion-order enumeration on four hops:
+        // the decode bucket, the YAML writer, the YAML reader's map, and ControllerEmit's iteration. That is a BCL
+        // implementation detail rather than a documented guarantee, so this test is the contract: swap any hop to
+        // a hash-ordered map and it fails here.
         const string yaml =
             "schema: 1\ncontroller: DrvChain_Fx\nbasis: avatar-root\nrole: fx\n" +
             "parameters:\n  A: float\n  B: float\n  C: float\n" +
@@ -1169,14 +1061,11 @@ public class ControllerDecompileTests
             "the same-bucket copy chain must re-emit in authored order; got " + string.Join(", ", chain));
     }
 
-    // ---- W8: a transition carrying BOTH isExit and a destination ----------------------------------
-
     [Test]
     public void Walk_Transition_IsExit_With_Destination_Refuses()
     {
-        // No Inspector authors this, but both setters are public, so a script or a hand-edited asset can.
-        // SetTarget used to take isExit first and return, dropping the destination without a word — a silent
-        // normalization of a contradiction the decoder can neither represent nor adjudicate.
+        // No Inspector authors this, but both setters are public, so a script or a hand-edited asset can. The
+        // decoder can neither represent nor adjudicate the contradiction.
         const string yaml =
             "schema: 1\ncontroller: ExitClash_Fx\nbasis: avatar-root\nrole: fx\n" +
             "parameters:\n  P: float\n" +
@@ -1190,7 +1079,7 @@ public class ControllerDecompileTests
         var tr = emitted.Controller.layers[0].stateMachine.states
             .First(cs => cs.state.name == "S").state.transitions[0];
         Assert.IsNotNull(tr.destinationState, "fixture precondition: the transition has a destination");
-        tr.isExit = true;   // now contradictory
+        tr.isExit = true;
         EditorUtility.SetDirty(tr);
 
         var w = ControllerDecompile.Walk(emitted.Controller);
@@ -1199,17 +1088,9 @@ public class ControllerDecompileTests
         Assert.IsTrue(w.Refusals.Any(r => r.Contains("'T'")), "the refusal names the dropped destination");
     }
 
-    // ---- W8: a refusal location names its layer ---------------------------------------------------
-
     [Test]
     public void Walk_Refusal_Location_Names_Its_Layer()
     {
-        // Refusals are reported as one controller-wide list, and both location vocabularies used to omit the
-        // layer: a root machine rendered as a bare "(root)", a state as "state 'S'". Two layers that each
-        // carry a state of the same name — the ordinary case, every SDK template ships an "Idle" — therefore
-        // produced identical lines. Both layers here are named S on purpose, so ONLY the layer can tell them
-        // apart, and the refusal is raised from a state-scoped site (the vocabulary the original finding
-        // missed; it named PathLabel alone).
         const string yaml =
             "schema: 1\ncontroller: LayerLoc_Fx\nbasis: avatar-root\nrole: fx\n" +
             "parameters:\n  P: float\n" +
@@ -1233,9 +1114,7 @@ public class ControllerDecompileTests
             EditorUtility.SetDirty(drv);
         }
 
-        // Cover BOTH location vocabularies, since they are built by different helpers. The state-scoped
-        // completeness sweep stayed unqualified when this test first shipped — it asserted only
-        // Contains("Alpha") and passed straight over the gap.
+        // Cover BOTH location vocabularies, since StateLabel and MachineLabel build them separately.
         foreach (var layer in emitted.Controller.layers)
         {
             var st = layer.stateMachine.states[0].state;
@@ -1263,23 +1142,18 @@ public class ControllerDecompileTests
             Assert.IsTrue(w.Refusals.Any(r => r.Contains(expected) && r.Contains("machine '(root)'")),
                 "a MACHINE-scoped refusal names layer " + expected + ": " + string.Join(" | ", w.Refusals));
         }
-        // Both labels carry their own quotes, so a caller adding a second pair renders the layer name as
-        // though it were the entity's name — "machine 'layer 'Alpha' (root)'". Pin the shape, not just the
-        // presence of the word.
+        // Both labels carry their own quotes, so a caller adding a second pair renders the layer name as though
+        // it were the entity's name: "machine 'layer 'Alpha' (root)'".
         Assert.IsFalse(w.Refusals.Any(r => r.Contains("'layer ")),
             "a location nested the layer inside another entity's quotes: " + string.Join(" | ", w.Refusals));
     }
-
-    // ---- review: the folded default rung decodes under the SAME guarantees as a ladder rung -------
 
     [Test]
     public void Walk_Default_SubMachine_Rung_Refuses_Mute()
     {
         // A `default:` naming a direct sub-machine is emitted as a trailing unconditional entry rung, which
-        // DecodeMachine folds back into `default:` and skips past DecodeEntryTransition. It used to skip that
-        // method's mute/solo refusal along with it: a MUTED rung — inert in the source — then recompiled as a
-        // LIVE unconditional default, a behavioural rewrite rather than a cosmetic loss, and `default:` has
-        // nowhere to carry mute. The dropped-name Note was copied into that branch; these guards were not.
+        // DecodeMachine folds back into `default:`, skipping DecodeEntryTransition. `default:` has nowhere to carry
+        // mute, so a MUTED rung would recompile as a LIVE unconditional default unless that branch refuses it too.
         const string yaml =
             "schema: 1\ncontroller: DefRungMute_Fx\nbasis: avatar-root\nrole: fx\n" +
             "parameters:\n  P: float\n" +
@@ -1293,7 +1167,6 @@ public class ControllerDecompileTests
         var rung = root.entryTransitions[root.entryTransitions.Length - 1];
         Assert.IsNotNull(rung.destinationStateMachine, "fixture precondition: that rung targets the sub-machine");
 
-        // Clean first — the added guards must not invent a refusal on the ordinary shape.
         Assert.AreEqual(0, ControllerDecompile.Walk(emitted.Controller).Refusals.Count,
             "an unmuted default rung must still decode clean");
 
@@ -1303,7 +1176,6 @@ public class ControllerDecompileTests
         var w = ControllerDecompile.Walk(emitted.Controller);
         Assert.IsTrue(w.Refusals.Any(r => r.Contains("default sub-machine rung carries mute/solo")),
             "a muted default rung -> refusal; got: " + string.Join(" | ", w.Refusals));
-        // Located like every sibling entry refusal, layer included, so one controller-wide list stays readable.
         Assert.IsTrue(w.Refusals.Any(r => r.Contains("transition from Entry in layer [0] 'L'")),
             "the refusal carries the standard located prefix: " + string.Join(" | ", w.Refusals));
     }
@@ -1388,8 +1260,6 @@ public class ControllerDecompileTests
     [Test]
     public void CleanController_Keeps_A_Parameter_Only_A_FaceTrackingSets_Entry_Reads()
     {
-        // The prune deletes every parameter it did not collect, so a set entry's source must count as a reference
-        // or a clean leaves the kept behaviour naming an undeclared parameter.
         var src = AnimatorSchemaYaml.Parse(AnimatorTestHelpers.FtSetsDoc, "test");
         ControllerEmit.Build(src, out var emitted);
         var layers = emitted.Controller.layers;

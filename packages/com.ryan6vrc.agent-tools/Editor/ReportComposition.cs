@@ -10,73 +10,25 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
-    /// <summary>
-    /// Where behaviour comes from on a composed avatar: every animator merged onto it, every parameter's
-    /// declaration and its writers and readers per merged surface, and the menu controls installed from
-    /// every source. One subject in, one digest out.
-    ///
-    /// It exists because the artifacts disagree about scope and no other door crosses them. Deciding
-    /// whether one toggle exists can take five artifacts — a prefab, two controllers merged from different
-    /// components, a menu asset carrying a second YAML document, and a parameters asset — and each of them
-    /// reads perfectly consistent on its own with the wrong answer. <c>ReportGimmick</c> deliberately stops
-    /// at the parameter FIELD and predicts no bake output; <c>CheckAvatar</c> is a <c>Check</c> on reference
-    /// integrity; <c>ReportController</c> sees one controller. This crosses those seams and nothing else.
-    ///
-    /// <b>A Report, never a verdict.</b> The writer set for a parameter is open — menu controls, contacts,
-    /// physbone and raycast suffixes, OSC from outside the avatar entirely — so "nothing writes this" is
-    /// not a claim any static read can make, and every empty cell says so in the cell rather than looking
-    /// like a finding. <c>docs/verify.md</c> owns what a reader may then assert.
-    ///
-    /// <b>Two modes, one door.</b> Plain (default) is an authored census: a pure read, cheap, and honest
-    /// that build-time renames are outside what it can see. <c>bake:true</c> measures the composed truth
-    /// instead, by building a throwaway clone through the real VRC SDK preprocess chain and diffing it
-    /// against that census. The flag only upgrades exactness — same subject, same question — which is why
-    /// this is a <c>Run</c> with a completeness flag and not a <c>Compare</c>: a <c>Compare</c> takes two
-    /// subjects from the caller, and here the caller supplies one and the tool derives the second view.
-    ///
-    /// Boundary against <see cref="AgentInspector"/>: that door dumps a menu asset's raw serialized fields
-    /// generically and leaves decoding to you; this one reports the authored control SET across every
-    /// installer, typed and merged, and dumps no raw fields. Drop to <c>AgentInspector.Run</c> for a
-    /// control's nested structs. Humanoid mapping is not here either — that divergence is
-    /// <c>CheckHumanoidRig.InspectAvatar</c>'s, named in output rather than called, because it lives in
-    /// <c>avatar-tools</c> and the dependency arrow runs the other way.
-    /// </summary>
+    /// <summary>Where behaviour comes from on a composed avatar: every animator merged onto it, every parameter's
+    /// declaration, writers and readers per merged surface, and the menu controls installed from every source.
+    /// Contract: docs/unity-tools.md.</summary>
     [AgentTool]
     public static class ReportComposition
     {
-        /// <summary>Rows past this are in the artifact only — a real avatar's tables run to hundreds of rows
-        /// and the in-band summary is a read budget, not a dump.</summary>
         private const int WindowRows = 12;
 
         internal const string ScopeWriters =
-            "(none among scanned surfaces; menu/contact/physbone/OSC not excluded)";
+            "(none among scanned surfaces; menu/contact/physbone/raycast/OSC not excluded)";
         internal const string ScopeAuthoredNames =
             "authored names; the build may rewrite them — bake:true resolves";
 
-        /// <summary>Digest the composition at <paramref name="avatarRoot"/> (a scene hierarchy path).
-        /// <paramref name="bake"/> measures composed truth off a fresh build instead of reporting the
-        /// authored census — it creates and destroys a clone, so it mutates editor state, and on a complex
-        /// avatar with an optimizer installed it has been measured at roughly half a minute; it is
-        /// two-phase for that reason (see <see cref="Verify"/>). It also publishes a <c>## Geometry</c> section —
-        /// triangles per renderer, authored against built — which is free at this scale: one index-count read
-        /// per submesh, measured at 0.04 ms per side on a 23-renderer composed avatar whose bake took ~16 s.
-        /// It also publishes a <c>## Performance</c> section, the SDK's own scan of the clone — every rated stat,
-        /// the SDK's rating per category, and each physbone chain's share of the transform budget. Its
-        /// <c>## Built menu</c> section maps each built control's path to the parameter and value it writes,
-        /// which the authored Menu controls table cannot: an auto-named Modular Avatar toggle has no name
-        /// until the build. Edit mode only.
-        /// Default off: cheap and safe is the default,
-        /// exactness is opt-in. <paramref name="paramFilter"/> narrows every parameter table to names
-        /// containing it, for chasing one parameter without paying for the whole avatar.
-        /// <para><paramref name="probe"/> is for a read of the built clone that no section makes: bake mode
-        /// hands it the clone and prints what it returns under <c>## Probe</c>. It runs on a later editor tick,
-        /// after this call has returned <c>PENDING</c> and after every section has been read, and the clone and
-        /// the build's generated assets are destroyed as soon as it returns — so return text, never an object.
-        /// Read-only against the clone is the contract; nothing enforces it.</para></summary>
+        /// <summary>Digest the composition at <paramref name="avatarRoot"/>. <paramref name="bake"/> measures it off a
+        /// fresh build on a throwaway clone and returns <c>PENDING</c>; <see cref="Verify"/> reads the result.
+        /// <paramref name="probe"/> must only read the clone, and nothing enforces that.</summary>
         public static string Run(string avatarRoot, bool bake = false, string paramFilter = null,
                                  Func<GameObject, string> probe = null)
         {
-            // First, so the refusal needs no avatar: a probe is handed the built clone, and plain mode builds none.
             if (probe != null && !bake)
                 return Refuse("probe: runs against the built clone, which only bake:true makes — call Run(avatarRoot, bake:true, probe: …)");
             var handle = SceneHandle.Resolve(avatarRoot);
@@ -86,8 +38,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (descriptor == null)
                 return Refuse("'" + avatarRoot + "' has no VRCAvatarDescriptor — Run expects the avatar (descriptor) root");
 
-            // In play the scene root IS the play build, with its own animation running: re-baking it measures
-            // neither the authored avatar nor the upload.
             if (bake && EditorApplication.isPlayingOrWillChangePlaymode)
                 return Refuse("bake:true is edit-mode only — the avatar in play is already the play build; exit play, then call again");
 
@@ -96,12 +46,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             return CompositionBake.Begin(root, census, paramFilter, probe);
         }
 
-        /// <summary>Re-read the verdict of a <c>bake:true</c> run from its artifact. The bake outlives the
-        /// MCP transport window, so <see cref="Run"/> returns a stable path before doing the work and the
-        /// result is read back here — a timed-out call loses nothing and must not be re-run.</summary>
+        /// <summary>Re-read the result of a <c>bake:true</c> run from its artifact.</summary>
         public static string Verify(string avatarRoot)
         {
-            // In play the handle resolves to the play build, a different object from the one the bake was keyed on.
             if (EditorApplication.isPlayingOrWillChangePlaymode)
                 return Refuse("Verify is edit-mode only — in play the root resolves to the play build, not the object the bake ran on; exit play, then call again");
             var handle = SceneHandle.Resolve(avatarRoot);
@@ -123,17 +70,13 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal class ParamRow
         {
             public string Name;
-            /// <summary>Every asset that declares this name. A list, not a slot: two FullControllers each
-            /// shipping a parameters asset that declares one name is a composed-scope fact, and overwriting
-            /// a single field reports whichever surface happened to be walked last.</summary>
             public readonly List<string> DeclaredAt = new List<string>();
             public string Declared => DeclaredAt.Count == 0
                 ? "(undeclared on any expression parameters asset reached here)"
                 : string.Join("; ", DeclaredAt);
-            /// <summary>False for a name that no expression-parameters asset and no controller declares —
-            /// a physbone suffix or a menu sub-parameter the runtime writes. Bake mode must NOT diff these:
-            /// the built side is a declaration set, so an undiffable name would land in `dropped`, whose
-            /// plain reading is "the build removed it".</summary>
+            /// <summary>False for a name no expression-parameters asset or controller declares: a physbone or raycast
+            /// suffix or a menu sub-parameter the runtime writes. Bake mode must not diff these: the built side is a declaration set,
+            /// so an undiffable name would land in `dropped`, whose plain reading is "the build removed it".</summary>
             public bool Diffable;
             public string Type = "—";
             public string Synced = "—";
@@ -145,8 +88,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         internal class MenuRow
         {
-            public string Source;     // where the control was installed from
-            public string Path;       // menu path as authored
+            public string Source;
+            public string Path;
             public string ControlName;
             public string Type;
             public string Parameter;
@@ -159,11 +102,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             public readonly List<MenuRow> Menu = new List<MenuRow>();
             public readonly List<string> Optimizers = new List<string>();
             public readonly List<string> Notes = new List<string>();
-            public readonly List<string> Other = new List<string>(); // tier-2 census: components no table read
+            public readonly List<string> Other = new List<string>();
             public int MenuAssetsWalked;
-            // Surfaces that really mount a controller no table below could read. Counted apart from
-            // Surfaces so `surfaces=N` keeps meaning "walked", and reported on the summary so a bare
-            // surfaces=0 cannot be read as "nothing merges here".
             public int UnlintableSurfaces;
         }
 
@@ -217,9 +157,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 foreach (var kv in usage.Reads) Row(kv.Key).Readers.Add(where + ": " + string.Join(", ", kv.Value));
             }
 
-            // Declared columns, mirroring the expression-parameters field grammar rather than inventing one.
             CollectDeclared(descriptor, surfaces, Row, res);
-            // Menu controls are writers too, and the commonest one an animator-only read misses entirely.
             CollectMenu(descriptor, surfaces, res, Row);
             CollectDynamicsWriters(root, Row);
             CollectOptimizers(root, res);
@@ -257,16 +195,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (s.Site == null) continue;
                 foreach (var ep in VrcfParamAssets(s.Site)) Ingest(ep, s.Label);
             }
-            // A controller parameter with no expression-parameters row is not an error — it may be a
-            // driver-only scratch value — but it IS the shape a reader mistakes for "undeclared/broken", so
-            // the row exists and says which asset did not carry it.
+            // A controller parameter with no expression-parameters row is not an error: it may be a driver-only scratch value.
             foreach (var s in surfaces)
             {
                 if (s.Controller == null || s.Controller.parameters == null) continue;
                 foreach (var p in s.Controller.parameters)
                 {
                     var r = row(p.name);
-                    r.Diffable = true; // a controller declares it, so the built controllers can carry it
+                    r.Diffable = true;
                     if (r.Type == "—") r.Type = p.type.ToString() + " (controller only)";
                 }
             }
@@ -274,8 +210,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                         + ScopeAuthoredNames + ".");
         }
 
-        /// <summary>Every VRCExpressionParameters a VRCFury FullController installs, read untyped so this
-        /// package keeps referencing no vendor assembly.</summary>
         private static IEnumerable<VRCExpressionParameters> VrcfParamAssets(Component site)
         {
             SerializedObject so;
@@ -298,9 +232,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         private static void CollectMenu(VRC.SDK3.Avatars.Components.VRCAvatarDescriptor descriptor,
             List<MergeSurfaces.Surface> surfaces, CensusResult res, Func<string, ParamRow> row)
         {
-            // Keyed on (asset, source): deduping the WALK is right, but dropping the second installer's
-            // provenance is not — a submenu asset two outfits both install is exactly the composed-scope
-            // fact this table exists to carry, and provenance is the product.
+            // Keyed on (asset, source), so a submenu asset two outfits both install keeps both installers' provenance.
             var seenAssets = new HashSet<(int asset, string source)>();
             void Walk(VRCExpressionsMenu menu, string source, string path, int depth)
             {
@@ -333,7 +265,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (s.Site == null) continue;
                 foreach (var (menu, prefix) in VrcfMenus(s.Site)) Walk(menu, s.Label, prefix, 0);
             }
-            // MA installs menus through its own components, which reference nothing this package can type.
             foreach (var c in descriptor.gameObject.GetComponentsInChildren<Component>(true))
             {
                 if (c == null) continue;
@@ -350,10 +281,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        /// <summary>An MA MenuItem authors one control inline rather than pointing at an asset, so it is read
-        /// field by field. This is the read <c>ReportGimmick</c> deliberately does not do — its census peeks
-        /// one struct level and stops above the driven parameter, which is exactly the field that decides
-        /// whether a toggle exists.</summary>
+        /// <summary>An MA MenuItem authors one control inline rather than pointing at an asset, so it is read field by field.</summary>
         private static void ReadMenuItem(Component c, CensusResult res, Func<string, ParamRow> row)
         {
             SerializedObject so;
@@ -398,10 +326,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Non-animator writers ─────────────────────────────────────────────────────────────────────
 
-        /// <summary>Contacts, physbones and raycasts write parameters no controller mentions. The physbone
-        /// suffix family is the one an animator-only read never sees: the component declares a PREFIX and
-        /// the runtime writes prefix+suffix, so the parameter a controller reads appears nowhere in the
-        /// scene as a literal string.</summary>
+        /// <summary>A physbone or raycast declares a PREFIX and the runtime writes prefix+suffix, so the parameter a
+        /// controller reads appears nowhere in the scene as a literal string.</summary>
         private static void CollectDynamicsWriters(GameObject root, Func<string, ParamRow> row)
         {
             foreach (var c in root.GetComponentsInChildren<Component>(true))
@@ -414,6 +340,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                     foreach (var suffix in new[] { "_IsGrabbed", "_IsPosed", "_Angle", "_Stretch", "_Squish" })
                         row(pb.parameter + suffix).Writers.Add(where + " (physbone suffix)");
                 }
+                else if (c is VRC.SDK3.Avatars.Components.VRCRaycast ray)
+                {
+                    if (string.IsNullOrEmpty(ray.Parameter)) continue;
+                    foreach (var suffix in new[] { "_Hit", "_Ratio", "_Distance" })
+                        row(ray.Parameter + suffix).Writers.Add(where + " (raycast suffix)");
+                }
                 else if (c is VRC.SDK3.Dynamics.Contact.Components.VRCContactReceiver cr)
                 {
                     if (!string.IsNullOrEmpty(cr.parameter)) row(cr.parameter).Writers.Add(where + " (contact receiver)");
@@ -423,9 +355,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static void CollectOptimizers(GameObject root, CensusResult res)
         {
-            // Reported, never controlled: the full chain is what ships, so an agent wanting a pre-optimizer
-            // view disables these itself before invoking. Naming them is the one honesty measure a bake owes
-            // its reader — a table taken through an optimizer is not the authored shape.
+            // Reported, never controlled: an agent wanting a pre-optimizer view disables these itself before invoking.
             foreach (var c in root.GetComponents<Component>())
             {
                 if (c == null) continue;
@@ -435,8 +365,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        /// <summary>Tier-2 census: every non-transform component under the root that no table above read, by
-        /// type, so <c>other=0</c> genuinely means empty rather than meaning nobody looked.</summary>
+        /// <summary>Tier-2 census: every non-transform component under the root that no table above read, by type.</summary>
         private static void CollectOther(GameObject root, CensusResult res)
         {
             var counts = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -462,6 +391,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             || fullName == "VRC.SDK3.Avatars.Components.VRCAvatarDescriptor"
             || fullName == "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone"
             || fullName == "VRC.SDK3.Dynamics.Contact.Components.VRCContactReceiver"
+            || fullName == "VRC.SDK3.Avatars.Components.VRCRaycast"
             || fullName == "UnityEngine.Animator";
 
         // ── Emit ─────────────────────────────────────────────────────────────────────────────────────
@@ -556,9 +486,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 sb.Append("\n## Probe\n\n");
                 foreach (var l in probeSection) sb.Append(l).Append('\n');
             }
-            // Scope is emitted in BOTH modes. It used to be the `else` arm of the bake section, so a bake
-            // artifact — the one whose heading promises composed truth — lost every scope rule while still
-            // rendering the whole Parameters table above, including its authored-only `synced` column.
             sb.Append("\n## Scope\n\n");
             if (bakeSection == null)
                 sb.Append("Plain mode reports what is AUTHORED. It makes no namespace-resolution claim: ").Append(ScopeAuthoredNames).Append(".\n");

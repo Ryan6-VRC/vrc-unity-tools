@@ -5,8 +5,6 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// Behavioral tests for RepathClips. Throwaway on-disk assets under an owned scratch path; assert on the
-// returned one-line summary + post-mutation clip bindings. Headless via tools/run-editmode-tests.ps1.
 public class RepathClipsTests
 {
     const string Root = "Assets/Agent/Scratch/RepathTests_NUnit";
@@ -64,9 +62,8 @@ public class RepathClipsTests
         string s = RepathClips.Run(ctrl, new[] { "Armature/Hips" }, new[] { "Armature/Pelvis" });
         StringAssert.Contains("=> PASS", s);
         Assert.AreEqual(2, AnimatorTestHelpers.Count(s, "bindingsRewritten"), "Hips + Hips/Spine, not HipsFoo");
-        // strict Count (require the token): the write path emits writeLandedFailures unconditionally
-        // (RepathClips.cs), so a refactor that dropped the token must fail loud, not silently weaken the
-        // read-back's happy path — which this rewrite is.
+        // Count is strict: the write path always emits writeLandedFailures, so a refactor that dropped the
+        // token fails here instead of silently weakening the read-back.
         Assert.AreEqual(0, AnimatorTestHelpers.Count(s, "writeLandedFailures"));
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(clip, "Armature/Pelvis"));
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(clip, "Armature/Pelvis/Spine"));
@@ -85,10 +82,9 @@ public class RepathClipsTests
         StringAssert.Contains("curve collision", fail);
         Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(clip, "A"), "nothing rewritten on a refused collision");
 
-        // force overrides the collision GUARD, but the write-landed read-back is unconditional (never
-        // bypassed by force — see RepathClips.cs). A genuine 2-sources-into-1-target collapse is lossy
-        // (only the last-written curve survives at T), so the read-back correctly flags a content
-        // mismatch and the run still FAILs, now via the write-landed guard instead of the collision guard.
+        // force overrides the collision GUARD but never the write-landed read-back. A 2-sources-into-1-target
+        // collapse is lossy (only the last-written curve survives at T), so the read-back flags a content
+        // mismatch and the run still FAILs.
         LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("write did not land"));
         string forced = RepathClips.Run(ctrl, new[] { "A", "B" }, new[] { "T", "T" }, force: true);
         StringAssert.Contains("curve collision override (force)", forced);

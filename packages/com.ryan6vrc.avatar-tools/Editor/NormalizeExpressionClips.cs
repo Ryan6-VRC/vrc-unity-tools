@@ -28,8 +28,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 var c = AssetDatabase.LoadAssetAtPath<AnimationClip>(p);
                 if (c == null) continue;
-                // Only standalone editable .anim assets can be persisted; an imported (FBX-embedded)
-                // or read-only clip would silently not save — refuse rather than report a false PASS.
                 if (!p.EndsWith(".anim", System.StringComparison.OrdinalIgnoreCase)
                     || AssetDatabase.IsSubAsset(c)
                     || (c.hideFlags & HideFlags.NotEditable) != 0)

@@ -8,38 +8,20 @@ using Ryan6Vrc.AgentTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
-    /// <summary>
-    /// Renders a baked-avatar thumbnail via a dedicated off-screen camera rather than RenderAvatar's
-    /// Scene-View window-grab, because baking (the VRC SDK preprocess chain,
-    /// <c>VRCBuildPipelineCallbacks.OnPreprocessAvatar</c>) gives real resolved meshes that a fixed-size
-    /// off-screen camera can render at a guaranteed fixed resolution — RenderAvatar never bakes, so it must
-    /// composite through the Scene View instead, capped to the pane's size and showing NDMF preview
-    /// proxies. The bake is the FULL SDK chain, not NDMF alone, so the portrait shows the avatar that
-    /// actually uploads (optimizers included).
-    /// <para>This is the <b>edit-mode front-end</b> — the default, deterministic, single synchronous call.
-    /// The venue-independent camera solve, capture core, and pose/expression resolvers live in
-    /// <see cref="RenderThumbnailCore"/>; the settled-dynamics/resolved-FX <b>play-mode</b> front-end is
-    /// <see cref="RenderThumbnailPlay"/>. Edit mode does not simulate physbones (they need the player loop)
-    /// and applies the expression by direct blendshape write — both correct here, neither possible in play,
-    /// which is exactly why play is a separate front-end on the same spine.</para>
-    /// </summary>
+    /// <summary>Edit-mode portrait PNG of an avatar after the full VRC SDK preprocess chain, so it shows what
+    /// uploads, optimizers included. A bake gives resolved meshes that an off-screen camera renders at a fixed
+    /// resolution; RenderAvatar never bakes, so it composites through the Scene View, capped to the pane's size
+    /// and showing NDMF preview proxies.
+    /// Contract: docs/unity-tools.md.</summary>
     [AgentTool]
     public static class RenderThumbnail
     {
-        // 3-point directional rig — cosmetic TASTE DEFAULTS, named + here so the operator tunes them after
-        // seeing real output. Edit-mode-only: a NewPreviewScene has no lights, so this tool supplies them.
-        // (Play mode renders in the scratch scene under the operator's OWN lights/backdrop, so it has no rig.)
-        // For a directional light only rotation matters. The rig is CAMERA-relative: the eulers below are
-        // authored for a camera on the avatar's +Z side, and the holder is yawed to match the solved camera
-        // (RenderThumbnailCore.CameraSolution.LightHolderRotation), so orbiting never lights a shot from
-        // behind. From that camera, screen-left = +X world and screen-right = -X world. Shadows off, and
-        // MEASURED so, not assumed: lilToon/Poiyomi gate shadow-receiving behind material toggles vendors
-        // rarely enable, so a cast shadow is invisible on the toon shaders that dominate — enabling it only
-        // costs a shadow-map pass and risks artifacts for no visible gain (probed on lilToon + Poiyomi,
-        // key-only and full-rig, hand-near-face poses). Total intensity 1.4, validated against real lilToon +
-        // Poiyomi renders: neither clips at 1.4 with allowHDR off (the old 2.7 total clipped faces to flat
-        // white), and it reads a touch poppier than the 1.2 it replaced. The ratio key:fill:rim is held; the
-        // total is what was swept.
+        // 3-point directional rig with cosmetic defaults: a NewPreviewScene has no lights, so this tool supplies
+        // them (play mode renders under the scene's own lights). Camera-relative: the eulers are authored for a
+        // camera on the avatar's +Z side, where screen-left = +X world, and the holder is yawed to match the
+        // solved camera. Shadows stay off because lilToon and Poiyomi gate shadow-receiving behind material
+        // toggles vendors rarely enable, so a cast shadow is invisible on them and only costs a shadow-map
+        // pass. Neither shader clips at the total intensity of 1.4 with allowHDR off.
         private const float KeyIntensity = 0.8167f;
         private static readonly Vector3 KeyEuler = new Vector3(40f, 220f, 0f);   // key : front-upper-left
         private const float FillIntensity = 0.35f;
@@ -47,9 +29,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private const float RimIntensity = 0.2333f;
         private static readonly Vector3 RimEuler = new Vector3(30f, 340f, 0f);   // rim : behind + above
 
-        // Cached once — EditorSceneManager.ClearSceneDirtiness is internal, reflected to restore a scene
-        // that was clean at snapshot. Null means the API drifted; teardown surfaces that (fail-loud) rather
-        // than silently leaving a scene dirty.
+        // Internal API, reflected to restore a scene that was clean at snapshot. Null means it drifted, which
+        // teardown reports rather than leaving a scene silently dirty.
         private static readonly System.Reflection.MethodInfo ClearSceneDirtinessMethod =
             typeof(UnityEditor.SceneManagement.EditorSceneManager).GetMethod(
                 "ClearSceneDirtiness",
@@ -58,9 +39,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>
         /// Render a portrait PNG of the baked <paramref name="target"/> avatar at
         /// <see cref="RenderThumbnailCore.CaptureWidth"/>×<see cref="RenderThumbnailCore.CaptureHeight"/> and return a
-        /// one-line verdict whose <c>png=</c> trailer is the written path. <paramref name="whatIf"/>
-        /// preflights (resolve target, assert a VRC_AvatarDescriptor, resolve <paramref name="pose"/>)
-        /// and returns without baking or touching the project.
+        /// one-line verdict whose <c>png=</c> trailer is the written path.
         /// </summary>
         /// <param name="target">avatar root: scene hierarchy path, instance id, or name (refused if not unique).</param>
         /// <param name="pose">null =&gt; floor (unposed); a bundled name (the <c>Editor/Poses/RTPose_*</c>
@@ -69,8 +48,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// on the baked FX controller (a gesture slot such as <c>Open</c>/<c>Peace</c>), or a clip asset
         /// path/GUID, whose blendShape curves are composited with <paramref name="pose"/>. Resolved after
         /// the bake — read the controller with ReportController to see what a given avatar offers.</param>
-        /// <param name="framing">"bust" | "half" | "full" — the subject height the frame covers. The
-        /// camera distance is solved from it and <paramref name="fov"/>, so the two are independent.</param>
+        /// <param name="framing">"bust" | "half" | "full": the subject height the frame covers.</param>
         /// <param name="bg">null =&gt; default backdrop; "#RRGGBB" =&gt; solid; "#TOP:#BOTTOM" =&gt;
         /// vertical two-stop gradient.</param>
         /// <param name="fov">vertical field of view in degrees (10–90). Changes the LOOK, not the framing:
@@ -81,9 +59,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// toward world +X (screen-left).</param>
         /// <param name="whatIf">preflight only: resolve target/descriptor/pose, report, bake nothing.
         /// <paramref name="expression"/> is echoed unresolved — it needs the baked controller.</param>
-        /// <param name="zoom">scale on the framing's span (0.6–1.6): &gt;1 tighter, &lt;1 wider. Framing
-        /// scale only — perspective is <paramref name="fov"/>'s. Jointly bounded: zoom × tan(fov/2) ≤ 1, the
-        /// closest shot fov 90 already reaches, so a high zoom at a wide fov is refused.</param>
+        /// <param name="zoom">scale on the framing's span (0.6–1.6): &gt;1 tighter, &lt;1 wider. Jointly bounded:
+        /// zoom × tan(fov/2) ≤ 1, the closest shot fov 90 already reaches, so a high zoom at a wide fov is refused.</param>
         /// <param name="pitch">camera elevation offset in degrees (±20), added to head-follow: positive =
         /// camera higher, looking down.</param>
         /// <param name="headroom">aim shift as a fraction of the framed span (±0.3): positive opens more frame
@@ -110,9 +87,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (descriptor == null)
                 return Fail(label, "no VRC_AvatarDescriptor on '" + label + "'");
 
-            // Validate framing + bg + camera up front so BOTH whatIf and the render path reject bad inputs
-            // before proceeding — a whatIf WOULD-RENDER must never precede an immediate render FAIL on the
-            // same inputs.
             float span, aimDrop;
             try { RenderThumbnailCore.FramingGeometry(framing, out span, out aimDrop); }
             catch (ArgumentException ex) { return Fail(label, ex.Message); }
@@ -122,9 +96,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (bg != null && !RenderThumbnailCore.TryParseBg(bg, out bgTop, out bgBottom))
                 return Fail(label, "unparseable bg '" + bg + "' — expected #RRGGBB, #RRGGBBAA, or #TOP:#BOTTOM");
 
-            // Bounded because the distance solve goes as 1/tan(fov/2): at 90 a bust frame puts the camera
-            // 0.23 m from the view point, inside the hair mesh, which renders as hair interior and would
-            // sail past the empty-frame guard.
+            // Bounded because the camera closes in as 1/tan(fov/2): any nearer than fov 90 puts it inside the hair
+            // mesh, which renders as hair interior and passes the empty-frame guard.
             if (!(fov >= RenderThumbnailCore.MinFov && fov <= RenderThumbnailCore.MaxFov))
                 return Fail(label, "fov " + fov.ToString(CultureInfo.InvariantCulture) + " out of range — expected "
                     + RenderThumbnailCore.MinFov.ToString(CultureInfo.InvariantCulture) + "–"
@@ -144,8 +117,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return Fail(label, poseErr);
 
                 string poseToken = string.IsNullOrEmpty(pose) ? "floor" : pose;
-                // Not preflighted: an expression resolves against the BAKED controller, which whatIf by
-                // definition does not have. Echoed so the caller can see what will be attempted.
                 string exprToken = string.IsNullOrEmpty(expression) ? "none" : expression + " (at bake)";
                 string ok = string.Format(CultureInfo.InvariantCulture,
                     "[RenderThumbnail] Render {0} whatIf pose={1} expression={2} framing={3} {4} descriptor=OK => WOULD-RENDER (no bake)",
@@ -158,8 +129,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!RenderThumbnailCore.ResolvePose(pose, out AnimationClip poseClip, out string renderPoseErr))
                 return Fail(label, renderPoseErr);
             bool wantExpression = !string.IsNullOrEmpty(expression);
-            // poseName is the ORIGINAL pose argument (for verdict display), not the resolved asset path —
-            // matches the whatIf branch's poseToken convention above. Same for expressionName.
             string poseName = string.IsNullOrEmpty(pose) ? "floor" : pose;
             string expressionName = string.IsNullOrEmpty(expression) ? "none" : expression;
 
@@ -174,65 +143,48 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var preRootIds = new HashSet<int>();
             foreach (var go in targetScene.GetRootGameObjects()) preRootIds.Add(go.GetInstanceID());
             var savedSelection = Selection.objects;
-            // activeObject (not activeGameObject): restoring the latter would null a non-GameObject selection
-            // (an asset/material — common in this workflow). Snapshot AnimationMode too, so teardown stops it
-            // only when WE started it — never ending an operator's in-progress Animation-window recording.
+            // activeObject, not activeGameObject: restoring the latter would null a non-GameObject selection.
+            // AnimationMode is snapshotted so teardown stops it only when this run started it, never ending an
+            // operator's Animation-window recording.
             UnityEngine.Object savedActive = Selection.activeObject;
             bool animModeAtStart = AnimationMode.InAnimationMode();
 
             Scene preview = default;
             GameObject baked = null;
-            // Declared out here, not in a `using`: the scope must be disposed INSIDE the teardown below (so the
-            // SDK pairing still fires last, after the preview scene closes) while its CleanupNote is read AFTER
-            // that, when the verdict is assembled. A using-block can give one or the other, not both.
+            // Not in a `using`: the scope is disposed inside the teardown, after the preview scene closes, while
+            // its CleanupNote is read later, when the verdict is assembled.
             AvatarBakeScope bake = null;
             string result = null;      // non-null on the silhouette-fail / non-success paths only
             string prefix = null;      // the OK verdict head, consumed after teardown once residualNote is known
             string pngPath = null;     // the written PNG path, ditto
             string residualNote = "";
 
-            // OUTER try — converts any exception from the pipeline (broken rig, null bake, non-humanoid clip)
-            // into a Fail verdict, the house convention. Its catch sits OUTSIDE the inner try/finally, so
-            // teardown runs and populates residualNote BEFORE the catch builds its return string.
             try
             {
             try
             {
-                // ---- Step 2: unique private clone -> bake (the non-destructiveness keystone) ----
-                // agent-tools' AvatarBake owns the door and why it is this one, not ManualProcessAvatar.
-                // The GUID suffix makes any generated-asset subfolder provably exclusive to this run
-                // (regardless of timer resolution), so a pre-existing-folder wholesale-delete can never
-                // touch a user's kept bake.
+                // ---- clone and bake ----
                 string stamp = Guid.NewGuid().ToString("N").Substring(0, 8);
                 bake = AvatarBake.Begin(root, root.name + "__rt_" + stamp);
                 if (!bake.Ok)
                 {
-                    // The stage comes from the scope, never composed here: it is the only thing that says
-                    // WHICH failure this was, and a hard-coded refusal string would report a destroyed root
-                    // or a setup throw as a build hook's refusal, pointing the reader at a console reason
-                    // nobody logged.
                     string why = bake.DescribeFailure();
                     if (bake.Failure != null)
-                        // Chained AND spelled into the message: the outer catch formats the verdict from the
-                        // OUTER exception, so an unspelled inner type reaches the console but never the
-                        // returned line — which is the half a caller reads.
+                        // Spelled into the message as well as chained: the outer catch formats the verdict from
+                        // the OUTER exception, so an unspelled inner type never reaches the returned line.
                         throw new InvalidOperationException(
                             "VRC build preprocess failed on '" + label + "' — " + why, bake.Failure);
                     throw new InvalidOperationException(
                         "VRC build preprocess refused '" + label + "' — " + why
-                        // Only claimable when a hook actually ran: a setup failure says nothing about
-                        // whether the avatar would upload.
                         + (bake.EnteredChain ? " The avatar would not upload in this state either." : ""));
                 }
                 baked = bake.Clone;
 
-                // ---- Step 3: preview scene ----
+                // ---- preview scene and lights ----
                 preview = UnityEditor.SceneManagement.EditorSceneManager.NewPreviewScene();
                 SceneManager.MoveGameObjectToScene(baked, preview);
 
-                // ---- Step 4: 3-point rig IN the preview scene (NO RenderSettings writes — those are global
-                // and would leak into + dirty the live scene; CAU stays lights-only for this reason). The
-                // camera's SolidColor clear is the background (no backdrop quad in v1). ----
+                // Lights only, no RenderSettings: those are global and would leak into and dirty the live scene.
                 var lightHolder = EditorUtility.CreateGameObjectWithHideFlags("__rt_lights", HideFlags.DontSave);
                 SceneManager.MoveGameObjectToScene(lightHolder, preview);
 
@@ -253,24 +205,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 MakeLight("__rt_fill", FillIntensity, FillEuler);
                 MakeLight("__rt_rim", RimIntensity, RimEuler);
 
-                // ---- Step 5: view point, then pose ----
-                // The view point (the creator-authored viewball) is the camera's target. It is computed on
-                // EVERY path — the floor path is the default and must keep rendering on a non-humanoid rig,
-                // which has no head bone — and it needs no Animator: ViewPosition is root-local.
+                // ---- view point, then pose ----
+                // The view point (the creator-authored viewball) is the camera's target. It needs no Animator:
+                // the default floor path must keep rendering on a non-humanoid rig, which has no head bone.
                 var descriptorBaked = baked.GetComponent<VRC.SDKBase.VRC_AvatarDescriptor>();
                 if (descriptorBaked == null)
                     throw new InvalidOperationException("baked clone has no VRC_AvatarDescriptor — bake dropped it");
 
-                // Pose-INDEPENDENT subject scale. Deliberately not the posed view point's world height: that
-                // drops when the avatar sits, which would shrink the span on exactly the seated poses and
-                // destroy framing comparability across the library. lossyScale because span feeds a world
-                // metre distance and VRChat avatars are routinely scaled at the root.
+                // Subject scale is pose-independent: SolveCamera takes ViewPosition.y and the root's lossyScale,
+                // never the posed view point's world height, which drops when the avatar sits and would shrink
+                // the span on exactly the seated poses. This product only gates on a usable value.
                 float viewHeight = descriptorBaked.ViewPosition.y * baked.transform.lossyScale.y;
                 Vector3 viewpoint = baked.transform.TransformPoint(descriptorBaked.ViewPosition);
-                // Degenerate viewball or a zero-scaled parent collapses span AND distance to 0: the camera
-                // lands exactly on `aim`, LookRotation gets a zero vector, and the run would surface as
-                // "nothing drew" — naming the wrong cause. A misplaced viewball is the operator's to see; an
-                // unusable one is ours to name.
                 if (!(viewHeight > 0.01f))
                     throw new InvalidOperationException(
                         "unusable view height " + viewHeight.ToString("0.###", CultureInfo.InvariantCulture)
@@ -279,10 +225,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         + " times root scale " + baked.transform.lossyScale.y.ToString("0.###", CultureInfo.InvariantCulture)
                         + "; the camera solve has no subject scale to work from");
 
-                // A resolved pose is SAMPLED AND HELD here: StopAnimationMode is deliberately NOT called
-                // before cam.Render() below — EndSampling leaves the pose applied, it does not revert it.
-                // Reverting happens once, defensively, in the outer teardown `finally` (below) after capture,
-                // so a throw mid-sampling still can't leak animation-mode state.
+                // A resolved pose is sampled and held: EndSampling leaves it applied, so StopAnimationMode must
+                // not run before the capture. Teardown stops it.
                 float headYaw = 0f, headPitch = 0f;   // both exactly zero on the floor path
                 if (poseClip != null)
                 {
@@ -291,8 +235,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         throw new InvalidOperationException(
                             "baked clone has no Animator — cannot sample pose '" + poseName + "'");
                     if (!animator.isHuman)
-                        // Generic rig: GetBoneTransform(Head) is null and SampleAnimationClip is a silent no-op,
-                        // yet the verdict would still claim pose=<name>. Fail loud instead (outer catch -> Fail).
+                        // On a generic rig GetBoneTransform(Head) is null and SampleAnimationClip silently does
+                        // nothing, yet the verdict would still claim pose=<name>.
                         throw new InvalidOperationException(
                             "baked avatar '" + label + "' is not humanoid — cannot sample pose '" + poseName + "'");
 
@@ -305,9 +249,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         throw new InvalidOperationException(
                             "baked avatar '" + label + "' has no Head bone — cannot aim a posed portrait");
 
-                    // Re-parent the view point onto the head so it follows the head's TRANSLATION AND
-                    // ROTATION through the pose. Eye bones are not used: many rigs lack them, and a bake can
-                    // rename them, whereas Head is mandatory on the humanoid rig asserted above.
+                    // The view point rides the head through the pose. Head, not eye bones: many rigs lack them
+                    // and a bake can rename them, whereas Head is mandatory on a humanoid rig.
                     Vector3 viewInHead = headBone.InverseTransformPoint(viewpoint);
                     Quaternion restHeadLocal = Quaternion.Inverse(baked.transform.rotation) * headBone.rotation;
 
@@ -318,21 +261,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                     viewpoint = headBone.TransformPoint(viewInHead);
 
-                    // Head facing as a DELTA FROM BIND, in the root's basis — rig-orientation-invariant (see
-                    // RenderThumbnailCore.HeadFacing). This is the venue-independent extraction; only the way
-                    // the head got posed (AnimationMode here vs Base-layer injection in play) differs.
                     RenderThumbnailCore.HeadFacing(baked.transform.rotation, headBone, restHeadLocal,
                         out headYaw, out headPitch);
                 }
 
-                // ---- Step 5b: expression, applied AFTER the pose and deliberately NOT through the
-                // animation system. A second SampleAnimationClip re-runs the Animator's humanoid solver
-                // and PARTIALLY UNDOES the pose — the left upper arm moved (301.6,303.5,76.7) ->
-                // (321.6,344.4,33.2). Pose and expression bind disjoint properties, not disjoint systems.
-                // Writing weights straight onto the renderers leaves the pose byte-identical.
-                // (In PLAY this direct write does not render — the playable graph wins — so RenderThumbnailPlay
-                // composes the expression into the FX controller instead. Edit mode has no graph, so the
-                // direct write is both correct and the cheaper path here.)
+                // ---- expression ----
+                // Applied after the pose and straight onto the renderers, not through the animation system: a
+                // second SampleAnimationClip re-runs the Animator's humanoid solver and partially undoes the
+                // pose, though the two bind disjoint properties.
                 string resolvedExpression = null;
                 if (wantExpression)
                 {
@@ -347,7 +283,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                             + "does not have, or only meshes that are not drawn");
                 }
 
-                // ---- Step 6: camera + off-screen sRGB capture, via the shared spine ----
+                // ---- camera and off-screen capture ----
                 var camGO = EditorUtility.CreateGameObjectWithHideFlags("__rt_cam", HideFlags.DontSave, typeof(Camera));
                 SceneManager.MoveGameObjectToScene(camGO, preview);
                 var cam = camGO.GetComponent<Camera>();
@@ -358,7 +294,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 cam.nearClipPlane = 0.01f;
                 cam.farClipPlane = 100f;
                 cam.cullingMask = ~(1 << 5); // exclude UI layer (5) — world-space canvases would render into the thumbnail
-                cam.allowHDR = false;                 // Linear project — the sRGB RT below carries the gamma
+                cam.allowHDR = false;                 // Linear project: Capture's sRGB RT carries the gamma
                 cam.fieldOfView = fov;
                 // Forward explicitly: renderingPath defaults to the project's tier settings, and under
                 // Deferred the BeforeForwardOpaque command buffer (the gradient) never fires.
@@ -370,8 +306,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     descriptorBaked.ViewPosition.y, baked.transform.eulerAngles.y, zoom, pitch, headroom);
                 cam.transform.position = solution.Position;
                 cam.transform.rotation = solution.Rotation;
-                // The rig is camera-relative by construction; without this, orbiting lights a yawed shot from
-                // behind. After MakeLight, which sets world rotation and then parents worldPositionStays.
+                // After MakeLight, which sets world rotation and then parents with worldPositionStays.
                 lightHolder.transform.rotation = solution.LightHolderRotation;
                 float camYaw = solution.CamYaw;
 
@@ -379,11 +314,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Vector3 headViewport = capture.HeadViewport;
                 bool nothingDrew = capture.Drawn == 0;
 
-                // Which clip the selector actually resolved to post-bake, and where the camera ended up — the
-                // things the reader cannot infer from the arguments. camYaw is RESOLVED (tracking + oblique),
-                // so a saturated clamp is visible rather than silent; head is the view point's viewport
-                // position, origin bottom-left, REPORTED not gated — a bad crop is visible in the PNG, and
-                // failing would withhold the very image that would show it.
+                // head is the view point's viewport position, origin bottom-left, reported and not gated: failing
+                // on a bad crop would withhold the image that shows it.
                 string shapesToken = wantExpression ? " (" + resolvedExpression + ")" : "";
                 prefix = "[RenderThumbnail] Render " + label + " baked pose=" + poseName
                     + " expression=" + expressionName + shapesToken + " framing=" + framingToken
@@ -398,8 +330,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
                 if (nothingDrew)
                 {
-                    // Fail loud, uniform (=> FAIL:) — do NOT write a blank PNG. Named honestly: a frame the
-                    // subject fills EDGE TO EDGE also reads uniform, because then column 0 is subject too.
+                    // No blank PNG. The wording hedges because a frame the subject fills edge to edge also reads
+                    // uniform: column 0 is then subject too.
                     result = Fail(label, "every pixel matches its row's background reference (pose=" + poseName
                         + " expression=" + expressionName + " framing=" + framingToken + " camYaw="
                         + camYaw.ToString("0.#", CultureInfo.InvariantCulture)
@@ -411,33 +343,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     pngPath = System.IO.Path.Combine(Application.temporaryCachePath,
                         "renderthumbnail_" + safeLabel + "_" + stamp + ".png");
                     System.IO.File.WriteAllBytes(pngPath, capture.Png);
-                    // Verdict is built AFTER teardown (once residualNote is known) — leave `result` null to
-                    // signal the success path, so a cleanup-failed run never ships an "=> OK | png=" token.
                 }
             }
             finally
             {
-                // ---- Step 7: teardown — runs on EVERY exit (success or throw). Order matters.
-                // The body is itself wrapped so the SDK postprocess pairing below can never be skipped:
-                // the steps here are guarded against null, not against throwing (the reflected
-                // ClearSceneDirtiness can raise TargetInvocationException; DestroyImmediate can raise on
-                // an already-destroyed object), and losing the pairing would leak exactly what it exists
-                // to clean while replacing the real pipeline exception with a teardown one. ----
+                // ---- teardown, on every exit ----
+                // The nested try is there so a throw from these steps (the reflected ClearSceneDirtiness,
+                // DestroyImmediate on a destroyed object) cannot skip bake.Dispose in the inner finally.
                 try
                 {
-                // The capture core owns its own RT/readback/gradient lifecycle (destroyed inside Capture),
-                // so teardown no longer chases them.
                 if (!animModeAtStart && AnimationMode.InAnimationMode()) AnimationMode.StopAnimationMode();
 
                 if (preview.IsValid())
                     UnityEditor.SceneManagement.EditorSceneManager.ClosePreviewScene(preview); // destroys baked + lights + camera
 
-                // Orphan sweep: any root new in the target's scene since the step-0 snapshot. A failed bake's
-                // clone is already destroyed by the scope and `baked` by ClosePreviewScene — this is the
-                // backstop for a stray NDMF intermediate, or a `baked` stranded by a bake that threw after
-                // instantiating the clone into the live scene but before we could move it to the preview.
-                // It reaches that stranded clone only while the target sits in the active scene: AvatarBake
-                // creates the clone in the ACTIVE scene and leaves it there until we move it (see AvatarBakeScope).
+                // Orphan sweep: any root new in the target's scene since preRootIds. The backstop for a stray NDMF
+                // intermediate, or a clone stranded by a throw before it reached the preview. It reaches that
+                // clone only while the target sits in the active scene, where AvatarBake instantiates it.
                 if (targetScene.IsValid())
                 {
                     foreach (var go in targetScene.GetRootGameObjects())
@@ -448,8 +370,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Selection.objects = savedSelection;
                 Selection.activeObject = savedActive;
 
-                // Restore scene cleanliness for scenes that were clean at snapshot but are now dirty (the bake
-                // instantiates the clone into the live scene, dirtying it; the orphan sweep dirties it too).
                 foreach (var kv in sceneDirtyAtStart)
                 {
                     Scene sc = kv.Key;
@@ -457,21 +377,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     if (ClearSceneDirtinessMethod != null)
                         ClearSceneDirtinessMethod.Invoke(null, new object[] { sc });
                     else
-                        // API drifted — surface it rather than silently leaving a scene dirty.
                         residualNote += " note=scene-dirty-uncleared: EditorSceneManager.ClearSceneDirtiness internals drifted";
                 }
 
                 }
                 finally
                 {
-                    // Closing the scope fires the SDK's paired OnPostprocessAvatar, and it must happen HERE:
-                    // last, after the whole teardown body above, and in a finally that body cannot skip by
-                    // throwing. The pairing is a contract — the post-callback runs every hook's OWN cleanup
-                    // (NDMF's temporary-asset sweep among them) rather than this tool guessing folder names
-                    // it does not control. Assets that outlive it are not chased — projects accumulate some.
-                    // Dispose is documented never to throw, which is what makes it safe in here: a throw
-                    // would replace the real pipeline exception with a teardown one. A failed cleanup is
-                    // surfaced, not swallowed, and never fatal — the PNG is already written.
+                    // Last, in a finally the body above cannot skip: closing the scope fires the SDK's paired
+                    // OnPostprocessAvatar, which runs every hook's own cleanup (NDMF's temporary-asset sweep among
+                    // them). Assets that outlive it are not chased. Dispose never throws, so it cannot replace the
+                    // real pipeline exception with a teardown one.
                     if (bake != null)
                     {
                         bake.Dispose();
@@ -480,16 +395,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 }
             }
 
-                // Verdict assembled HERE, after teardown, so residualNote (a cleanup failure) is known before we
-                // decide whether a success run may ship its load-bearing "=> OK | png=" token.
-                if (result != null) return result + residualNote;   // silhouette-fail / non-success paths
+                if (result != null) return result + residualNote;
                 if (string.IsNullOrEmpty(residualNote))
                 {
-                    // The verdict is logged WITHOUT `png=`, then both trailers are spliced on, `png=` first.
-                    // Routing the png-bearing line through the writer would hand it to WriteRunLog's failure
-                    // path, which truncates at the last "=> " — so a locked RunLog would turn a good capture
-                    // into "=> FAIL: write failed" and drop the png= token UploadAvatar reads (TOOLS.md).
-                    // A capture that succeeded says so; only the log trailer is contingent on the write.
                     string logged = RenderThumbnailCore.WriteSessionLog("renderthumbnail", label, prefix + " => OK",
                         "# RenderThumbnail\n\n- target: `" + label + "`\n- png: " + pngPath + "\n"
                         + "- verdict line: " + prefix + " => OK\n");
@@ -497,28 +405,24 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     Debug.Log(ok);
                     return ok;
                 }
-                // Rendered fine, but teardown left residue — NO success-form png= token (a machine consumer must
-                // not read this as clean success); the residue is the headline, the path is informational only.
+                // Rendered, but teardown left residue: no success-form png= token, so a machine consumer cannot
+                // read this as clean success. The path is informational.
                 string degraded = prefix + " => CLEANUP-FAILED — png written to " + pngPath + residualNote;
                 Debug.LogError(degraded);
                 return degraded;
             }
             catch (Exception ex)
             {
-                // Inner finally has already run (teardown complete, residualNote populated) — surface the pipeline
-                // exception as a Fail verdict, keeping the type + stack so a deep NDMF/MA pass failure is nameable.
                 Debug.LogException(ex);
                 return Fail(label, ex.GetType().Name + ": " + ex.Message) + residualNote;
             }
         }
 
         /// <summary>
-        /// Write the clip's <c>blendShape.*</c> curves straight onto the baked clone's renderers and
-        /// return how many landed on a DRAWN one. Only blendShape curves are applied — an expression is
-        /// its blendshape curves. Applying rather than sampling is what keeps the pose intact (see the
-        /// call site); a zero return is the caller's signal that the clip and the baked avatar do not
-        /// match. <b>Edit-mode only</b>: in play the playable graph overwrites a direct SetBlendShapeWeight,
-        /// so RenderThumbnailPlay composes the expression into the FX controller instead.
+        /// Write the clip's <c>blendShape.*</c> curves straight onto the baked clone's renderers and return how
+        /// many landed on a DRAWN one; zero means the clip and the baked avatar do not match.
+        /// <b>Edit-mode only</b>: in play the playable graph overwrites a direct SetBlendShapeWeight, so
+        /// RenderThumbnailPlay composes the expression into the FX controller instead.
         /// </summary>
         private static int ApplyExpression(GameObject baked, AnimationClip clip)
         {
@@ -545,9 +449,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var curve = AnimationUtility.GetEditorCurve(clip, binding);
                 if (curve == null || curve.length == 0) continue;
 
-                // Evaluate at clip.length, matching the pose's sample-at-clip.length convention. Curves
-                // default to ClampForever, so for the single-key clips expressions almost always are this
-                // is the only key; for a multi-key clip it is deliberately the END state.
+                // clip.length, matching the pose's sampling: for a multi-key clip this is deliberately the END state.
                 smr.SetBlendShapeWeight(index, curve.Evaluate(clip.length));
                 applied++;
             }

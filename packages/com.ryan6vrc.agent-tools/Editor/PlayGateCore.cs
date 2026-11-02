@@ -11,52 +11,29 @@ using VRC.SDK3.Avatars.Components;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Pure, UI-free evaluation of the play-entry preconditions (no window / menu / selection coupling —
-    /// the testability seam). <see cref="PlayGate"/> is the Editor-coupled door that runs this on
-    /// <c>ExitingEditMode</c> and cancels entry on failure. INSPECTION ONLY — never mutates the scene;
-    /// it is a pure refusal that names each offender and its fix, like the tracked <c>run_tests</c> deny hook.
+    /// UI-free evaluation of the play-entry preconditions, which only inspects and never mutates the scene.
+    /// <see cref="PlayGate"/> runs it on <c>ExitingEditMode</c>. Contract: docs/verify.md §The play-entry gate.
     ///
-    /// Enumeration is scoped to the passed <paramref name="scene"/> (the "≥1 active avatar" trigger) —
-    /// never the global <c>FindObjectsOfType</c>, which spans additively-loaded scenes + DontDestroyOnLoad
-    /// and would false-positive "More than 1 avatar enabled". Non-SDK hazards (VRCFury / GestureManager /
-    /// LyumaAv3Emulator) are detected by <c>GetType().FullName</c> reflection (the <see cref="ReportGimmick"/>
-    /// precedent — no asmdef dependency).
+    /// Enumeration is scoped to the passed scene, never the global <c>FindObjectsOfType</c>, which spans
+    /// additively-loaded scenes and DontDestroyOnLoad and would false-positive "More than 1 avatar enabled".
+    /// Non-SDK hazards are detected by <c>GetType().FullName</c> reflection, with no asmdef dependency.
     ///
-    /// Two rules — GestureManager-enabled and the emulator config — fire ONLY when an enabled emulator
-    /// control object exists (a GestureManager only fights a *live* emulator; the emulator's own config is
-    /// only meaningful when it is present). Exactly-one-avatar and VRCFury-Fix-Write-Defaults are real
-    /// hazards regardless, so they are unconditional.
-    ///
-    /// <b>Two scopes, one door.</b> <see cref="EvaluateEntry"/> is the four rules; <see cref="Evaluate"/>
-    /// dispatches to it in edit mode and REFUSES in play, where 2a and 3b are structurally
-    /// untrustworthy (a live emulator's own clones inflate 2a; VRCFury and the emulator each clear 3b's
-    /// flag on a composed build). Agents read that false offender list as a dead-build verdict and one
-    /// brief encoded it as an abort trigger, which is what the refusal retires. The hook calls
-    /// <see cref="EvaluateEntry"/>, never the dispatch — <see cref="Evaluate"/> owns that reasoning.
-    ///
-    /// Degradation is one sentence: <b>absent = safe silent skip; present-but-unreadable = block loud.</b>
-    /// A genuinely-absent type (package not installed) skips its rule silently; a hazard that IS on a
-    /// scene object but whose needed field/feature can't be reflected emits a loud named FAIL — a read
-    /// miss on a live hazard must never read as an honest "all clear".
+    /// Degradation: a hazard type that is absent (package not installed) skips its rule silently; a hazard
+    /// on a scene object whose needed field or feature cannot be read is present-but-unreadable and blocks
+    /// with a named FAIL.
     /// </summary>
     public static class PlayGateCore
     {
-        // FWD leaf — pinned, not tribal. The VRCFury Fix-Write-Defaults feature type; confirmed against
-        // VRCFury 1.1334.0. Re-pin if a VRCFury update renames it (the blind self-check below fails loud
-        // when this no longer resolves in the loaded VRCFury assembly).
+        // The VRCFury Fix-Write-Defaults feature type. Re-pin if VRCFury renames it; CheckVrcFury blocks when
+        // this no longer resolves in the loaded assembly.
         public const string FwdFeatureFullName = "VF.Model.Feature.FixWriteDefaults";
-        // Leaf (last segment) matched against each VRCFury feature's managedReferenceFullTypename leaf,
-        // mirroring ReportGimmick's "FullController"/"ApplyDuringUpload" leaf-matching. Derived from the
-        // full name — one source of truth, so a re-pin can't leave the two silently divergent.
-        // Note the asymmetry: the blind check resolves the FULL name (exact); feature matching compares
-        // the LEAF (loose). Both a full-name miss and a leaf mismatch resolve toward a BLOCK — the safe
-        // direction — so the looseness never opens a fail-open.
+        // Feature matching compares this leaf to each feature's managedReferenceFullTypename leaf, while the
+        // blind check resolves the full name. Both a full-name miss and a leaf mismatch block.
         public static readonly string FwdFeatureLeaf =
             FwdFeatureFullName.Substring(FwdFeatureFullName.LastIndexOf('.') + 1);
 
-        // Full type names of the reflected hazards (mirrors verify.md's assert snippet + ReportGimmick).
-        // The emulator's own type and field names live in EmulatorBinding, which the canary asserts against
-        // the installed package — don't re-spell them here.
+        // The emulator's own type and field names live in EmulatorBinding, which its canary asserts against
+        // the installed package; don't re-spell them here.
         private const string VrcFuryComponentFullName = "VF.Model.VRCFury";
         private const string GestureManagerFullName   = "BlackStartX.GestureManager.GestureManager";
 
@@ -69,19 +46,17 @@ namespace Ryan6Vrc.AgentTools.Editor
         {
             public bool Pass;
             public List<Offender> Offenders;
-            /// <summary>Which rule set produced this. <c>Entry</c>: the entry-scope door produced it — the
-            /// four rules ran, or threw while running. <c>Play</c>: nothing was evaluated and the one offender
-            /// is the scope refusal. Branch on THIS,
-            /// never on <see cref="Pass"/> alone — a refusal is also <c>Pass=false</c>.</summary>
+            /// <summary><c>Entry</c>: the four rules ran, or threw while running. <c>Play</c>: nothing was
+            /// evaluated and the one offender is the scope refusal. Branch on this, never on
+            /// <see cref="Pass"/> alone: a refusal is also <c>Pass=false</c>.</summary>
             public PlayGateScope Scope;
         }
         public struct Offender { public string Tag; public string Message; public string Fix; }
 
         // ----- The in-play scope refusal --------------------------------------------------------------
-        // Agent-directed diagnostic prose, so the strings live at one canon and the tests assert these
-        // constants rather than fragments (the CheckAvatar precedent). The two "why" clauses are stated as
-        // why the rules CANNOT BE TRUSTED in play, not as observed facts: with no emulator installed neither
-        // clause is true of the scene, and rule 2a's offender there would be a genuine multi-avatar finding.
+        // The two "why" clauses are stated as why the rules CANNOT BE TRUSTED in play, not as observed facts:
+        // with no emulator installed neither clause is true of the scene, and rule 2a's offender there would
+        // be a genuine multi-avatar finding.
 
         internal const string ScopeRefusalTag = "Entry gate called in play - not a scene finding";
 
@@ -96,11 +71,9 @@ namespace Ryan6Vrc.AgentTools.Editor
             "branch on PlayGateResult.Scope (Entry vs Play), not on Pass alone; to judge whether a build actually ran " +
             "the stack, measure the built avatar rather than the gate (docs/emulator.md §Setup)";
 
-        /// <summary>Evaluate the preconditions for entering play with <paramref name="scene"/>. In EDIT mode
-        /// this is <see cref="EvaluateEntry"/>. IN PLAY it evaluates nothing and returns the scope refusal:
-        /// the entry rules are structurally untrustworthy there (see the class summary). Read
-        /// <see cref="PlayGateResult.Scope"/>
-        /// to tell the two apart — both carry <c>Pass=false</c> when they carry offenders.
+        /// <summary>Evaluate the preconditions for entering play with <paramref name="scene"/>. In edit mode
+        /// this is <see cref="EvaluateEntry"/>. In play it evaluates nothing and returns the scope refusal
+        /// (<see cref="ScopeRefusalMessage"/> says why).
         ///
         /// <see cref="PlayGate"/> deliberately calls <see cref="EvaluateEntry"/> and NOT this door.
         /// <c>Application.isPlaying</c> may read true during <c>ExitingEditMode</c> — the reason
@@ -121,28 +94,24 @@ namespace Ryan6Vrc.AgentTools.Editor
             };
         }
 
-        /// <summary>The four entry rules against <paramref name="scene"/> (the scene entering play — the
-        /// hook passes <c>SceneManager.GetActiveScene()</c>). Pass ⇔ zero offenders. A non-avatar /
-        /// codegen / bake scene (no active descriptor) passes silently. Scope-free by construction: it makes
-        /// no <c>Application.isPlaying</c> read, which is what lets the hook call it safely.
+        /// <summary>The four entry rules against <paramref name="scene"/>. A scene with no active descriptor
+        /// passes silently. It makes no <c>Application.isPlaying</c> read, which is what lets the hook call it
+        /// safely.
         ///
-        /// <b>Internal, and that is load-bearing.</b> Called in play this evaluates the clone-inflated 2a
-        /// count and the cleared 3b flag and stamps the result <c>Scope=Entry</c> — a caller obeying
-        /// "branch on Scope" would read those false offenders as an entry verdict, which is worse than the
-        /// unscoped result this change replaced. <see cref="Evaluate"/> is the door for anyone outside this
-        /// assembly. Reflection still reaches this method, so the narrowing removes a false steer rather
-        /// than sealing the path.</summary>
+        /// Internal on purpose: called in play it evaluates the clone-inflated 2a count and the cleared 3b
+        /// flag and stamps the result <c>Scope=Entry</c>, so a caller branching on Scope would read those false
+        /// offenders as an entry verdict. <see cref="Evaluate"/> is the door for anyone outside this assembly;
+        /// reflection still reaches this method.</summary>
         internal static PlayGateResult EvaluateEntry(Scene scene)
         {
             var offenders = new List<Offender>();
             var roots = scene.IsValid() ? scene.GetRootGameObjects() : Array.Empty<GameObject>();
 
-            // Rule 1: gather active-in-hierarchy descriptors under the scene's roots. None → pass silently.
-            // Gather includeInactive:true then filter on activeInHierarchy explicitly — NOT the (false)
-            // overload: on Unity 2022.3.22f1, GetComponentsInChildren(false) returns the QUERIED ROOT's own
-            // component even when that root is inactive (live-reproduced), so a deactivated top-level avatar
-            // would be miscounted as active — a false "More than 1 avatar enabled" that also defeats the
-            // gate's own "deactivate all but one" fix. The explicit filter is the spec-sanctioned form.
+            // Rule 1. Gather includeInactive:true then filter on activeInHierarchy, NOT the (false) overload: on
+            // Unity 2022.3.22f1, GetComponentsInChildren(false) returns the QUERIED ROOT's own component even
+            // when that root is inactive (live-reproduced), so a deactivated top-level avatar would be
+            // miscounted as active, a false "More than 1 avatar enabled" that defeats the gate's own
+            // "deactivate all but one" fix.
             var descriptors = new List<VRCAvatarDescriptor>();
             foreach (var root in roots)
                 foreach (var d in root.GetComponentsInChildren<VRCAvatarDescriptor>(true))
@@ -150,7 +119,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (descriptors.Count == 0)
                 return new PlayGateResult { Pass = true, Offenders = offenders, Scope = PlayGateScope.Entry };
 
-            // Rule 2a (unconditional): more than one active descriptor.
+            // Rule 2a
             if (descriptors.Count > 1)
             {
                 var paths = descriptors.Select(d => Path(d.transform));
@@ -162,15 +131,14 @@ namespace Ryan6Vrc.AgentTools.Editor
                 });
             }
 
-            // Rule 2b (unconditional): VRCFury carried but no Fix-Write-Defaults feature.
+            // Rule 2b
             CheckVrcFury(descriptors, offenders);
 
-            // Rules 3a/3b are keyed on one lookup — an enabled emulator control object — computed ONCE.
             var emulator = FindEnabledEmulator(roots);
             if (emulator != null)
             {
-                CheckGestureManager(roots, offenders);      // 3a — a GM only fights a live emulator
-                CheckEmulatorConfig(emulator, offenders);   // 3b — the emulator's own config
+                CheckGestureManager(roots, offenders);      // 3a
+                CheckEmulatorConfig(emulator, offenders);   // 3b
             }
 
             return new PlayGateResult
@@ -179,9 +147,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             };
         }
 
-        /// <summary>Overlay line 2 (deterministic, unit-testable): the first two offender tags in parens,
-        /// then <c>+N (see log)</c> when there are more than two. Lives in the pure core so it is testable
-        /// without Editor coupling.</summary>
         public static string OverlaySummaryLine(List<Offender> offenders)
         {
             if (offenders == null || offenders.Count == 0) return "";
@@ -192,21 +157,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             return sb.ToString().TrimEnd();
         }
 
-        /// <summary>The FAIL's FIRST line: every offender and its fix on ONE line, <c> | </c>-separated.
-        /// Each offender renders <c>[tag] message (fix: fix)</c>; the <c> | </c> join and the parenthesized
-        /// fix keep the two separators unambiguous. Pure + deterministic, the testable sibling of
-        /// <see cref="OverlaySummaryLine"/>.
-        ///
-        /// This originally existed because the agent's console read returned only an entry's first line, so
-        /// offender detail had to be crammed onto line 1 or be lost. That door is gone — `ReportConsole`
-        /// returns the whole entry — but the one-line form is kept on its own merit: it is a line grammar a
-        /// reader can scan and a log can carry intact, and the Scene-view overlay has no room for a block.
-        ///
-        /// The no-newline invariant is enforced HERE, not assumed of callers: every field is flattened
-        /// (any whitespace run → one space) before it lands on the line. An offender's Message can carry a
-        /// multi-line value — the exception FAIL embeds a whole stack trace (<see cref="PlayGate"/>'s catch)
-        /// — so a raw join would break the one-line grammar mid-verdict. Flattening also makes that stack
-        /// trace legible on a single line.</summary>
+        /// <summary>The FAIL's first line: every offender and its fix on one line. Fields are flattened because
+        /// a Message can be multi-line: <see cref="PlayGate"/>'s catch embeds a whole stack trace.</summary>
         public static string ConsoleSummaryLine(List<Offender> offenders)
         {
             if (offenders == null || offenders.Count == 0) return "";
@@ -214,37 +166,28 @@ namespace Ryan6Vrc.AgentTools.Editor
                 "[" + OneLine(o.Tag) + "] " + OneLine(o.Message) + " (fix: " + OneLine(o.Fix) + ")"));
         }
 
-        // Collapse every run of whitespace (newlines, tabs, indentation) to a single space and trim — the
-        // guard that makes ConsoleSummaryLine's single-line promise hold for any field value.
         private static string OneLine(string s) =>
             string.IsNullOrEmpty(s) ? s : Regex.Replace(s, @"\s+", " ").Trim();
 
         // ----- Rule 2b: VRCFury carried but no Fix-Write-Defaults feature ------------------------------
 
-        // Conditional on the avatar actually carrying VRCFury (absent VRCFury → no FWD hazard → silent).
-        // Highest-value block: a first build without FWD pops a blocking modal that stalls the agent.
+        // A first build without FWD pops a blocking modal that stalls the agent.
         private static void CheckVrcFury(List<VRCAvatarDescriptor> descriptors, List<Offender> offenders)
         {
-            // Blind-detection self-check (finding-#1 policy): resolve the pinned FWD type in the loaded
-            // domain. Resolved once; only consulted when an avatar actually carries VRCFury.
             var fwdType = VendorReflect.FindType(FwdFeatureFullName);
             bool blindReported = false; // the blind FAIL is domain-global — emit it once, not per avatar
 
             foreach (var d in descriptors)
             {
-                // includeInactive: MANDATORY here (the ReportGimmick precedent) — VRCFury's non-destructive
-                // build processes inactive objects too, so a VRCFury/FWD setup under a toggled-off child
-                // still pops the modal. Missing it would read "no VRCFury" and fail open. (Contrast the
-                // active-descriptor / GM / emulator scans, which stay active-only: an inactive GM or
-                // emulator drives nothing — only VRCFury's *presence* matters even when inactive.)
+                // includeInactive is mandatory here: VRCFury's non-destructive build processes inactive objects
+                // too, so a VRCFury/FWD setup under a toggled-off child still pops the modal. The descriptor, GM
+                // and emulator scans stay active-only because an inactive GM or emulator drives nothing.
                 var fury = new List<MonoBehaviour>();
                 foreach (var mb in d.GetComponentsInChildren<MonoBehaviour>(true))
                     if (mb != null && mb.GetType().FullName == VrcFuryComponentFullName) fury.Add(mb);
-                if (fury.Count == 0) continue; // this avatar carries no VRCFury → no FWD hazard
+                if (fury.Count == 0) continue;
 
-                // present-but-unreadable: VRCFury IS here but the pinned FWD type no longer resolves →
-                // a stale leaf silently reading "no FWD needed"/"FWD present" is the exact fail-open this
-                // gate exists to prevent. Block loud instead of trusting the no-match (once for the domain).
+                // present-but-unreadable: the pinned FWD type no longer resolves, so a no-match proves nothing.
                 if (fwdType == null)
                 {
                     if (!blindReported)
@@ -271,8 +214,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
                 if (hasFwd) continue;
 
-                // No FWD found. If a feature was undecodable we cannot be sure it wasn't the FWD one →
-                // present-but-unreadable → block loud (distinct message); otherwise the plain no-FWD block.
+                // present-but-unreadable when a feature was undecodable: it might be the FWD one.
                 offenders.Add(anyUndecodable
                     ? new Offender
                     {
@@ -292,8 +234,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Rule 3a: an enabled GestureManager fights a LIVE emulator --------------------------------
 
-        // Only reached when an enabled emulator control object exists (caller-gated). A standalone enabled
-        // GestureManager, with no emulator, is a legitimate workflow and is allowed.
+        // Caller-gated on an enabled emulator: a standalone enabled GestureManager is a legitimate workflow.
         private static void CheckGestureManager(GameObject[] roots, List<Offender> offenders)
         {
             var found = new List<string>();
@@ -310,18 +251,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                 });
         }
 
-        // ----- Rule 3b: emulator config (the enabled emulator was already found) ------------------------
+        // ----- Rule 3b: emulator config ------------------------------------------------------------------
 
-        // The enabled emulator control object is passed in (found once in Evaluate). Intent-to-emulate is
-        // inferred from the scene, never mind-read.
         private static void CheckEmulatorConfig(MonoBehaviour emu, List<Offender> offenders)
         {
             var t = emu.GetType();
             bool? run  = ReportGimmick.ReadBoolMember(emu, t, EmulatorBinding.RunPreprocessAvatarHook);
             bool? perm = ReportGimmick.ReadBoolMember(emu, t, EmulatorBinding.EnablePlayerContactPermissions);
 
-            // present-but-unreadable: the emulator IS here but a needed flag can't be reflected (renamed
-            // field) → block loud rather than skip a live hazard.
+            // present-but-unreadable
             if (run == null || perm == null)
             {
                 var missing = new List<string>();
@@ -354,10 +292,6 @@ namespace Ryan6Vrc.AgentTools.Editor
                 });
         }
 
-        // ----- Reflection helpers ----------------------------------------------------------------------
-
-        // Find the first enabled emulator control object under the scene roots (active-only; an inactive
-        // emulator drives nothing). Returned to Evaluate so the GM and emulator-config rules share one scan.
         private static MonoBehaviour FindEnabledEmulator(GameObject[] roots)
         {
             foreach (var root in roots)
@@ -367,8 +301,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             return null;
         }
 
-        // Reuse ReportGimmick's scene-root-absolute path grammar (one grammar across the family), inheriting
-        // its first-match duplicate-named-sibling caveat rather than authoring a second path formatter.
         private static string Path(Transform t) => ReportGimmick.GetHierarchyPath(t);
     }
 }

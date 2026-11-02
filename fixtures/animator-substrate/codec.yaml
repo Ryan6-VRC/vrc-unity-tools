@@ -1,13 +1,7 @@
-# Float -> bool binary codec (encoder) — worked example for the animator write substrate.
+# Float -> bool binary codec (encoder) — worked example for the animator write substrate; the idiom is
+# docs/gimmicks.md "Float→bool binary codec".
 #
-# Encodes a float OscFloat in [0,1) into 3 bool bits by the classic subtract-walk (docs/gimmicks.md
-# "Float->bool binary codec"): copy the input into a working residue, then for each bit b (weight
-# 2^-(b+1) = 0.5, 0.25, 0.125) test residue > weight; if so set the bit and subtract the weight.
-# Truncating (not rounding) — OscFloat=0.7 -> 0.101b = 0.625 -> bits [1,0,1]. n bits cost ~n frames
-# (one transition per frame); the compiler's frame-latency advisory reports the walk length.
-#
-# The machine loops Start->…->Start so it re-encodes every cycle, tracking OscFloat live. Raw input
-# (OscFloat) and encoded outputs (bit0..2) are distinct params. Compiles; CheckAnimator PASS; emulator-verified.
+# Truncating, not rounding: OscFloat=0.7 -> 0.101b = 0.625 -> bits [1,0,1].
 
 schema: 1
 controller: Codec_Fx
@@ -19,31 +13,28 @@ defaults:
   transition: { duration: 0, exitTime: none, interruption: none }
 
 parameters:
-  OscFloat: { type: float, default: 0.0 }   # the input to encode (0..1), driven externally / by OSC
-  Work:     { type: float, default: 0.0 }   # working residue (driver-written; Copy of input, then Adds)
-  bit0: bool                                  # MSB (0.5 place)
-  bit1: bool                                  # 0.25 place
-  bit2: bool                                  # LSB (0.125 place)
+  OscFloat: { type: float, default: 0.0 }   # the input to encode, in [0,1); driven externally
+  Work:     { type: float, default: 0.0 }   # working residue
+  bit0: bool                                  # MSB
+  bit1: bool
+  bit2: bool
 
 layers:
   - name: Codec
-    # Each walk state carries a tiny inert `tick` clip so its exit-time hop fires FAST. An exit-time
-    # transition fires at clip-end; a motionless state still advances but takes the 1s default empty-state
-    # length, so a multi-hop walk would crawl (~1s per state). The 0.02s tick makes `exitTime: 1.0` land in
-    # ~1 frame instead — the carrier is a speed control, not a correctness fix. The conditional Accept branch
-    # is listed first (fires immediately when Work exceeds the weight); otherwise the state runs out its tick
-    # and the Reject hop fires. ~1 frame per state, ~8 per encode.
+    # Each walk state carries a tiny inert `tick` clip: a motionless state's exit-time hop takes the 1s
+    # fallback (animator-schema.md §clips), so a multi-hop walk would crawl. The carrier is a speed control,
+    # not a correctness fix.
     states:
       Start:
         motion: { clip: tick }
         behaviours:
-          - driver: { copy: { Work: OscFloat } }   # residue := input, fresh each cycle
+          - driver: { copy: { Work: OscFloat } }
         transitions:
           - { to: Test0, when: [], exitTime: 1.0 }
       Test0:
         motion: { clip: tick }
         transitions:
-          - { to: Accept0, when: [ Work greater 0.5 ] }   # priority: accept if residue exceeds the weight
+          - { to: Accept0, when: [ Work greater 0.5 ] }   # listed first: accept as soon as the residue exceeds the weight
           - { to: Reject0, when: [], exitTime: 1.0 }         # else fall through when the tick ends
       Accept0:
         motion: { clip: tick }
@@ -88,4 +79,4 @@ layers:
     default: Start
 
 clips:
-  tick: { seconds: 0.02 }   # ~1 frame at 60fps; short length so exitTime hops fire fast (not the 1s default)
+  tick: { seconds: 0.02 }

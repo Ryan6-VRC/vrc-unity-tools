@@ -6,26 +6,11 @@ using System.Text;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// The WRITE-BACK direction, inverse of <see cref="AnimatorSchemaYaml"/>: renders a typed
-    /// <see cref="AnimDocument"/> as YAML text in exactly the bounded block/flow subset that
-    /// <see cref="AnimatorSchemaYaml.Parse"/> accepts. The parser is the SPEC — <c>Parse(Serialize(doc))</c>
-    /// reproduces <paramref name="doc"/> structurally, so this only emits constructs the reader binds and
-    /// quotes exactly the scalars the reader would otherwise mis-infer (a value that reads as bool/number/null,
-    /// or a token that would break tokenization). System.* only (no Unity API), like the parser it inverts, so
-    /// the codec pair is unit-checkable outside the editor.
-    ///
-    /// DETERMINISTIC + CANONICAL — the Decompile→Compile→Decompile fixpoint compares two serialized
-    /// strings for textual identity, so the SAME document must always render byte-identically:
-    ///   - Fixed key order per construct; map/list order is the model's insertion order (already stable).
-    ///   - '\n' line endings only (never Environment.NewLine), 2-space indent, no tabs.
-    ///   - One number formatting for every numeric type: integral values render without a decimal point,
-    ///     fractional values via the shortest round-trip decimal — and float values are normalized THROUGH
-    ///     that decimal so a value re-read as double re-renders identically (serialize is idempotent through a
-    ///     parse: <c>Serialize(Parse(Serialize(doc))) == Serialize(doc)</c>).
-    ///
-    /// Never emits an unsupported construct (anchors/aliases/tags/block scalars/multi-doc/tabs); GUIDs are
-    /// always quoted (an all-hex handle can read as a number); the reserved <c>_notes</c> block is rendered
-    /// last and is compile-ignored on re-parse (the parser skips <c>_</c>-prefixed top-level keys).
+    /// Inverse of <see cref="AnimatorSchemaYaml"/>: renders an <see cref="AnimDocument"/> as YAML in the subset
+    /// <see cref="AnimatorSchemaYaml.Parse"/> accepts, quoting any scalar the reader would not read back as the
+    /// same string. System.* only. The Decompile→Compile→Decompile fixpoint compares serialized strings, so output
+    /// is canonical: fixed key order, '\n' line endings, 2-space indent, one number format, and
+    /// <c>Serialize(Parse(Serialize(doc))) == Serialize(doc)</c>.
     /// </summary>
     public static class AnimatorSchemaEmit
     {
@@ -58,8 +43,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             L(sb, "defaults:");
             L(sb, "  writeDefaults: " + Bool(d.WriteDefaults));
-            // exitTime in defaults only carries the has-exit-time bool, and the parser accepts only 'none'
-            // there (the sole value in scope) — so it is always rendered 'none'.
             L(sb, "  transition: { duration: " + Num(d.TransitionDuration)
                   + ", exitTime: none, interruption: " + InterruptionToken(d.Interruption) + " }");
         }
@@ -100,9 +83,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ----- shared (named) blend trees -----
 
-        // One entry per tree that several motion slots reference by name. Block form throughout, like a
-        // keyframed clip: these are the document's largest single objects, and a shared tree is shared
-        // precisely because a human needs to read it in one place.
         private static void EmitTrees(StringBuilder sb, List<BlendTreeSpec> trees)
         {
             L(sb, "trees:");
@@ -122,7 +102,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 if (c.Curves.Count > 0)
                 {
-                    // Keyframed clips render in block form: one binding per line.
                     L(sb, "  " + Key(c.Name) + ":");
                     if (c.Seconds.HasValue) L(sb, "    seconds: " + Num(c.Seconds.Value));
                     if (c.Loop) L(sb, "    loop: true");
@@ -162,8 +141,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return "[ " + string.Join(", ", parts) + " ]";
         }
 
-        // Flat (default) curves keep the bare-list form byte-identical to before linear tangents existed;
-        // only a Linear/Stepped-tangent curve pays for the map form, matching AnimatorSchemaYaml.BindCurve's reader.
         private static string FlowCurve(CurveSpec cs)
         {
             var keysFlow = FlowCurveKeys(cs.Keys);
@@ -186,7 +163,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             L(sb, "layers:");
             foreach (var layer in layers)
             {
-                // First key of a block-sequence item carries the "- "; the dash sits at indent 2, its keys at 4.
                 L(sb, "  - name: " + ScalarStr(layer.Name));
                 const int f = 4;
                 if (layer.Weight != 1f) L(sb, Sp(f) + "weight: " + Num(layer.Weight));
@@ -197,7 +173,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // The machine-body keys shared by a layer's Root machine and every nested sub-machine, in fixed order.
         private static void EmitMachineBody(StringBuilder sb, StateMachine sm, int f)
         {
             if (sm.States.Count > 0)
@@ -210,8 +185,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 L(sb, Sp(f) + "machines:");
                 foreach (var sub in sm.Machines)
                 {
-                    // onExit sits beside the body keys but is not one of them — it belongs to the sub-machine
-                    // wrapper, so an empty machine that still carries onExit cannot use the `{}` short form.
+                    // onExit belongs to the sub-machine wrapper, not its body, so an empty machine that carries
+                    // onExit cannot use the `{}` short form.
                     if (IsMachineEmpty(sub.Machine) && sub.OnExit.Count == 0) { L(sb, Sp(f + 2) + Key(sub.Name) + ": {}"); continue; }
                     L(sb, Sp(f + 2) + Key(sub.Name) + ":");
                     EmitMachineBody(sb, sub.Machine, f + 4);
@@ -243,7 +218,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (sm.Layout != null) EmitLayout(sb, sm, f);
         }
 
-        // Emit nodes in States-then-Machines order (deterministic — Dictionary order is not contractual).
+        // States-then-Machines order, not l.Nodes order: Dictionary order is not contractual.
         private static void EmitLayout(StringBuilder sb, StateMachine sm, int f)
         {
             var l = sm.Layout;
@@ -330,11 +305,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return "{ " + string.Join(", ", parts) + " }";
         }
 
-        // The state's own blend tree renders in block form (the human-facing surface); nested child
-        // trees render inline (flow) so recursion stays a single-line value.
-        // nameIsKey == this tree is a `trees:` entry, whose map key already carries the name. Emitting `name:`
-        // as well would produce a document the parser refuses (BindTrees), i.e. decompile output that cannot
-        // recompile — so the suppression is a correctness requirement, not tidiness.
+        // nameIsKey: this tree is a `trees:` entry, whose map key carries the name. BindTrees refuses a `name:`
+        // there, so emitting one would produce decompile output that cannot recompile.
         private static void EmitTreeBlock(StringBuilder sb, BlendTreeSpec spec, int indent, bool nameIsKey = false)
         {
             L(sb, Sp(indent) + "tree: " + TreeKindToken(spec.Kind));
@@ -351,9 +323,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var c in spec.Children) L(sb, Sp(indent + 2) + "- " + FlowChild(c, spec.Kind));
         }
 
-        // A child map carries its motion (clip/ref/nested-tree) plus its parent-kind-specific placement and
-        // per-child modifiers. A nested tree splices its tree-level keys in beside the placement — the parser's
-        // BindTreeChild reads the placement/modifiers and BindTree reads the tree keys off the same map.
+        // A nested tree splices its tree-level keys in beside the placement: BindTreeChild reads the placement
+        // and modifiers and BindTree the tree keys, off the same map.
         private static string FlowChild(TreeChild ch, TreeKind parentKind)
         {
             var parts = new List<string>();
@@ -380,7 +351,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return "{ " + string.Join(", ", parts) + " }";
         }
 
-        // The tree-level fields of a nested (flow) tree, without the surrounding braces.
         private static List<string> TreeInner(BlendTreeSpec spec)
         {
             var parts = new List<string> { "tree: " + TreeKindToken(spec.Kind) };
@@ -428,12 +398,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return "[ " + string.Join(", ", strs) + " ]";
         }
 
-        // '<param> <op> <value>' — op and value are the LAST two space-separated tokens; everything before
-        // is the param, verbatim (the parser right-anchors, so interior spaces stay unquoted and legible).
-        // The whole string routes through ScalarStr, so a param carrying a flow-delimiter/comment/leader
-        // hazard emits as ONE quoted scalar under the same predicate as every other scalar in the schema.
-        // Exposed raw (unquoted) for the decompiler's self-check, which re-splits it with the parser's own
-        // grammar to refuse a condition that can't survive its serialized form.
+        // Unquoted, for the decompiler's self-check, which re-splits it through AnimatorSchemaYaml.ParseCondition
+        // to refuse a condition that cannot survive its serialized form.
         internal static string RawCondString(Condition c)
         {
             string val = (c.Op == CondOp.Is || c.Op == CondOp.IsNot)
@@ -484,10 +450,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ----- _notes -----
 
-        // Renders every ReservedNotes entry inside a single top-level `_notes:` block (the decompiler's output
-        // channel). The entry keyed exactly "_notes" (what a prior parse stores the whole block under) is
-        // unwrapped so a round-tripped document does not gain a nesting level each pass — the fixpoint the
-        // reserved-key contract exists for. Re-parsing skips `_`-prefixed top-level keys, so this is inert.
+        // The entry keyed exactly "_notes" (what a prior parse stores the whole block under) is unwrapped so a
+        // round-tripped document does not gain a nesting level each pass.
         private static void EmitNotes(StringBuilder sb, Dictionary<string, object> notes)
         {
             if (notes.Count == 0) return;
@@ -515,10 +479,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return NeedsQuote(s) ? Quote(s) : s;
         }
 
-        // The line-based reader cannot carry a literal newline in any scalar and Quote does not escape
-        // one, so emitting it would write torn YAML. Every string field funnels through ScalarStr/Quote,
-        // so the guard lives here — one choke point instead of per-decode-site checks that rot as fields
-        // are added. DecompileController catches this into a named FAIL.
+        // The line-based reader cannot carry a literal newline in any scalar and Quote does not escape one.
+        // DecompileController catches this throw into a named FAIL.
         private static void CheckNoLineBreak(string s)
         {
             if (s.IndexOf('\n') < 0 && s.IndexOf('\r') < 0) return;
@@ -526,10 +488,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 + "' contains a line break, which cannot round-trip the line-based YAML");
         }
 
-        // Quote when the raw token would NOT read back as the same string: it infers to bool/number/null, is
-        // empty, has edge whitespace, opens with a reserved/ambiguous leader, or contains a char that breaks
-        // block or flow tokenization. Quoting is always safe (the reader strips quotes to the literal) and a
-        // pure function of the string, so it stays idempotent.
+        // True when the raw token would not read back as the same string; quoting is always safe.
         private static bool NeedsQuote(string s)
         {
             if (s.Length == 0) return true;
@@ -552,8 +511,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return false;
         }
 
-        // Double-quoted form: the reader unescapes \" and \\, so those are the only escapes emitted.
-        // (Direct callers — GUID rendering — get the line-break guard here; ScalarStr guards its own.)
+        // The reader unescapes \" and \\, so those are the only escapes emitted. The guard here covers FlowGuid,
+        // which calls this directly.
         private static string Quote(string s)
         {
             CheckNoLineBreak(s);
@@ -576,9 +535,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static string NumFromDouble(double d)
         {
-            // Intentional lossy clamp: NaN/Infinity have no token in the accepted subset and would emit
-            // unparseable text. A decompiled graph can't author them (Unity stores finite floats), so 0 keeps
-            // output parseable rather than silently corrupting it — not an accidental data change.
+            // Intentional lossy clamp: NaN and Infinity render as 0 rather than as tokens the schema does not define.
             if (double.IsNaN(d) || double.IsInfinity(d)) return "0";
             if (d == Math.Floor(d) && Math.Abs(d) < 1e15) return ((long)d).ToString(Inv);
             return d.ToString("R", Inv);

@@ -12,21 +12,16 @@ using Ryan6Vrc.AgentTools.Editor;
 using nadena.dev.modular_avatar.core;
 using VRC.SDK3.Avatars.Components;
 
-// ReportShapeOverlap proof obligations. The pure core (Analyze) reads blendshape deltas off an in-memory
-// Mesh, so most tests build a Mesh with AddBlendShapeFrame and known per-vertex deltas and assert the
-// touched-set footprints + containment directly — no scene, no fakes, the real GetBlendShapeFrameVertices
-// path. Report door tests (scene resolve + summary + log trailer + FAIL branches) run against a throwaway
-// Single scene (mirrors CheckSeamTests): fixtures live in it, it is never saved.
+// The pure core (Analyze) reads blendshape deltas off an in-memory Mesh, so its tests need no scene. Door tests
+// run in a throwaway Single scene that is never saved.
 [Category("ReportShapeOverlap")]
 public class ReportShapeOverlapTests
 {
     private GameObject _root;
     private readonly List<Mesh> _meshes = new List<Mesh>();
 
-    // A Report writes a Snapshot markdown, and docs/unity-tools.md declares that dir DURABLE — the operator's
-    // own pile, pruned by nothing. Record the path each call named in its `| log=` trailer and delete exactly
-    // those; a glob over `shape-overlap_*.md` would also sweep snapshots the operator took by hand. One list for
-    // the whole fixture rather than a per-test field, so a test making two Report calls records both.
+    // A Report writes a Snapshot markdown. Record the path each call named in its `| log=` trailer and delete
+    // exactly those; a glob over `shape-overlap_*.md` would also sweep snapshots the operator took by hand.
     private static readonly List<string> Artifacts = new List<string>();
 
     [OneTimeTearDown]
@@ -63,7 +58,7 @@ public class ReportShapeOverlapTests
         return m;
     }
 
-    // Add a blendshape whose delta at each listed (idx, magnitudeMeters) is (mag,0,0); every other vertex 0.
+    // Magnitudes are meters.
     private static void AddShape(Mesh m, string name, params (int idx, float mag)[] touched)
     {
         var d = new Vector3[m.vertexCount];
@@ -71,7 +66,6 @@ public class ReportShapeOverlapTests
         m.AddBlendShapeFrame(name, 100f, d, null, null);
     }
 
-    // Shorthand: shape touching a contiguous [lo, hi] vertex span at a uniform magnitude.
     private static void AddSpan(Mesh m, string name, int lo, int hi, float mag)
     {
         var t = new List<(int, float)>();
@@ -98,9 +92,8 @@ public class ReportShapeOverlapTests
 
     private const string LogMarker = "| log=";
 
-    // The door, with the Snapshot path it named recorded for teardown. Every Report call in this fixture goes
-    // through here, including the ones that assert only on the returned summary — a summary-only call wrote its
-    // artifact too — and the FAIL cases, whose contract is that there is no trailer to record.
+    // The door, recording the Snapshot path it named for teardown. Every Report call in this fixture goes through
+    // here, because a call that asserts only on the returned summary wrote its artifact too.
     private static string Report(string meshObject, string[] shapeNames = null, string outfitRoot = null)
     {
         string summary = ReportShapeOverlap.Run(meshObject, shapeNames, outfitRoot);
@@ -119,8 +112,7 @@ public class ReportShapeOverlapTests
 
     // ── Core: containment metric ──────────────────────────────────────────────────────────────────────
 
-    // B's span sits entirely inside A's ⇒ the smaller (B) is fully swallowed ⇒ containment 1.0 (the
-    // double-subtraction condition: stocking contains the driven leg shrink).
+    // The double-subtraction condition: a stocking shape contains the driven leg shrink.
     [Test]
     public void Containment_fullyContained_isOne()
     {
@@ -137,7 +129,6 @@ public class ReportShapeOverlapTests
         Assert.AreEqual(1.0f, p.Containment, 1e-4f);
     }
 
-    // Partial overlap below the flag threshold: |A∩B|=2 over min(10,7)=7 ⇒ 0.286 < 0.30 ⇒ not flagged.
     [Test]
     public void Containment_partial_belowFlag()
     {
@@ -154,9 +145,6 @@ public class ReportShapeOverlapTests
 
     // ── Core: the two-tier noise floor ─────────────────────────────────────────────────────────────────
 
-    // The RELATIVE tier earns its place: 10 main verts at 50mm set p95≈50mm ⇒ thr=10%·p95=5mm, so 5 stray
-    // verts at 1mm (well ABOVE the 0.1mm absolute floor) are pruned. absFloor alone would keep them
-    // (footprint 15); the relative tier drops them to 10. This is the stray-authoring-vertex case.
     [Test]
     public void RelativeFloor_prunesStrayVerts()
     {
@@ -171,8 +159,6 @@ public class ReportShapeOverlapTests
         Assert.Greater(f.Threshold, ReportShapeOverlap.AbsFloorMeters, "thr is driven by the relative tier here");
     }
 
-    // The ABSOLUTE tier is the floor when the shape is uniformly tiny: p95≈0.2mm ⇒ 10%·p95=0.02mm < 0.1mm,
-    // so thr clamps to absFloor and the 0.05mm sub-visual verts are pruned while the 0.2mm ones survive.
     [Test]
     public void AbsoluteFloor_prunesSubVisual()
     {
@@ -189,7 +175,6 @@ public class ReportShapeOverlapTests
 
     // ── Core: robustness ───────────────────────────────────────────────────────────────────────────────
 
-    // A missing shape name is recorded, not fatal; the resolvable shapes still pair.
     [Test]
     public void MissingShape_recorded_notFatal()
     {
@@ -203,7 +188,6 @@ public class ReportShapeOverlapTests
         Assert.AreEqual(1.0f, PairOf(a, "A", "B").Containment, 1e-4f);
     }
 
-    // An all-zero shape touches nothing ⇒ footprint 0 ⇒ containment guards the divide-by-zero (0, no throw).
     [Test]
     public void EmptyShape_noDivideByZero()
     {
@@ -278,10 +262,8 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("no SkinnedMeshRenderer with blendshapes", r);
     }
 
-    // A healthy mesh with nothing co-active is an ANSWER, not a refusal: all three sources are optional by
-    // contract and the tool assembles the set itself, so "nothing is on together here" is what the caller
-    // asked. It used to share the bad-input FAIL envelope, which also denied the caller a RunLog path —
-    // the artifact the compose checkpoint requires — so a legitimate empty read could not be recorded.
+    // All three sources are optional and the tool assembles the set itself, so "nothing is on together here" is
+    // what the caller asked, and it still writes its artifact and names it in the trailer.
     [Test]
     public void Report_emptyCoActiveSet_isAnAnswerNotARefusal()
     {
@@ -297,10 +279,8 @@ public class ReportShapeOverlapTests
         StringAssert.DoesNotContain("meshCutters=", r, "the cutter scan never ran, so no verdict on it may print");
     }
 
-    // Presence, and the whole reason the token exists: a cutter anti-clips by vertex FILTER, so this outfit is
-    // anti-clipped with no ShapeChanger row anywhere — `reacted=0` alone would read as "nothing anti-clips".
-    // Typed AddComponent, not reflection: the test asmdef references MA, so an upstream rename breaks the
-    // BUILD here rather than quietly asserting against a fixture that was never created.
+    // A cutter anti-clips by vertex FILTER, so this outfit is anti-clipped with no ShapeChanger row anywhere and
+    // `reacted=0` alone would read as "nothing anti-clips".
     [Test]
     public void Report_meshCutterUnderOutfitRoot_saysPresentBesideReacted()
     {
@@ -315,13 +295,12 @@ public class ReportShapeOverlapTests
         var r = Report(Path(body), new string[0], Path(avatar));
         StringAssert.Contains("reacted=0", r);
         StringAssert.Contains("meshCutters=present", r);
-        // Beside reacted=, not merely somewhere on the line: the token's only job is to qualify that number,
-        // and a reader scanning for the zero must meet the qualification at the same glance.
+        // Adjacent to reacted=, because the token's only job is to qualify that number.
         StringAssert.IsMatch(@"reacted=0 meshCutters=present", r);
     }
 
-    // The clean scan. `absent` is the tell that the scan RAN — distinct from the no-outfitRoot case above,
-    // which prints no token at all. Scoped, per CutterPresence: "none under this root", never "nothing cuts".
+    // `absent` says the scan ran, unlike the no-outfitRoot case above, which prints no token. It means "none under
+    // this root", never "nothing cuts".
     [Test]
     public void Report_noMeshCutter_saysAbsentSoTheScanIsLegible()
     {
@@ -336,8 +315,7 @@ public class ReportShapeOverlapTests
         StringAssert.DoesNotContain("NOT scanned", r, "outfitRoot was passed — the scan ran");
     }
 
-    // The branch no scene fixture can reach (MA always resolves in a live Editor) and the one the shipped
-    // census had no test for at all. Pure over its inputs, so it is assertable directly.
+    // No scene fixture can reach this branch, because MA always resolves in a live Editor.
     [Test]
     public void DecideCutterState_typeDriftWithMaInstalled_isDriftUnknownNeverAbsent()
     {
@@ -347,7 +325,6 @@ public class ReportShapeOverlapTests
             "false all-clear this signal exists to prevent");
     }
 
-    // The other half of the same ambiguity: MA genuinely absent is the honest silent floor, NOT a withholding.
     [Test]
     public void DecideCutterState_maAbsent_isAbsentNotWithheld()
     {
@@ -355,9 +332,6 @@ public class ReportShapeOverlapTests
             ReportShapeOverlap.DecideCutterState(null, maInstalled: false, anyCutterFound: false));
     }
 
-    // The state->string mapping, asserted directly. Without this the drift path is covered only as an ENUM,
-    // while the text an agent actually reads goes unexercised — the same gap this change was made to close,
-    // one level of indirection down.
     [Test]
     public void MeshCutterPart_rendersEachStateExactly()
     {
@@ -369,11 +343,10 @@ public class ReportShapeOverlapTests
         Assert.AreEqual("", ReportShapeOverlap.MeshCutterPart(ReportShapeOverlap.CutterState.NotScanned));
     }
 
-    // Both MA drift paths withhold on the SUMMARY, not only to the console. Neither is reachable from a scene
-    // fixture (MA always resolves in a live Editor), and the reactions one shipped silent for exactly that
-    // reason: a drifted ShapeChanger type produced `reacted=0` indistinguishable from a clean scan. Asserted
-    // on the rendering directly, and asserted TOGETHER, because the two types share a namespace — the
-    // realistic rename sets both, and one door confessing while its twin stays quiet is the defect.
+    // Both MA drift paths withhold on the SUMMARY, not only to the console: a drifted ShapeChanger type otherwise
+    // yields `reacted=0`, indistinguishable from a clean scan. Neither is reachable from a scene fixture, so this
+    // asserts the rendering, and asserts them TOGETHER because the two types share a namespace: the realistic
+    // rename sets both.
     [Test]
     public void WithheldNotes_spellsEveryDriftTheSameWay()
     {
@@ -391,12 +364,11 @@ public class ReportShapeOverlapTests
 
         var actives = new ReportShapeOverlap.Ingested { ActiveStateUnknown = true };
         StringAssert.Contains("signal WITHHELD", ReportShapeOverlap.WithheldNotes(actives),
-            "the third signal predates this change and must keep the shared spelling");
+            "the active-state-unknown signal must use the shared WITHHELD spelling");
     }
 
-    // The note is gated on the SCAN, not on an empty result: this is the common call shape — a
-    // caller-supplied set, no outfitRoot — where `reacted=0` would otherwise be indistinguishable from
-    // "scanned, and nothing reacts". It regressed exactly here once.
+    // The note is gated on the SCAN, not on an empty result: with a caller-supplied set and no outfitRoot,
+    // `reacted=0` would otherwise be indistinguishable from "scanned, and nothing reacts".
     [Test]
     public void Report_shapesPassedWithoutOutfitRoot_stillNamesTheUnscannedSource()
     {
@@ -410,8 +382,6 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("NOT scanned — no outfitRoot passed", r);
     }
 
-    // A null (or blank) shape-name element is malformed input, not a MISSING shape: reject it in the FAIL
-    // envelope rather than let GetBlendShapeIndex(null) throw a raw exception out of Report().
     [Test]
     public void Report_nullShapeName_fails()
     {
@@ -425,7 +395,6 @@ public class ReportShapeOverlapTests
         Assert.IsFalse(r.Contains("| log="), "malformed input is a bare FAIL, not a written report");
     }
 
-    // Two child renderers both carrying blendshapes ⇒ ambiguous ⇒ FAIL naming them (point at one).
     [Test]
     public void Report_ambiguousMesh_fails()
     {
@@ -450,10 +419,9 @@ public class ReportShapeOverlapTests
         go.AddComponent<SkinnedMeshRenderer>().sharedMesh = mesh;
     }
 
-    // ── ShapeChanger reaction ingestion (Task 1) ───────────────────────────────────────────────────────
+    // ── ShapeChanger reaction ingestion ────────────────────────────────────────────────────────────────
     // AvatarObjectReference.Get resolves relative to an avatar root, so fixtures hang off a VRCAvatarDescriptor
-    // (registered as an avatar-root type by NDMF's VRChat platform at editor load). The body SMR and the
-    // ShapeChanger-bearing outfit both live under it; the reaction's Object points at the body's GameObject.
+    // (registered as an avatar-root type by NDMF's VRChat platform at editor load).
 
     private GameObject NewAvatarRoot(string name)
     {
@@ -481,7 +449,7 @@ public class ReportShapeOverlapTests
         foreach (var (shape, type) in rows)
         {
             var objRef = new AvatarObjectReference();
-            objRef.Set(target); // resolve relative to the avatar root the outfit hangs under
+            objRef.Set(target);
             list.Add(new ChangedShape { Object = objRef, ShapeName = shape, ChangeType = type, Value = 100f });
         }
         sc.Shapes = list;
@@ -489,13 +457,10 @@ public class ReportShapeOverlapTests
     }
 
     // ── Build-effective active state ──────────────────────────────────────────────────────────────────
-    // MA conditions every reaction on its ancestors' activeSelf, so a declaration behind a PARKED ancestor
-    // does not apply at the initial state and cannot own a worn shape. The discriminator that decides this
-    // is whether the parked ancestor is toggle-driven: getting it wrong in either direction is a false
-    // verdict, so both directions are asserted, not just the one the repair was written for.
+    // MA conditions every reaction on its ancestors' activeSelf, so a declaration behind a PARKED ancestor may
+    // not apply at the initial state. Whether that ancestor is toggle-driven decides it, and a wrong call in
+    // either direction misleads the reader, so both directions are asserted.
 
-    // Reparent a ShapeChanger's host under a new intermediate GameObject, so the fixture can park (or drive)
-    // a single ancestor without touching the changer itself.
     private GameObject Interpose(GameObject child, string name)
     {
         var mid = new GameObject(name);
@@ -515,10 +480,9 @@ public class ReportShapeOverlapTests
         return ot;
     }
 
-    // A declaration reachable only from behind a parked, undriven ancestor may not apply at the initial state.
-    // It is ANNOTATED, never flagged: proving it dead needs MA's build-time animation index (any clip binding
-    // the ancestor's m_IsActive keeps the reaction live), which no edit-time read has — so flagging would
-    // invent offenders on every FX-toggled wardrobe, the failure this tool exists to avoid.
+    // Proving the declaration dead needs MA's build-time animation index (any clip binding the ancestor's
+    // m_IsActive keeps the reaction live), which no edit-time read has, so flagging would invent offenders on
+    // every FX-toggled wardrobe.
     [Test]
     public void Report_declaredOnlyBehindParkedAncestor_annotatedNotFlagged()
     {
@@ -539,9 +503,8 @@ public class ReportShapeOverlapTests
             "a parked declaration is annotated for the reader to rule on, never promoted to a verdict: " + row);
     }
 
-    // The false-positive direction, and the one that would have made this repair worse than the defect: an
-    // outfit switched off in the scene but driven by an ObjectToggle is a LIVE conditional, not a dead branch
-    // (MA exempts toggle targets from constant-folding). This is the standard shipping shape.
+    // An outfit switched off in the scene but driven by an ObjectToggle is a LIVE conditional, not a dead branch
+    // (MA exempts toggle targets from constant-folding).
     [Test]
     public void Report_parkedAncestorDrivenByObjectToggle_stillDeclares()
     {
@@ -562,9 +525,9 @@ public class ReportShapeOverlapTests
         Assert.IsFalse(row.Contains("inactive:"), "a toggle-driven ancestor is not parked: " + row);
     }
 
-    // The deleted skip. MA's affected-object skip is guarded on `affectedObject != null`, and FindShapes calls
-    // ObjectRule with the 3-arg form, so ShapeChangers pass null and EVERY ancestor gets a condition — including
-    // one that is also an ancestor of the body. Mirroring MeshCutter's skip here would restore the false green.
+    // MA's affected-object skip is guarded on `affectedObject != null`, and FindShapes calls ObjectRule with the
+    // 3-arg form, so ShapeChangers pass null and EVERY ancestor gets a condition, including one that is also an
+    // ancestor of the body. Mirroring MeshCutter's skip here would wrongly read this ancestor as not parked.
     [Test]
     public void Report_parkedAncestorAlsoAncestorOfBody_stillCountsAsParked()
     {
@@ -585,8 +548,8 @@ public class ReportShapeOverlapTests
         Assert.IsFalse(row.Contains("MISMATCH"), "annotated, not flagged: " + row);
     }
 
-    // The caller's own root is not authoring state. `map-outfit-shapes` prescribes turning a piece off to drive
-    // this tool, so charging the root to the rows would mark every declaration dead in one stroke.
+    // The caller's own root is not authoring state: a caller who staged the piece off would otherwise read every
+    // declaration as parked.
     [Test]
     public void Report_outfitRootItselfInactive_isANoteNotAWaveOfMismatches()
     {
@@ -605,8 +568,7 @@ public class ReportShapeOverlapTests
     }
 
     // MA scans toggles from the AVATAR root, and the ordinary wardrobe layout parks the ObjectToggle on a menu
-    // object ABOVE the outfit. Scoping the scan to the caller's root would miss it and annotate a genuinely
-    // driven ancestor as parked — a false annotation on the most common layout there is.
+    // object ABOVE the outfit.
     [Test]
     public void Report_toggleAboveTheOutfitRoot_stillCountsAsDriven()
     {
@@ -626,9 +588,7 @@ public class ReportShapeOverlapTests
             "a toggle above the caller's root still drives the ancestor: " + ResolutionRow(md, "Shrink_Hip"));
     }
 
-    // `Inverted` is how "apply this while the piece is OFF" is authored, and ReactionRule.InitiallyActive XORs
-    // it — so an inverted changer behind a parked ancestor is initially ACTIVE. Reading it as parked would
-    // annotate exactly the healthy inverted case.
+    // `Inverted` is how "apply this while the piece is OFF" is authored, and ReactionRule.InitiallyActive XORs it.
     [Test]
     public void Report_invertedChangerBehindParkedAncestor_isLiveNotParked()
     {
@@ -645,8 +605,7 @@ public class ReportShapeOverlapTests
             "an inverted declaration behind a parked ancestor is initially active: " + ResolutionRow(md, "Shrink_Hip"));
     }
 
-    // MA's initial state is the last INITIALLY-ACTIVE group, not the last declared. A live declaration must win
-    // over a parked one whatever the hierarchy order — otherwise the annotation is order-dependent.
+    // MA's initial state is the last INITIALLY-ACTIVE group, not the last declared.
     [Test]
     public void Report_oneLiveAndOneParkedDeclaration_readsAsLive()
     {
@@ -663,8 +622,7 @@ public class ReportShapeOverlapTests
             "a live declaration owns the shape regardless of enumeration order: " + ResolutionRow(md, "Shrink_Hip"));
     }
 
-    // A toggle row that drives the ancestor OFF resolves to inactive, so treating mere toggle MEMBERSHIP as
-    // "driven" would restore the blind spot the annotation exists to surface.
+    // A toggle row driving the ancestor OFF resolves to inactive, so toggle MEMBERSHIP alone does not make it driven.
     [Test]
     public void Report_toggleDrivingTheAncestorOff_isNotTreatedAsDriven()
     {
@@ -681,7 +639,6 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("inactive:", ResolutionRow(md, "Shrink_Hip"));
     }
 
-    // A live chain is unaffected — the anti-flood invariant still holds for everything this repair does not touch.
     [Test]
     public void Report_liveChain_declarationStillSuppresses()
     {
@@ -698,8 +655,6 @@ public class ReportShapeOverlapTests
         Assert.IsFalse(row.Contains("MISMATCH"), "a live declaration still owns its shape: " + row);
     }
 
-    // MA never consults the ShapeChanger component's own `enabled`, so neither may this — a component-disabled
-    // changer on a live chain still declares. Asserted because "disabled" is the intuitive reading and it is wrong.
     [Test]
     public void Report_componentDisabledOnLiveChain_stillDeclares()
     {
@@ -716,8 +671,6 @@ public class ReportShapeOverlapTests
         Assert.IsFalse(row.Contains("MISMATCH"), "MA ignores the component's enabled flag, so this must too: " + row);
     }
 
-    // A Set-mode ShapeChanger writing the body mesh contributes its shape to the analyzed set even though its
-    // scene weight is 0 (the caller passes only the worn Stocking; Shrink_Hip is pulled in by the reaction).
     [Test]
     public void Report_shapeChangerSet_ingestedAtZeroWeight()
     {
@@ -734,11 +687,9 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("`Shrink_Hip`", ReadLog(r));
     }
 
-    // A ShapeChanger whose write-target is a DIFFERENT mesh is ignored (the reaction to Torso must not be pulled
-    // into Face's analyzed set — even though Shrink_Hip exists on Face's mesh, so a mis-ingest would show) — and
-    // the summary says where the rows went, because a census pointed at the wrong mesh otherwise prints the same
-    // `reacted=0` as an outfit that reacts to nothing. Names deliberately not substrings of each other, so the
-    // note naming the wrong mesh could not pass; a null-target row must not be listed.
+    // Shrink_Hip also exists on Face's mesh, so a mis-ingest would show. The summary names where the rows went
+    // because a census pointed at the wrong mesh otherwise prints the same `reacted=0` as an outfit that reacts to
+    // nothing. Face and Torso are not substrings of each other, so the note naming the wrong mesh could not pass.
     [Test]
     public void Report_shapeChangerDifferentMesh_ignoredAndNamed()
     {
@@ -763,9 +714,8 @@ public class ReportShapeOverlapTests
         StringAssert.DoesNotContain("target " + Path(body), r);
     }
 
-    // The sibling note is gated on reacted=0: once any row lands on this mesh the census is on the right mesh,
-    // so a sibling row is the ordinary filtered case and nothing prints. Both rows present, so the gate is what
-    // is being tested — not the absence of sibling rows.
+    // The sibling note is gated on reacted=0: once any row lands on this mesh the census is on the right mesh, so
+    // a sibling row is the ordinary filtered case and nothing prints.
     [Test]
     public void Report_shapeChangerOnThisAndSibling_noSiblingNote()
     {
@@ -784,8 +734,6 @@ public class ReportShapeOverlapTests
         StringAssert.DoesNotContain("rows under outfitRoot target", r);
     }
 
-    // The {worn} tier: a shape at nonzero weight on the resolved SMR is ingested off the SMR (not the Mesh),
-    // while a zero-weight sibling is not. No outfit root ⇒ the MA path is untouched (MA-absent-safe).
     [Test]
     public void BuildAnalyzeSet_wornShape_ingestedFromNonzeroWeight()
     {
@@ -802,7 +750,6 @@ public class ReportShapeOverlapTests
         CollectionAssert.DoesNotContain(ing.Names, "Idle");
     }
 
-    // Per-row targets (an unset Object leaves referencePath empty ⇒ resolves to null at Get time).
     private ModularAvatarShapeChanger AddShapeChangerRows(GameObject avatar, string name,
         params (string shape, ShapeChangeType type, GameObject target)[] rows)
     {
@@ -820,8 +767,6 @@ public class ReportShapeOverlapTests
         return sc;
     }
 
-    // A row whose Object resolves to null is skipped without throwing, and a valid SIBLING row on the SAME
-    // component is still ingested — the per-row guard must not let one bad ref truncate the sweep.
     [Test]
     public void BuildAnalyzeSet_nullTargetRow_skippedSiblingIngested()
     {
@@ -840,8 +785,6 @@ public class ReportShapeOverlapTests
         CollectionAssert.DoesNotContain(ing.Names, "Nulled");
     }
 
-    // A shape that is BOTH caller-passed AND reaction-targeted appears once in the union, and the reaction
-    // ChangeType is still recorded (dedup must not drop the Task-2 type capture).
     [Test]
     public void BuildAnalyzeSet_passedAndReaction_dedupedTypeRecorded()
     {
@@ -857,9 +800,6 @@ public class ReportShapeOverlapTests
         Assert.AreEqual(1, ing.ReactionTypes["Dual"], "reaction ChangeType still recorded on the deduped shape");
     }
 
-    // Multiple ShapeChanger components, one carrying multiple rows — every reaction-targeted shape is ingested
-    // and each row's ChangeType is captured. Both ChangeType poles are here (Set=1 on A/C, Delete=0 on B), so
-    // the two single-pole tests that used to sit above assert nothing this does not.
     [Test]
     public void BuildAnalyzeSet_multipleShapeChangers_allIngested()
     {
@@ -880,10 +820,8 @@ public class ReportShapeOverlapTests
         Assert.AreEqual(1, ing.ReactionTypes["C"]); // Set
     }
 
-    // ── Task 2: resolution table + weight audit + disposition + summary ─────────────────────────────────
+    // ── Resolution table + weight audit + disposition + summary ─────────────────────────────────────────
 
-    // A ShapeChanger row carrying a custom Set value (the base fixture hardcodes 100) — needed to distinguish a
-    // Set's resolved-target (its own value) from a Delete's (always `deleted`, whatever its Value field holds).
     private ModularAvatarShapeChanger AddShapeChangerValued(GameObject avatar, string name, GameObject target,
         params (string shape, ShapeChangeType type, float value)[] rows)
     {
@@ -901,8 +839,6 @@ public class ReportShapeOverlapTests
         return sc;
     }
 
-    // The single Resolution-table line for `shape` (one line per union shape, between "## Resolution" and the
-    // next "## " section header). Lets a test assert one row's columns without matching the whole document.
     private static string ResolutionRow(string body, string shape)
     {
         int start = body.IndexOf("## Resolution", StringComparison.Ordinal);
@@ -914,8 +850,8 @@ public class ReportShapeOverlapTests
         return "";
     }
 
-    // (a) The anti-flood invariant: a reaction-declared shape sits at static weight 0 (the reaction owns it at
-    // runtime), yet its row is NOT flagged MISMATCH — flagging every correctly-owned row would flood the report.
+    // A reaction-declared shape sits at static weight 0 because the reaction owns it at runtime; flagging every
+    // correctly-owned row would flood the report.
     [Test]
     public void Report_reactionDeclaredAtZeroWeight_notFlagged()
     {
@@ -935,7 +871,6 @@ public class ReportShapeOverlapTests
                 Assert.IsFalse(line.Contains("MISMATCH"), "no data row should be flagged: " + line);
     }
 
-    // (b) The hazard case: a shape worn at nonzero weight with NO reaction declaring it ⇒ MISMATCH.
     [Test]
     public void Report_wornButUndeclared_flaggedMismatch()
     {
@@ -952,8 +887,8 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("none", row); // no reaction owns it
     }
 
-    // (c) A Delete reaction removes (or NaN-hides) the shape's vertices and writes no weight ⇒ resolved-target
-    // `deleted`, regardless of its Value field. Value=30 here so a leaked value could never read as the token.
+    // A Delete's resolved target is `deleted` whatever its Value field holds; Value=30 here so a leaked value
+    // could not read as the token.
     [Test]
     public void Report_deleteReaction_resolvedTargetIsDeleted()
     {
@@ -968,7 +903,6 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("| deleted |", row); // resolved-target column = deleted for a Delete, never its Value
     }
 
-    // (d) A Set reaction's resolved-target = its declared Value (here 42, distinct from a Delete's `deleted`).
     [Test]
     public void Report_setReaction_resolvedTargetIsValue()
     {
@@ -983,8 +917,6 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("| 42 |", row); // resolved-target column = the Set value
     }
 
-    // (e) Two ShapeChangers declaring one shape at different values surface as a CONFLICT — not collapsed to
-    // last-wins — both on the ingestion record and in the rendered row.
     [Test]
     public void Report_multiReactionDifferentValue_conflict()
     {
@@ -1005,8 +937,6 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("80", row); // both values surfaced, not collapsed
     }
 
-    // (f) The weight audit lists EVERY blendshape on the mesh, including ones never in the co-active union — but
-    // the footprint/pairwise pass stays scoped to the union (audit shapes are not footprinted).
     [Test]
     public void Report_weightAudit_listsAllShapes_footprintsStayScoped()
     {
@@ -1028,7 +958,6 @@ public class ReportShapeOverlapTests
         StringAssert.DoesNotContain("`Idle2`", footprintsOnward);
     }
 
-    // (g) The updated summary carries reacted=/worn=/missing= and keeps => OK, with no PASS/FAIL verdict token.
     [Test]
     public void Report_summary_reactedWornMissingOk_noVerdict()
     {
@@ -1049,9 +978,8 @@ public class ReportShapeOverlapTests
         Assert.IsFalse(r.Contains("PASS") || r.Contains("=> FAIL"), "a Report emits no verdict token");
     }
 
-    // Two Delete rows on one shape with differing STORED Value fields are NOT a conflict: MA ignores a Delete's
-    // Value (the shape is a vertex selector), so conflict detection must compare Delete on type only. (Regression:
-    // raw (type,value) comparison spuriously flagged 100 vs 30 as a conflict.)
+    // MA ignores a Delete's Value (the shape is a vertex selector), so conflict detection must compare Delete on
+    // type only.
     [Test]
     public void Report_twoDeleteRowsDifferingValues_noConflict()
     {
@@ -1072,8 +1000,6 @@ public class ReportShapeOverlapTests
         StringAssert.DoesNotContain("CONFLICT", row);
     }
 
-    // The summary's mismatch= field counts ONLY worn-but-undeclared rows, distinct from worn= (which also counts
-    // declared-and-worn shapes) — proving worn= is not a proxy for the disposition signal.
     [Test]
     public void Report_summary_mismatchCountsWornUndeclaredOnly()
     {
@@ -1092,9 +1018,8 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("mismatch=1", r); // only the undeclared one is a mismatch
     }
 
-    // Fix (finding #2): a NONZERO weight below "0.###" resolution (a float-noise residual) is classified worn
-    // yet must not render as "0" — the row would silently contradict its own mismatch= count. The current-weight
-    // cell shows the real magnitude instead. (Regression: Num's "0.###" printed 0.0004 as "0".)
+    // A NONZERO weight below "0.###" resolution (a float-noise residual) is classified worn, so rendering it as
+    // "0" would contradict the row's own mismatch= count.
     [Test]
     public void Report_tinyResidualWeight_wornButNotRenderedZero()
     {
@@ -1113,9 +1038,8 @@ public class ReportShapeOverlapTests
         StringAssert.Contains("0.0004", row); // real magnitude visible, not collapsed to "0"
     }
 
-    // Fix (finding #1): the MA-present probe underpins loud-vs-silent on an unresolved ShapeChanger type. If the
-    // hardcoded runtime-assembly name were wrong the probe would read "absent" even with MA installed, silently
-    // defeating the drift warning. In this test asmdef MA is referenced ⇒ the probe MUST read installed.
+    // A wrong hardcoded runtime-assembly name would read "absent" even with MA installed, silently defeating the
+    // drift warning.
     [Test]
     public void ModularAvatarInstalled_trueWhenReferenced()
     {
@@ -1123,11 +1047,9 @@ public class ReportShapeOverlapTests
             "MA is referenced by the test asmdef; the presence probe's assembly name must match");
     }
 
-    // ── Review follow-up: markdown-cell encoding + unknown-enum drift + overlap precompute ──────────────
+    // ── Rendering: markdown-cell encoding + unknown-enum drift + max overlap ────────────────────────────
 
-    // The encoder's own escaping rules are pinned once, in RunLogFormatTests — this tool only proves it is
-    // wired into the render path: a shape name with a pipe appears backslash-escaped in the RunLog, never in
-    // its raw column-breaking form.
+    // RunLogFormatTests pins the encoder's own rules; this proves only that it is wired into the render path.
     [Test]
     public void Report_shapeNameWithPipe_escapedInRunLog()
     {
@@ -1141,8 +1063,7 @@ public class ReportShapeOverlapTests
         StringAssert.DoesNotContain("`a|b`", md); // never the raw, column-breaking form
     }
 
-    // Finding #3: an out-of-range ShapeChangeType (a future MA mode or corrupt serialized enum) renders loudly
-    // as UNKNOWN(n) with an `unknown` resolved-target and a drift warning — never silently defaulted to Set.
+    // (ShapeChangeType)2 stands in for a future MA mode or a corrupt serialized enum.
     [Test]
     public void Report_unknownChangeType_renderedUnknownNotSet()
     {
@@ -1160,9 +1081,6 @@ public class ReportShapeOverlapTests
         Assert.IsFalse(row.Contains("Set="), "an unknown change type must not render as Set");
     }
 
-    // Finding #4: the overlap column is precomputed once per shape (instead of re-scanning a.Pairs per shape)
-    // and must report each shape's MAX containment across all its pairs. Small sits in two pairs — 1.00 with
-    // Big, 0.50 with Mid — so its cell must be the max 1.00; a clobbering or min aggregation would leave 0.50.
     [Test]
     public void Report_resolutionOverlapColumn_reportsMaxContainment()
     {

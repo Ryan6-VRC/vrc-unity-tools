@@ -95,7 +95,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return;
                 }
                 pathOwner[fromP] = fromMaterials[i];
-                if (toMaterials[i] == fromMaterials[i]) continue; // unchanged row
+                if (toMaterials[i] == fromMaterials[i]) continue;
                 string toP = toMaterials[i] != null ? AssetDatabase.GetAssetPath(toMaterials[i]) : "";
                 map[fromP] = toP;
             }

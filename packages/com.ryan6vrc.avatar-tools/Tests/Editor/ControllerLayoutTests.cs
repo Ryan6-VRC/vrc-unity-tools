@@ -4,14 +4,11 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 
-// Layout-preservation tests: the parse + validate cases run purely in memory; the Compile_* cases below
-// call ControllerEmit.Build, which persists a controller to the scratch folder — TearDown removes it.
+// ControllerEmit.Build's 2-arg door persists its controller to ScratchFolder; TearDown removes it.
 public class ControllerLayoutTests
 {
     private const string ScratchFolder = "Assets/Agent/Scratch/emit";
 
-    // ControllerEmit.Build's 2-arg door mints a VRCExpressionParameters nobody persists; see
-    // AnimatorTestHelpers.UnownedSideAssetSweep for why a survivor breaks unrelated suites.
     private readonly AnimatorTestHelpers.UnownedSideAssetSweep _paramSweep =
         new AnimatorTestHelpers.UnownedSideAssetSweep();
 
@@ -26,7 +23,6 @@ public class ControllerLayoutTests
             AssetDatabase.DeleteAsset(ScratchFolder);
     }
 
-    // A minimal two-state layer with an authored layout block placing Idle off-grid.
     private const string LayoutDoc = @"
 schema: 1
 controller: LayoutTest_Fx
@@ -89,15 +85,12 @@ layers:
             "unknown layout node flagged: " + string.Join(" | ", errors));
     }
 
-    // The accept side (layout keys that DO resolve → no dangling-layout error) is asserted by
-    // Escaped_Node_Name_Roundtrips below, on the harder escaped-name doc.
-
     [Test]
     public void Validate_Rejects_NonCanonical_Layout_Key()
     {
-        // A state named "A/B" whose layout key is written LITERALLY ("A/B") instead of canonically escaped
-        // ("A\/B"). It resolves to a real member (so dangling-layout doesn't fire) but would MISS emit's
-        // EscapeSegment lookup and silently grid-drop the coordinate — must fail loud at validation instead.
+        // A layout key written literally ("A/B") instead of canonically escaped ("A\/B") resolves to a real
+        // member, so dangling-layout doesn't fire, but would miss emit's EscapeSegment lookup and silently
+        // grid-drop the coordinate.
         var src = @"
 schema: 1
 controller: NonCanon_Fx
@@ -123,7 +116,6 @@ layers:
     [Test]
     public void Compile_Honors_Listed_And_Grids_Omitted()
     {
-        // Author only Idle; Go is omitted from nodes -> grid slot 1.
         var doc = AnimatorSchemaYaml.Parse(
             LayoutDoc.Replace("nodes: { Idle: [111, 222], Go: [333, 444] }", "nodes: { Idle: [111, 222] }"),
             "test");
@@ -147,8 +139,7 @@ layers:
         Assert.AreEqual(ControllerEmit.SpecialExit,  sm.exitPosition);
     }
 
-    // Move a state off-grid in a persisted controller (ChildAnimatorState is a struct -> edit a copy, write
-    // the whole array back), then save.
+    // ChildAnimatorState is a struct: edit a copy and write the whole array back.
     private static void MoveState(AnimatorStateMachine sm, string name, Vector3 to)
     {
         var arr = sm.states;
@@ -159,14 +150,8 @@ layers:
         AssetDatabase.SaveAssets();
     }
 
-    // Capture of an arranged controller is asserted where it matters end-to-end:
-    // Layout_Roundtrip_Fixpoint_Nested_And_NonInteger (below) drags every node kind and proves the
-    // coordinates come back, and DecompileControllerTests.StripLayout_Writes_Yaml_Without_Layout holds the
-    // captured-vs-stripped contrast at the door.
-
-    // An otherwise-empty sub-machine whose special node was dragged off-constant carries a captured Layout.
-    // The emitter must not treat it as empty ({}) and drop that layout — its exitPosition must survive the
-    // Decompile->Serialize->Parse->Compile round-trip.
+    // AnimatorSchemaEmit serializes an empty sub-machine as `{}` unless it carries a captured Layout, so this
+    // is the case where a dragged special node could be lost.
     [Test]
     public void Layout_Survives_On_Empty_Arranged_SubMachine()
     {
@@ -175,7 +160,6 @@ layers:
         var controller = res.Controller;
         var root = controller.layers[0].stateMachine;
 
-        // An EMPTY sub-machine (no states inside) whose exit node is dragged off its constant.
         var child = root.AddStateMachine("Empty", ControllerEmit.GridSub(0));
         child.exitPosition = new Vector3(9, 9, 0);
         EditorUtility.SetDirty(root);
@@ -193,10 +177,7 @@ layers:
             "empty arranged sub-machine's exit position survived (layout not dropped as {})");
     }
 
-    // A never-arranged nested controller (a sub-machine with a state, nothing dragged) emits NO layout block
-    // anywhere: the root machine and the nested machine both decode to a null Layout. Exercises the
-    // isRoot:false + parent==SpecialParent omit path — and, via its first assertion, the flat never-arranged
-    // case too (no separate grid-controller test needed).
+    // Exercises IsDefaultLayout's isRoot:false path, where parent == SpecialParent omits the layout.
     [Test]
     public void Decompile_Omits_Layout_For_Nested_Grid_Controller()
     {
@@ -225,11 +206,10 @@ layers:
     [Test]
     public void Escaped_Node_Name_Roundtrips()
     {
-        // A state whose name contains '/'. The states: key is RAW ("A/B" -> State.Name). Every ESCAPED
-        // reference (transition target, default, layout node key) is the address form the producers emit:
-        // EscapeSegment gives "A\/B", and double-quoted YAML needs the backslash doubled ("A\\/B") because
-        // the reader halves \\ -> \ (an unknown \/ would instead drop the backslash). This is exactly what
-        // ControllerDecompile + AnimatorSchemaEmit round-trip.
+        // The states: key is raw ("A/B" -> State.Name). Every escaped reference (transition target, default,
+        // layout node key) is the address form the producers emit: EscapeSegment gives "A\/B", and double-quoted
+        // YAML needs the backslash doubled ("A\\/B") because the reader halves \\ -> \ (an unknown \/ would
+        // instead drop the backslash).
         var src = @"
 schema: 1
 controller: Esc_Fx
@@ -252,25 +232,19 @@ layers:
         Assert.AreEqual(new Vector3(123, 456, 0), cs.position, "escaped-name node placed");
     }
 
-    // Renamed off "…_And_RFormat": every coordinate in LayoutDoc is an integer, so this test never touched
-    // float formatting. R-format preservation is proven by Layout_Roundtrip_Fixpoint_Nested_And_NonInteger's
-    // 287.34f drag surviving the round-trip exactly.
     [Test]
     public void Serialize_Renders_Layout_In_Flow_Form()
     {
         var doc = AnimatorSchemaYaml.Parse(LayoutDoc, "test");
         var yaml = AnimatorSchemaEmit.Serialize(doc);
         StringAssert.Contains("layout:", yaml);
-        StringAssert.Contains("nodes: {", yaml);       // flow form
+        StringAssert.Contains("nodes: {", yaml);
         StringAssert.Contains("[111, 222]", yaml);
         Assert.IsFalse(yaml.Contains("parent:"), "no parent authored -> not emitted");
     }
 
-    // Full round-trip fixpoint: an arranged controller (nested sub-machine + a non-integer drag, every
-    // capture path exercised) Decompile->Serialize->Parse->Compile back to the SAME positions, and a second
-    // decompile is textually identical. Assertions compare against the DRAGGED values, not merely yaml
-    // self-consistency — a lossy float format would self-stabilize on the second pass yet still have thrown
-    // away the human's arrangement on the first.
+    // Assertions compare against the dragged values, not merely yaml self-consistency: a lossy float format
+    // would self-stabilize on the second pass yet still have thrown away the human's arrangement on the first.
     [Test]
     public void Layout_Roundtrip_Fixpoint_Nested_And_NonInteger()
     {
@@ -279,24 +253,19 @@ layers:
         var controller = res.Controller;
         var root = controller.layers[0].stateMachine;
 
-        // A NESTED sub-machine with a state inside it — its own specials (incl. parent) exercise the
-        // isRoot:false capture path.
         var child = root.AddStateMachine("Sub", ControllerEmit.GridSub(0));
         child.AddState("SubState", ControllerEmit.GridState(0));
 
-        // --- Drag every node kind off its grid/constant default ---
-        // (a) a ROOT state -> a NON-INTEGER coord (proves R-format float preservation).
+        // A non-integer root-state coordinate proves R-format float preservation.
         var idlePos = new Vector3(287.34f, 154.9f, 0);
         MoveState(root, "Idle", idlePos);
 
-        // (b) the SUB-MACHINE NODE's position in the root (ChildAnimatorStateMachine is a struct -> copy-back).
         var subNodePos = new Vector3(615.5f, 42.25f, 0);
         int subIdx = System.Array.FindIndex(root.stateMachines, c => c.stateMachine.name == "Sub");
         var subs = root.stateMachines;
         subs[subIdx].position = subNodePos;
         root.stateMachines = subs;
 
-        // (c) the root's special nodes -> distinct off-constant values.
         var rootEntry = new Vector3(12, 34, 0);
         var rootAny   = new Vector3(56, 78, 0);
         var rootExit  = new Vector3(90, 11, 0);
@@ -304,7 +273,6 @@ layers:
         root.anyStatePosition = rootAny;
         root.exitPosition     = rootExit;
 
-        // (d) the NESTED machine's own special nodes -> distinct values, incl. parentStateMachinePosition.
         var childEntry  = new Vector3(5, 6, 0);
         var childExit   = new Vector3(7, 8, 0);
         var childParent = new Vector3(9, 10, 0);
@@ -316,13 +284,12 @@ layers:
         EditorUtility.SetDirty(child);
         AssetDatabase.SaveAssets();
 
-        // --- Fixpoint: Decompile -> Serialize -> Parse -> Compile ---
         var yaml1 = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(controller).Doc);
         var doc2 = AnimatorSchemaYaml.Parse(yaml1, "roundtrip");
         ControllerEmit.Build(doc2, out var res2);
         var root2 = res2.Controller.layers[0].stateMachine;
 
-        // Assert the DRAGGED values survived exactly (Vector3 Assert.AreEqual is per-component exact).
+        // Vector3 Assert.AreEqual is per-component exact.
         var idle2 = System.Array.Find(root2.states, cs => cs.state.name == "Idle");
         Assert.AreEqual(idlePos, idle2.position, "root state's non-integer position survived exactly");
 
@@ -338,7 +305,6 @@ layers:
         Assert.AreEqual(childExit,   child2.exitPosition,               "nested exit position survived");
         Assert.AreEqual(childParent, child2.parentStateMachinePosition, "nested parentStateMachinePosition survived (isRoot:false path)");
 
-        // Textual fixpoint: a second decompile of the recompiled controller is byte-identical.
         var yaml2 = AnimatorSchemaEmit.Serialize(ControllerDecompile.Walk(res2.Controller).Doc);
         Assert.AreEqual(yaml1, yaml2, "second decompile is textually identical (fixpoint reached)");
     }

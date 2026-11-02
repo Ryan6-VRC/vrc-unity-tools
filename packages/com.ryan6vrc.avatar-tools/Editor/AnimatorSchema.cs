@@ -3,13 +3,9 @@ using System.Text;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
-    // Addressing-name escaping. A state/sub-machine NAME may legally contain the path separator '/' (or a
-    // literal '\'). In a transition-target / default PATH context, escape per SEGMENT so the separator stays
-    // unambiguous: '\' -> '\\', '/' -> '\/'. This lives in the BARE-SCALAR layer, BELOW YAML string-quoting:
-    // the decoder escapes here first; if the escaped value still needs YAML double-quoting, Quote doubles the
-    // '\' and the reader halves it, so the two escapings COMPOSE (no separate compound-hazard handling needed).
-    // The compiler splits a path on UNescaped '/' then unescapes each segment. Bare names with no unescaped
-    // '/' and the 'Sub/A' / leading-'/' forms are unaffected.
+    // Addressing-name escaping. A state/sub-machine NAME may legally contain '/' or '\', so a transition-target
+    // or default PATH escapes per SEGMENT: '\' -> '\\', '/' -> '\/'. This is the BARE-SCALAR layer, BELOW YAML
+    // string-quoting: Quote doubles the '\' and the reader halves it, so the two escapings compose.
     public static class AddressPath
     {
         public static string EscapeSegment(string name)
@@ -44,9 +40,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
     }
 
-    // Typed model for the animator-write substrate. Plain POCOs (System.* only, no Unity API) so the
-    // parser and later compiler stages can be unit-checked without the editor. Every type/field here is
-    // the shared contract that AnimatorSchemaYaml and ControllerEmit reference verbatim — do not rename.
+    // Typed model for the animator-write substrate. Plain POCOs: System.* only, no Unity API.
     public enum BindingBasis { AvatarRoot, MountRoot }
     public enum ControllerRole { Fx, BaseFx, Gesture, Action, Sitting, TPose, IkPose, Additive, Base }
     public enum AnimParamType { Bool, Int, Float }
@@ -54,25 +48,20 @@ namespace Ryan6Vrc.AvatarTools.Editor
     public enum TransitionInterruption { None, Source, Destination, SourceThenDestination, DestinationThenSource }
     public enum TreeKind { OneD, SimpleDirectional2D, FreeformDirectional2D, FreeformCartesian2D, Direct }
     public enum CondOp { Is, IsNot, Greater, Less, Equals, NotEqual }
-    // The four control kinds in the schema. The SDK also has TwoAxisPuppet/FourAxisPuppet; they are
-    // deliberately out of vocabulary (docs/menus.md: "TwoAxis/FourAxis puppets are effectively unused
-    // here"), so an unknown kind fails by name rather than half-emitting a puppet with no labels.
+    // The SDK's TwoAxisPuppet/FourAxisPuppet are out of vocabulary (docs/animator-schema.md §Not yet in the
+    // schema); the parser refuses an unknown kind.
     public enum MenuControlKind { Button, Toggle, SubMenu, Radial }
 
-    // Parameter names the compiler owns — an authored document must NOT declare these (SchemaValidation
-    // refuses them), so emission can inject them without colliding with a user param.
+    // Parameter names the compiler owns.
     public static class ReservedNames
     {
-        // The seconds-only carrier's scratch float: ControllerEmit declares it on the controller on first
-        // use to give a duration-only clip an honest, resolvable Animator-property curve; it is never listed
-        // in the emitted VRCExpressionParameters.
+        // The seconds-only carrier's scratch float (docs/animator-schema.md §clips).
         public const string CarrierParam = "_CompilerNull";
     }
 
-    // The SDK's per-menu control cap, mirrored here because SchemaValidation is System.*-only and cannot
-    // reach the SDK type. A MANAGED ECHO: ControllerEmit asserts this against VRCExpressionsMenu.MAX_CONTROLS
-    // on every emit, so an SDK change fails loud here instead of drifting. Violating it is destructive, not
-    // cosmetic — the SDK's own menu inspector silently truncates `controls` to the cap on open
+    // The SDK's per-menu control cap, mirrored here because SchemaValidation is System.*-only. ControllerEmit
+    // asserts this against VRCExpressionsMenu.MAX_CONTROLS on every menu emit. Exceeding it is destructive: the
+    // SDK's own menu inspector silently truncates `controls` to the cap on open
     // (VRCExpressionsMenuEditor.RefreshListSizeView), so an over-long menu loses controls the first time a
     // human looks at it.
     public static class MenuLimits { public const int MaxControlsPerMenu = 8; }
@@ -87,24 +76,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public List<ParamSpec> Parameters = new List<ParamSpec>();
         public List<Layer> Layers = new List<Layer>();
         public List<ClipSpec> Clips = new List<ClipSpec>();
-        // Named blend trees the document declares once and several motion slots reference by name
-        // (MotionRef.Shared). Keyed by BlendTreeSpec.Name exactly as Clips is keyed by ClipSpec.Name, so a
-        // `trees:` entry's KEY carries its identity and its body emits no `name:` of its own. Emission builds
-        // one BlendTree sub-asset per entry, lazily on first reference and memoized, so every reference site
-        // points at the same object rather than a copy.
+        // Named blend trees: each emits one BlendTree sub-asset however many motion slots reference it
+        // (MotionRef.Shared).
         public List<BlendTreeSpec> Trees = new List<BlendTreeSpec>();
         public List<MenuControl> Menu;          // null == no menu: block (emit writes no menu asset)
         public Dictionary<string, object> ReservedNotes = new Dictionary<string, object>();
         public string SourcePath;
     }
 
-    // One expression-menu control. Ordered (menu display order is what the wearer sees), so the schema
-    // holds a LIST, not a name-keyed map: two controls may legitimately share a name, and a map would
-    // both forbid that and lose the order.
-    //
-    // Sub-menu children hang here rather than in a separate document-level collection, so the YAML nests
-    // exactly as the menu does. ControllerEmit flattens the tree into one root asset plus a hidden
-    // sub-asset per sub-menu, the same way an inline clip embeds.
+    // One expression-menu control. The schema holds an ordered LIST, not a name-keyed map: display order is what
+    // the wearer sees, and two controls may share a name.
     public sealed class MenuControl
     {
         public string Name;
@@ -112,12 +93,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public string Param;                    // the driven parameter; null for a bare SubMenu
         public float Value = 1f;                // Button/Toggle: the value written while active
         public List<MenuControl> Controls;      // SubMenu only; null otherwise
-        // The control's icon, as authored: either a project path (it starts `Assets/` or `Packages/`) or a
-        // path relative to THIS DOCUMENT's own directory. Document-relative is the portable form and the
-        // reason this is not a plain project path like `mask:` — a vrc-patterns entry's icon sits beside its
-        // own yaml, and that pair is compiled both from the installed package path and from an arbitrary
-        // filesystem --root, which no single project path spans. ControllerEmit.ResolveIcon owns the three
-        // outcomes (resolved / present but outside the project / not found). All four kinds may carry one.
+        // The control's icon, as authored: a project path (it starts `Assets/` or `Packages/`) or a path
+        // relative to THIS DOCUMENT's own directory. ControllerEmit.ResolveIcon owns the outcomes.
         public string Icon;
     }
 
@@ -150,16 +127,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public List<State> States = new List<State>();
         public List<SubMachine> Machines = new List<SubMachine>();
         public string DefaultState;             // BARE local name within this machine (state or submachine)
-        // A default state that does NOT live in this machine — Unity's m_DefaultState is a plain AnimatorState
-        // PPtr with no subtree constraint, so a layer root can boot a state nested several machines down. A
-        // ROOT-RELATIVE address (the `to:` grammar), always naming a state, never a sub-machine.
-        //
-        // Separate from DefaultState because the two are independent facts that CO-EXIST in Unity, not two
-        // spellings of one: a machine can carry a foreign m_DefaultState AND a trailing unconditional entry
-        // rung at the same time (measured). They also emit through different mechanisms — DefaultState writes
-        // a PPtr for a state or an entry rung for a sub-machine, DefaultStatePath only ever writes the PPtr —
-        // so folding them into one key would make the address form silently select the mechanism, and would
-        // leave the co-existing shape unrepresentable.
+        // A default state nested below this machine: a ROOT-RELATIVE address, always naming a state. Separate
+        // from DefaultState because the two CO-EXIST in Unity (docs/animator-schema.md §`defaultState:`).
         public string DefaultStatePath;
         public List<Transition> EntryLadder = new List<Transition>();   // ordered
         public List<Transition> AnyLadder = new List<Transition>();     // ordered; each has CanTransitionToSelf
@@ -167,8 +136,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public MachineLayout Layout;
     }
     // OnExit == the sub-machine's OUTGOING transitions, fired when it reaches its own Exit. Unity models these
-    // as AnimatorTransition (the entry-rung type), so they carry conditions + target and NO timing surface at
-    // all — which is why they are a list of Transition with the same fields the entry ladder honors, and no more.
+    // as AnimatorTransition (the entry-rung type), so they carry conditions + target and NO timing surface.
     // They live on the PARENT's model because that is the machine whose scope their targets resolve in.
     public sealed class SubMachine
     {
@@ -177,24 +145,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public List<Transition> OnExit = new List<Transition>();
     }
 
-    // Per-machine node layout (Unity graph positions). Null unless authored or captured. Nodes keyed by the
-    // EscapeSegment form of the state/sub-machine name (names may contain '/'); coords are [x, y] (z is
-    // always 0). Entry/Any/Exit/Parent are the four special-node positions; Parent (the "up" node) is
-    // meaningful only in a sub-machine. See docs/animator-schema.md and the layout-preservation spec.
+    // Per-machine node layout. Null unless authored or captured. Contract: docs/animator-schema.md §layout.
     public sealed class MachineLayout
     {
         public Dictionary<string, float[]> Nodes = new Dictionary<string, float[]>();
         public float[] Entry, Any, Exit, Parent;   // [x, y] or null
     }
 
-    // Schema-tree traversal shared by every consumer that flattens a layer's states across the whole
-    // sub-machine tree (WD hoist, state-count budget checks, RunLog summaries). One walk, so a new
-    // schema-tree consumer costs no fourth copy — the spec's one-edit-site health bar. Null-safe: skips a
-    // null state or sub-machine rather than throwing (a well-formed document has none; malformed input
-    // degrades instead of faulting).
+    // Traversal shared by every consumer that flattens a layer's states across the whole sub-machine tree.
+    // Null-safe: skips a null state or sub-machine rather than throwing.
     public static class SchemaTree
     {
-        // Every state under this machine, recursing sub-machines at any depth, appended to `into`.
         public static void CollectStates(this StateMachine sm, List<State> into)
         {
             if (sm == null) return;
@@ -202,7 +163,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             foreach (var sub in sm.Machines) if (sub != null && sub.Machine != null) sub.Machine.CollectStates(into);
         }
 
-        // Count of the same traversal, without materializing the list.
         public static int CountStates(this StateMachine sm)
         {
             if (sm == null) return 0;
@@ -235,10 +195,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public string Name;                     // null ⇒ Unity's empty default; state/AnyState only (refused on entry)
         public bool Mute; public bool Solo;     // AnimatorStateTransition editor flags (state + AnyState ladders)
         // Normalized time in the DESTINATION state's motion where playback begins (Unity m_TransitionOffset).
-        // null == Unity's 0 (play from the start). Load-bearing, not cosmetic: a layer whose states share one
-        // clip at speed 0 and differ only by their incoming offset is a POSE PICKER — one clip sampled at
-        // several points — so zeroing it collapses every pose onto frame 0. State + AnyState only; an entry
-        // rung is an AnimatorTransition and has no timing surface to put it on.
+        // null == Unity's 0. A layer whose states share one clip at speed 0 and differ only by their incoming
+        // offset is a POSE PICKER, so zeroing it collapses every pose onto frame 0. State + AnyState only; an
+        // entry rung is an AnimatorTransition and has no timing surface.
         public float? Offset;
         // null == inherit Defaults:
         public float? Duration; public float? ExitTime; public bool? FixedDuration;
@@ -246,10 +205,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
     }
     public struct Condition { public string Param; public CondOp Op; public float Value; }
 
-    // Motion: exactly one of Clip / RefPath / RefGuid / Tree / Shared is set. Clip refers into
-    // AnimDocument.Clips by name; Shared refers into AnimDocument.Trees by name, and is the one form that
-    // does NOT own its motion — every MotionRef carrying the same Shared name resolves to a single BlendTree
-    // sub-asset, which is the whole point of the construct.
+    // Motion: exactly one field is set. Shared is the one form that does NOT own its motion: every MotionRef
+    // carrying the same Shared name resolves to a single BlendTree sub-asset.
     public sealed class MotionRef
     {
         public string Clip;                     // inline-clip name
@@ -281,7 +238,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     }
 
     // Inline clip: exactly one authoring form. Sets == constant single-key writes; Curves == keyframed;
-    // Seconds != null with no Sets/Curves == duration-only (compiler emits an inert carrier later).
+    // Seconds != null with no Sets/Curves == duration-only (compiler emits an inert carrier).
     public sealed class ClipSpec
     {
         public string Name;
@@ -297,7 +254,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     public sealed class Behaviour
     {
         public string Kind;                     // "driver" | "tracking" | "playableLayer" | "locomotion" | "poseSpace" | "playAudio" | "layerControl" | "faceTrackingSets"
-        public Dictionary<string, object> Fields = new Dictionary<string, object>(); // decoded per-kind by ControllerEmit later
+        public Dictionary<string, object> Fields = new Dictionary<string, object>(); // decoded per-kind by ControllerEmit
     }
 
     public sealed class SchemaException : System.Exception

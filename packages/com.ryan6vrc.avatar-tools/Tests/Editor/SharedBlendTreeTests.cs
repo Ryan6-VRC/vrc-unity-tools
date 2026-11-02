@@ -9,14 +9,9 @@ using UnityEngine.TestTools;
 
 // ── Shared (named) blend trees: `trees:` + `shared:` ────────────────────────────────────────────────
 //
-// One tree authored once compiles to ONE BlendTree sub-asset that several motion slots reference, and a
-// decompile RECOVERS that sharing instead of inlining a copy per parent.
-//
-// Read the emit and read halves as genuinely separate claims. Every test that reaches decompile THROUGH a
-// compile can only ever observe the compiler's own memo; DecompileRecoversSharingFromHandBuiltController is
-// the one that builds the sharing with the Unity API directly and so pins that the refcount pre-pass counts
-// the LIVE graph. That distinction is the whole reason the read side can be wrong while everything else is
-// green — see the vacuous-pass note on the fixpoint test below.
+// A test that reaches decompile through a compile only observes the compiler's own memo, so the read side
+// can be wrong while those stay green. The "built WITHOUT the compiler" section pins the refcount pre-pass
+// against the live graph.
 public class SharedBlendTreeTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/shared_tree_tests";
@@ -27,8 +22,6 @@ public class SharedBlendTreeTests
     [TearDown]
     public void TearDown() => AssetDatabase.DeleteAsset(TestRoot);
 
-    // Two states and one nested tree-child all naming the same shared tree — the three-parent shape the
-    // construct exists for, and the shape the FT driver rig has (two tree children plus one state motion).
     private const string SharedDoc = @"schema: 1
 controller: SharedTree_Fx
 basis: avatar-root
@@ -69,9 +62,6 @@ layers:
 
     // ── emit ────────────────────────────────────────────────────────────────────────────────────────
 
-    // REFERENCE IDENTITY, not a count. EmitResult.Trees is rebuilt from LoadAllAssetsAtPath by
-    // ReloadFromDisk, which already collapses duplicates — so a `Trees.Count` assertion passes whether or
-    // not the memo exists, and would prove nothing about sharing.
     [Test]
     public void SharedTreeEmitsOneObjectReferencedFromEveryParent()
     {
@@ -89,15 +79,14 @@ layers:
         Assert.AreSame(fromA, fromB, "a tree CHILD naming the shared tree resolves to that same object");
         Assert.AreEqual("Driver", fromA.name, "the shared tree is named by its trees: key, not by a positional auto-name");
 
-        // The whole point, measured the way the target controller was measured: one serialized document.
         var trees = AssetDatabase.LoadAllAssetsAtPath(AssetDatabase.GetAssetPath(c))
             .OfType<BlendTree>().Where(t => t.name == "Driver").ToList();
         Assert.AreEqual(1, trees.Count, "exactly one 'Driver' BlendTree sub-asset exists");
     }
 
-    // A shared tree's children auto-name off the KEY, so none of them needs an explicit name: on the way
-    // back. If BuildTree took the caller's positional default instead, the built name would depend on which
-    // reference site populated the memo first and every child would gain a spurious name:.
+    // A shared tree's children auto-name off its key. If BuildTree took the caller's positional default
+    // instead, the built name would depend on which reference site populated the memo first, and every child
+    // would decompile with a spurious `name:`.
     [Test]
     public void SharedTreeChildrenCarryNoSpuriousNames()
     {
@@ -109,9 +98,9 @@ layers:
 
     // ── round trip ──────────────────────────────────────────────────────────────────────────────────
 
-    // NOTE ON VACUITY: the text-equality half of this test passes even with the feature entirely inert —
-    // three unshared trees would inline on BOTH decodes and compare equal. The shape assertions are what
-    // make it a test of sharing rather than of determinism, so do not drop them to make a failure go away.
+    // The text-equality half passes even with the feature inert: three unshared trees would inline on both
+    // decodes and compare equal. The shape assertions make this a test of sharing rather than determinism, so
+    // do not drop them to make a failure go away.
     [Test]
     public void SharedTreeDocumentIsAFixpoint()
     {
@@ -130,8 +119,6 @@ layers:
         Assert.AreEqual(d1, d2, "decode(C1) == decode(compile(decode(C1))) — the shared form round-trips exactly");
     }
 
-    // The construct must not disturb the ordinary case: a tree with ONE parent stays inline, so every
-    // existing document and fixture decompiles byte-identically to before.
     [Test]
     public void SinglyReferencedTreeStaysInline()
     {
@@ -157,8 +144,6 @@ layers:
         motion: { shared: Solo }
     default: A
 ";
-        // A single reference COMPILES — it is not an error — and the decompile re-inlines it, which is the
-        // documented asymmetry: sharing is a property of the built graph, and one parent is not sharing.
         var c = FixpointOracle.CompileTo(TestRoot, doc, "Inline_Fx", "solo");
         var walked = ControllerDecompile.Walk(c).Doc;
         Assert.AreEqual(0, walked.Trees.Count, "a one-parent tree decompiles inline, with no trees: entry");
@@ -170,8 +155,6 @@ layers:
 
     // ── read side, built WITHOUT the compiler ───────────────────────────────────────────────────────
 
-    // The only test that pins the refcount pre-pass against Unity's own sharing rather than against the
-    // emitter's memo. Also the committed stand-in for the live acceptance run on the legacy FT controller.
     [Test]
     public void DecompileRecoversSharingFromHandBuiltController()
     {
@@ -186,9 +169,9 @@ layers:
         parent.AddChild(shared);
 
         var sm = ac.layers[0].stateMachine;
-        sm.AddState("S1").motion = shared;     // parent 1: a state motion
-        sm.AddState("S2").motion = shared;     // parent 2: another state motion
-        sm.AddState("S3").motion = parent;     // parent 3: a tree child
+        sm.AddState("S1").motion = shared;
+        sm.AddState("S2").motion = shared;
+        sm.AddState("S3").motion = parent;
         EditorUtility.SetDirty(ac);
         AssetDatabase.SaveAssets();
 
@@ -199,14 +182,13 @@ layers:
         string yaml = AnimatorSchemaEmit.Serialize(doc);
         Assert.AreEqual(3, CountOccurrences(yaml, "shared: HandShared"),
             "all three parent slots emit a shared: reference");
-        // The trees: entry takes its name from its KEY. An emitted `name:` inside the body is exactly what
-        // BindTrees refuses, i.e. decompile output that cannot recompile.
+        // BindTrees refuses a `name:` inside the body, so emitting one would be decompile output that cannot
+        // recompile.
         StringAssert.DoesNotContain("name: HandShared", yaml,
             "a trees: entry must not emit a name: line beside its key");
     }
 
-    // The same motion in two child slots of ONE parent is two parent edges, so it is shared. Named here
-    // because it is the case a node-counting pre-pass silently gets wrong.
+    // The case a node-counting pre-pass silently gets wrong.
     [Test]
     public void SameTreeTwiceUnderOneParentCountsAsShared()
     {
@@ -230,9 +212,6 @@ layers:
         Assert.AreEqual("Twice", doc.Trees[0].Name);
     }
 
-    // A name collision between two shared trees INLINES both rather than refusing the document. "Blend Tree"
-    // is Unity's default name for every UI-created tree, so a refusal here would block a read door on
-    // content we do not own, with renaming a vendor asset as the only remedy.
     [Test]
     public void CollidingSharedTreeNamesInlineRatherThanRefuse()
     {
@@ -332,10 +311,9 @@ layers:
             "a trees: entry nothing references is refused by name — got: " + string.Join(" | ", errors));
     }
 
-    // LIVENESS IS TRANSITIVE. An entry referenced only from another `trees:` body is reachable only if that
-    // body is itself reachable — otherwise a self-edge or a mutually-referencing clique sustains its own use
-    // count, escapes `unreferenced-tree`, and is then never built (emit is lazy and driven from state
-    // motions), so a declared object leaves the controller with no diagnostic at all.
+    // An entry referenced only from another `trees:` body is live only if that body is. Otherwise a self-edge
+    // or a mutually-referencing clique sustains its own use count, escapes `unreferenced-tree`, and is never
+    // built, because emit is lazy and driven from state motions.
     [Test]
     public void SelfReferencingDeadTreeIsRefused()
     {
@@ -396,7 +374,6 @@ layers:
         Assert.IsTrue(errors.Any(e => e.Contains("unreferenced-tree") && e.Contains("'B'")), "B is dead");
     }
 
-    // A tree reached transitively through a LIVE shared tree is live, and must not be refused.
     [Test]
     public void TransitivelyReachedTreeIsNotRefused()
     {
@@ -430,15 +407,10 @@ layers:
             "a tree reached through a live shared tree is live — got: " + string.Join(" | ", errors));
     }
 
-    // NO CYCLE GUARD ON THE READ SIDE, deliberately — Unity will not let one exist. Its importer breaks a
-    // BlendTree cycle on load, nulling the offending child and logging "BlendTree cycle detected"; measured
-    // both through AddChild and with the cycle written straight into the asset text, which is the stronger
-    // case since hand edits and vendor tooling write .controller YAML directly. So the decoder can never
-    // observe a cycle, and a guard there would be unreachable code. This test is what keeps that true: if a
-    // future Unity preserves the edge, it fails and the read side owes a guard.
-    //
-    // The COMPILE side is a different story and does carry one (CyclicSharedTreesRefuse): an authored
-    // document can express a cycle that never reaches Unity at all.
+    // The read side has no cycle guard because Unity's importer breaks a BlendTree cycle on load, nulling the
+    // offending child and logging "BlendTree cycle detected". If a future Unity preserves the edge, this test
+    // fails and the read side owes a guard. The compile side does carry one (CyclicSharedTreesRefuse): an
+    // authored document can express a cycle that never reaches Unity.
     [Test]
     public void UnityItselfRefusesToBuildABlendTreeCycle()
     {
@@ -509,8 +481,6 @@ layers:
             "a shared: naming no entry is refused by name — got: " + string.Join(" | ", errors));
     }
 
-    // The key IS the name. A body carrying one too would give the tree two names that could disagree, and a
-    // decompile never writes one — so it is a parse refusal rather than a silent shadow.
     [Test]
     public void NameFieldInsideATreesEntryIsRefused()
     {
@@ -535,8 +505,8 @@ layers:
         StringAssert.Contains("takes its name from its key", ex.Message);
     }
 
-    // `shared:` reaches DecodeMotionRef's dispatch BEFORE the unguarded tree fallthrough. If it did not, a
-    // shared map would land in BindTree and throw KeyNotFoundException — a crash, not a named refusal.
+    // A `shared:` map reaching DecodeMotionRef's unguarded tree fallthrough would throw KeyNotFoundException,
+    // a crash instead of this named refusal.
     [Test]
     public void SharedMotionWithSiblingKeysIsANamedRefusal()
     {

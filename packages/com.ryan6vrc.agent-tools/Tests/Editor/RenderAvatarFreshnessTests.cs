@@ -4,21 +4,15 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 
-// RenderAvatar's freshness layer — everything that decides whether a captured sheet may be vouched for.
-// One fixture because it is one production surface reached four ways, grown one file per repair wave (#38
-// FAIL severity → #42 change horizon → #47 proxy/arm-scope → #73 outcome canary); the tell was two of those
-// files carrying a byte-identical private NdmfInstalled().
-//
+// RenderAvatar's freshness layer: everything that decides whether a captured sheet may be vouched for.
 // Batchmode has no SceneView, preview scene, preview session, or play mode, so no CaptureCore path is
-// reachable here: the live half is Tests/Editor/RenderAvatarFreshnessGate.md, run over execute_code against
-// an MA-composed avatar. Headless this fixture pins exactly three things — that the reflected handles still
-// resolve, that the extracted pure predicates decide correctly, and that the diagnostic wording the next
-// agent acts on is present.
+// reachable here: the live half is Tests/Editor/RenderAvatarFreshnessGate.md. Headless this fixture pins that
+// the reflected handles still resolve, that the extracted pure predicates decide correctly, and that the
+// diagnostic wording the next agent acts on is present.
 public class RenderAvatarFreshnessTests
 {
-    // Package-presence signal independent of the reflection path under test: the package registry by package
-    // ID — survives an assembly rename/split that would blind an assembly-name check the same way it blinds
-    // the handles.
+    // Reads the package registry by package ID: an assembly rename or split would blind an assembly-name check
+    // the same way it blinds the handles under test.
     private static bool NdmfInstalled()
     {
         foreach (var p in UnityEditor.PackageManager.PackageInfo.GetAllRegisteredPackages())
@@ -27,9 +21,7 @@ public class RenderAvatarFreshnessTests
     }
 
     // ── Reflection canaries: NDMF/Unity internals the gate hangs on ──────────────────────────────────
-    // Package present + handle unresolved must FAIL, never skip (the versionDefines/reflection-canary rule:
-    // a skip is exactly when production goes blind). These are the cheapest real coverage in the repo — they
-    // resolve live handles, so a silent upstream rename reds the suite instead of blinding the gate.
+    // Package present + handle unresolved must FAIL, never skip: a skip is exactly when production goes blind.
 
     [Test]
     public void ChangeHorizonHandles_ResolveAgainstInstalledNdmf()
@@ -56,12 +48,7 @@ public class RenderAvatarFreshnessTests
             "backgrounded captures of reactive avatars can return OK-stale again; re-pin the handles.");
     }
 
-    // NDMF installed + the handle unusable must red-FAIL, never Ignore: there is no name fallback, so drift →
-    // no-avatar-root for every target → every reactive avatar routes to Settle.Exempt and backgrounded
-    // captures return OK-stale silently. The canary folds a RETURN-TYPE check (see
-    // AvatarRootResolverHandleResolved): a bare != null would stay green through a Transform→GameObject
-    // return drift that fails at runtime. Resolver SEMANTICS delegate to NDMF's own (tested) walk-up — we
-    // canary the handle, not the walk.
+    // The walk-up itself is NDMF's, so this canaries the handle, not the walk.
     [Test]
     public void AvatarRootResolverHandle_ResolvesAgainstInstalledNdmf()
     {
@@ -73,10 +60,8 @@ public class RenderAvatarFreshnessTests
             "to Settle.Exempt and backgrounded captures can return OK-stale silently; re-pin the resolver handle.");
     }
 
-    // The reload-guard handles are UnityEditor internals on a VRChat-PINNED editor version — they must
-    // resolve on this venue, always (no Ignore branch). A red here means the pinned-Unity assumption itself
-    // broke (editor upgraded?): re-measure the parked-deform states before re-pinning, don't just fix the
-    // reflection.
+    // UnityEditor internals on the VRChat-pinned editor, so there is no Ignore branch. A red means the editor
+    // itself changed: re-measure the parked-deform states before re-pinning, don't just fix the reflection.
     [Test]
     public void ReloadGuardHandles_ResolveOnPinnedUnity()
     {
@@ -85,14 +70,9 @@ public class RenderAvatarFreshnessTests
             + "is silently gone and captures under a pending reload certify stale geometry again");
     }
 
-    // The sweep through its real call path, not just its handles. Batchmode has no NDMF preview session, so
-    // PreviewSession.Current reads null and the sweep must exit at its previews-disabled guard returning
-    // EXACTLY "" — nothing to sweep. Every other return is a live regression: the drift note means a handle
-    // rotted OR the body threw (the catch-all returns that note too), and the incomplete sentinel means the
-    // pump loop ran where it cannot. The previous assertion accepted the drift note and skipped its check
-    // entirely on "", so both of those read as a pass. There is deliberately no elapsed-time bound: headless
-    // the pump loop is unreachable (ProbeSettle returns Exempt on the first iteration), so a bound here
-    // guards nothing — the sweep's ~250 ms cap is a live-gate property (RenderAvatarFreshnessGate.md).
+    // Batchmode has no NDMF preview session, so PreviewSession.Current reads null and the sweep must exit at its
+    // previews-disabled guard returning EXACTLY "". No elapsed-time bound: SweepNdmfChangeHorizon's pump loop and
+    // its deadline sit past that guard, so a bound here guards nothing.
     [Test]
     public void Sweep_Headless_ExitsCleanAtThePreviewsDisabledGuard()
     {
@@ -106,16 +86,13 @@ public class RenderAvatarFreshnessTests
 
     // ── Pure gate predicates: the decisions extracted so batchmode can pin them ──────────────────────
 
-    // G56 scope rule: a reactive component on a SIBLING of the capture target must still arm the gate — the
-    // call site scans HasReactiveMA from the target's arm-scope root (the outermost avatar root, resolved by
-    // ResolveArmScope). This pins the helper's scan semantics the call site depends on: a subtree scan misses
-    // the sibling, a root scan catches it — and armedBy names the match by hierarchy path. (ResolveArmScope's
-    // own resolution is delegated to NDMF and canaried above — a fake descriptor can't drive the real-type
-    // resolver, so here we stand in transform.root.)
+    // A reactive component on a SIBLING of the capture target must still arm the gate: the call site scans
+    // HasReactiveMA from the target's arm-scope root. A fake descriptor can't drive ResolveArmScope's real-type
+    // resolver, so transform.root stands in for it here.
     [Test]
     public void HasReactiveMA_AncestorScope_CatchesSiblingReactives_AndNamesThem()
     {
-        var root = new GameObject("V3_FixtureRoot");
+        var root = new GameObject("SiblingReactiveRoot");
         try
         {
             var target = new GameObject("Body"); target.transform.SetParent(root.transform);
@@ -125,23 +102,20 @@ public class RenderAvatarFreshnessTests
             Assert.IsFalse(RenderAvatar.HasReactiveMA(target, out _),
                 "subtree scan unexpectedly sees the sibling — scope semantics changed, retire this test deliberately");
             Assert.IsTrue(RenderAvatar.HasReactiveMA(target.transform.root.gameObject, out string armedBy),
-                "root scan missed a sibling reactive — the G56 leaf-mesh arming hole is open again");
-            Assert.AreEqual("V3_FixtureRoot/Outfit", armedBy,
+                "root scan missed a sibling reactive — the leaf-mesh arming hole is open again");
+            Assert.AreEqual("SiblingReactiveRoot/Outfit", armedBy,
                 "armedBy must be the matched component's hierarchy path — the settle-FAIL messages append it");
         }
         finally { Object.DestroyImmediate(root); }
     }
 
-    // The attribution-integrity guard: proxies discovered + session settled + every one attributes to null =
-    // the silent body-drop, and nothing else FAILs. Also the ONLY headless check of the two attribution FAIL
-    // constants' load-bearing wording.
     [Test]
     public void AttributionAllNull_TruthTable_AndFailReasonsExist()
     {
         Assert.IsTrue(RenderAvatar.IsAttributionAllNull(RenderAvatar.Settle.Settled, 5, 0),
             "proxies discovered + settled + every attribution null = the silent body-drop — must FAIL");
         Assert.IsFalse(RenderAvatar.IsAttributionAllNull(RenderAvatar.Settle.Settled, 0, 0),
-            "zero discovered (at-rest avatar) is normal — must NOT FAIL (the deleted presence false-FAIL)");
+            "zero discovered (at-rest avatar) is normal — must NOT FAIL");
         Assert.IsFalse(RenderAvatar.IsAttributionAllNull(RenderAvatar.Settle.Settled, 5, 5),
             "healthy: discovered and attributed");
         Assert.IsFalse(RenderAvatar.IsAttributionAllNull(RenderAvatar.Settle.Unsettled, 5, 0),
@@ -153,13 +127,12 @@ public class RenderAvatarFreshnessTests
         StringAssert.Contains("null for every one", RenderAvatar.ProxyAllNullFailReason);
     }
 
-    // The resolver must be tri-state so Drift ≠ NoAvatarRoot. NoAvatarRoot is a legitimate Settle.Exempt;
-    // Drift (handle unusable OR a non-Transform invoke result — the return-type drift that slips a bare-null
-    // canary) must route to a loud FAIL at the call site, never a silent exempt.
+    // NoAvatarRoot is a legitimate Settle.Exempt; Drift must route to a loud FAIL at the call site, never a
+    // silent exempt.
     [Test]
     public void ClassifyArmScope_TriState_DistinguishesDriftFromNoAvatarRoot()
     {
-        var go = new GameObject("V4_ArmScopeFixture");
+        var go = new GameObject("ArmScopeFixture");
         try
         {
             var t = go.transform;
@@ -178,15 +151,9 @@ public class RenderAvatarFreshnessTests
         finally { Object.DestroyImmediate(go); }
     }
 
-    // Every reflection-drift/unsettled state FAILs before the OK return, so the summary gate token is exactly
-    // armed|exempt — never a "drift" value the docs don't enumerate.
-    //
-    // Swept over the WHOLE Settle enum rather than sampled. `settle` is 4-valued (Exempt/Settled/Unsettled/
-    // Drift), so hand-picking Settled and Drift models it as a boolean term and leaves Unsettled and Exempt
-    // unasserted: widening production to `settle != Settle.Drift` keeps every sampled case green while
-    // returning "armed" mid-rebuild and with previews globally off — a render certified freshness-gated when
-    // it is not, which is the one thing this gate exists to prevent. Enumerating also means a NEW Settle
-    // member cannot silently widen the gate; it arrives already asserted exempt.
+    // Swept over the WHOLE Settle enum rather than sampled: hand-picking Settled and Drift stays green when
+    // production widens to `settle != Settle.Drift`, returning "armed" mid-rebuild and with previews globally
+    // off, and a new Settle member arrives already asserted exempt.
     [Test]
     public void GateToken_IsArmedOnlyForAReactiveSettledTarget()
     {
@@ -200,10 +167,7 @@ public class RenderAvatarFreshnessTests
     }
 
     // ── Outcome-canary layer: the end-to-end nudge canary and the pending-reload guard ───────────────
-    // Both exist because two measured editor states (pending script reload; play round-trip exited unfocused
-    // — 2026-07-29) defeat every mechanism gate at once while gate=armed keeps certifying. Live behavior is
-    // gate-doc territory (RenderAvatarFreshnessGate.md V4, with on-demand arming recipes); headless we pin
-    // the pure pieces and the diagnostic wording the next agent will act on.
+    // Live behaviour: RenderAvatarFreshnessGate.md.
 
     [Test]
     public void ShouldRunCanary_TruthTable()
@@ -211,9 +175,9 @@ public class RenderAvatarFreshnessTests
         Assert.IsTrue(RenderAvatar.ShouldRunCanary(false, true),
             "edit-mode SMR grab is where the freeze lives — canary must run, FOCUSED OR NOT (a "
             + "kicked-but-not-interacted editor reads focused while still parked; a focus skip "
-            + "certified a stale sheet live, 2026-07-29)");
+            + "certified a stale sheet live)");
         Assert.IsFalse(RenderAvatar.ShouldRunCanary(true, true),
-            "play mode renders through the live player loop — measured fresh 2026-07-29, no canary");
+            "play mode renders through the live player loop — measured fresh, no canary");
         Assert.IsFalse(RenderAvatar.ShouldRunCanary(false, false),
             "nothing skinned was drawn — nothing can be parked, no canary");
     }
@@ -228,30 +192,24 @@ public class RenderAvatarFreshnessTests
         Assert.IsTrue(RenderAvatar.CanaryAlive(11124), "a real nudge measures O(10^4)");
     }
 
-    // The unit chain the council flagged (PR #73 finding 4): worldDelta is already lossy-scaled by the
-    // caller; the swing realizes ≥ half of it; worldPerSourcePx comes from the LIVE canary camera
-    // (2·ortho / camH); side→tileRes is the compared tiles' downscale. Pin representative arithmetic
-    // so a future "simplification" back to sv.size units red-fails.
+    // Representative arithmetic only: the caller computes wpp, so this cannot see a call site drifting back to
+    // sv.size units.
     [Test]
     public void CanaryExpectedTilePx_UnitChain()
     {
-        // 90mm shape, camera ortho 0.67 over 1447 source px → wpp ≈ 9.26e-4 m/px; side 900 → tile 1024.
         float wpp = 2f * 0.67f / 1447f;
         float px = RenderAvatar.CanaryExpectedTilePx(0.090f, wpp, 900, 1024);
         Assert.Greater(px, 40f, "a 90mm shape at body framing must predict well above the 16-px eligibility bar");
-        // Same shape at whole-avatar framing (ortho 1.9): smaller but still eligible.
         float pxFar = RenderAvatar.CanaryExpectedTilePx(0.090f, 2f * 1.9f / 1447f, 900, 1024);
         Assert.Greater(pxFar, 16f, "avatar-root framing must not silently lose all blendshape eligibility");
         Assert.Less(pxFar, px, "zooming out reduces predicted amplitude");
-        // Degenerate inputs never divide by zero or go negative.
         Assert.AreEqual(0f, RenderAvatar.CanaryExpectedTilePx(0.1f, 0f, 900, 1024));
         Assert.AreEqual(0f, RenderAvatar.CanaryExpectedTilePx(0.1f, wpp, 0, 1024));
     }
 
-    // The FAIL text is doctrine the next agent executes — pin the load-bearing parts: the remedy is
-    // INTERACTIVE focus (~10 s of programmatic kick-focus measurably does NOT wake the parked
-    // scheduler; a human clicking in does), the kick outcome, and the named nudge so an operator can
-    // judge a suspected false-FAIL.
+    // The FAIL text is what the next agent executes. Pinned: the remedy is INTERACTIVE focus (programmatic
+    // kick-focus does not wake the parked scheduler), the kick outcome, the named nudge so an operator can
+    // judge a suspected false-FAIL, and the message's own occlusion caveat.
     [Test]
     public void CanaryDiagnostics_CarryTheRemedy_AndDeclareTheGap()
     {
@@ -267,28 +225,19 @@ public class RenderAvatarFreshnessTests
         StringAssert.Contains("focus kick failed (SetForegroundWindow refused)", refused);
         StringAssert.Contains("click into", refused);
         StringAssert.Contains("~10 s", refused);
-        // The escalation cure: a focused play round-trip cured the specimen the click could not.
         StringAssert.Contains("enter and exit play mode once with the editor focused", refused);
         StringAssert.Contains("enter and exit play mode once with the editor focused", kicked);
-        // The occlusion self-doubt (council finding 6): the message carries its own false-FAIL caveat,
-        // because the message — not the gate doc — is what the next agent acts on.
         StringAssert.Contains("occluded", kicked);
         StringAssert.Contains("different angle", kicked);
 
-        // The other half of the same disclosure: when no shape is probe-worthy the summary carries a NOTE
-        // instead of a verdict, and both phrases are the payload — "canary unavailable" is what an operator
-        // greps for, "cannot be ruled out" is the admission that this sheet is not freshness-certified.
-        // Asserted here rather than as its own case because no code path DECIDES on this constant; only its
-        // wording is load-bearing, so a rewrite that softened it to a shrug would otherwise stay green.
+        // With no probe-worthy shape the summary carries this note instead of a verdict. No code path decides
+        // on the constant, so only this pins its wording.
         StringAssert.Contains("canary unavailable", RenderAvatar.CanaryUnavailableNote);
         StringAssert.Contains("cannot be ruled out", RenderAvatar.CanaryUnavailableNote);
     }
 
-    // The scan is the outcome half of the shading guard: batchmode cannot render a pixel, so what IS
-    // assertable headlessly is the counter's discipline. Exact match only — the placeholder is a flat fill,
-    // and near-cyan is ordinary art on a lilToon avatar, so a tolerance would fail honest grabs. Alpha is
-    // deliberately unexamined (Downscale's Sample hardcodes it to 255), which is why no alpha case appears
-    // here: a test over alpha-0 data would assert against input the tool cannot produce.
+    // Exact match only: the placeholder is a flat fill, and near-cyan is ordinary art on a lilToon avatar, so a
+    // tolerance would fail honest grabs.
     [Test]
     public void CountPlaceholderPx_ExactMatchOnly_AndNullSafe()
     {
@@ -296,7 +245,7 @@ public class RenderAvatarFreshnessTests
         Assert.AreEqual(0, RenderAvatar.CountPlaceholderPx(new Color32[0]));
 
         var buf = new Color32[16];
-        for (int i = 0; i < buf.Length; i++) buf[i] = new Color32(233, 226, 224, 255); // the measured hair tone
+        for (int i = 0; i < buf.Length; i++) buf[i] = new Color32(233, 226, 224, 255);
         Assert.AreEqual(0, RenderAvatar.CountPlaceholderPx(buf));
 
         buf[3] = new Color32(0, 255, 255, 255);
@@ -307,9 +256,7 @@ public class RenderAvatarFreshnessTests
         Assert.AreEqual(2, RenderAvatar.CountPlaceholderPx(buf));
     }
 
-    // The measured partial case: 64 px on a sheet that otherwise reads healthy (gate doc §Shading cell,
-    // 2026-08-13). It is the reason the floor is 0 and the reason no blob/interior filter is applied — a
-    // region this small has no interior pixels at all and is invisible to one.
+    // The measured partial case: gate doc §Shading cell.
     [Test]
     public void CountPlaceholderPx_CountsTheMeasuredPartialCase_NoInteriorFilter()
     {
@@ -322,13 +269,9 @@ public class RenderAvatarFreshnessTests
         Assert.AreEqual(64, RenderAvatar.CountPlaceholderPx(tile));
     }
 
-    // Same reasoning as the canary/reload constants above: no code path decides on this wording, but the
-    // wording is what an agent acts on. The payload is the placeholder colour (what an operator matches
-    // against a suspect sheet by eye), the offending angle, and — load-bearing — two materially different
-    // remedies. ShaderUtil.anythingCompiling is editor-global and cannot tell this grab's compilation from
-    // an unrelated import's, so the compiling arm must not claim attribution, and the quiet arm must not
-    // promise a re-grab will help. An earlier draft of the retired note claimed "the guard did not cover
-    // some path"; this pins the corrected claim so a rewrite cannot quietly restore the over-claim.
+    // ShaderUtil.anythingCompiling is editor-global and cannot tell this grab's compilation from an unrelated
+    // import's, so the compiling arm must not claim attribution, and the quiet arm must not promise a re-grab
+    // will help.
     [Test]
     public void PlaceholderFailReason_NamesTheColourAndSplitsTheRemedyByProbe()
     {
@@ -340,7 +283,7 @@ public class RenderAvatarFreshnessTests
             StringAssert.Contains("#00FFFF", s);
             StringAssert.Contains("front", s);
             StringAssert.Contains("64", s);
-            StringAssert.DoesNotContain("did not cover", s);
+            StringAssert.DoesNotContain("escaped the guard", s);
         }
         StringAssert.Contains("cannot be attributed", compiling);
         StringAssert.Contains("re-grab first", compiling);
@@ -348,9 +291,9 @@ public class RenderAvatarFreshnessTests
         StringAssert.Contains("Measure the mechanism", quiet);
         Assert.AreNotEqual(compiling, quiet, "the two arms must not collapse to one remedy");
 
-        // The terminal case has to end somewhere the reader can act: floor 0 with no opt-out means an
-        // authored cyan surface would otherwise leave a target permanently un-grabbable. Both arms carry it,
-        // and the doc route is a resolvable PATH — a console reader has the string, not the class doc.
+        // Floor 0 with no opt-out: an authored cyan surface would otherwise leave a target permanently
+        // un-grabbable, so both arms name the way out. The doc route is a resolvable PATH because a console
+        // reader has the string, not the class doc.
         foreach (var s in new[] { compiling, quiet })
         {
             StringAssert.Contains("showGizmos:false", s);
@@ -359,10 +302,8 @@ public class RenderAvatarFreshnessTests
         }
     }
 
-    // The counter is exercised through the real decode path, not just over hand-built buffers: the gate
-    // doc's live Measure row can only report "the grab returned OK", which is circular as proof, so what is
-    // assertable headlessly is that an encoded-then-decoded sheet still counts exactly. A scan reading a
-    // mis-strided or wrong-format buffer fails here rather than in a green live cell.
+    // A live `OK` is circular as proof (gate doc §Shading cell), so the count is also pinned through the real
+    // decode path: a wrong-format buffer fails here rather than in a green live cell.
     [Test]
     public void CountPlaceholderPx_SurvivesThePngRoundTrip()
     {
@@ -393,9 +334,8 @@ public class RenderAvatarFreshnessTests
         finally { UnityEngine.Object.DestroyImmediate(tex); }
     }
 
-    // Frame A is a prior grab off disk: the live compile probe says nothing about it, so its reason must
-    // name the diff-specific damage (fabricated or masked `changed` px) and send the reader to re-grab A
-    // rather than this call.
+    // Frame A is a prior grab off disk: the live compile probe says nothing about it, so its reason sends the
+    // reader to re-grab A rather than this call.
     [Test]
     public void FrameAPlaceholderFailReason_SendsTheReaderToReGrabA()
     {
@@ -420,19 +360,16 @@ public class RenderAvatarFreshnessTests
     }
 
     // ── FAIL severity split ──────────────────────────────────────────────────────────────────────────
-    // G17: the transient settle-gate FAIL must log at Warning (an expected "re-grab" retry condition), while
-    // genuine failures stay at Error — so a console-clean gate isn't polluted by the re-grab prompt. Capture
-    // can't reach the settle gate headless (it returns "no SceneView" first), so the split is verified on the
-    // two Fail helpers directly; the call-site wiring (settle gate → FailTransient) is a one-line read.
+    // The transient settle-gate FAIL logs at Warning so a console-clean gate isn't polluted by the re-grab
+    // prompt. Capture returns "no SceneView" before the settle gate headless, so the split is pinned on the two
+    // Fail helpers directly.
 
     [Test]
     public void SettleFail_LogsWarning_NotError()
     {
-        // Expect(Warning) both asserts the severity IS Warning and marks it handled. Were it an Error, the
-        // Warning-expect would go unmatched AND the Error would be an unhandled-error test failure.
         LogAssert.Expect(LogType.Warning, new Regex(@"\[RenderAvatar\] Hair => FAIL: preview not settled"));
         string msg = RenderAvatar.FailTransient("Hair", "preview not settled (rebuild in flight)");
-        StringAssert.StartsWith("[RenderAvatar] Hair => FAIL:", msg); // same FAIL contract string as Fail
+        StringAssert.StartsWith("[RenderAvatar] Hair => FAIL:", msg);
     }
 
     [Test]

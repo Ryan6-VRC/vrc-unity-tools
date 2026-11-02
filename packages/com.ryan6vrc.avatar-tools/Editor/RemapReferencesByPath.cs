@@ -10,19 +10,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
         {
             public int remapped;
             public int nulled;
-            /// <summary>
-            /// SerializedProperty paths of the refs this call set null (count == <see cref="nulled"/>).
-            /// Lets a caller classify each null against the component's table descriptor — a dropped
-            /// soft-dep (e.g. <c>ignoreTransforms</c> entry) is behavior-inert, while a hard-dep null may
-            /// block the build. Additive; callers that don't classify (GraftHierarchy) ignore it.
-            /// </summary>
+            /// <summary>SerializedProperty paths of the refs this call set null (count == <see cref="nulled"/>).</summary>
             public List<string> nulledPaths;
             /// <summary>
-            /// Named ambiguous-rename reasons (A1 count-equality guard) hit while resolving refs under a
-            /// <c>vendorToOwned</c>: the ref still NULLS (counted in <see cref="nulled"/>/<see cref="nulledPaths"/>
-            /// as a plain missing path), but the reason rides here so the caller can name it rather than let
-            /// it hide as an ordinary null. Empty on the null-map path (the guard never fires). Callers that
-            /// don't thread a map ignore it.
+            /// Reasons from the ambiguous-rename guard (<see cref="IndexedPath.GuardRename"/>). The ref still
+            /// nulls and counts in <see cref="nulled"/>/<see cref="nulledPaths"/> as a plain missing path; the
+            /// reason rides here so the caller can name it. Empty on the null-map path.
             /// </summary>
             public List<string> renameWarnings;
         }
@@ -30,21 +23,18 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>
         /// Rebinds every ObjectReference in <paramref name="so"/> whose target is under
         /// <paramref name="srcRoot"/> to the object at the same indexed hierarchy path under
-        /// <paramref name="dstRoot"/>. References whose target is not under srcRoot (assets,
-        /// scene-external objects) are left untouched. A reference is set null and counted in
-        /// <see cref="Result.nulled"/> when the indexed path is missing under dstRoot OR the
-        /// destination object lacks the referenced component type; successful rebinds are counted
-        /// in <see cref="Result.remapped"/>. The caller owns <see cref="SerializedObject.Update"/>
-        /// beforehand and <c>ApplyModifiedProperties*()</c> afterward.
+        /// <paramref name="dstRoot"/>; targets outside srcRoot stay untouched. A reference is set null
+        /// when the path is missing under dstRoot or the destination object lacks the referenced
+        /// component type. The caller owns <see cref="SerializedObject.Update"/> beforehand and
+        /// <c>ApplyModifiedProperties*()</c> afterward.
         ///
-        /// <paramref name="vendorToOwned"/> (<c>vendorName ⇒ ownedName</c>, injective, Ordinal — see
-        /// <see cref="IndexedPath.ValidateRenameMap"/>) substitutes the destination-side segment name at the
-        /// armature-root (and any other renamed) level. Empty/absent/null ⇒ byte-identical to today.
+        /// <paramref name="vendorToOwned"/> (<c>vendorName ⇒ ownedName</c>, validated by the caller with
+        /// <see cref="IndexedPath.ValidateRenameMap"/>) substitutes the destination-side segment names.
         ///
         /// <para>OBJECT references only: the <c>referencePath</c> STRING half of a Modular Avatar
-        /// <c>AvatarObjectReference</c> is deliberately out of scope here and in every transplant tool.
+        /// <c>AvatarObjectReference</c> is out of scope here and in every transplant tool.
         /// Contract, the two shapes where that costs something, and the check that names them:
-        /// <c>docs/unity-tools.md</c> §transplant kit.</para>
+        /// <c>docs/unity-tools.md</c> §Avatar tools.</para>
         /// </summary>
         public static Result Remap(SerializedObject so, Transform srcRoot, Transform dstRoot,
                                    IDictionary<string, string> vendorToOwned = null)
@@ -57,7 +47,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var o = it.objectReferenceValue;
                 if (o == null) continue;
                 Transform t = o is Component c ? c.transform : (o is GameObject g ? g.transform : null);
-                if (t == null || !t.IsChildOf(srcRoot)) continue;       // only refs under srcRoot
+                if (t == null || !t.IsChildOf(srcRoot)) continue;
                 var dt = IndexedPath.FindByIndexedPath(srcRoot, dstRoot, t, vendorToOwned, out var failReason);
                 if (dt == null)
                 {
@@ -68,12 +58,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 else if (o is GameObject) it.objectReferenceValue = dt.gameObject;
                 else
                 {
-                    // ASSUMPTION: at most one component of a given type per transform. When the
-                    // destination has multiple same-type components, GetComponent returns the FIRST,
-                    // so remapping to one-of-N same-type components would bind to the wrong one.
-                    // Proper N-way disambiguation is deferred until a caller needs it; CopyComponents
-                    // sidesteps this entirely by rebinding copied components through the SessionMap
-                    // (vendor component → our copy) before this generic path-remap ever runs.
+                    // Assumes at most one component of a type per transform: with several on the
+                    // destination, GetComponent returns the first, so a ref to any other binds wrong.
+                    // CopyComponents sidesteps this by rebinding copied components through the
+                    // SessionMap (vendor component → our copy) before this generic path-remap runs.
                     var comp = dt.GetComponent(o.GetType());
                     it.objectReferenceValue = comp;
                     if (comp == null) { res.nulled++; res.nulledPaths.Add(it.propertyPath); continue; }
@@ -87,19 +75,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// Read-only sibling of <see cref="Remap"/>: returns the transform under
         /// <paramref name="dstRoot"/> at the same indexed hierarchy path that
         /// <paramref name="srcTarget"/> occupies under <paramref name="srcRoot"/>, or null if that
-        /// path is missing under dstRoot (or srcTarget is null / not under srcRoot). For callers
-        /// that must relocate a single transform rather than rebind a SerializedObject — e.g.
-        /// placing a relocated constraint on its corresponding destination bone.
+        /// path is missing under dstRoot (or srcTarget is null / not under srcRoot).
         /// </summary>
         public static Transform Counterpart(Transform srcRoot, Transform dstRoot, Transform srcTarget)
             => Counterpart(srcRoot, dstRoot, srcTarget, null, out _);
 
         /// <summary>
         /// As <see cref="Counterpart(Transform,Transform,Transform)"/>, threading a
-        /// <paramref name="vendorToOwned"/> (<c>vendorName ⇒ ownedName</c>) into the indexed-path walk so a host
-        /// under a renamed armature root resolves. On the A1 ambiguous-rename guard, returns null and sets
-        /// <paramref name="failReason"/> (a named signal distinct from a plain missing path). Empty/absent/null
-        /// map ⇒ byte-identical to the null-map overload.
+        /// <paramref name="vendorToOwned"/> (<c>vendorName ⇒ ownedName</c>) into the indexed-path walk. When the
+        /// ambiguous-rename guard (<see cref="IndexedPath.GuardRename"/>) trips, returns null and sets
+        /// <paramref name="failReason"/>; a plain missing path returns null and leaves it null.
         /// </summary>
         public static Transform Counterpart(Transform srcRoot, Transform dstRoot, Transform srcTarget,
                                             IDictionary<string, string> vendorToOwned, out string failReason)

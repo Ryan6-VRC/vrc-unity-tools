@@ -8,7 +8,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
     [AgentTool]
     public static class RemapMaterials
     {
-        /// Keys/values are material asset paths; a from-key path remaps every material sharing that path (a standalone .mat = exactly one; embedded FBX sub-assets all share the FBX path, so extract them to .mat first). A null/empty 'to' value clears the slot (destructive).
+        /// Keys/values are material asset paths. Embedded FBX sub-assets all share the FBX path, so two in use under one key FAIL; extract them to .mat first. A null/empty 'to' value clears the slot (destructive).
         public static string Run(GameObject root, IDictionary<string, string> replacements, bool whatIf = false)
         {
             if (root == null) return "[RemapMaterials] FAIL: root is null";
@@ -39,8 +39,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             renderers.AddRange(root.GetComponentsInChildren<MeshRenderer>(true));
             renderers.AddRange(root.GetComponentsInChildren<SkinnedMeshRenderer>(true));
 
-            // Fail loud on the ambiguity the window also guards: two DISTINCT materials sharing one
-            // matched asset path make a path-keyed remap ambiguous (embedded FBX sub-assets).
             var firstAtPath = new Dictionary<string, Material>();
             foreach (var r in renderers)
                 foreach (var m in r.sharedMaterials)

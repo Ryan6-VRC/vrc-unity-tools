@@ -13,37 +13,16 @@ using VRC.SDK3.Dynamics.PhysBone.Components;
 
 namespace Ryan6Vrc.AgentTools.Editor
 {
-    /// <summary>
-    /// Read-only rest-pose clearance digest between body surfaces and the physbone chains hung around them: the
-    /// classifier the fix-clipping skill runs before choosing a branch, and the rest-contact gate it re-runs
-    /// after a collider write. Per chain joint it measures the gap to the nearest baked body vertex against
-    /// the chain's own collision radius there, the gap to every collider the chain references, and prints the
-    /// authored facts a collider decision reads (angle limits, existing collider coverage, capsule extent,
-    /// which bones weight the body and garment near the chain). Numbers only — a Report, never a verdict.
-    ///
-    /// Collision model: a chain bone is the segment from a joint to its child (plus the virtual endpoint bone
-    /// when <c>endpointPosition</c> is set), with the SDK's per-bone radius scaled by the joint's world scale;
-    /// collider slack is segment-to-segment. The root joint itself is not simulated, so it is printed but does
-    /// not count toward <c>insideBodyAtRest</c>. The body is a baked point cloud, so <c>bodySlack</c> is the
-    /// joint's collision sphere against the nearest body vertex — an overlap claim, not an inside/outside one.
-    ///
-    /// Surface: the NDMF preview proxy where one exists (a composed body with its shrink/shape reactions
-    /// applied), else the scene instance (reactions sit at weight 0 there — the header says which was read).
-    /// Edit mode only, refusing in play, so this is the rest-pose approximation of what a play-mode drive
-    /// measures exactly: no physbone solve, no pose. Chain roots under a VRC constraint are pumped once so a cold editor does
-    /// not report a stale pose as rest (`emulator.md` §Edit-mode VRC constraints); a pump that cannot land is
-    /// reported, never hidden.
-    ///
-    /// INSPECTION ONLY — bakes into throwaway meshes, writes nothing to the scene or project.
-    /// </summary>
+    /// <summary>Rest-pose clearance between body surfaces and the physbone chains hung around them: each joint's gap to the
+    /// nearest baked body vertex and to the colliders its chain references, beside the limits and skin weights a
+    /// collider decision reads.
+    /// Contract: docs/unity-tools.md.</summary>
     [AgentTool]
     public static class ReportClearance
     {
-        // Per-joint radius is radius × radiusCurve(t), t = depth / maxDepth along the chain, which is how the
-        // SDK parameterises every per-bone curve. A joint with lateral freedom under this many degrees is
-        // flagged `lateralLocked`: a collider cannot swing it sideways, whatever its size.
+        // A joint with lateral freedom under this many degrees is flagged `lateralLocked`: a collider cannot swing it
+        // sideways, whatever its size.
         internal const float LateralLockDeg = 1f;
-        // Body vertices whose nearest chain joint lies within (joint radius + this) feed the weight readout.
         internal const float WeightBandMeters = 0.03f;
 
         internal struct JointRow
@@ -72,12 +51,9 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Door ────────────────────────────────────────────────────────────────────────────────────────────
 
-        /// <summary>Digest rest clearance under scene object <paramref name="avatarRoot"/> between the body surfaces
-        /// <paramref name="bodies"/> (<c>ReportClipping</c>'s handles: a path or unique renderer name, optionally
-        /// <c>#material</c>) and every active physbone chain rooted at or under a transform <paramref name="chains"/>
-        /// names (null = every chain). Returns a one-line summary ending <c>=&gt; OK | log=&lt;path&gt;</c>; a play-mode
-        /// call, a handle that does not resolve, or a scope holding no chain is a bare <c>[ReportClearance] FAIL: …</c>
-        /// with no trailer.</summary>
+        /// <summary>Digest rest clearance under <paramref name="avatarRoot"/> between the body surfaces
+        /// <paramref name="bodies"/> (<c>ReportClipping</c>'s handles) and every active physbone chain rooted at or under a
+        /// transform <paramref name="chains"/> names (null = every chain).</summary>
         public static string Run(string avatarRoot, string[] bodies, string[] chains = null)
         {
             if (EditorApplication.isPlaying) return Fail("edit mode only: in play every joint stands where the solver pushed it, so rest contact would read near zero; exit play, or read the motion with DrivePhysBones");
@@ -102,9 +78,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             string bodySurface = string.Join("+", bodySurfaces);
             var rows = pbs.Select(b => Measure(b, root.transform, bodyPts)).ToList();
             DedupeKeys(rows);
-            // The garment a chain moves is the set of renderers skinned to any of its joints — not "every other
-            // renderer", which would fold hair, eyes and underwear into one bucket and mask which bones the
-            // skirt actually rides.
             var jointSet = new HashSet<Transform>(rows.SelectMany(r => r.Joints).Select(j => j.T));
             var bodySmrs = new HashSet<SkinnedMeshRenderer>(body.Select(s => s.r));
             var garmentSmrs = root.GetComponentsInChildren<SkinnedMeshRenderer>(true)
@@ -117,16 +90,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Emit(root, body, surface, rows, colliders, pumpNote, chains);
         }
 
-        // The vertices a material-narrowed body keeps; null keeps every vertex.
         static HashSet<int> Kept(ReportClipping.Surface s) => s.label.Contains("#") ? new HashSet<int>(s.tris) : null;
 
         // ── Chains ──────────────────────────────────────────────────────────────────────────────────────────
 
         internal static Transform EffectiveRoot(VRCPhysBone b) => b.rootTransform != null ? b.rootTransform : b.transform;
 
-        // Joints: the effective root and every descendant not pruned by ignoreTransforms (a listed transform
-        // prunes itself and its children — the field's own tooltip). A root with several children under
-        // multiChildType=Ignore is not simulated itself; it is still listed, depth 0, so the reader sees it.
+        // A root with several children under multiChildType=Ignore is not simulated itself; it is still listed, at depth 0.
         internal static List<Transform> Joints(VRCPhysBone b)
         {
             var root = EffectiveRoot(b);
@@ -147,6 +117,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var j in joints)
             {
                 int d = Depth(j, row.Root);
+                // The SDK evaluates every per-bone curve at t = depth / maxDepth along the chain.
                 float t = (float)d / maxDepth;
                 float scale = AbsMax(j.lossyScale);
                 float r = b.radius * Curve(b.radiusCurve, t) * scale;
@@ -155,8 +126,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                                         ColliderSlack = float.PositiveInfinity, NearestCollider = "—",
                                         MaxAngleX = b.maxAngleX * Curve(b.maxAngleXCurve, t), MaxAngleZ = b.maxAngleZ * Curve(b.maxAngleZCurve, t) };
                 row.Joints.Add(jr);
-                // The root joint is the chain's anchor, not a simulated bone: its sphere overlapping the body is
-                // the normal case for a skirt hung from the waist and no fix addresses it.
+                // The root joint's sphere overlapping the body is the normal case for a skirt hung from the waist, and no fix
+                // addresses it.
                 if (d > 0 && !float.IsNaN(jr.BodySlack)) row.MinBodySlack = Math.Min(row.MinBodySlack, jr.BodySlack);
             }
             row.Limits = Limits(b, row.Joints, out row.LateralLocked, out row.LockedJoint);
@@ -167,9 +138,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal static float Curve(AnimationCurve c, float t) => c != null && c.length > 0 ? Mathf.Max(0f, c.Evaluate(t)) : 1f;
         internal static float AbsMax(Vector3 v) => Mathf.Max(Mathf.Abs(v.x), Mathf.Abs(v.y), Mathf.Abs(v.z));
 
-        // Lateral freedom per joint, since the SDK evaluates the max-angle curves along the chain: Hinge locks Z
-        // outright; Polar and Angle expose it as maxAngleZ / maxAngleX at that joint. The flag names the first
-        // simulated joint whose lateral freedom is under LateralLockDeg.
+        // Hinge locks Z outright; Polar and Angle expose lateral freedom as maxAngleZ / maxAngleX at each joint.
         internal static string Limits(VRCPhysBone b, List<JointRow> joints, out bool lateralLocked, out string lockedJoint)
         {
             lateralLocked = false; lockedJoint = "";
@@ -189,17 +158,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                          : "Angle max=" + F(b.maxAngleX) + curveNote + rot;
         }
 
-        // Two chains rooted on same-named bones (a base and an outfit each carrying `Hair`) would print as one
-        // row; suffix the duplicates with their relative path so the collider audit columns stay readable.
         private static void DedupeKeys(List<ChainRow> rows)
         {
             foreach (var g in rows.GroupBy(r => r.Key).Where(g => g.Count() > 1).ToList())
                 foreach (var r in g) r.Key = r.Key + " (" + RelPath(r.Root.root, r.Root) + ")";
         }
 
-        // The nearest VRC constraint on the chain root or an ancestor below the avatar root, with its sources:
-        // a skirt whose roots are parent-constrained to Chest over a body on Hips is the cause the reader
-        // needs to see, and no other number here says it.
+        // A skirt whose roots are parent-constrained to Chest over a body on Hips is a cause no other number here shows.
         private static string ConstraintSources(Transform root, Transform avatar)
         {
             for (var t = root; t != null && t != avatar; t = t.parent)
@@ -220,10 +185,6 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Colliders ───────────────────────────────────────────────────────────────────────────────────────
 
-        // Every collider any region chain references, plus every active collider under the root that none
-        // does (the audit case: a vendor wired 6 of 9 chains). Capsule: `height` is the core segment, so the
-        // rounded ends add 2×radius to the end-to-end extent — printed beside the authored value because a
-        // collider sized as if height were end-to-end lands 2r too long.
         private static List<ColliderRow> ColliderRows(GameObject root, List<ChainRow> rows)
         {
             var all = new List<VRCPhysBoneColliderBase>();
@@ -236,8 +197,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                                            Inactive = !c.isActiveAndEnabled, InsideBounds = c.insideBounds };
                 var rt = c.rootTransform != null ? c.rootTransform : c.transform;
                 cr.RootName = Key(rt.name);
-                // rootTransform scale multiplies radius/height in the SDK's shape; measured from lossyScale's
-                // largest axis, the same choice the session's bounds check agreed with on a uniformly scaled rig.
+                // The SDK's shape scales radius and height by rootTransform's scale.
                 float s = AbsMax(rt.lossyScale);
                 cr.Radius = c.radius * s;
                 var center = rt.TransformPoint(c.position);
@@ -265,15 +225,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                                         Dictionary<GameObject, SkinnedMeshRenderer> proxies)
         {
             var all = colliders.Where(c => r.Bone.colliders.Contains(c.Col)).ToList();
-            // Measured against active, enabled, non-plane, non-containing colliders only: a disabled collider is
-            // out of the SDK's collision scene, a plane has no segment, and an insideBounds collider keeps the
-            // chain *inside* it, so its slack would carry the opposite sign.
+            // A disabled collider is out of the SDK's collision scene, a plane has no segment, and an insideBounds collider
+            // keeps the chain *inside* it, so its slack would carry the opposite sign.
             var refd = all.Where(c => !c.Inactive && !c.InsideBounds && c.Col.shapeType != VRCPhysBoneColliderBase.ShapeType.Plane).ToList();
             r.Colliders = all.Count == 0 ? "—" : string.Join(", ", all.Select(c => Key(c.Col.name)
                 + (c.Inactive ? " (inactive)" : c.InsideBounds ? " (insideBounds)" : c.Col.shapeType == VRCPhysBoneColliderBase.ShapeType.Plane ? " (plane)" : "")));
-            // Bone segments: joint to each child joint, plus the virtual endpoint bone off every leaf when
-            // endpointPosition is set. Slack is segment-to-segment, with the bone radius the larger of its two
-            // ends (conservative).
             var byT = r.Joints.ToDictionary(j => j.T, j => j);
             var ep = r.Bone.endpointPosition;
             for (int i = 0; i < r.Joints.Count; i++)
@@ -292,19 +248,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                 r.Joints[i] = j;
                 if (!float.IsPositiveInfinity(j.ColliderSlack)) r.MinColliderSlack = Math.Min(r.MinColliderSlack, j.ColliderSlack);
             }
-            // Weight readout over the vertices near this chain's joints: the body's bones vs the garment's.
-            // Relative motion between those two bone sets is what walks the body into the garment.
             foreach (var b in bodies) r.BodyNear += WeightsNear(b.r, proxies, Kept(b), r, r.BodyWeights, out _);
             foreach (var g in garments) { r.GarmentNear += WeightsNear(g, proxies, null, r, r.GarmentWeights, out string gs); if (gs != null) r.GarmentSurfaces.Add(gs); }
         }
 
         // ── Geometry ────────────────────────────────────────────────────────────────────────────────────────
 
-        // Bakes the renderer the preview shows when NDMF has a proxy for this GameObject, else the scene
-        // instance; the proxy carries the composed reactions (shrink shapes at their worn weight) the scene
-        // instance holds at 0. World-space points either way.
-        // A kept-vertex set narrows the points to a material's submeshes, read off the scene mesh's indices, so a proxy
-        // whose vertex count differs from the scene mesh keeps every vertex.
+        // `kept` indexes the scene mesh, so a proxy whose vertex count differs from it keeps every vertex.
         private static List<Vector3> Bake(SkinnedMeshRenderer smr, Dictionary<GameObject, SkinnedMeshRenderer> proxies, HashSet<int> kept, out string surface)
         {
             SkinnedMeshRenderer src = smr;
@@ -314,9 +264,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             var pts = new List<Vector3>();
             try
             {
-                // useScale:true + localToWorldMatrix lands vertices at their world positions once (measured on a
-                // ring skinned under a root scaled x2: baked 0.100, world 0.200). useScale:false bakes them
-                // already world-scaled, so the matrix would double the scale.
+                // useScale:true + localToWorldMatrix lands vertices at their world positions once (measured under a root
+                // scaled x2). useScale:false bakes them already world-scaled, so the matrix would double the scale.
                 src.BakeMesh(m, true);
                 var l2w = src.transform.localToWorldMatrix; var vs = m.vertices;
                 bool all = kept == null || vs.Length != smr.sharedMesh.vertexCount;
@@ -326,9 +275,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return pts;
         }
 
-        // Proxy map: preview-scene renderer GameObject → its original, inverted to original → proxy SMR.
-        // Public NDMF API reached by reflection (this asmdef has references:[]); drift = empty map = scene
-        // surface, which the header names, so a drifted hook degrades loudly rather than silently.
+        // A drifted NDMF handle empties this map, so the read falls to the scene surface, which the header names.
         private static readonly Type NdmfPreviewType = VendorReflect.FindType("nadena.dev.ndmf.preview.NDMFPreview");
         private static readonly MethodInfo MiGetOriginalForProxy = NdmfPreviewType != null
             ? SafeGetMethod(NdmfPreviewType, "GetOriginalObjectForProxy", BindingFlags.Static | BindingFlags.Public) : null;
@@ -369,7 +316,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return Mathf.Sqrt(best);
         }
 
-        // Closest distance between segments p0-p1 and q0-q1 (Ericson, Real-Time Collision Detection, 5.1.9).
+        // Ericson, Real-Time Collision Detection, 5.1.9.
         internal static float SegmentSegmentDistance(Vector3 p0, Vector3 p1, Vector3 q0, Vector3 q1)
         {
             var d1 = p1 - p0; var d2 = q1 - q0; var r = p0 - q0;
@@ -402,9 +349,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return (p - (a + ab * t)).magnitude;
         }
 
-        // Top skin-weight bones over the vertices of `smr` within (joint radius + WeightBandMeters) of any joint
-        // of the chain, read off the flat GetAllBoneWeights walk (the top-4 struct truncates). Returns the
-        // vertex count that fed the readout; weights are accumulated into `acc` by bone name.
+        // Reads the flat GetAllBoneWeights walk because the top-4 struct truncates. Returns the vertex count that fed `acc`.
         private static int WeightsNear(SkinnedMeshRenderer smr, Dictionary<GameObject, SkinnedMeshRenderer> proxies, HashSet<int> kept, ChainRow r, Dictionary<string, float> acc, out string surface)
         {
             surface = null;
@@ -438,9 +383,9 @@ namespace Ryan6Vrc.AgentTools.Editor
         // ── Constraint pump ─────────────────────────────────────────────────────────────────────────────────
 
         // Chain roots (or their ancestors under the avatar) driven by a VRC constraint sit at a stale pose in a
-        // cold editor. One RegisterConstraint + UpdateConstraints(finalizeImmediately) settles them for this
-        // read (measured, emulator.md); both entry points are non-public, so a drifted handle prints as
-        // `constraintPump=unavailable` beside the count and the rest numbers are read as possibly stale.
+        // cold editor. One RegisterConstraint + UpdateConstraints(finalizeImmediately) settles them (emulator.md
+        // §Edit-mode VRC constraints); both entry points are non-public, so a drifted handle prints as
+        // `constraintPump=unavailable` and the rest numbers are read as possibly stale.
         private static string PumpConstraints(GameObject root, List<VRCPhysBone> chains)
         {
             var driven = new HashSet<VRCConstraintBase>();

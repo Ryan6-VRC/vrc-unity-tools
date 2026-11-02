@@ -8,27 +8,20 @@ using UnityEngine.SceneManagement;
 namespace Ryan6Vrc.AgentTools.Editor
 {
     /// <summary>
-    /// Editor-coupled door for the play-entry gate: on every interactive play entry it runs the pure
-    /// <see cref="PlayGateCore"/> against the active scene and — on failure — cancels entry and prints a
-    /// prescriptive FAIL naming each offender and its fix, plus a 2-line Scene-view overlay and a one-shot
-    /// human-clickable override. A pure refusal: it never mutates the scene.
-    ///
-    /// Not <c>[AgentTool]</c>-marked — the hook and menu are not agent-invoked, so the callable surface is
-    /// unchanged (no TOOLS.md row). The reactive cancel already hands the agent the verdict cheaply
-    /// (instant, before the multi-minute build), so no <c>Check()</c> pre-check tool exists.
+    /// The play-entry gate's Editor hook: runs <see cref="PlayGateCore"/> on every interactive play entry and
+    /// on failure cancels entry. A pure refusal, it never mutates the scene.
+    /// Contract: docs/verify.md §The play-entry gate.
     /// </summary>
     [InitializeOnLoad]
     public static class PlayGate
     {
-        // SessionState (not EditorPrefs): session-local, auto-clears on Editor restart so the gate re-arms
-        // for the next agent session — dodging the machine-global-EditorPref cross-project leak. Namespaced
-        // to avoid cross-tool collision.
+        // SessionState, not EditorPrefs: an unconsumed override clears on Editor restart, so the gate re-arms
+        // for the next session.
         private const string OverrideKey = "Ryan6Vrc.AgentTools.PlayGate.AllowNextEntry";
         private const string OverrideMenu = "Tools/Atelier/Allow Next Play Entry";
 
-        // Trivial ctor — does exactly one thing: subscribe. A throw here would silently disable the gate for
-        // the whole domain with no cancel path; all reflection/evaluation happens lazily in the handler
-        // (under its try/catch).
+        // Trivial ctor, subscribe only: a throw here would silently disable the gate for the whole domain with
+        // no cancel path, so all reflection and evaluation happen in the handler under its try/catch.
         static PlayGate()
         {
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
@@ -36,37 +29,30 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static void OnPlayModeStateChanged(PlayModeStateChange state)
         {
-            // Batch/CI has no human, Scene view, or interactive session to protect, and no one to click the
-            // override — gating there would cancel a legitimate headless play-entry. No-op in batch mode.
             if (Application.isBatchMode) return;
             if (state != PlayModeStateChange.ExitingEditMode) return;
 
             try
             {
-                // One-shot override: consume (clear) and let play proceed with no evaluation.
                 if (SessionState.GetBool(OverrideKey, false))
                 {
                     SessionState.SetBool(OverrideKey, false);
                     return;
                 }
 
-                // EvaluateEntry, not Evaluate: this handler runs during ExitingEditMode, where
-                // Application.isPlaying may already read true, and the dispatch would then refuse every
-                // entry forever (PlayGateCore.Evaluate's doc-comment owns the reasoning).
+                // EvaluateEntry, not Evaluate: PlayGateCore.Evaluate's doc says why.
                 var result = PlayGateCore.EvaluateEntry(SceneManager.GetActiveScene());
-                if (result.Pass) return; // play proceeds silently
+                if (result.Pass) return;
 
-                // Cancel entry (spike-confirmed clean: no flicker into play, single ExitingEditMode fire),
-                // then emit console FIRST, overlay LAST.
+                // Setting isPlaying false here cancels entry; observed clean, with no flicker into play and a
+                // single ExitingEditMode fire.
                 EditorApplication.isPlaying = false;
                 EmitConsole(result);
                 EmitOverlay(result);
             }
             catch (Exception e)
             {
-                // Fail closed: never let a throw fall through into a multi-minute build on an unverified
-                // scene. Route through EmitConsole so the exception FAIL names its fix + the override path
-                // (the error is the interface), same as an ordinary offender block.
+                // Fail closed: a throw must not fall through into a multi-minute build on an unverified scene.
                 EditorApplication.isPlaying = false;
                 EmitConsole(new PlayGateCore.PlayGateResult
                 {
@@ -78,22 +64,15 @@ namespace Ryan6Vrc.AgentTools.Editor
                         {
                             Tag = "PlayGate",
                             Message = "play gate threw while evaluating — blocking to be safe:\n" + e,
-                            Fix = "fix the exception above; or override this one entry via the menu below",
+                            Fix = "fix the exception above; or override this one entry via the menu on this block's first line",
                         },
                     },
                 });
             }
         }
 
-        // The addressable-specifics surface the agent reads via read_console. Family grammar: prefix
-        // [PlayGate], verdict token => FAIL (matching [ReportGimmick] … => OK). Tone model: the run_tests
-        // deny reason — a refusal that names its own fix.
-        //
-        // read_console returns ONLY the first line of a log entry's message (a multi-line body is silently
-        // dropped — see PlayGateCore.ConsoleSummaryLine), so LINE 1 is the agent's whole channel and must be
-        // self-sufficient: every offender, its fix, and the override path, all on it. The pretty per-offender
-        // block below is the human's expanded Console view (Unity collapses the entry to line 1 anyway) — a
-        // second rendering of the same offender list, not a second source of truth.
+        // Family grammar: prefix [PlayGate], verdict token => FAIL (matching [ReportGimmick] … => OK). The
+        // summary line and the per-offender block below render one offender list.
         private static void EmitConsole(PlayGateCore.PlayGateResult result)
         {
             var sb = new StringBuilder();
@@ -106,10 +85,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             Debug.LogError(sb.ToString());
         }
 
-        // Glanceable, branded, auto-fading. In its OWN try/catch so a Scene-view failure can never suppress
-        // the already-emitted console diagnostic; null-guarded (no Scene view open → console already fired).
-        // The 'Atelier' brand lives ONLY here (the human surface) — the deliberate exception to the machine
-        // [PlayGate] grammar. Two lines, no emoji.
+        // Own try/catch so an overlay failure stays a warning instead of reaching the handler's catch as a
+        // false "gate threw" FAIL. This human surface deliberately skips the [PlayGate] grammar.
         private static void EmitOverlay(PlayGateCore.PlayGateResult result)
         {
             try
@@ -127,8 +104,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
         }
 
-        // One-shot, universal (no human-vs-agent distinction, no persistent disable) — consumed by the next
-        // ExitingEditMode. The gate is a shared safety net, not an agent leash.
         [MenuItem(OverrideMenu)]
         private static void AllowNextEntry()
         {

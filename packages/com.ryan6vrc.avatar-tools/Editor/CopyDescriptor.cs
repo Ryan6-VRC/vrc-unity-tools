@@ -11,32 +11,23 @@ using Ryan6Vrc.AgentTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// Transplants the vendor's VRCAvatarDescriptor onto our owned avatar, remapping every
-    /// scene reference from the vendor hierarchy to ours via <see cref="RemapReferencesByPath"/>.
+    /// Transplants the vendor's VRCAvatarDescriptor onto our owned avatar with its scene refs remapped to our
+    /// hierarchy. Contract: docs/unity-tools.md.
     ///
     /// Two safety gates abort early if the transplant would silently produce wrong results:
-    ///   A) Scale/orientation: the descriptor's view position, eye offsets, and collider offsets
-    ///      are authored in world-space scale — a mismatch means they'd be wrong on our avatar.
-    ///   B) Blendshape parity: viseme and eyelid bindings are by blendshape index, so the face
-    ///      mesh must have the same blendshape names in the same order on both sides.
+    ///   A) Scale/orientation: the descriptor's view position, eye offsets and collider offsets depend on
+    ///      scale, so a mismatch leaves them wrong on our avatar.
+    ///   B) Blendshape parity: eyelid bindings are by blendshape index and viseme bindings by name, so the
+    ///      face mesh must have the same blendshape names in the same order on both sides.
     ///
-    /// The PipelineManager's blueprintId is always cleared so we never inherit the vendor's
-    /// uploaded avatar ID.
-    ///
-    /// Call <see cref="Run"/> from MCP execute_code.
-    /// PASS = gate passed, 0 vendor-hierarchy leaks, blueprintId empty.
+    /// PASS = gates passed, 0 vendor-hierarchy leaks, 0 lost refs, blueprintId empty.
     /// </summary>
     [AgentTool]
     public static class CopyDescriptor
     {
         // ── Public API ────────────────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Transplant the VRCAvatarDescriptor from <paramref name="vendorSource"/> onto
-        /// <paramref name="ownedRoot"/>, remapping all scene refs to our hierarchy.
-        /// Returns a one-line PASS/FAIL summary ending with the RunLog path (<c>… => RESULT | log=&lt;path&gt;</c>);
-        /// also Debug.Log/LogError it.
-        /// </summary>
+        /// <summary>Returns a one-line PASS/FAIL summary ending with the RunLog path (<c>… => RESULT | log=&lt;path&gt;</c>).</summary>
         /// <param name="ownedRoot">Our owned avatar root in the scene (Animator already configured).</param>
         /// <param name="vendorSource">The vendor's dressed source carrying the VRCAvatarDescriptor to copy.</param>
         public static string Run(GameObject ownedRoot, GameObject vendorSource, bool whatIf = false)
@@ -53,8 +44,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 whatIf   = whatIf,
             };
 
-            // Execute-path Undo group handle. Stays -1 until the group is opened (after the gates,
-            // execute only), so the finally collapses only a real group.
             int undoGroup = -1;
 
             try
@@ -82,29 +71,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     return Fail(data, label, "VRCAvatarDescriptor not found on vendorSource (" + vendorSource.name + ")");
 
                 // ── Snapshot critical scene refs on the VENDOR descriptor ──────────────────
-                // Before copying, record every ObjectReference property on the vendor descriptor
-                // whose value is non-null AND under the vendor hierarchy — these are the scene refs
-                // (viseme mesh, eye/eyelid transforms, collider transforms, …) we MUST preserve.
-                // Keyed by serialized property path so the post-remap check is field-agnostic:
-                // a path-remap that nulls ANY of them (broken lip-sync / eye-tracking / etc.) is a
-                // lostRef and must FAIL, rather than special-casing viseme/eyes per field.
                 var criticalPaths = SnapshotSceneRefPaths(vendorDesc, vendorSource.transform);
 
                 // ── whatIf: preview go/no-go, mutate nothing ───────────────────────────────
-                // Gates passed and the vendor descriptor was found → preview go. The remap/leak/
-                // lostRef realities only exist after the copy, so we report the critical scene-ref
-                // count that WOULD be remapped and return BEFORE any AddComponent/CopySerialized/
-                // remap/blueprint-clear.
                 if (whatIf)
                 {
                     data.Count("criticalRefs", criticalPaths.Count);
                     data.Note("gates passed; vendor descriptor found; blueprintId would be cleared; " +
                         "remapped/nulled/leaks/lostRefs realized only on execute");
 
-                    // C2 — preview the viewpoint recompute WITHOUT requiring the not-yet-added owned
-                    // descriptor. referenceVpIsBaseline: true so oldVP == the vendorVP the copy will land in
-                    // BOTH modes (preview == execute even on an overwrite re-run); mutates nothing (whatIf).
-                    // Wrapped so a viewpoint fault can never demote this preview — it is a NON-fatal note.
+                    // A viewpoint fault stays a NON-fatal note and never demotes this preview.
                     try
                     {
                         var vpPrev = FixViewpoint.Recompute(ownedRoot, vendorSource, whatIf: true, referenceVpIsBaseline: true);
@@ -117,18 +93,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         data.Note("viewpoint: verify — viewpoint preview errored (" + vex.Message + "); ViewPosition would stay at copied vendor value");
                     }
 
-                    data.result = "PASS";   // gates passed + descriptor found => preview go
+                    data.result = "PASS";
                     return TransplantCore.Finish(data, label);
                 }
 
-                // ── Execute-path Undo group: descriptor add/overwrite + CopySerialized +
-                //    remap-apply + PipelineManager add/clear collapse into one undo step. ──────
+                // ── Execute-path Undo group: every mutation below collapses into one undo step ──────
                 Undo.IncrementCurrentGroup();
                 Undo.SetCurrentGroupName("CopyDescriptor");
                 undoGroup = Undo.GetCurrentGroup();
 
                 // ── Get or add descriptor on ownedRoot ───────────────────────────────────
-                // AddComponent may also auto-add PipelineManager via RequireComponent.
                 var ourDesc  = ownedRoot.GetComponent<VRCAvatarDescriptor>();
                 bool wasAdded = ourDesc == null;
                 if (wasAdded)
@@ -141,25 +115,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 EditorUtility.SetDirty(ourDesc);
 
                 // ── Remap scene refs via shared helper ─────────────────────────────────────
-                // Rebinds viseme mesh, eye-look transforms, eyelid mesh, collider transforms, etc.
-                // from the vendor hierarchy to the same indexed hierarchy paths under ours.
-                // Asset references (playable layer controllers) are NOT under srcRoot, so they
-                // are left untouched by the helper.
                 var so          = new SerializedObject(ourDesc);
                 var remapResult = RemapReferencesByPath.Remap(so, vendorSource.transform, ownedRoot.transform);
                 so.ApplyModifiedPropertiesWithoutUndo();
                 data.Count("remapped", remapResult.remapped);
                 data.Count("nulled", remapResult.nulled);
 
-                // ── Fresh PipelineManager (never keep vendor's blueprintId) ────────────────
+                // ── PipelineManager ────────────────────────────────────────────────────────────
                 string blueprintId = ClearOrCreatePipelineManager(ownedRoot);
                 data.Note("blueprint=" + (string.IsNullOrEmpty(blueprintId) ? "<empty>" : blueprintId));
 
-                // ── Lost-reference check (general; subsumes viseme/eyes/eyelids) ────────────
-                // For every critical vendor scene ref snapshotted above, our descriptor must now
-                // hold a non-null value at the same property path. A null means the path-remap
-                // silently dropped a scene ref — the worst failure mode — so record the property
-                // path as an offender and gate PASS on lostRefs == 0.
+                // ── Lost-reference check ───────────────────────────────────────────────────────
                 var lostRefPaths = new List<string>();
                 int lostRefs = CountLostRefs(ourDesc, criticalPaths, lostRefPaths);
                 data.Count("lostRefs", lostRefs);
@@ -167,7 +133,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     data.Offender("lostRef: '" + p + "' nulled by the remap (broken lip-sync/eye-tracking/collider ref)");
 
                 // ── Leak check ─────────────────────────────────────────────────────────────
-                // Any remaining ObjectReference still under vendorSource is a missed remap.
                 int leaks = CountLeaks(ourDesc, vendorSource.transform);
                 data.Count("leaks", leaks);
                 if (leaks > 0)
@@ -178,8 +143,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 data.Note("layers=[" + ReportPlayableLayers(ourDesc) + "]");
 
                 // ── Spot-checks: viseme mesh + eye transforms (report only) ────────────────
-                // These names are reported for legibility; correctness is now enforced generically
-                // by the lostRefs check above (a nulled viseme/eye ref shows up there as an offender).
                 var visemeSMR = ourDesc.VisemeSkinnedMesh;
                 data.Note("viseme=" + (visemeSMR != null ? visemeSMR.name : "(null)"));
 
@@ -197,8 +160,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 data.result = pass ? "PASS" : "FAIL";
                 if (!pass)
                 {
-                    // The per-item offenders above carry the detail; error carries the joined headline
-                    // so a FAIL RunLog never reads "error": null (and matches CleanController's verify FAIL).
+                    // The offenders above carry the detail; error carries the joined headline so a FAIL RunLog
+                    // never reads "error": null.
                     var reasons = new List<string>();
                     if (leaks > 0)    reasons.Add("leaks=" + leaks);
                     if (lostRefs > 0) reasons.Add("lostRefs=" + lostRefs);
@@ -206,14 +169,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     data.error = string.Join("; ", reasons);
                 }
 
-                // ── Viewpoint recompute (C6, NON-fatal) ────────────────────────────────────────────
-                // After the leak/lostRef gates, recompute ViewPosition from the vendor reference + the
-                // owned eyes/head. referenceVpIsBaseline: true — the just-copied vendorVP is the delta-gate
-                // baseline (write only when |newVP − copiedVP| > ε). The recompute core writes inside this
-                // open Undo group. It rides as a prominent STATE-asserting note and does NOT flip the verdict:
-                // a recompute miss (no eyes) leaves the copied ViewPosition in place — exactly today's
-                // no-recompute behavior, not a regression that should FAIL. Wrapped so a viewpoint fault can
-                // never demote the copy verdict (the real gates are leaks/lostRefs/blueprint).
+                // ── Viewpoint recompute (NON-fatal) ────────────────────────────────────────────────
+                // A recompute miss or fault leaves the copied ViewPosition in place and never flips the verdict,
+                // which the gates above own.
                 try
                 {
                     var vp = FixViewpoint.Recompute(ownedRoot, vendorSource, whatIf: false, referenceVpIsBaseline: true);
@@ -233,9 +191,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             finally
             {
-                // Collapse the execute-path descriptor mutations into one undo step on every exit
-                // (success, an early-FAIL return inside the try, or a mid-run exception). Only when a
-                // group was actually opened (execute path, past the gates); whatIf/gate-fail left it -1.
                 if (undoGroup != -1) Undo.CollapseUndoOperations(undoGroup);
             }
 
@@ -244,11 +199,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Gate A: scale / orientation ───────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Returns a diagnostic string if scale or rotation are mismatched, null on pass.
-        /// Scale: element-wise relative tolerance 1e-3.
-        /// Rotation: quaternion angle must be &lt;1°.
-        /// </summary>
+        /// <summary>Returns a diagnostic string on a scale or rotation mismatch, null on pass.</summary>
         private static string CheckScaleAndOrientation(Transform ours, Transform vendor)
         {
             Vector3 os = ours.lossyScale;
@@ -269,7 +220,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return string.Format(CultureInfo.InvariantCulture,
                     "rotation angle={0:F3}° (threshold=1°)", angle);
 
-            return null; // pass
+            return null;
         }
 
         // ── Gate B: blendshape parity ─────────────────────────────────────────────────────────
@@ -315,10 +266,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         "blendshape[{0}] name mismatch: ours='{1}' vendor='{2}'", i, on, vn);
             }
 
-            return null; // pass
+            return null;
         }
 
-        /// <summary>Returns the SkinnedMeshRenderer with the most blendshapes under root.</summary>
         private static SkinnedMeshRenderer FindFaceSMR(GameObject root)
         {
             SkinnedMeshRenderer best = null;
@@ -335,11 +285,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         // ── PipelineManager ───────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Ensures ownedRoot has a PipelineManager with an EMPTY blueprintId.
-        /// VRCAvatarDescriptor carries [RequireComponent(typeof(PipelineManager))], so one may
-        /// already exist (possibly carrying the vendor's ID from the EditorUtility.CopySerialized
-        /// step). We always clear the field via SerializedObject.
-        /// Returns the blueprintId after clearing (must be "" for PASS).
+        /// Ensures ownedRoot has a PipelineManager with an empty blueprintId and returns the blueprintId after
+        /// clearing (must be "" for PASS). VRCAvatarDescriptor carries [RequireComponent(typeof(PipelineManager))],
+        /// so one may already exist holding an ID.
         /// </summary>
         private static string ClearOrCreatePipelineManager(GameObject ownedRoot)
         {
@@ -354,7 +302,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Undo.RecordObject(pm, "CopyDescriptor: clear PipelineManager blueprintId");
             }
 
-            // Clear via SerializedObject to handle both serialized-field and backing-field edge cases.
             var pmSo   = new SerializedObject(pm);
             var bpProp = pmSo.FindProperty("blueprintId");
             if (bpProp != null && bpProp.propertyType == SerializedPropertyType.String)
@@ -365,7 +312,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             EditorUtility.SetDirty(pm);
 
-            // Read back the live public field to confirm the clear took effect.
             return pm.blueprintId ?? "";
         }
 
@@ -396,10 +342,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         /// <summary>
-        /// For each snapshotted critical path, count those that are null on our descriptor after the
-        /// remap (a silently dropped scene ref). Records each offending property path in
-        /// <paramref name="offenders"/>. The descriptor layout matches the vendor's (it was produced
-        /// by CopySerialized), so the property paths line up one-to-one.
+        /// Count the snapshotted critical paths now null on our descriptor, the scene refs the remap silently
+        /// dropped, recording each in <paramref name="offenders"/>. The paths line up one-to-one because
+        /// CopySerialized produced our descriptor from the vendor's.
         /// </summary>
         private static int CountLostRefs(VRCAvatarDescriptor ourDesc, List<string> criticalPaths, List<string> offenders)
         {
@@ -421,10 +366,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Leak check ────────────────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Count ObjectReferences on the descriptor that still point into the vendor hierarchy.
-        /// A clean remap should leave zero; any non-zero count means a path was missing under ours.
-        /// </summary>
+        /// <summary>Count ObjectReferences on the descriptor that still point into the vendor hierarchy.</summary>
         private static int CountLeaks(VRCAvatarDescriptor ourDesc, Transform vendorRoot)
         {
             int leaks = 0;
@@ -446,10 +388,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Playable layers ───────────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Summarises which playable-layer controllers are non-null after the copy.
-        /// Controllers are asset references (not scene refs) so the remap leaves them untouched.
-        /// </summary>
+        /// <summary>Lists each non-default playable layer with its controller.</summary>
         private static string ReportPlayableLayers(VRCAvatarDescriptor desc)
         {
             var sb = new StringBuilder();
@@ -463,7 +402,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (layers == null) return;
             foreach (var layer in layers)
             {
-                if (layer.isDefault) continue; // ignore empty/unset default layers
+                if (layer.isDefault) continue;
                 if (sb.Length > 0) sb.Append(", ");
                 sb.Append(layer.type.ToString()).Append('=');
                 sb.Append(layer.animatorController != null ? layer.animatorController.name : "(null)");
@@ -471,12 +410,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         }
 
         // ── RunLog output ─────────────────────────────────────────────────────────────────────
-        // One shared envelope writer serves both modes: counts are emitted only where added, so the
-        // whatIf log honestly omits the execute-only counters (remapped/nulled/leaks/lostRefs are
-        // unknowable without copying) rather than reporting zeros for them.
 
-        /// <summary>Route an argument-guard failure through the shared envelope tail — never a bare
-        /// trailer-less line: every guard failure still writes a RunLog and carries its path.</summary>
         private static string ArgFail(string label, bool whatIf, GameObject ownedRoot, GameObject source, string msg)
         {
             var data = new RunData
@@ -488,8 +422,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return Fail(data, label, msg);
         }
 
-        /// <summary>Fail an in-flight run (gate / missing-descriptor stage) through the same grammar:
-        /// named offender + <c>error</c>, shared envelope tail.</summary>
         private static string Fail(RunData data, string label, string msg)
         {
             data.result = "FAIL";
@@ -500,10 +432,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Data type ─────────────────────────────────────────────────────────────────────────
 
-        /// <summary>The package RunLog envelope; counts/offenders/notes are added at the site that
-        /// computes them (state assertions — viseme/eyes/blueprint/layers/viewpoint — ride as notes,
-        /// so the one-line summary still carries them; the viewpoint note is the NON-fatal
-        /// state-asserting FixViewpoint fold that never flips the verdict).</summary>
         private sealed class RunData : RunLog
         {
             public RunData() : base("copy-descriptor") { }

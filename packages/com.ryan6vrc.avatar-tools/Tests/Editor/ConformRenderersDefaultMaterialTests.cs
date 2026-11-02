@@ -3,20 +3,13 @@ using UnityEditor;
 using UnityEngine;
 using Ryan6Vrc.AvatarTools.Editor;
 
-// The default-material gate, which FAILs a conform run on its own (`defaultMatSlots` is one of the ANDed
-// conditions behind the PASS). It used to decide "this is Unity's built-in" by NAME, which any project
-// material sharing that name satisfies — so the gate carried a false-FAIL vector, and nothing in the suite
-// asserted the rule at all. The only prior reference deliberately avoided tripping it.
-//
-// Both polarities are the point. A negative measured over the vendor corpus proves nothing here: that corpus
-// is the wrong population (ConformRenderers runs on OUR avatars after a transplant, which is exactly where an
-// unremapped material leaves a built-in slot behind), and per docs/verify.md an instrument must be shown to
-// see a positive before its negative is worth anything. These tests are that positive.
+// The default-material gate FAILs a conform run on its own and decides by identity, not name; these tests pin
+// both polarities. A negative measured over the vendor corpus proves nothing here: ConformRenderers runs on our
+// avatars after a transplant, which is where an unremapped material leaves a built-in slot behind.
 public class ConformRenderersDefaultMaterialTests
 {
-    // The real built-in must still be recognized — this is the "instrument can see a positive" half. If the
-    // handle ever stops resolving, the production predicate falls back to GUID+localId and warns; if BOTH
-    // routes failed, the gate would silently never fire and this is what catches that.
+    // If the handle and the production predicate's GUID+localId fallback both failed, the gate would silently
+    // never fire; this is what catches that.
     [Test]
     public void Recognizes_the_real_builtin_default_material()
     {
@@ -25,8 +18,6 @@ public class ConformRenderersDefaultMaterialTests
         Assert.IsTrue(ConformRenderers.IsBuiltinDefaultMaterial(builtin));
     }
 
-    // The false-FAIL vector the name compare carried. A project material may legitimately be named
-    // "Default-Material"; under the old rule it FAILed the whole conform run.
     [Test]
     public void Does_not_mistake_a_project_material_that_merely_shares_the_name()
     {
@@ -34,15 +25,14 @@ public class ConformRenderersDefaultMaterialTests
         try
         {
             impostor.name = "Default-Material";
-            Assert.AreEqual("Default-Material", impostor.name, "the impostor must satisfy the OLD name compare");
+            Assert.AreEqual("Default-Material", impostor.name, "the impostor must satisfy a name-only compare");
             Assert.IsFalse(ConformRenderers.IsBuiltinDefaultMaterial(impostor),
                 "identity, not name, is what decides — this material is not Unity's built-in");
         }
         finally { Object.DestroyImmediate(impostor); }
     }
 
-    // An ordinary material is neither, and a null slot is the OTHER branch entirely (null slots are counted
-    // as null-slot offenders, never as default-material ones) — pinned so the two never merge.
+    // A null slot is the other branch: it counts as a null-slot offender, never a default-material one.
     [Test]
     public void Ordinary_and_null_materials_are_not_the_builtin()
     {

@@ -1,5 +1,3 @@
-// Behavioral tests for OwnControllerClips. Throwaway on-disk assets under an owned scratch path; assert on
-// the returned one-line summary + post-mutation controller/clip state. Headless via tools/run-editmode-tests.ps1.
 using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.Animations;
@@ -29,12 +27,12 @@ public class OwnControllerClipsTests
 
     void EnsureVendor() { if (!AssetDatabase.IsValidFolder("Assets/Vendor")) { AssetDatabase.CreateFolder("Assets", "Vendor"); _createdVendor = true; } AnimatorTestHelpers.EnsureFolder(VendorRoot); }
 
-    AnimationClip VendorClip(string name)
+    AnimationClip VendorClip(string name, string bindingPath = "Body")
     {
         EnsureVendor();
         string p = VendorRoot + "/" + name + ".anim";
         var c = AnimatorTestHelpers.MakeClip(p);
-        AnimatorTestHelpers.AddFloatCurve(c, "Body", typeof(Transform), "m_LocalPosition.x");
+        AnimatorTestHelpers.AddFloatCurve(c, bindingPath, typeof(Transform), "m_LocalPosition.x");
         AnimatorTestHelpers.Save(c, p);
         return c;
     }
@@ -88,8 +86,8 @@ public class OwnControllerClipsTests
         StringAssert.Contains("=> PASS", s);
         Assert.AreEqual(2, AnimatorTestHelpers.Count(s, "copiesMade"));
         Assert.AreEqual(2, AssetDatabase.FindAssets("t:AnimationClip", new[] { Out }).Length, "two distinct owned copies");
-        // End-state, not just file count: each state must retarget to its OWN distinct owned copy. A map
-        // pointing both states at one copy (orphaning the other file) would still pass the count assertions.
+        // A map pointing both states at one copy, orphaning the other file, would still pass the count
+        // assertions above.
         var m1 = FindState(ctrl, "S1").motion as AnimationClip;
         var m2 = FindState(ctrl, "S2").motion as AnimationClip;
         string p1 = AssetDatabase.GetAssetPath(m1), p2 = AssetDatabase.GetAssetPath(m2);
@@ -103,8 +101,8 @@ public class OwnControllerClipsTests
     [Test]
     public void Retargets_nested_blendtree_and_synced_override()
     {
-        var vTree = VendorClip("InTree");
-        var vOverride = VendorClip("InOverride");
+        var vTree = VendorClip("InTree", "TreeBody");
+        var vOverride = VendorClip("InOverride", "OverrideBody");
         string cp = Root + "/Fx3.controller";
         var ctrl = AnimatorController.CreateAnimatorControllerAtPath(cp);
         var sm = ctrl.layers[0].stateMachine;
@@ -121,9 +119,8 @@ public class OwnControllerClipsTests
         StringAssert.Contains("=> PASS", s);
         Assert.AreEqual(0, AnimatorTestHelpers.Count(s, "residual"), "both nested + override slots retargeted");
         Assert.GreaterOrEqual(AnimatorTestHelpers.Count(s, "retargets"), 2);
-        // residual=0 only proves no slot still points at an in-scope VENDOR clip; a slot retargeted to the
-        // WRONG owned clip is still owned → residual=0. Inspect the actual end-state slots (re-walk ctrl,
-        // which survives Run's reimport; the pre-Run inner/st refs may be stale). Both must be owned copies.
+        // residual=0 only proves no slot still points at an in-scope vendor clip, so read the slots back. Re-walk
+        // ctrl, which survives Run's reimport; the pre-Run inner/st refs may be stale.
         var treeState = FindState(ctrl, "Tree");
         var innerBt = (treeState.motion as BlendTree).children[0].motion as BlendTree;
         var innerChild = innerBt.children[0].motion as AnimationClip;
@@ -134,6 +131,8 @@ public class OwnControllerClipsTests
         Assert.IsNotNull(overrideMotion, "synced override is a clip after retarget");
         StringAssert.StartsWith(Out, AssetDatabase.GetAssetPath(overrideMotion), "synced override retargeted to an owned copy");
         Assert.AreNotEqual(vOverride, overrideMotion, "synced override no longer the vendor original");
+        Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(AssetDatabase.GetAssetPath(innerChild), "TreeBody"), "the tree slot holds the tree clip's copy");
+        Assert.IsTrue(AnimatorTestHelpers.ClipHasBinding(AssetDatabase.GetAssetPath(overrideMotion), "OverrideBody"), "the override slot holds the override clip's copy");
     }
 
     [Test]

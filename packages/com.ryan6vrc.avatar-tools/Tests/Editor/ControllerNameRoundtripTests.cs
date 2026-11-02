@@ -8,15 +8,10 @@ using UnityEngine;
 
 namespace Ryan6Vrc.AvatarTools.Tests
 {
-    // Behavioral tests for the name round-trip (compile <-> decompile) of blend trees and transitions:
-    // a human-authored `name:` survives; an auto-named tree (the positional <State>_BlendTree /
-    // <parent>_<i> default) stays nameless in YAML; a `name:` on an entry-ladder rung or on a clip tree child
-    // is refused at parse (neither emit path reads it). Also covers the completeness sweep's per-type m_Name
-    // membership: a cosmetic entry-transition/SMB name is tolerated, not refused. Run headless via
-    // tools/run-editmode-tests.ps1 (or the Test Runner window / CI); not via MCP run_tests — wrong venue
-    // (live editor). See docs/verify.md.
+    // A human-authored `name:` survives the compile <-> decompile round trip; an auto-named tree (the
+    // positional <State>_BlendTree / <parent>_<i> default) stays nameless in YAML.
     //
-    // NOT here: a name carrying a LINE BREAK. That is the serializer's one funnel guard
+    // NOT here: a name carrying a line break. That is the serializer's one funnel guard
     // (AnimatorSchemaEmit.CheckNoLineBreak, reached by every name/path/field through ScalarStr), witnessed
     // once at RoundtripStressTests.Funnel_LineBreakInParamName_Fails — a name-position case only re-walks it.
     public class ControllerNameRoundtripTests
@@ -26,10 +21,10 @@ namespace Ryan6Vrc.AvatarTools.Tests
         [SetUp]
         public void SetUp() => AnimatorTestHelpers.EnsureFolder(TestRoot);
 
-        // Per-test deletion is load-bearing, not hygiene: CompileTo reuses a controller already sitting in its
-        // outDir (the compile door's GUID-stable idempotence path), so a leaked artifact would change which
-        // branch the next case exercises. No AssetDatabase.Refresh() on either side — CreateFolder registers
-        // the folder AND writes its .meta, and DeleteAsset closes its own import.
+        // Per-test deletion is load-bearing: CompileTo reuses a controller already sitting in its outDir (the
+        // compile door's GUID-stable path), so a leaked artifact would change which branch the next case
+        // exercises. No AssetDatabase.Refresh() on either side: CreateFolder registers the folder and writes its
+        // .meta, and DeleteAsset closes its own import.
         [TearDown]
         public void TearDown()
         {
@@ -37,9 +32,6 @@ namespace Ryan6Vrc.AvatarTools.Tests
             if (Directory.Exists(TestRoot)) Directory.Delete(TestRoot, true);
         }
 
-        // ── 1: a named parent + unnamed child — the child does NOT inherit an explicit name, and the whole
-        //      document still reaches a fixpoint on a second pass. No separate single-named-tree case: the
-        //      parent here IS a named top-level tree (Direct), and test 5 is a named top-level 1D one. ──────
         [Test]
         public void NamedParentTree_UnnamedChildTree_ChildStaysNameless()
         {
@@ -87,8 +79,6 @@ clips:
             Assert.AreEqual(yamlA, yamlB, "a second compile/decode pass reaches the same fixpoint");
         }
 
-        // ── 2: a default-CONSTRUCTED Unity name ("Blend Tree") is not the schema's auto-generated default
-        //      ("<State>_BlendTree") — it is a real (if unintentional) name and must surface ────────────
         [Test]
         public void DefaultConstructedTreeName_SurfacesWhenNotAutoDefault()
         {
@@ -110,13 +100,11 @@ clips:
             StringAssert.Contains("Blend Tree", yaml, "the surfaced name appears in the serialized yaml");
         }
 
-        // ── 3: a named transition round-trips. The STATE ladder is the witness for BOTH ladders: emit funnels
-        //      every state/AnyState transition through ControllerEmit.ConfigureStateTransition and decode
-        //      through ControllerDecompile.DecodeStateTransition, so an AnyState case re-walks the same two
-        //      methods. The ONE field each ladder handles outside those two is `canTransitionToSelf` (assigned
-        //      and read beside the shared calls: authored on AnyState, derived from the target on a state
-        //      rung) — and it is not a name; its round-trips are covered by the addressing.yaml fixture at
-        //      RoundtripStressTests.Fixpoint_AuthoredYaml and by ControllerDecompileTests.Walk_SelfRung_* ─────
+        // The state ladder witnesses both ladders: emit funnels every state/AnyState transition through
+        // ControllerEmit.ConfigureStateTransition and decode through ControllerDecompile.DecodeStateTransition.
+        // The one field each ladder handles outside those two is `canTransitionToSelf`, covered by the
+        // addressing.yaml fixture at RoundtripStressTests.Fixpoint_AuthoredYaml and by
+        // ControllerDecompileTests.Walk_SelfRung_*.
         [Test]
         public void NamedStateTransition_Roundtrips()
         {
@@ -146,8 +134,6 @@ layers:
             Assert.AreEqual(yamlA, yamlB, "a named transition reaches a textual fixpoint");
         }
 
-        // ── 4: a `name:` on an entry-ladder rung is refused AT PARSE — the entry-emit path never reads a
-        //      transition name, so silently accepting one would drop it without a trace ───────────────────
         [Test]
         public void EntryRungName_ThrowsAtParse()
         {
@@ -167,9 +153,6 @@ layers:
             StringAssert.Contains("name", ex.Message);
         }
 
-        // ── 5: a name requiring YAML quoting (a colon) round-trips intact — the first feature to put
-        //      arbitrary human text through ScalarStr/NeedsQuote in a name position — for both a blend-tree
-        //      name and a transition name ────────────────────────────────────────────────────────────────
         [Test]
         public void QuotingRequiredNames_Roundtrip()
         {
@@ -210,13 +193,10 @@ clips:
             Assert.AreEqual(yamlA, yamlB, "a quoting-requiring name reaches a textual fixpoint");
         }
 
-        // ── 6: a vendor entry transition and a vendor SMB carrying a cosmetic Inspector name decompile
-        //      WITHOUT refusal — the completeness sweep's m_Name membership lives per-type (not a blanket
-        //      ignore), and entry/SMB names are deliberately in the "tolerated, not captured" half of that
-        //      split. This is the check that would FAIL if m_Name were removed from UniversalIgnore without
-        //      also being added to EntryTransitionAware and the SMB aware sets. The mirror obligation — that
-        //      OUR compiler never emits a named SMB, so the sweep never swallows a name it wrote itself — is
-        //      asserted on the behaviours fixture at RoundtripStressTests.Fixpoint_AuthoredYaml ────────────
+        // The completeness sweep's m_Name membership is per-type, and entry/SMB names are tolerated, not
+        // captured. Fails if m_Name leaves EntryTransitionAware or DriverAware. The mirror obligation, that our
+        // compiler never emits a named SMB, is asserted on the behaviours fixture at
+        // RoundtripStressTests.Fixpoint_AuthoredYaml.
         [Test]
         public void NamedEntryTransitionAndNamedSmb_DecompileToleratesCosmeticNames()
         {
@@ -235,11 +215,8 @@ clips:
                 "cosmetic entry-transition/SMB names are tolerated (ignored), not refused: " + string.Join(" | ", w.Refusals));
         }
 
-        // ── 7: a `name:` on a CLIP tree child is refused at parse. The whole tree-only key set
-        //      (param/paramY/children/normalized/name) shares ONE `if (!hasTree) throw` in
-        //      AnimatorSchemaYaml's tree-child switch, so one key witnesses all five: they are only meaningful
-        //      when the child is itself a nested tree, and on a clip/ref child must be refused rather than
-        //      silently dropped ─────────────────────────────────────────────────────────────────────────────
+        // The whole tree-only key set (param/paramY/children/normalized/name) shares one `if (!hasTree) throw`
+        // in AnimatorSchemaYaml's tree-child switch, so one key witnesses all five.
         [Test]
         public void ClipChildName_ThrowsAtParse()
         {
@@ -267,9 +244,6 @@ clips:
             StringAssert.Contains("nested-tree child", ex.Message);
         }
 
-        // ── 8: regression — a `name:` on a NESTED-TREE child (the valid case the hasTree guard must not
-        //      break) still parses and round-trips, mirroring test 1's direct→1d nesting with a name added
-        //      to the nested child itself ────────────────────────────────────────────────────────────────
         [Test]
         public void NamedNestedTreeChild_Roundtrips()
         {

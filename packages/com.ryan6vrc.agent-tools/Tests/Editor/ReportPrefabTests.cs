@@ -1,10 +1,5 @@
-// Pins ReportPrefab's per-level attribution on a chain built here from scratch: a regular prefab, a variant
-// of it that removes one child, adds one, removes one component, flips one property and leaves overrides on
-// what it removed, and a scene instance
-// of the variant with one authored move. The load-bearing claim is that each edit lands at the LEVEL that made
-// it and nowhere else — the flattened read every other door gives cannot say that. Fixture assets go under a
-// throwaway folder and are deleted in TearDown; the Snapshot artifacts each call writes are recorded and
-// deleted at OneTimeTearDown (never globbed — the Snapshots dir is the operator's durable pile).
+// Pins that ReportPrefab attributes each edit to the level that made it and nowhere else. Snapshot artifacts
+// are recorded and deleted by path, never globbed: the Snapshots dir is durable and holds the operator's own.
 using System.Collections.Generic;
 using System.IO;
 using NUnit.Framework;
@@ -76,8 +71,8 @@ public class ReportPrefabTests
             Object.DestroyImmediate(inst.transform.Find("Drop").gameObject);          // records a removed GameObject
             Object.DestroyImmediate(inst.transform.Find("Keep").GetComponent<BoxCollider>()); // records a removed component
             // Overrides on targets this level removes. Appended rather than edited in, since the removed objects
-            // have no instance left to edit; the shadowed test asserts they survived the save. Before the edits
-            // below: SetPropertyModifications writes back a list that does not yet hold a just-made live edit.
+            // have no instance left to edit; the shadowed test asserts they survived the save. This runs before
+            // the edits below because SetPropertyModifications writes back a list missing a just-made live edit.
             var mods = new List<PropertyModification>(PrefabUtility.GetPropertyModifications(inst));
             var dropSrc = baseAsset.transform.Find("Drop");
             mods.Add(new PropertyModification { target = baseAsset.transform.Find("Keep").GetComponent<BoxCollider>(), propertyPath = "m_Size.x", value = "2" });

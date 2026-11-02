@@ -11,19 +11,15 @@ using UnityEditor.SceneManagement;
 using UnityEngine.TestTools;
 using Ryan6Vrc.AgentTools.Editor;
 
-// CheckSeam proof obligations.
-//
-// CheckSeam.Run resolves scene paths against the ACTIVE scene (its local Resolve/FindByHierarchyPath), so —
-// like CheckAvatarTests — fixtures live in a throwaway ADDITIVE scene set active in SetUp and torn down in
-// place; nothing is ever saved to the real project. The pure-core logic is exercised by injecting fake seams
-// (ResolveSeam / ResolveHumanoid) via reflection (Tests is a separate assembly), the same seams that carry the
-// real MA/VRCFury reflection live. The seams are captured in SetUp and restored in TearDown.
+// CheckSeam.Run resolves scene paths through SceneHandle.Resolve against the ACTIVE scene, so fixtures live in
+// the throwaway Single scene SetUp opens. The pure-core logic runs on injected fake seams (ResolveSeam /
+// ResolveHumanoid), the same seams that carry the real MA/VRCFury reflection live.
 [Category("CheckSeam")]
 public class CheckSeamTests
 {
     private GameObject _root;
-    // Every PASS/NOT-PASS run emits a RunLog; a test that calls the door several times emits several, so the
-    // paths accumulate and TearDown removes them in ONE batched delete rather than an import apiece.
+    // Every PASS/NOT-PASS run emits a RunLog; TearDown removes the accumulated paths in ONE batched delete rather
+    // than an import apiece.
     private readonly List<string> _logPaths = new List<string>();
     private object _origResolveSeam, _origResolveHumanoid;
 
@@ -33,9 +29,8 @@ public class CheckSeamTests
         LogAssert.ignoreFailingMessages = true; // REFUSE paths log at error/warning — expected in negative tests
         // Batchmode boots on an untitled, unsaved scene; NewScene(Additive) throws against that ("Cannot create
         // a new scene additively with an untitled scene unsaved") and a freshly created untitled scene is itself
-        // dirty, so additive is order-dependent — never allowed when a test runs in isolation. Use a Single
-        // throwaway scene (CheckAvatarTests uses the same pattern): our fixtures live in it (the active scene,
-        // which is exactly what CheckSeam.Resolve searches). Never saved.
+        // dirty, so additive is order-dependent. Fixtures live in this Single scene, the active one
+        // SceneHandle.Resolve searches. Never saved.
         EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         _root = new GameObject("CheckSeamTestRoot");
         _origResolveSeam = GetSeam("ResolveSeam");
@@ -48,8 +43,6 @@ public class CheckSeamTests
         if (_root != null) UnityEngine.Object.DestroyImmediate(_root);
         _root = null;
         ResetSeams();
-        // _tmpScene is the only open scene (Single) and so cannot be closed; the next SetUp's Single NewScene
-        // replaces it, discarding fixtures. It is never saved — nothing persists to the project.
         if (_logPaths.Count > 0) AssetDatabase.DeleteAssets(_logPaths.ToArray(), new List<string>());
         _logPaths.Clear();
         LogAssert.ignoreFailingMessages = false;
@@ -93,7 +86,7 @@ public class CheckSeamTests
         return go;
     }
 
-    // Hierarchy path of a fixture GO (matches CheckSeam.Resolve's FindByHierarchyPath contract).
+    // Hierarchy path of a fixture GO: the first rung of SceneHandle.Resolve.
     private static string Path(GameObject go)
     {
         var t = go.transform;
@@ -103,7 +96,7 @@ public class CheckSeamTests
     }
 
     // Build a base GO with N named child bones + an empty merge GO, and inject a non-empty HumanoidMap over the
-    // base bones so the door's humanoid guard passes and the seam guards (this task) are the ones under test.
+    // base bones so the door's humanoid guard passes and the seam guards are the ones under test.
     private void SetupBaseAndHumanoid(out GameObject baseGO, out GameObject mergeGO, int humanoidBones)
     {
         baseGO = NewChild(_root, "Base");
@@ -245,7 +238,6 @@ public class CheckSeamTests
     {
         // A base with no humanoid Animator → DefaultResolveHumanoid returns an empty map. Inject the empty map
         // directly so this proves the door's empty-bucket REFUSE path independently of the reflection default.
-        // no-humanoid is a valid-abstain REFUSE ⇒ warning (RefuseAbstain → Debug.LogWarning).
         LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(@"\[CheckSeam\] REFUSE:"));
         var baseGO = NewChild(_root, "Base");     // plain GO, no humanoid Animator
         var mergeGO = NewChild(_root, "Merge");
@@ -255,11 +247,11 @@ public class CheckSeamTests
         StringAssert.Contains("no humanoid", r);
     }
 
-    // ── Task 3: seam-mapping structural guards (injected SeamResolution over plain Transforms) ─────────
-    // The reflection default (DefaultResolveSeam) is proven by the live corpus (Task 8), not here — a
-    // SDK-only TestEditor has no MA/VRCFury. These prove the door's union/guard/conflict branches.
+    // ── Seam-mapping structural guards (injected SeamResolution over plain Transforms) ─────────────────
+    // The reflection default (DefaultResolveSeam) runs in CheckSeamLiveTests, not here. These prove the door's
+    // union/guard/conflict branches.
 
-    // G26: zero pairs with NO BoneProxy present ⇒ genuinely bare prop ⇒ route to own-mergeable.
+    // Zero pairs with NO BoneProxy present ⇒ genuinely bare prop ⇒ route to own-mergeable.
     [Test]
     public void NoSeam_refusesAsBareProp()
     {
@@ -272,15 +264,15 @@ public class CheckSeamTests
         StringAssert.Contains("bare prop", r); // names the route (own-mergeable), opposite the proxy route
     }
 
-    // G26: zero pairs BUT a ModularAvatar BoneProxy present ⇒ offset-tolerant anchor attachment, NOT bare.
-    // The skill routes oppositely on these two — one string for both was the conflation the finding names.
+    // Zero pairs BUT a ModularAvatar BoneProxy present ⇒ offset-tolerant anchor attachment, NOT bare.
+    // The skill routes oppositely on these two.
     [Test]
     public void ZeroPairs_withBoneProxy_refusesAsProxy_notBareProp()
     {
         LogAssert.Expect(LogType.Warning, RefuseRe); // proxy abstain ⇒ warning
         SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
         var bpType = Resolve("nadena.dev.modular_avatar.core.ModularAvatarBoneProxy");
-        Assert.IsNotNull(bpType, "TestEditor must have Modular Avatar installed (setup-test-editor copies it)");
+        Assert.IsNotNull(bpType, "TestEditor must have Modular Avatar installed (the test venue provisions it)");
         mergeGO.AddComponent(bpType); // a BoneProxy maps no humanoid bones ⇒ zero scorable pairs
         CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution();
         var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
@@ -300,7 +292,7 @@ public class CheckSeamTests
         LogAssert.Expect(LogType.Warning, RefuseRe); // abstain ⇒ warning
         SetupBaseAndHumanoid(out var baseGO, out var mergeGO, humanoidBones: 3);
         var maType = Resolve("nadena.dev.modular_avatar.core.ModularAvatarMergeArmature");
-        Assert.IsNotNull(maType, "TestEditor must have Modular Avatar installed (setup-test-editor copies it)");
+        Assert.IsNotNull(maType, "TestEditor must have Modular Avatar installed (the test venue provisions it)");
         mergeGO.AddComponent(maType); // present, but the injected resolution matched nothing
         CheckSeam.ResolveSeam = (_, __) => new CheckSeam.SeamResolution();
         var r = CheckSeam.Run(Path(baseGO), Path(mergeGO));
@@ -350,9 +342,9 @@ public class CheckSeamTests
     }
 
     // ── Reflection failure classification: genuine API drift vs a seam that can't resolve onto THIS base ──
-    // DefaultResolveSeam's unwrap/classify branch can't run here (no MA/VRCFury to throw); these prove the
-    // door routes the two carrier fields to the right severity. Drift = tool broken vs installed package
-    // (misuse → error); Unresolvable = valid asset the gate can't certify against this base (abstain → warning).
+    // These stub ResolveSeam and prove the door routes the two carrier fields to the right severity. Drift = tool
+    // broken vs installed package (misuse → error); Unresolvable = valid asset the gate can't certify against this
+    // base (abstain → warning).
 
     [Test]
     public void ReflectDrift_refusesAtError()
@@ -366,15 +358,6 @@ public class CheckSeamTests
     }
 
     // ── ClassifyReflect itself ────────────────────────────────────────────────────────────────
-    //
-    // The REFUSE tests below stub ResolveSeam, so they exercise Check()'s severity dispatch and never reach
-    // the classifier — CheckSeam.cs records that it was validated end-to-end by the live corpus rather than
-    // by unit tests. These three cover it directly.
-    //
-    // The abstain arm used to prepend "(likely an incompatible or independent rig)" to the inner exception's
-    // own message: a guessed cause printed beside deterministic text that already named the real one. The
-    // live-corpus row shows both at once — VRCFury reporting a `linkTo` path missing from the base, under a
-    // prefix asserting a rig mismatch instead.
 
     [Test]
     public void ClassifyReflect_abstainArm_reportsTheInnerCauseWithoutGuessingOne()
@@ -391,9 +374,6 @@ public class CheckSeamTests
             "no invented cause: the classifier knows the seam failed, not why");
     }
 
-    // The severity split is decided by exception TYPE, which is what makes dropping the guessed prose a
-    // wording change rather than a reclassification. Pinned so an edit to the message cannot quietly move a
-    // case between arms.
     [Test]
     public void ClassifyReflect_missingMemberArm_isMisuseNotAbstain()
     {
@@ -404,7 +384,6 @@ public class CheckSeamTests
         StringAssert.Contains("MissingMethodException", res.ReflectError);
     }
 
-    // First carrier wins across both fields: a later throw must not upgrade an earlier abstain to misuse.
     [Test]
     public void ClassifyReflect_firstCarrierWins_aLaterThrowDoesNotUpgradeAnAbstain()
     {
@@ -430,10 +409,10 @@ public class CheckSeamTests
         StringAssert.Contains("does not resolve onto this base", r);
     }
 
-    // ── Task 7: VRCFury scale-bake REFUSE + severity split ──────────────────────────────────────────────
-    // The real scale read (forceOneWorldScale / GetScalingFactor) is proven live (Task 8); here inject a
-    // SeamResolution carrying ScaleBakeReason and prove the door REFUSEs on it at WARNING (valid-abstain
-    // severity, not misuse), distinguishing it from the root-not-found / reflect-error misuse paths.
+    // ── VRCFury scale-bake REFUSE + severity split ──────────────────────────────────────────────────────
+    // The real scale read (forceOneWorldScale / GetScalingFactor) runs in CheckSeamLiveTests; here an injected
+    // ScaleBakeReason proves the door REFUSEs at WARNING (valid-abstain severity), unlike the root-not-found and
+    // reflect-error misuse paths.
 
     [Test]
     public void ScaleBake_refusesAtWarning()
@@ -446,7 +425,7 @@ public class CheckSeamTests
         StringAssert.Contains("scaled at bake", r);
     }
 
-    // ── Task 4: weighted-humanoid count + ≤1 proxy REFUSE ──────────────────────────────────────────────
+    // ── Weighted-humanoid count + ≤1 proxy REFUSE ──────────────────────────────────────────────────────
     // Join on the merge side: NewSkinnedMergeable's SMR.bones[] reference the SAME Transforms the injected
     // SeamResolution's .Merge carries, so a ≥0.1 skin weight on a mapped humanoid pair makes it count.
 
@@ -462,10 +441,10 @@ public class CheckSeamTests
         StringAssert.Contains("Head", r);
     }
 
-    // Regression: MA and VRCFury can each contribute the SAME (Base,Merge) pair. The conflict guard keeps an
-    // identical duplicate (it only rejects a base mapped to two DIFFERENT merges), so a genuine single-bone
-    // proxy was counted twice — reaching the ≥2 gate and PASSing an asset that must hit the ≤1 proxy REFUSE.
-    // The reference-identity dedupe collapses it to 1. Without the fix this returns PASS; with it, REFUSE.
+    // MA and VRCFury can each contribute the SAME (Base,Merge) pair. The conflict guard keeps an identical
+    // duplicate (it only rejects a base mapped to two DIFFERENT merges), so without the reference-identity dedupe a
+    // genuine single-bone proxy counts twice, reaches the ≥2 gate and PASSes an asset that must hit the ≤1 proxy
+    // REFUSE.
     [Test]
     public void DuplicatePair_stillCountsOnce_refusesProxy()
     {
@@ -504,10 +483,8 @@ public class CheckSeamTests
         StringAssert.StartsWith("[CheckSeam] REFUSE:", r1);
         StringAssert.Contains("single humanoid attachment", r1);
 
-        // Isolate the second fixture: it shares the "Base"/"Merge" hierarchy path, so Resolve(Path(b2)) would
-        // hit b1's base (and REFUSE "different avatar" before the count logic — a vacuous pass) unless b1 is
-        // gone. Destroy the first fixture, then 0.11 keeps Spine ⇒ 2 weighted ⇒ gate ⇒ coincident ⇒ PASS. This
-        // POSITIVELY exercises "0.11 flips 1→2 and reaches the gate".
+        // The second fixture shares the "Base"/"Merge" hierarchy path, which SceneHandle.Resolve refuses as
+        // ambiguous unless the first is gone. 0.11 keeps Spine ⇒ 2 weighted ⇒ gate ⇒ coincident ⇒ PASS.
         UnityEngine.Object.DestroyImmediate(b1);
         UnityEngine.Object.DestroyImmediate(m1);
 
@@ -550,11 +527,9 @@ public class CheckSeamTests
         CheckSeam.ResolveSeam = (_, __) => seam;
     }
 
-    // Regression: mesh.boneWeights (legacy) exposes only the top-4 influences per vertex, so a humanoid bone at
-    // ≥0.1 that never lands in a vertex's top 4 is dropped — flipping the count (here 2→1, a false proxy REFUSE).
-    // MaxWeights now reads GetAllBoneWeights()/GetBonesPerVertex(). Fixture: a vertex with 5 influences where the
-    // 5th (lowest) is Spine at 0.1; the old top-4 read would drop it, leaving count=1; the all-influence read
-    // keeps it ⇒ count=2 ⇒ reaches the gate ⇒ coincident ⇒ PASS.
+    // mesh.boneWeights (legacy) exposes only the top-4 influences per vertex, so a read through it drops a humanoid
+    // bone at ≥0.1 that never lands in a vertex's top 4, flipping the count (here 2→1, a false proxy REFUSE).
+    // MaxWeights reads GetAllBoneWeights()/GetBonesPerVertex() instead.
     [Test]
     public void MaxWeights_countsInfluenceBeyondTop4()
     {
@@ -576,9 +551,7 @@ public class CheckSeamTests
         var bones = new[] { mChest, mSpine, f1, f2, f3, f4 }; // boneIndex 0..5
 
         // Vertex 0: Chest at 1.0 (1 influence). Vertex 1: 5 influences sorted descending, Spine (idx 1) is the
-        // 5th/lowest at 0.12 — outside the legacy top-4 window (F1..F4 all outrank it). Spine sits 0.02 ABOVE the
-        // 0.1 gate threshold (not on it) so 16-bit weight quantization can't drift the read below 0.1 and flip
-        // the count. v1 sums to 1.0 so no per-vertex renormalization compounds the drift.
+        // 5th/lowest at 0.12 — outside the legacy top-4 window, and clear of the 0.1 gate per AttachExplicitSkin.
         AttachExplicitSkin(mergeGO, bones,
             new byte[] { 1, 5 },
             new[]
@@ -602,18 +575,17 @@ public class CheckSeamTests
         ReadLog(r);
     }
 
-    // ── Task 5: the ε coincidence gate — PASS / NOT-PASS + offenders ────────────────────────────────────
+    // ── The ε coincidence gate — PASS / NOT-PASS + offenders ────────────────────────────────────────────
     // Fixtures put base bones and merge bones both at their root origin (localPosition 0) ⇒ coincident ⇒
     // delta 0; move a merge bone's localPosition to inject a known world offset. SpanMm=350 (BuildSeam) ⇒
     // ε = max(0.5, 0.003·350) = 1.05mm.
 
-    // The gate, swept over one fixture: coincident → sub-ε → over-ε. ONE fixture is not an optimization but a
-    // requirement — a second would collide on the "Base"/"Merge" hierarchy path and Resolve would return the
-    // first, so the three cases have to be one bone nudged three times.
+    // The gate, swept over one fixture: coincident → sub-ε → over-ε. A second fixture would collide on the
+    // "Base"/"Merge" hierarchy path, which SceneHandle.Resolve refuses as ambiguous, so the three cases are one
+    // bone nudged three times.
     [Test]
     public void Gate_boundary()
     {
-        // ε = max(0.5, 0.003·SpanMm) = 1.05mm at SpanMm=350 (BuildSeam).
         BuildSeam(out var baseGO, out var mergeGO, humanoid: new[] { "Chest", "Spine" },
             weights: new[] { ("Chest", 1.0f), ("Spine", 1.0f) });
         var chest = FindBone(mergeGO, "Chest");
@@ -625,15 +597,14 @@ public class CheckSeamTests
         StringAssert.Contains("weightedHumanoid=2", r0);
         StringAssert.Contains("offenders=0", r0);
         StringAssert.Contains("context=0 dropped=0", r0);
-        StringAssert.DoesNotContain("maxOffset", r0); // G37: PASS carries no offender magnitude
+        StringAssert.DoesNotContain("maxOffset", r0); // PASS carries no offender magnitude
         StringAssert.Contains("maxWithinEps=", r0);   // PASS surfaces the sub-ε band on the one-liner
         var body0 = ReadLog(r0);
         StringAssert.Contains("_(all within ε)_", body0);
         StringAssert.Contains("maxWithinEps=", body0); // and in the RunLog body
 
         // (b) 0.6mm < ε ⇒ still PASS. Locks the real sub-ε magnitude + even-count median formatting: offsets
-        // {Chest 0.6, Spine 0.0} ⇒ max 0.60, median (0.0+0.6)/2 = 0.30. Guards against an empty-list /
-        // stuck-0 / wrong-set / broken-Median bug that the coincident all-0.00 PASS above leaves green.
+        // {Chest 0.6, Spine 0.0} ⇒ max 0.60, median (0.0+0.6)/2 = 0.30.
         chest.localPosition = new Vector3(0.0006f, 0f, 0f);
         var r1 = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> PASS", r1);
@@ -645,13 +616,13 @@ public class CheckSeamTests
         var r2 = CheckSeam.Run(Path(baseGO), Path(mergeGO));
         StringAssert.Contains("=> NOT-PASS", r2);
         StringAssert.Contains("offenders=1", r2);
-        StringAssert.Contains("maxOffset=1.2mm", r2); // G37: worst-offender magnitude on the one-liner
+        StringAssert.Contains("maxOffset=1.2mm", r2); // worst-offender magnitude on the one-liner
         var body2 = ReadLog(r2);
         StringAssert.Contains("**seam-offset**", body2);
         StringAssert.Contains("bone=`Chest`", body2);
     }
 
-    // ── Task 6: non-humanoid handling — leaf drop + ungated context, never touching the verdict ─────────
+    // ── Non-humanoid handling — leaf drop + ungated context, never touching the verdict ─────────────────
     // The gate sees two coincident weighted humanoid bones (→ PASS). A weighted non-humanoid NON-leaf bone
     // (a child bone in SMR.bones[] ⇒ non-leaf) offset 50mm becomes ungated CONTEXT; a weighted non-humanoid
     // LEAF bone (no child in SMR.bones[]) offset 30mm is DROPPED (count only). Neither shifts PASS.
@@ -672,8 +643,6 @@ public class CheckSeamTests
         map.Bones.Add(bChest); map.Bones.Add(bSpine); // ONLY these two count as humanoid
         CheckSeam.ResolveHumanoid = _ => map;
 
-        // Merge bones. Humanoid pairs coincident (delta 0 ⇒ gate PASS). Breast_L_Root is non-leaf (its child
-        // Breast_L_Tip is in SMR.bones[]) offset 50mm ⇒ context. Tail_End is a leaf offset 30mm ⇒ dropped.
         var mChest = NewChild(mergeGO, "Chest").transform;
         var mSpine = NewChild(mergeGO, "Spine").transform;
         var mBreast = NewChild(mergeGO, "Breast_L_Root").transform;
@@ -708,11 +677,8 @@ public class CheckSeamTests
         Assert.IsFalse(body.Contains("bone=`Tail_End`"), "a dropped leaf is neither offender nor context");
     }
 
-    // ── F35: the bare door — resolver-free, name-matched, caller-supplied tolerance ──────────────────
+    // ── The bare door — resolver-free, name-matched, caller-supplied tolerance ───────────────────────
     // CheckBare is the pre-seam companion: no MA/VRCFury mapping to reflect, so pairs come from bone NAMES.
-    // These are the unit suite's own guard, not a supplement to one — unlike the seam door, whose reflection
-    // defaults only the live corpus (CheckSeam.md) can prove, the bare door touches no vendor package, so
-    // everything it does is reachable here.
 
     // Base + mergeable as SIBLINGS (never nested — the shape the door exists for: a fresh refit output sitting
     // beside a target body). Each humanoid name gets a base bone and an identically-named merge bone skinned at
@@ -730,8 +696,7 @@ public class CheckSeamTests
         NewSkinnedMergeable(mergeGO, humanoid.Select(n => (n, weight)).ToArray());
     }
 
-    // The gap this door exists to close, asserted as one fact: on a fixture with no seam component, the seam
-    // door REFUSEs and the bare door scores. If a future change lets Check score this, the door is redundant.
+    // If a future change lets the seam door score this fixture, the bare door is redundant.
     [Test]
     public void Bare_scoresTheFixtureTheSeamDoorRefuses()
     {
@@ -752,12 +717,9 @@ public class CheckSeamTests
         ReadLog(bareResult);
     }
 
-    // The caller-root cause. A mergeable root narrowed past its own meshes — SkinnedMeshRenderers sitting as
-    // SIBLINGS of the armature rather than under it — leaves nothing skinned under the root, which used to land
-    // in the 0-bone message and read as "a failed transfer or a bone-naming break … rebuild the mergeable".
-    // Measured live, that verdict was wrong by 19 shared weighted bones and nearly cost a good refit. The tell is
-    // mechanical (no weights under the root at all), so the message must lead with it and disclaim the
-    // quality reading rather than offer it.
+    // A mergeable root narrowed past its own meshes — SkinnedMeshRenderers sitting as SIBLINGS of the armature
+    // rather than under it — leaves nothing skinned under the root. The tell is mechanical (no weights under the
+    // root at all), so the message must lead with it and disclaim the "rebuild the mergeable" reading.
     [Test]
     public void Bare_rootWithNoSkinnedWeights_blamesTheRootNotTheMergeable()
     {
@@ -792,17 +754,16 @@ public class CheckSeamTests
         ReadLog(r);
     }
 
-    // The tolerance sweep, one fixture nudged three times (a second fixture would collide on the "Base"/"Merge"
-    // hierarchy path and Resolve would return the first — Gate_boundary's constraint, unchanged here).
+    // The tolerance sweep, one fixture nudged three times for Gate_boundary's reason.
     // maxOffsetMm = 0.01mm: the refit regime, ~100× tighter than the seam door's ε at this SpanMm (1.05mm), so
-    // every case below would PASS under the seam door's ε. That is the point of a caller-supplied tolerance.
+    // every case below would PASS under the seam door's ε.
     [Test]
     public void Bare_toleranceBoundary_callerSupplied()
     {
         BuildBare(out var baseGO, out var mergeGO, new[] { "Chest", "Spine" });
         var chest = FindBone(mergeGO, "Chest");
 
-        // (a) Coincident ⇒ PASS, no offender magnitude (G37 holds at the bare door too).
+        // (a) Coincident ⇒ PASS, no offender magnitude.
         var r0 = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 0.01f);
         StringAssert.Contains("=> PASS", r0);
         StringAssert.Contains("offenders=0", r0);
@@ -833,14 +794,12 @@ public class CheckSeamTests
         StringAssert.Contains("offset=0.0200mm", body2);
 
         // (d) The SAME scene at a millimetre tolerance PASSes — the verdict tracks the caller's tolerance,
-        // not the geometry alone. This is why the parameter has no default.
+        // not the geometry alone.
         var r3 = CheckSeam.CheckBare(Path(baseGO), Path(mergeGO), 1.0f);
         StringAssert.Contains("=> PASS", r3);
         ReadLog(r3);
     }
 
-    // Worst-first ordering, and that every over-tolerance bone is named — the offender contract the skill
-    // reads to route its repair.
     [Test]
     public void Bare_offendersNamedWorstFirst()
     {
@@ -863,8 +822,7 @@ public class CheckSeamTests
         Assert.IsFalse(body.Contains("bone=`Hips`"), "a within-tolerance bone is not an offender");
     }
 
-    // A duplicated armature copy under the mergeable makes name-matching arbitrary. Refusing beats picking:
-    // the PASS a wrong pick produces is indistinguishable from a real one.
+    // A duplicated armature copy under the mergeable makes name-matching arbitrary.
     [Test]
     public void Bare_ambiguousBoneNameUnderMergeable_refuses()
     {
@@ -897,10 +855,9 @@ public class CheckSeamTests
         StringAssert.Contains("share no bone names", r);
     }
 
-    // The ≤1 floor is shared machinery but NOT a shared meaning, so the two doors must not share the sentence.
-    // One weighted humanoid bone at the seam door is a correct hair/hat/earring — "verify the bake". At the
-    // bare door it means two whole skeletons matched on at most one skinned bone name, which is a failed
-    // transfer; sending that reader to inspect the bake points them at a result that should be rebuilt.
+    // One weighted humanoid bone at the seam door is a correct hair/hat/earring — "verify the bake". At the bare
+    // door it means two whole skeletons matched on at most one skinned bone name, a failed transfer that should be
+    // rebuilt, so the two doors must not share the sentence.
     [Test]
     public void Bare_oneWeightedHumanoid_refusesWithoutTheProxyReading()
     {
@@ -915,8 +872,7 @@ public class CheckSeamTests
     }
 
     // Name-matching pairs more bones than the seam door would: an armature carries bones no mesh skins, and a
-    // name match on one is not evidence about the geometry. The weighted-SMR filter is what excludes them — a
-    // bare-door-specific risk, because name-matching (unlike a seam mapping) has nothing else holding it back.
+    // name match on one is not evidence about the geometry. The weighted-SMR filter is what excludes them.
     [Test]
     public void Bare_nameMatchedButUnskinnedBone_doesNotCount()
     {
@@ -938,15 +894,14 @@ public class CheckSeamTests
         Assert.IsFalse(ReadLog(r).Contains("bone=`Hips`"), "an unskinned name-match is neither offender nor context");
     }
 
-    // A missing tolerance is misuse (error), not an abstain — and the refusal says what to supply.
     [Test]
-    public void Bare_nonPositiveTolerance_refusesAtError()
+    public void Bare_invalidTolerance_refusesAtError()
     {
         BuildBare(out var baseGO, out var mergeGO, new[] { "Chest", "Spine" });
 
         // 0/negative/NaN fail any `> 0` test. +∞ does NOT — it clears one and then makes every offset "within
         // ε", so the door would PASS anything. Below the report's precision floor a genuine offender rounds to
-        // 0.0000mm and a NOT-PASS reads clean, which defeats the point of gating at all.
+        // 0.0000mm and a NOT-PASS reads clean.
         foreach (var bad in new[] { 0f, -1f, float.NaN, float.PositiveInfinity, 0.00001f })
         {
             LogAssert.Expect(LogType.Error, BareRefuseRe); // misuse ⇒ error, one per call
@@ -978,8 +933,7 @@ public class CheckSeamTests
         // The base carries its own skin, so a sweep rooted at the OUTER object finds the base's bones weighted
         // — that is what makes the self-pairs count. The mergeable part shares no bone name with the base, so
         // each base bone name has exactly one hit under the outer root: the base's own bone. Unguarded, that is
-        // three (b, b) pairs at distance 0 and a clean PASS. Correctly named the other way round, this fixture
-        // is the honest "share no bone names" REFUSE — the overlap is what converts a refusal into a false pass.
+        // three (b, b) pairs at distance 0 and a clean PASS.
         AttachSkin(baseGO, baseBones.Select(b => (b, 1.0f)).ToArray(), null);
         NewSkinnedMergeable(outerGO, new[] { ("Skirt_01", 1.0f), ("Skirt_02", 1.0f) });
         LogAssert.Expect(LogType.Error, BareRefuseRe);
@@ -990,9 +944,8 @@ public class CheckSeamTests
         StringAssert.DoesNotContain("=> PASS", r);
     }
 
-    // The reverse nesting is legitimate and must keep scoring: a mergeable placed under the base but not yet
-    // seamed is exactly what own-mergeable stages before authoring a seam. Guarding both directions would
-    // refuse it.
+    // The reverse nesting is legitimate: a mergeable placed under the base but not yet seamed is exactly what
+    // own-mergeable stages before authoring a seam.
     [Test]
     public void Bare_mergeableInsideBase_stillScores()
     {

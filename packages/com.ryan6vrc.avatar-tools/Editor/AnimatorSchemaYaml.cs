@@ -6,27 +6,12 @@ using System.Text;
 namespace Ryan6Vrc.AvatarTools.Editor
 {
     /// <summary>
-    /// Parses an animator-schema YAML document into a typed <see cref="AnimDocument"/>. Hand-rolled
-    /// bounded-subset parser: no external YAML library (the package must stay portable + dup-assembly-free),
-    /// and JSON is not an option because the schema's comments are load-bearing. Depends on System.* only —
-    /// no UnityEngine/UnityEditor — so the model + parser can be unit-checked outside the editor.
-    ///
-    /// Two stages, kept as separate methods so stage 1 is reasoned independently:
-    ///   1. <see cref="BuildNeutralTree"/> — tokenize the supported subset into a neutral tree of
-    ///      Dictionary&lt;string,object&gt; (mappings), List&lt;object&gt; (sequences), and scalars
-    ///      (string / bool / long / double / null). Refuses duplicate map keys and unsupported constructs.
-    ///   2. <see cref="Bind"/> — walk the neutral tree into <see cref="AnimDocument"/>, enforcing schema
-    ///      semantics. Every violation throws a <see cref="SchemaException"/> naming the offender.
-    ///
-    /// SUPPORTED YAML SUBSET (this is the fail-loud boundary):
-    ///   - Block mappings (2-space indentation) and block sequences ("- ").
-    ///   - Flow mappings "{ k: v, ... }" and flow sequences "[ a, b ]", nestable.
-    ///   - Scalar type inference: true/false/on/off -> bool; integer -> long; decimal/exponent -> double;
-    ///     "~" or empty -> null; otherwise string. Map keys are always strings (never inferred).
-    ///   - Single- and double-quoted strings (quotes stripped; in double quotes \" and \\ are unescaped).
-    ///   - "#" to end-of-line is a comment, except inside quotes.
-    ///   REFUSED, by name + line: anchors "&", aliases "*", explicit tags "!", block scalars "|"/">",
-    ///   multi-doc "---"/"...", complex "?" keys, tab indentation.
+    /// Parses an animator-schema YAML document into a typed <see cref="AnimDocument"/>. Hand-rolled bounded-subset
+    /// parser, System.* only: no UnityEngine, UnityEditor or external YAML library.
+    /// <see cref="BuildNeutralTree"/> tokenizes the subset into Dictionary&lt;string,object&gt; mappings,
+    /// List&lt;object&gt; sequences and string/bool/long/double/null scalars; <see cref="Bind"/> walks that tree into
+    /// the model. Every violation throws a <see cref="SchemaException"/> naming the offender.
+    /// Contract: docs/animator-schema.md.
     /// </summary>
     public static class AnimatorSchemaYaml
     {
@@ -59,9 +44,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return root;
         }
 
-        // Split into significant logical lines: strip comments, drop blank/comment-only lines, compute
-        // indentation, and refuse the line-level unsupported constructs (multi-doc markers, complex keys,
-        // tab indentation).
         private static List<Line> Prescan(string text)
         {
             var result = new List<Line>();
@@ -89,8 +71,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return result;
         }
 
-        // Remove a "#...to end of line" comment, but not one inside single/double quotes and only when the
-        // "#" begins a token (start of line or preceded by whitespace).
         private static string StripComment(string line)
         {
             bool inS = false, inD = false;
@@ -118,9 +98,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static Dictionary<string, object> ParseMapping(List<Line> lines, ref int i, int indent)
         {
-            // Parameter/state/clip ORDER is the Dictionary's insertion-order enumeration (keys are only ever
-            // added, never removed, so it stays stable). A future edit that removes+re-adds keys would break
-            // that ordering contract — use an order-preserving structure if that ever changes.
+            // Parameter/state/clip order is this Dictionary's insertion-order enumeration, which holds only while
+            // keys are never removed; removing and re-adding one needs an order-preserving structure.
             var map = new Dictionary<string, object>();
             while (i < lines.Count && lines[i].Indent == indent && !IsSeqLine(lines[i].Text))
             {
@@ -143,8 +122,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return map;
         }
 
-        // A key with an empty inline value owns the following deeper-indented block, or a sequence at the
-        // same indent as the key (YAML allows that), or null if nothing follows.
         private static object ParseChildBlock(List<Line> lines, ref int i, int parentIndent)
         {
             if (i >= lines.Count) return null;
@@ -163,7 +140,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var line = lines[i];
                 string dash = line.Text;
 
-                // Locate the content start after the dash (support "- " and "-  ").
                 int k = 1;
                 while (k < dash.Length && dash[k] == ' ') k++;
                 string content = k < dash.Length ? dash.Substring(k) : string.Empty;
@@ -190,8 +166,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return list;
         }
 
-        // True when a block-sequence item's content is itself a "key: value" mapping entry (as opposed to a
-        // flow collection, a quoted scalar, or a plain scalar).
         private static bool IsInlineMappingStart(string content)
         {
             if (content.Length == 0) return false;
@@ -213,7 +187,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return false;
         }
 
-        // Split "key: value" / "key:" into a string key and the (possibly empty) value text.
         private static string SplitKey(string text, int lineNo, out string valuePart, out bool hasValue)
         {
             bool inS = false, inD = false;
@@ -246,9 +219,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return t;
         }
 
-        // Parse a block value (right side of "key:") — a flow collection, a quoted scalar, or a plain scalar.
-        // A plain scalar is taken whole (commas within it are legal), so this is NOT the same as the
-        // delimiter-terminated flow-scalar reader.
+        // A plain scalar is taken whole (commas within it are legal), unlike ReadFlowValue's delimiter-terminated
+        // reader.
         private static object ParseScalarOrFlow(string valueText, int lineNo)
         {
             string t = valueText.Trim();
@@ -419,11 +391,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static SchemaException Unsupported(string name, string sym, int lineNo)
             => new SchemaException($"unsupported YAML {name} '{sym}' at line {lineNo}");
 
-        // Scalar type inference (unquoted, non-empty, already checked for forbidden leaders). This is the READ
-        // half of the round-trip contract: AnimatorSchemaEmit.InfersNonString mirrors these rules to decide
-        // which string scalars it must QUOTE (a token that would infer here to bool/number/null), and
-        // AnimatorSchemaEmit.NumFromFloat mirrors ToNumber's double↔float handling. A change here must move in
-        // lockstep with those — NeedsQuote_Agrees_With_Parser_InferScalar_Across_Token_Battery guards the drift.
+        // AnimatorSchemaEmit.InfersNonString mirrors these rules to decide which strings it must quote, so a change
+        // here moves in lockstep. NeedsQuote_Agrees_With_Parser_InferScalar_Across_Token_Battery guards the drift.
         private static object InferScalar(string t)
         {
             if (t == "~") return null;
@@ -464,9 +433,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     default: throw new SchemaException($"unknown top-level key '{key}'");
                 }
             }
-            // Basis has no unbound sentinel: the BindingBasis enum defaults to AvatarRoot, so an omitted key
-            // would silently read as avatar-root. Require it here — the earliest point — to close the
-            // silently-unbound-animation landmine before it reaches the model.
+            // BindingBasis defaults to AvatarRoot and has no unbound sentinel, so only this check catches an
+            // omitted key.
             if (!map.ContainsKey("basis"))
                 throw new SchemaException("missing required key 'basis' (avatar-root | mount-root)");
             return doc;
@@ -546,7 +514,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 {
                     case "duration": d.TransitionDuration = ToNumber(kv.Value, "defaults.transition.duration"); break;
                     case "exitTime":
-                        // Defaults only carry the has-exit-time bool; only 'none' is in scope here.
                         if (kv.Value is string s && s == "none") d.TransitionHasExitTime = false;
                         else throw new SchemaException("defaults.transition.exitTime: only 'none' is supported");
                         break;
@@ -558,7 +525,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static void BindParameters(AnimDocument doc, Dictionary<string, object> map)
         {
-            // Duplicate names are already refused by stage-1's per-mapping guard (line-numbered).
             foreach (var kv in map)
             {
                 string name = kv.Key;
@@ -634,8 +600,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         case "mask": layer.Mask = ToStr(kv.Value, "layer.mask"); break;
                         case "blend": layer.Blend = ParseBlend(ToStr(kv.Value, "layer.blend")); break;
                         case "writeDefaults": layer.WriteDefaults = ToBool(kv.Value, "layer.writeDefaults"); break;
-                        // Machine-body keys (states/machines/entry/any/default/behaviours) bind into the
-                        // layer's Root machine — the same surface a nested sub-machine carries.
                         default:
                             if (!BindMachineKey(layer.Root, kv.Key, kv.Value, "layer"))
                                 throw new SchemaException($"unknown layer field '{kv.Key}'");
@@ -646,9 +610,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // Binds one machine-body key shared by a layer's Root machine and every nested sub-machine.
-        // Returns false (without consuming) if the key isn't a machine-body key, so the layer caller can
-        // treat it as an unknown-layer-field error and the sub-machine caller as an unknown-machine-field.
         private static bool BindMachineKey(StateMachine sm, string key, object value, string ctx)
         {
             switch (key)
@@ -686,8 +647,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             sm.Layout = layout;
         }
 
-        // A coordinate is a flow list of exactly two numbers -> float[2]. Malformed shape fails by context;
-        // a non-numeric element fails through ToNumber's own named throw.
         private static float[] ToCoord(object value, string ctx)
         {
             var list = ToList(value, ctx);
@@ -696,11 +655,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return new[] { ToNumber(list[0], ctx), ToNumber(list[1], ctx) };
         }
 
-        // A sub-machine body is a pure machine body (no layer-level keys) that recurses through the same
-        // key binder — nested sub-machines fall out for free.
         private static void BindMachines(StateMachine parent, Dictionary<string, object> map)
         {
-            // Duplicate sub-machine names are already refused by stage-1's per-mapping guard (line-numbered).
             foreach (var kv in map)
             {
                 string name = kv.Key;
@@ -708,9 +664,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var sub = new SubMachine { Name = name };
                 foreach (var bk in body)
                 {
-                    // onExit belongs to the SUB-MACHINE, not to its body: it is the parent's outgoing edge set,
-                    // fired when this machine reaches Exit. Keeping it off BindMachineKey is what makes it
-                    // structurally impossible to author on a layer ROOT, which has no parent to exit to.
+                    // Keeping onExit off BindMachineKey makes it structurally impossible to author on a layer root,
+                    // which has no parent to exit to.
                     if (bk.Key == "onExit")
                     {
                         BindTransitions(sub.OnExit, ToList(bk.Value, $"machine '{name}'.onExit"),
@@ -724,10 +679,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // Entry / AnyState ladders are ordered transition lists. Only the AnyState ladder is backed by a real
-        // AnimatorStateTransition, so only it carries that type's fields (canTransitionToSelf, mute, solo, name,
-        // offset); an entry rung is an AnimatorTransition and honors none of them, so all are refused there
-        // (fail loud, mirroring the canTransitionToSelf precedent).
         private static void BindLadder(List<Transition> into, List<object> list, bool anyLadder)
         {
             BindTransitions(into, list, allowSelf: anyLadder, stateTransitionFields: anyLadder);
@@ -745,7 +696,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static void BindStates(StateMachine sm, Dictionary<string, object> map)
         {
-            // Duplicate state names are already refused by stage-1's per-mapping guard (line-numbered).
             foreach (var kv in map)
             {
                 string name = kv.Key;
@@ -788,10 +738,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // A control is a single-key map whose key is the KIND and whose value is the control NAME
-        // (`- toggle: Enable`), with the remaining fields as siblings. The single-key-dispatch shape is
-        // `behaviours:`'s; the name sits in value position because a control always has one and identity
-        // reads better inline than as a `name:` field three lines down.
         private static List<MenuControl> BindMenu(List<object> list, string ctx)
         {
             var into = new List<MenuControl>();
@@ -800,8 +746,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var m = ToMap(list[i], $"{ctx}[{i}]");
                 string where = $"{ctx}[{i}]";
 
-                // Find the kind key first: everything else is validated against it, and reporting an
-                // unknown sibling before knowing the kind would name the wrong offender.
                 MenuControl ctl = null;
                 foreach (var kv in m)
                 {
@@ -822,12 +766,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         case "param": ctl.Param = ToStr(kv.Value, $"{where}.param"); break;
                         case "value": ctl.Value = ToNumber(kv.Value, $"{where}.value"); sawValue = true; break;
-                        // Every kind renders an icon, so unlike `value`/`controls` this needs no kind guard.
-                        // Trimmed, because surrounding space would otherwise slip past the absolute-path
-                        // refusal (which reads the first character) and resurface as a confusing
-                        // "not found" at emit. A valueless `icon:` is refused rather than read as absent:
-                        // YAML binds it to null, and silently meaning "no icon" would disagree with
-                        // `icon: ""`, which validation rejects — the two spellings say the same thing.
+                        // Trimmed, or surrounding space would slip past the absolute-path refusal, which reads
+                        // the first character.
                         case "icon":
                             ctl.Icon = ToStr(kv.Value, $"{where}.icon")?.Trim();
                             if (ctl.Icon == null)
@@ -842,14 +782,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     }
                 }
 
-                // A radial's knob is its subParameter, not a written constant — `value:` has nowhere to go
-                // on emit, so accepting it silently would be a lie about what the control does.
                 if (sawValue && ctl.Kind == MenuControlKind.Radial)
                     throw new SchemaException($"{where}: a radial has no 'value' — its parameter carries the position, and nothing is written on press");
                 if (sawValue && ctl.Kind == MenuControlKind.SubMenu && ctl.Param == null)
                     throw new SchemaException($"{where}: 'value' without 'param' — a submenu writes a value only when it also names a parameter");
-                // Count, not just null: `controls: []` binds to an empty non-null list, so a null-only guard
-                // would let the exact dead-end page through that this refusal names.
+                // Count, not just null: `controls: []` binds to an empty non-null list.
                 if (ctl.Kind == MenuControlKind.SubMenu && (ctl.Controls == null || ctl.Controls.Count == 0))
                     throw new SchemaException($"{where}: a submenu needs at least one entry under 'controls' (an empty submenu is a dead end in the wearer's menu)");
 
@@ -870,17 +807,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // allowSelf defaults FALSE so a state-transition list (which calls this without the flag) refuses
-        // canTransitionToSelf: only the AnyState ladder authors it. A state rung's flag is derived from its
-        // target — on exactly when `to:` is the rung's own state — so authoring it there could only contradict
-        // the target. The AnyState caller passes true.
-        //
-        // stateTransitionFields defaults TRUE and names the real distinction: a state or AnyState rung is backed
-        // by an AnimatorStateTransition, which carries the editor flags AND the whole timing surface; an entry
-        // rung and a sub-machine onExit rung are backed by AnimatorTransition, which has neither. Those callers
-        // pass false, and every field the plain type cannot hold is refused there rather than silently dropped
-        // on emit. One gate for one type distinction, so a field added to Transition later cannot be honored on
-        // a rung that has nowhere to put it just because nobody remembered to list it.
+        // A state or AnyState rung is backed by AnimatorStateTransition, an entry or sub-machine onExit rung by plain
+        // AnimatorTransition. Those two callers pass stateTransitionFields: false, so a field their emit path cannot
+        // carry refuses here rather than dropping silently.
         private static void BindTransitions(List<Transition> into, List<object> list, bool allowSelf = false, bool stateTransitionFields = true)
         {
             foreach (var item in list)
@@ -926,12 +855,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // Fields only a state/AnyState rung honors. Both rungs that refuse them are backed by AnimatorTransition,
-        // but for TWO different reasons, and collapsing them into one sentence made the message false: the timing
-        // surface genuinely does not exist on that type, whereas mute/solo/name DO exist on it (they are declared
-        // one level up, on AnimatorTransitionBase) and are refused because this schema's entry/onExit emit path
-        // does not carry them. Saying "the type has no such field" of mute/solo/name would send an author looking
-        // for a Unity limitation that isn't there.
+        // Only these are absent from AnimatorTransition. mute/solo/name exist on it, inherited through
+        // AnimatorTransitionBase, so their refusal blames the emit path rather than Unity.
         private static readonly HashSet<string> TimingFields = new HashSet<string>
         {
             "duration", "exitTime", "fixedDuration", "interruption", "ordered", "offset",
@@ -954,13 +879,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 into.Add(ParseCondition(ToStr(el, "condition")));
         }
 
-        // '<param> <op> <value>' parsed RIGHT-ANCHORED: the text after the last space is the value, the
-        // single token before it is the op, and everything before is the parameter — VERBATIM (interior
-        // spaces, colons, tabs, and op-lookalike suffixes like a param named 'X is true' all survive).
-        // Separators are strict single spaces, never normalized: a doubled space is a typo made loud, and
-        // a param whose own trailing space would collide with the separator is unrepresentable here (the
-        // decompiler refuses such names up front — its self-check renders and re-splits every condition
-        // through this same method, so the two can't disagree).
+        // Right-anchored, with strict single-space separators that are never normalized. A param whose own trailing
+        // space would collide with the separator is unrepresentable; the decompiler's self-check re-splits every
+        // condition through this method and refuses such names.
         internal static Condition ParseCondition(string s)
         {
             if (string.IsNullOrEmpty(s))
@@ -1011,17 +932,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (n == 0) throw new SchemaException($"{ctx}: motion must set exactly one of clip/ref/tree/shared");
             if (n > 1) throw new SchemaException($"{ctx}: motion sets more than one of clip/ref/tree/shared");
 
-            // Caller-specific strictness stays here: a state's clip and shared forms are closed (no siblings).
             if (hasClip && m.Count != 1) throw new SchemaException($"{ctx}: motion clip form takes only 'clip'");
             if (hasShared && m.Count != 1) throw new SchemaException($"{ctx}: motion shared form takes only 'shared'");
             return DecodeMotionRef(m, ctx, $"{ctx} motion.clip", $"{ctx} motion.ref");
         }
 
-        // The clip/ref/tree → MotionRef dispatch shared by a state's `motion:` and a blend-tree child, called
-        // once the caller has established exactly one of clip/ref/tree is present. Only the dispatch is shared;
-        // each caller keeps its own presence rules (BindMotion: n==0 and a non-'clip' sibling are errors;
-        // BindTreeChild: n==0 is a legal empty slot). clipLabel/refLabel carry each caller's error context so
-        // diagnostics stay verbatim.
         private static MotionRef DecodeMotionRef(Dictionary<string, object> m, string ctx, string clipLabel, string refLabel)
         {
             var mr = new MotionRef();
@@ -1071,16 +986,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         foreach (var c in ToList(kv.Value, $"{ctx} tree.children"))
                             spec.Children.Add(BindTreeChild(ToMap(c, $"{ctx} tree child"), ctx));
                         break;
-                    // Child-level fields when this map is a tree-that-is-a-child: consumed by BindTreeChild,
-                    // ignored here (mirror of BindTreeChild ignoring tree-level fields).
+                    // Consumed by BindTreeChild when this tree is a child.
                     case "directWeight": case "threshold": case "timeScale": case "mirror": case "cycleOffset":
                     case "x": case "y": case "posX": case "posY": break;
                     default: throw new SchemaException($"{ctx} tree: unknown field '{kv.Key}'");
                 }
             }
-            // Reject a field misplaced for this kind — build/decode honor each field only on the kinds below,
-            // so accepting it elsewhere would silently erase it through compile→decompile. Refuse instead (the
-            // parser already refuses unknown fields and per-context mute/solo/canTransitionToSelf).
+            // Build or decode honors each field only on the kinds below, so accepting it elsewhere would silently
+            // erase it through compile→decompile.
             bool twoD = spec.Kind == TreeKind.SimpleDirectional2D
                      || spec.Kind == TreeKind.FreeformDirectional2D
                      || spec.Kind == TreeKind.FreeformCartesian2D;
@@ -1126,7 +1039,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return child;
         }
 
-        // Canonical pinned tree-kind tokens (case-sensitive). No alternates.
         private static TreeKind ParseTreeKind(string v)
         {
             switch (v)
@@ -1141,17 +1053,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // The child-placement/modifier keys BindTree deliberately ignores (BindTreeChild consumes them off the
-        // same map when a tree IS a child). Named here so BindTrees can refuse them on a top-level entry.
+        // The keys BindTree ignores because BindTreeChild consumes them off the same map when a tree is a child. A
+        // trees: entry is never a child, so BindTrees refuses them rather than letting them vanish.
         private static readonly string[] ChildPlacementKeys =
             { "directWeight", "threshold", "timeScale", "mirror", "cycleOffset", "x", "y", "posX", "posY" };
 
-        // `trees:` — the named blend trees a `shared:` motion slot references. The map KEY is the tree's
-        // identity, so a `name:` inside the body is refused rather than silently shadowing the key: a decompile
-        // never writes one, and a hand-authored one would give the same tree two names that could disagree.
         private static void BindTrees(AnimDocument doc, Dictionary<string, object> map)
         {
-            // Duplicate tree names are already refused by stage-1's per-mapping guard (line-numbered).
             foreach (var kv in map)
             {
                 string name = kv.Key;
@@ -1160,9 +1068,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     throw new SchemaException($"tree '{name}': a trees: entry must declare a tree kind ('tree: direct' etc.)");
                 if (m.ContainsKey("name"))
                     throw new SchemaException($"tree '{name}': a trees: entry takes its name from its key — remove the 'name' field");
-                // BindTree tolerates child-placement keys because a nested tree IS a child and the two field
-                // sets share one map. A trees: entry is never a child, so those keys would silently vanish —
-                // the placement belongs on the `shared:` reference site instead.
                 foreach (var k in ChildPlacementKeys)
                     if (m.ContainsKey(k))
                         throw new SchemaException($"tree '{name}': '{k}' places a tree inside its parent — put it on the 'shared:' reference, not on the trees: entry");
@@ -1174,7 +1079,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         private static void BindClips(AnimDocument doc, Dictionary<string, object> map)
         {
-            // Duplicate clip names are already refused by stage-1's per-mapping guard (line-numbered).
             foreach (var kv in map)
             {
                 string name = kv.Key;
@@ -1202,8 +1106,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
         }
 
-        // Accepts EITHER the bare list form `[[t,v],...]` (flat tangents) or a map form
-        // `{ tangents: linear, keys: [[t,v],...] }` for an opt-in linear ramp.
         private static CurveSpec BindCurve(string binding, object value, string ctx)
         {
             var curve = new CurveSpec { Binding = binding };
@@ -1269,12 +1171,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             throw new SchemaException($"{ctx}: expected a boolean, got {Describe(v)}");
         }
 
-        // A declared clip length must be POSITIVE. Unity reports a zero- or negative-length clip as
-        // length 0, and the animator gives any non-positive state length an effective 1s — so
-        // `exitTime: 0.2` on such a state dwells 0.2 SECONDS instead of 0.2 x the clip's length
-        // (animator-schema.md §clips). Refuse rather than floor: the derived path floors because the
-        // author declared nothing, but a declared `seconds: 0` is an authoring mistake, and silently
-        // rounding it up to one frame would hide it.
         private static float ToClipLength(object v, string clipName, string key)
         {
             float s = ToNumber(v, $"clip '{clipName}' {key}");
@@ -1285,7 +1181,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return s;
         }
 
-        // InferScalar only ever yields long/double for numbers, never int — no int arm needed.
         private static float ToNumber(object v, string ctx)
         {
             if (v is long l) return l;
@@ -1312,7 +1207,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
             throw new SchemaException($"{ctx}: expected an integer, got {Describe(v)}");
         }
 
-        // A boolean-or-number default flattened to a float (true -> 1, false -> 0).
         private static float ToBoolFloat(object v, string ctx)
         {
             if (v is bool b) return b ? 1f : 0f;

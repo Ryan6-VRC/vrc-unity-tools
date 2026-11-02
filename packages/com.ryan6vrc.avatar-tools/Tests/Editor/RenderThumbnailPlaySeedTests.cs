@@ -1,7 +1,3 @@
-// Behavioral tests for RenderThumbnailPlay.SeedParameters — the param-continuity copy that keeps a
-// freshly-inserted FX/pose playable from reporting controller defaults back into the emulator's two-way
-// param sync (which would reset the operator's toggles runtime-wide). Pure in-memory graph build + read
-// + destroy: no live-object mutation, safe headless via tools/run-editmode-tests.ps1.
 using NUnit.Framework;
 using UnityEditor.Animations;
 using UnityEngine;
