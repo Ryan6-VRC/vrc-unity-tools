@@ -55,11 +55,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         return Fail(data, label, "asset at " + previewDestPath + " exists but is not an AnimatorController");
                     }
 
-                    // Reads the SOURCE's layers where execute reads a reused clean controller's: a name an
-                    // earlier run trimmed passes here and FAILs on execute.
-                    var srcLayers = sourceFx.layers;
-                    var previewAllNames = new string[srcLayers.Length];
-                    for (int i = 0; i < srcLayers.Length; i++) previewAllNames[i] = srcLayers[i].name;
+                    // The controller execute will trim: a reused clean controller keeps only what an earlier run
+                    // kept, so a name that run trimmed FAILs here as it does on execute.
+                    var previewBasis = data.CleanFxReused ? AssetDatabase.LoadAssetAtPath<AnimatorController>(previewDestPath) : sourceFx;
+                    var previewLayers = previewBasis.layers;
+                    var previewAllNames = new string[previewLayers.Length];
+                    for (int i = 0; i < previewLayers.Length; i++) previewAllNames[i] = previewLayers[i].name;
                     string previewSelErr;
                     int[] previewKeepIdx = SelectLayersToKeep(previewAllNames, keepLayerNames, out previewSelErr);
                     if (previewKeepIdx == null)
@@ -67,18 +68,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         return Fail(data, label, previewSelErr);
                     }
                     var previewKeptNames = new string[previewKeepIdx.Length];
-                    for (int i = 0; i < previewKeepIdx.Length; i++) previewKeptNames[i] = srcLayers[previewKeepIdx[i]].name;
+                    for (int i = 0; i < previewKeepIdx.Length; i++) previewKeptNames[i] = previewLayers[previewKeepIdx[i]].name;
                     data.LayerCount = previewKeepIdx.Length;
                     data.LayerNames = string.Join("/", previewKeptNames);
 
-                    // Counts are relative to the SOURCE controller; on a reused (already-pruned)
-                    // clean controller the execute-time drop count lands lower.
                     var previewKeptLayers = new AnimatorControllerLayer[previewKeepIdx.Length];
-                    for (int i = 0; i < previewKeepIdx.Length; i++) previewKeptLayers[i] = srcLayers[previewKeepIdx[i]];
-                    var previewReferenced = CollectReferencedParameters(previewKeptLayers, srcLayers);
+                    for (int i = 0; i < previewKeepIdx.Length; i++) previewKeptLayers[i] = previewLayers[previewKeepIdx[i]];
+                    var previewReferenced = CollectReferencedParameters(previewKeptLayers, previewLayers);
                     int previewParamsKept = 0;
                     var previewParamsDropped = new List<string>();
-                    foreach (var p in sourceFx.parameters)
+                    foreach (var p in previewBasis.parameters)
                     {
                         if (previewReferenced.Contains(p.name)) previewParamsKept++;
                         else previewParamsDropped.Add(p.name);
@@ -362,7 +361,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             {
                 var hits = new List<int>();
                 for (int i = 0; i < allLayerNames.Length; i++) if (allLayerNames[i] == name) hits.Add(i);
-                if (hits.Count == 0) { error = "requested layer '" + name + "' absent from source FX"; return null; }
+                if (hits.Count == 0) { error = "requested layer '" + name + "' absent from the controller (the source FX, or a reused clean controller, which keeps only what an earlier run kept)"; return null; }
                 if (hits.Count > 1)  { error = "requested layer '" + name + "' is ambiguous (" + hits.Count + " matches)"; return null; }
                 keep.Add(hits[0]);
             }
@@ -393,7 +392,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// <summary>A synced layer (<c>syncedLayerIndex &gt;= 0</c>) has a null stateMachine: it borrows
         /// the source layer's structure and carries per-state override motions and behaviours, so it
         /// resolves against <paramref name="allLayers"/>: the trimmed <c>ctrl.layers</c> on execute, the
-        /// source controller's layers in the whatIf preview.</summary>
+        /// same controller's untrimmed layers in the whatIf preview.</summary>
         internal static HashSet<string> CollectReferencedParameters(
             IEnumerable<AnimatorControllerLayer> keptLayers, AnimatorControllerLayer[] allLayers)
         {

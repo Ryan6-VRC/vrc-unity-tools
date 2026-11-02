@@ -225,7 +225,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             => "flat #00FFFF placeholder px in " + where + " — " + total + " px, worst '" + worstAngle
                + "' at " + worstN + " (floor 0: a healthy sheet measures exactly zero). Unity draws that "
                + "placeholder for a shader variant still compiling, which this grab forces synchronous "
-               + "compilation to prevent, so a path escaped the guard. "
+               + "compilation to prevent. "
                + (compiling
                    ? "Shader compilation is still in flight — editor-global, so it cannot be attributed to "
                      + "this grab either way, but it is consistent with the known async-compile producer: "

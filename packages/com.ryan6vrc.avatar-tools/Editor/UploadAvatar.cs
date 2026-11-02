@@ -151,9 +151,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>On a halt, a <c>not-attempted</c> row for every remaining avatar: the upload-avatar skill
         /// re-feeds the failed and not-attempted tail.</summary>
-        static void AppendNotAttempted(UploadReport report, GameObject[] avatars, int startExclusive)
+        static void AppendNotAttempted(UploadReport report, GameObject[] avatars, int startIndex)
         {
-            for (int j = startExclusive; j < avatars.Length; j++)
+            for (int j = startIndex; j < avatars.Length; j++)
                 report.rows.Add(new Row { handle = avatars[j] != null ? avatars[j].name : "(null)",
                                           state = "unknown", result = "not-attempted" });
         }

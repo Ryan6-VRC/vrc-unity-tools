@@ -341,7 +341,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             "The face mesh, with visemeMeshBasis naming how it was arrived at. \"descriptor\" is a FACT: a "
           + "VRCAvatarDescriptor whose lipSync mode declares a face mesh named it, and it was joined to this "
           + "inventory by Mesh ASSET IDENTITY, not by name — avatarFbx is the FBX that mesh lives in, and is the "
-          + "reference for bodyGuess. \"guess:most-blendshapes\" is the old heuristic, reported only where no "
+          + "reference for bodyGuess. \"guess:most-blendshapes\" is a heuristic, reported only where no "
           + "descriptor answered or the mesh it named is not in this package's FBX inventory (ordinary for an "
           + "outfit or hair package pointing at a base body elsewhere) — verify it. Every declared mesh is "
           + "tried in prefab path order and the first that joins wins, so a package whose outfit prefab sorts "
@@ -636,14 +636,14 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             // Strategy 2: "_FX" anywhere in the ASSET PATH, not the filename, so a folder named *_FX qualifies every
             // controller under it.
-            var byName = new List<string>();
+            var pathMatches = new List<string>();
             foreach (var guid in AssetDatabase.FindAssets("t:AnimatorController", new[] { vendorFolder }))
             {
                 var ap = AssetDatabase.GUIDToAssetPath(guid);
-                if (ap.IndexOf("_FX", StringComparison.OrdinalIgnoreCase) >= 0) byName.Add(ap);
+                if (ap.IndexOf("_FX", StringComparison.OrdinalIgnoreCase) >= 0) pathMatches.Add(ap);
             }
-            byName.Sort(StringComparer.Ordinal);
-            foreach (var ap in byName)
+            pathMatches.Sort(StringComparer.Ordinal);
+            foreach (var ap in pathMatches)
             {
                 var ctrl = AssetDatabase.LoadAssetAtPath<AnimatorController>(ap);
                 if (ctrl != null) { fxPath = ap; byPathMatch = true; return ctrl; }

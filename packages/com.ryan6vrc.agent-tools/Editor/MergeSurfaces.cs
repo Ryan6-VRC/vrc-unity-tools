@@ -36,8 +36,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Label;
             public Func<string, string> PathRewrite;
             public bool RootBindingsApplyToAvatar;
-            /// <summary>The raw frame as the vendor helpers resolved it.</summary>
-            public FrameResult Frame;
         }
 
         /// <summary>Test seam: forces an unreflected-anchor name onto a real frame, so the fail-loud path
@@ -70,8 +68,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var pairs = new List<Surface>();
             var seen = new HashSet<(int ctrl, int root, int kind)>();
             void Add(AnimatorController c, GameObject mount, List<GameObject> roots, Component site,
-                     FrameKind kind, string label, Func<string, string> rewrite, bool rootToAvatar,
-                     FrameResult frame)
+                     FrameKind kind, string label, Func<string, string> rewrite, bool rootToAvatar)
             {
                 if (c == null) return;
                 int rootId = mount != null ? mount.GetInstanceID() : 0;
@@ -80,14 +77,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     Controller = c, Roots = roots, Mount = mount, Site = site, Kind = kind,
                     Label = label, PathRewrite = rewrite, RootBindingsApplyToAvatar = rootToAvatar,
-                    Frame = frame,
                 });
             }
 
             if (descriptor != null)
                 CollectDescriptorLayers(descriptor, root, (c, label) => Add(
-                    c, root, new List<GameObject> { root }, null, FrameKind.DescriptorLayer, label, null, false,
-                    new FrameResult { Root = root, Kind = FrameKind.DescriptorLayer }),
+                    c, root, new List<GameObject> { root }, null, FrameKind.DescriptorLayer, label, null, false),
                     (label, what) => onUnlintable?.Invoke(descriptor, label + ": " + what));
 
             foreach (var c in root.GetComponentsInChildren<Component>(true))
@@ -103,7 +98,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     var mount = maFrame.Root ?? root;
                     // MA declares one frame for the whole controller and carries no path-rewrite rules.
                     Add(maCtrl, mount, new List<GameObject> { mount }, c, FrameKind.MA,
-                        "MA MergeAnimator @ " + PathOf(c.gameObject), null, false, maFrame);
+                        "MA MergeAnimator @ " + PathOf(c.gameObject), null, false);
                 }
 
                 if (TryVrcfFrame(c, out var vrcfCtrls, out var vrcfFrame))
@@ -119,7 +114,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     foreach (var vc in vrcfCtrls)
                         Add(vc, mount, roots, c, FrameKind.VRCF,
                             "VRCFury FullController @ " + PathOf(c.gameObject),
-                            vrcfFrame.PathRewrite, vrcfFrame.RootBindingsApplyToAvatar, vrcfFrame);
+                            vrcfFrame.PathRewrite, vrcfFrame.RootBindingsApplyToAvatar);
                 }
             }
             return pairs;

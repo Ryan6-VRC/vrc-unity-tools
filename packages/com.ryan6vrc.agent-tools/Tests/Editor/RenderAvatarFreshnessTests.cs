@@ -283,7 +283,7 @@ public class RenderAvatarFreshnessTests
             StringAssert.Contains("#00FFFF", s);
             StringAssert.Contains("front", s);
             StringAssert.Contains("64", s);
-            StringAssert.DoesNotContain("did not cover", s);
+            StringAssert.DoesNotContain("escaped the guard", s);
         }
         StringAssert.Contains("cannot be attributed", compiling);
         StringAssert.Contains("re-grab first", compiling);

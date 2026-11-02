@@ -90,7 +90,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             var doc = new StringBuilder();
             doc.Append("# ReportGimmick: ").Append(root.name).Append('\n');
             doc.Append("root: `").Append(GetHierarchyPath(root.transform)).Append("`  \n");
-            doc.Append("_transform handles are full scene-root-absolute paths; under first-match resolution a duplicate-named sibling makes a handle non-unique (a pre-existing family caveat, surfaced here because the interior walk can hit duplicate-named bones)._\n");
+            doc.Append("_transform handles are full scene-root-absolute paths; under first-match resolution a duplicate-named sibling makes a handle non-unique._\n");
             doc.Append("\ncontacts=").Append(contactCount)
                   .Append(" raycasts=").Append(raycasts.Length)
                   .Append(" physbones=").Append(physbones.Length)
@@ -569,7 +569,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 {
                     if (src != null && src != driven && src.IsChildOf(driven))
                     {
-                        lines.Add("**feedback loop (self-referential constraint source)** — `" + Cell(GetHierarchyPath(driven)) + "` ← `" + Cell(GetHierarchyPath(src)) + "` — docs/gimmicks.md §Constraint patterns · Trilateration cage / Crawler servo");
+                        lines.Add("**feedback loop (self-referential constraint source)** — `" + Cell(GetHierarchyPath(driven)) + "` ← `" + Cell(GetHierarchyPath(src)) + "` — docs/gimmicks.md §Constraint patterns · Position-from-proximity tracking");
                         break;
                     }
                 }
@@ -638,7 +638,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// read all its sources. Bounds what a zero count covers.</summary>
         internal const string SourceLengthScopeLine =
             "only the 16 keyable slots (`source0`…`source15`) are read; a constraint whose `Sources.totalLength` " +
-            "reaches them keeps its remaining sources in `overflowList`, which this scan does not open";
+            "exceeds them keeps its remaining sources in `overflowList`, which this scan does not open";
 
         /// <summary>The keyable half of a VRC constraint's source list — <c>source0</c>…<c>source15</c>, the
         /// slots an animator can bind. Sources past these live in <c>overflowList</c> (docs/runtime.md

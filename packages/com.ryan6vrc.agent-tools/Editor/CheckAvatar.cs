@@ -31,7 +31,6 @@ namespace Ryan6Vrc.AgentTools.Editor
     [AgentTool]
     public static class CheckAvatar
     {
-        private const string MaObjRefTypeName = "nadena.dev.modular_avatar.core.AvatarObjectReference";
         private const string MaAvatarRootSentinel = CheckAnimator.MaAvatarRootSentinel;
 
         // Standing Notes lines, on every RunLog.
@@ -60,7 +59,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             "This avatar root is not active in the scene, so nothing under it is running; the live markers " +
             "above are relative to the root and still discriminate between hosts.";
 
-        internal const string FailLoudNotePrefix = "fail-loud (R-H): ";
+        internal const string FailLoudNotePrefix = "fail-loud: ";
 
         /// <summary>Fires iff the inspected root carries any MA relocator, so a clean anchor-seam count
         /// reads as the scoped result it is rather than as whole-avatar confirmation.</summary>

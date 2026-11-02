@@ -197,10 +197,11 @@ namespace Ryan6Vrc.AgentTools.Editor
         /// <see cref="FailedStage"/>, the only thing that says WHICH refusal it was.</summary>
         internal string DescribeFailure()
         {
-            if (Failure != null)
-                return (_preprocessed ? "OnPreprocessAvatar threw " : "bake clone setup threw ")
-                     + Failure.GetType().Name + ": " + Failure.Message;
-            return FailedStage;
+            return Failure != null ? DescribeThrow(Failure, _preprocessed) : FailedStage;
         }
+
+        internal static string DescribeThrow(Exception failure, bool enteredChain)
+            => (enteredChain ? "OnPreprocessAvatar threw " : "bake clone setup threw ")
+             + failure.GetType().Name + ": " + failure.Message;
     }
 }

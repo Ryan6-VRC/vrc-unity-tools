@@ -78,6 +78,13 @@ public class RenderThumbnailPlayOptionsRecordTests
         Assert.IsFalse(RenderThumbnailPlay.IsBothReloadDisabled(true, EnterPlayModeOptions.None));
     }
 
+    [Test]
+    public void OptionsEndRow_claimsARestoreOnlyWhenRunChangedThePair()
+    {
+        StringAssert.Contains("restored", RenderThumbnailPlay.OptionsEndRow(false, EnterPlayModeOptions.None));
+        StringAssert.Contains("left as found", RenderThumbnailPlay.OptionsEndRow(true, RenderThumbnailPlay.ForcedOptions));
+    }
+
     // Reads the production constant rather than restating it: a second copy here would keep passing after
     // ForcedOptions was narrowed to one flag.
     [Test]

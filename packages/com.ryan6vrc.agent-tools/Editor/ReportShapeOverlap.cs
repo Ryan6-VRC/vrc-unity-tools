@@ -393,8 +393,11 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
                 catch (Exception e)
                 {
+                    // A dropped component shrinks the driven set the same way a dropped row does.
                     Debug.LogWarning("[ReportShapeOverlap] skipped an ObjectToggle component on '" +
-                        PathOf(comp.gameObject) + "' (" + e.GetType().Name + "): " + e.Message);
+                        PathOf(comp.gameObject) + "' (" + e.GetType().Name + "): " + e.Message +
+                        " — active-state annotation withheld for this run.");
+                    return null;
                 }
             }
             return driven;
@@ -539,7 +542,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 "not promoted to MISMATCH because proving a declaration dead needs MA's build-time animation index (any clip " +
                 "binding the ancestor's `m_IsActive` keeps it live), which no edit-time read has; flagging without it would " +
                 "invent offenders on every FX-toggled wardrobe. Toggle-driven and inverted declarations are already excluded " +
-                "here (mechanism: `nondestructive.md`)._\n\n");
+                "here (mechanism: `ReportShapeOverlap.cs` §Build-effective active state)._\n\n");
             sb.Append("| shape | reaction | current | resolved-target | overlap | disposition |\n");
             sb.Append("| --- | --- | --- | --- | --- | --- |\n");
             var maxOverlap = new Dictionary<string, float>();

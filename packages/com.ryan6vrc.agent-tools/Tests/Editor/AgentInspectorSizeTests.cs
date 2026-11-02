@@ -74,3 +74,42 @@ public class AgentInspectorSizeTests
         Assert.AreEqual("", AgentInspector.SizeNote(_tmp + "_absent", "Avatar", true));
     }
 }
+
+// A throw mid-walk degrades to a fieldsError, and the snapshot around it still has to parse.
+public class AgentInspectorJsonWriterTests
+{
+    private static string Compact(AgentInspector.JsonWriter w) => w.ToString().Replace("\n", "").Replace(" ", "");
+
+    [Test]
+    public void UnwindTo_closesNestedScopesInOrder_andAnswersAPendingName()
+    {
+        var w = new AgentInspector.JsonWriter();
+        w.BeginObject();
+        int depth = w.Depth;
+        w.PropName("fields");
+        w.BeginObject();
+        w.PropName("arr");
+        w.BeginArray();
+        w.BeginObject();
+        w.PropName("pending");
+
+        w.UnwindTo(depth);
+        w.Prop("fieldsError", "boom");
+        w.EndObject();
+
+        Assert.AreEqual("{\"fields\":{\"arr\":[{\"pending\":null}]},\"fieldsError\":\"boom\"}", Compact(w));
+        Assert.AreEqual(0, w.Depth);
+    }
+
+    [Test]
+    public void UnwindTo_withNothingOpenedPastTheMark_writesNothing()
+    {
+        var w = new AgentInspector.JsonWriter();
+        w.BeginObject();
+        w.UnwindTo(w.Depth);
+        w.Prop("fieldsError", "boom");
+        w.EndObject();
+
+        Assert.AreEqual("{\"fieldsError\":\"boom\"}", Compact(w));
+    }
+}

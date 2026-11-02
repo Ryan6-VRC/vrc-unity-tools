@@ -542,6 +542,12 @@ namespace Ryan6Vrc.AgentTools.Editor
             }));
         }
 
+        internal static string RecoveryReport(List<string> restored, bool pumpArmed, bool managerAlive)
+            => "RECOVERED from a domain reload — restored " + string.Join(", ", restored.ToArray())
+                + ". A recompile or package import tore down a GrabPhysBone session mid-flight"
+                + (pumpArmed ? " with an Advance in flight" : "")
+                + (managerAlive ? "; its frame count is void" : "; any grab it held died with the PhysBoneManager and its frame count is void");
+
         /// <summary>Runs once per domain load; a surviving record means a session was torn down mid-flight
         /// with native state still mutated.</summary>
         internal static void RecoverAfterDomainReload()
@@ -555,6 +561,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             SessionState.EraseString(RecordKey);
 
             var what = new List<string>();
+            var mgr = PhysBoneManager.Inst;
             if (r.DtPinned)
             {
                 Time.fixedDeltaTime = r.SavedFixedDt;
@@ -562,7 +569,6 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             if (r.Owned != null)
             {
-                var mgr = PhysBoneManager.Inst;
                 foreach (var h in r.Owned) Owned.Add(h);
                 if (mgr != null && Owned.Count > 0) what.Add("re-adopted " + Owned.Count + " grab handle(s)");
             }
@@ -576,10 +582,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
             if (what.Count == 0) return;
 
-            var report = "RECOVERED from a domain reload — restored " + string.Join(", ", what.ToArray())
-                + ". A recompile or package import tore down a GrabPhysBone session mid-flight"
-                + (r.PumpArmed ? " with an Advance in flight" : "")
-                + "; any grab it held died with the PhysBoneManager and its frame count is void";
+            var report = RecoveryReport(what, r.PumpArmed, mgr != null);
 
             // The durable channel is Held()'s next answer, not the console. Measured: a recovery logged
             // from the first delayCall after a domain load lands inside the reload's console clear and the

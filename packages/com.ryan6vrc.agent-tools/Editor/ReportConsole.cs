@@ -158,14 +158,14 @@ namespace Ryan6Vrc.AgentTools.Editor
             var counts = new Dictionary<string, int>();
             foreach (var e in kept)
             {
-                var key = e.Body + " " + e.Stack;
+                var key = e.Body + "\0" + e.Stack;
                 int seen;
                 counts[key] = counts.TryGetValue(key, out seen) ? seen + 1 : 1;
             }
             var emitted = new HashSet<string>();
             for (int i = kept.Count - 1; i >= 0; i--)
             {
-                var key = kept[i].Body + " " + kept[i].Stack;
+                var key = kept[i].Body + "\0" + kept[i].Stack;
                 if (!emitted.Add(key)) { collapsed++; continue; }
                 rows.Add(new KeyValuePair<Entry, int>(kept[i], counts[key]));
             }

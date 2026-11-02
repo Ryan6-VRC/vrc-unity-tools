@@ -19,7 +19,7 @@ namespace Ryan6Vrc.AgentTools.Editor
         private const int WindowRows = 12;
 
         internal const string ScopeWriters =
-            "(none among scanned surfaces; menu/contact/physbone/OSC not excluded)";
+            "(none among scanned surfaces; menu/contact/physbone/raycast/OSC not excluded)";
         internal const string ScopeAuthoredNames =
             "authored names; the build may rewrite them — bake:true resolves";
 
@@ -74,8 +74,8 @@ namespace Ryan6Vrc.AgentTools.Editor
             public string Declared => DeclaredAt.Count == 0
                 ? "(undeclared on any expression parameters asset reached here)"
                 : string.Join("; ", DeclaredAt);
-            /// <summary>False for a name no expression-parameters asset or controller declares: a physbone suffix or a
-            /// menu sub-parameter the runtime writes. Bake mode must not diff these: the built side is a declaration set,
+            /// <summary>False for a name no expression-parameters asset or controller declares: a physbone or raycast
+            /// suffix or a menu sub-parameter the runtime writes. Bake mode must not diff these: the built side is a declaration set,
             /// so an undiffable name would land in `dropped`, whose plain reading is "the build removed it".</summary>
             public bool Diffable;
             public string Type = "—";
@@ -326,8 +326,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ── Non-animator writers ─────────────────────────────────────────────────────────────────────
 
-        /// <summary>A physbone declares a PREFIX and the runtime writes prefix+suffix, so the parameter a controller reads
-        /// appears nowhere in the scene as a literal string. Raycasts also write parameters and are not collected here.</summary>
+        /// <summary>A physbone or raycast declares a PREFIX and the runtime writes prefix+suffix, so the parameter a
+        /// controller reads appears nowhere in the scene as a literal string.</summary>
         private static void CollectDynamicsWriters(GameObject root, Func<string, ParamRow> row)
         {
             foreach (var c in root.GetComponentsInChildren<Component>(true))
@@ -339,6 +339,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                     if (string.IsNullOrEmpty(pb.parameter)) continue;
                     foreach (var suffix in new[] { "_IsGrabbed", "_IsPosed", "_Angle", "_Stretch", "_Squish" })
                         row(pb.parameter + suffix).Writers.Add(where + " (physbone suffix)");
+                }
+                else if (c is VRC.SDK3.Avatars.Components.VRCRaycast ray)
+                {
+                    if (string.IsNullOrEmpty(ray.Parameter)) continue;
+                    foreach (var suffix in new[] { "_Hit", "_Ratio", "_Distance" })
+                        row(ray.Parameter + suffix).Writers.Add(where + " (raycast suffix)");
                 }
                 else if (c is VRC.SDK3.Dynamics.Contact.Components.VRCContactReceiver cr)
                 {
@@ -385,6 +391,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             || fullName == "VRC.SDK3.Avatars.Components.VRCAvatarDescriptor"
             || fullName == "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone"
             || fullName == "VRC.SDK3.Dynamics.Contact.Components.VRCContactReceiver"
+            || fullName == "VRC.SDK3.Avatars.Components.VRCRaycast"
             || fullName == "UnityEngine.Animator";
 
         // ── Emit ─────────────────────────────────────────────────────────────────────────────────────

@@ -172,6 +172,11 @@ layers: []
   - toggle: A
     param: Enable
 ");
+        var stale = Load();
+        stale.name = "Stale";
+        EditorUtility.SetDirty(stale);
+        AssetDatabase.SaveAssetIfDirty(stale);
+        Assert.AreEqual("Stale", Load().name, "the fixture must reach the recompile with the old name");
         Compile(@"menu:
   - toggle: A
     param: Enable

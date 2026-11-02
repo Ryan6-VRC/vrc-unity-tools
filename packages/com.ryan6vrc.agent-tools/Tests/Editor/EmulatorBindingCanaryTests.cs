@@ -102,14 +102,14 @@ public class EmulatorBindingCanaryTests
     public void DocumentedRuntimeFields_Resolve_Publicly()
     {
         AssertFields(RequireType(EmulatorBinding.RuntimeFullName),
-            EmulatorBinding.DocumentedRuntimePublicFields, Public, "verify.md teaches it as a public handle");
+            EmulatorBinding.DocumentedRuntimePublicFields, Public, "emulator.md teaches it as a public handle");
     }
 
     [Test]
     public void DocumentedEmulatorFields_Resolve_Publicly()
     {
         AssertFields(RequireType(EmulatorBinding.EmulatorFullName),
-            EmulatorBinding.DocumentedEmulatorPublicFields, Public, "verify.md teaches it as a public handle");
+            EmulatorBinding.DocumentedEmulatorPublicFields, Public, "emulator.md teaches it as a public handle");
     }
 
     [Test]
@@ -118,10 +118,10 @@ public class EmulatorBindingCanaryTests
         // The recipe this pins is docs/emulator.md §Two-avatar contact sessions.
         var t = RequireType(EmulatorBinding.RuntimeFullName);
         Assert.IsNotNull(t.GetField(EmulatorBinding.ContactPlayerId, NonPublic),
-            EmulatorBinding.ContactPlayerId + " is gone — verify.md's two-avatar sender-hygiene recipe " +
+            EmulatorBinding.ContactPlayerId + " is gone — emulator.md's two-avatar sender-hygiene recipe " +
             "reads it to destroy duplicate senders");
         Assert.IsNull(t.GetField(EmulatorBinding.ContactPlayerId, Public),
-            EmulatorBinding.ContactPlayerId + " is now PUBLIC — verify.md still prescribes NonPublic binding " +
+            EmulatorBinding.ContactPlayerId + " is now PUBLIC — emulator.md still prescribes NonPublic binding " +
             "plus an abort-on-null guard for it; simplify the recipe");
     }
 
@@ -133,7 +133,7 @@ public class EmulatorBindingCanaryTests
         var t = RequireType(EmulatorBinding.RuntimeFullName);
         foreach (var listName in new[] { "Floats", "Ints", "Bools" })
             AssertFields(RequireEntryType(t, listName), EmulatorBinding.ParamEntryCommonFields, Public,
-                "verify.md reads it off every " + listName + " entry");
+                "emulator.md reads it off every " + listName + " entry");
     }
 
     [Test]
@@ -147,10 +147,10 @@ public class EmulatorBindingCanaryTests
 
         Assert.IsNotNull(floatEntry.GetField(EmulatorBinding.ExpressionValue, Public),
             "the float param entry lost `" + EmulatorBinding.ExpressionValue +
-            "` — verify.md's float drive route goes through it");
+            "` — emulator.md's float drive route goes through it");
         Assert.IsNull(boolEntry.GetField(EmulatorBinding.ExpressionValue, Public),
             "the bool param entry GAINED `" + EmulatorBinding.ExpressionValue +
-            "` — verify.md says bools have none and routes them to `.value`; re-measure the drive rule");
+            "` — emulator.md says bools have none and routes them to `.value`; re-measure the drive rule");
     }
 
     [Test]
@@ -167,7 +167,7 @@ public class EmulatorBindingCanaryTests
     {
         var list = runtime.GetField(listName, Public);
         Assert.IsNotNull(list, runtime.Name + "." + listName +
-            " is gone — the parameter mirror verify.md drives and reads");
+            " is gone — the parameter mirror emulator.md drives and reads");
         var entry = EntryType(list.FieldType);
         Assert.IsNotNull(entry, runtime.Name + "." + listName + " is no longer a single-arg generic list (" +
             list.FieldType.Name + ") — cannot reach its entry type to check the drive route");

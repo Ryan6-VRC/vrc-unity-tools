@@ -227,6 +227,40 @@ public class ReportControllerTests
             "synced-layer override break must be live-reachable, not orphan residue");
     }
 
+    // A synced state with no override inherits the source state's motion, so its dangling reference is broken
+    // there too. The source layer's block renders the same cell, so the assert reads the synced block alone.
+    [Test]
+    public void SyncedLayer_DanglingInheritedSource_RendersBroken_NotEmpty()
+    {
+        const string SrcGuid = "99990000aaaabbbbccccddddeeeeffff";
+
+        var st = _ctrl.layers[0].stateMachine.AddState("Src");
+        var clip = new AnimationClip { name = "doomed" };
+        AssetDatabase.AddObjectToAsset(clip, _ctrl);
+        st.motion = clip;
+        _ctrl.AddLayer("Synced");
+        var ls = _ctrl.layers;
+        ls[1].syncedLayerIndex = 0;
+        _ctrl.layers = ls;
+        EditorUtility.SetDirty(_ctrl); AssetDatabase.SaveAssets();
+
+        string path = AssetDatabase.GetAssetPath(_ctrl);
+        AssetDatabase.TryGetGUIDAndLocalFileIdentifier(clip, out _, out long clipLocalId);
+        string yaml = File.ReadAllText(path);
+        yaml = Regex.Replace(yaml, @"m_Motion: \{fileID: " + clipLocalId + @"\}",
+            "m_Motion: {fileID: 7400000, guid: " + SrcGuid + ", type: 2}");
+        File.WriteAllText(path, yaml);
+        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
+        var reloaded = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
+
+        string report = ReadReport(reloaded);
+        int syncedAt = report.IndexOf("_synced layer");
+        Assert.That(syncedAt, Is.GreaterThanOrEqualTo(0), "precondition: the layer reads as synced");
+        string synced = report.Substring(syncedAt);
+        StringAssert.Contains("motion: (broken: guid=" + SrcGuid + ")", synced);
+        StringAssert.DoesNotContain("motion: (empty)", synced);
+    }
+
     // A dangling motion whose inner fileID is negative (an FBX-embedded clip's hash-derived localID, referenced
     // type: 3) must not be dropped by a \d+ that cannot match the sign.
     [Test]

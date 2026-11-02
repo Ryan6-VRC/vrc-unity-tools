@@ -210,7 +210,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     motion = ov != null ? ov : st.motion;
                     motionCell = motion != null
                         ? MotionLabel(motion) + (ov != null ? " (synced override)" : " (inherited source)")
-                        : "(empty)";
+                        : StateMotion(st, controller, danglingGuids);
                 }
                 else
                 {

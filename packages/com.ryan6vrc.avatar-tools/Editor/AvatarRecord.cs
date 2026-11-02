@@ -632,9 +632,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     var record = VrcApiReflect.Result(getTask);
                     string liveName = VrcApiReflect.GetName(record);
 
-                    var casWhy = AvatarRecordLogic.CheckExpectedName(expectCurrentName, liveName);
-                    if (casWhy != null)
-                    { AvatarRecordDriver.Finish(AvatarRecordDriver.Refuse(Door, casWhy)); return; }
+                    var expectedNameWhy = AvatarRecordLogic.CheckExpectedName(expectCurrentName, liveName);
+                    if (expectedNameWhy != null)
+                    { AvatarRecordDriver.Finish(AvatarRecordDriver.Refuse(Door, expectedNameWhy)); return; }
 
                     if (whatIf)
                     {

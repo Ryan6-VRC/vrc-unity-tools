@@ -711,7 +711,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             if (cleanRename != null)
                 log.Note("vendorToOwned active (" + cleanRename.Count +
-                         " entr(y/ies)) — predicted dest-path labels stay vendor-named; minted GOs use the mapped name");
+                         " entr(y/ies)) — minted GOs use the mapped name");
 
             var plan = BuildPlan(ownedRoot, vendorSource, typeNames, force, cleanRename);
 

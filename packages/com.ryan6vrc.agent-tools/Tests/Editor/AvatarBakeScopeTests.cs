@@ -127,7 +127,7 @@ namespace Ryan6Vrc.AgentTools.Tests
         }
 
         [Test]
-        public void DescribeFailure_namesSetupSeparatelyFromTheChain()
+        public void ADestroyedSource_readsAsNull_andDoesNotNameTheChain()
         {
             var bad = new GameObject("destroyed-before-use");
             UnityEngine.Object.DestroyImmediate(bad);
@@ -135,8 +135,17 @@ namespace Ryan6Vrc.AgentTools.Tests
             bake.Dispose();
 
             Assert.IsFalse(bake.Ok);
+            Assert.AreEqual("clone (source was null)", bake.FailedStage);
             StringAssert.DoesNotContain("OnPreprocessAvatar", bake.DescribeFailure(),
                 "the chain was never entered, so it must not be named");
+        }
+
+        [Test]
+        public void DescribeThrow_namesSetupSeparatelyFromTheChain()
+        {
+            var e = new InvalidOperationException("boom");
+            Assert.AreEqual("bake clone setup threw InvalidOperationException: boom", AvatarBakeScope.DescribeThrow(e, false));
+            Assert.AreEqual("OnPreprocessAvatar threw InvalidOperationException: boom", AvatarBakeScope.DescribeThrow(e, true));
         }
 
         [Test]

@@ -1497,7 +1497,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     {
                         Authored = p.Name, Built = alsoBuilt ? p.Name + " (see its built-only row)" : "—",
                         Category = "not-in-scope",
-                        Surface = "runtime-written (physbone suffix / menu sub-parameter) — nothing declares it, so a declaration set cannot carry it"
+                        Surface = "runtime-written (physbone or raycast suffix / menu sub-parameter) — nothing declares it, so a declaration set cannot carry it"
                                 + (alsoBuilt ? "; the build DOES carry this exact name — the two rows are one parameter, not two findings" : ""),
                     });
                     continue;

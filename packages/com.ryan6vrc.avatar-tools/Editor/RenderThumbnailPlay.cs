@@ -10,7 +10,6 @@ using UnityEngine;
 using UnityEngine.Animations;
 using UnityEngine.Playables;
 using UnityEngine.SceneManagement;
-using Ryan6Vrc.AgentTools.Editor;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
@@ -40,7 +39,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private const int DefaultSettleFrames = 90;
         // A chain whose bones' mean position moved more than this (world metres) between the last two settle
         // ticks is reported "still moving" at capture; below it is solver noise.
-        private const float MovingLeafDeltaM = 0.0003f;
+        private const float MovingChainDeltaM = 0.0003f;
         // A paused editor keeps firing EditorApplication.update but freezes Time.frameCount. After this long
         // without a new frame, fail the shot rather than spin with _shootUpdate non-null, refusing every later
         // Shoot.
@@ -61,7 +60,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static bool _attached;             // isolated to the built local avatar (post-play-entry)
         private static string _targetName;
         private static SceneSetup[] _sceneSetup;   // snapshot at Run; restored from disk on End
-        // Operator's Enter-Play-Mode Options, saved at Run and restored at End/AbortBegin.
+        // Operator's Enter-Play-Mode Options, saved at Run and restored at End/AbortRun.
         private static bool _optionsOverridden;
         private static bool _savedOptionsEnabled;
         private static EnterPlayModeOptions _savedOptions;
@@ -154,19 +153,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (scenePath != null)
                 {
                     if (!scenePath.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
-                        { AbortBegin(); return Fail("scenePath '" + scenePath + "' is not a .unity scene"); }
-                    if (!System.IO.File.Exists(scenePath)) { AbortBegin(); return Fail("scenePath '" + scenePath + "' does not exist"); }
+                        { AbortRun(); return Fail("scenePath '" + scenePath + "' is not a .unity scene"); }
+                    if (!System.IO.File.Exists(scenePath)) { AbortRun(); return Fail("scenePath '" + scenePath + "' does not exist"); }
                     EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
                 }
 
                 var venue = SceneManager.GetActiveScene();
-                if (string.IsNullOrEmpty(venue.path)) { AbortBegin(); return Fail("the venue scene is unsaved (no disk path) — save it or pass a scenePath"); }
+                if (string.IsNullOrEmpty(venue.path)) { AbortRun(); return Fail("the venue scene is unsaved (no disk path) — save it or pass a scenePath"); }
 
                 var handle = Ryan6Vrc.AgentTools.Editor.SceneHandle.Resolve(target);
-                if (!handle.Ok) { AbortBegin(); return Fail(handle.Refusal); }
+                if (!handle.Ok) { AbortRun(); return Fail(handle.Refusal); }
                 var target0 = handle.Object;
                 var descriptor = target0.GetComponent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
-                if (descriptor == null) { AbortBegin(); return Fail("no VRCAvatarDescriptor on '" + target0.name + "'"); }
+                if (descriptor == null) { AbortRun(); return Fail("no VRCAvatarDescriptor on '" + target0.name + "'"); }
 
                 // PlayGate wants exactly one active avatar; End's setup-restore brings the others back. The
                 // target itself must be active to build.
@@ -192,7 +191,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 _shootUpdate = null;
                 _lastShootResult = "(no shot yet)";
 
-                string beginSummary = "Begin " + _targetName + " => READY-TO-PLAY"
+                string runSummary = "Run " + _targetName + " => READY-TO-PLAY"
                     + (emuMade ? " emulator=created/enabled" : " emulator=present")
                     + (optsChanged ? " playmode-reload=disabled(restored on End)" : "")
                     + (adoptedForced ? " playmode-reload=already-forced(no saved record — cannot tell your setting"
@@ -200,8 +199,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     + (deactivated.Count > 0 ? " deactivated=[" + string.Join(",", deactivated) + "]" : "")
                     + " saved=[" + string.Join(",", saved) + "]"
                     + " — enter play (manage_editor play), then Shoot(...)";
-                return Ok(RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-begin", _targetName, beginSummary,
-                    "# RenderThumbnailPlay Begin\n\n- target: `" + _targetName + "`\n"
+                return Ok(RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-begin", _targetName, runSummary,
+                    "# RenderThumbnailPlay Run\n\n- target: `" + _targetName + "`\n"
                     + "- emulator: " + (emuMade ? "created/enabled" : "present") + "\n"
                     + "- playmode-reload: " + (optsChanged ? "disabled (restored on End)"
                         : adoptedForced ? "already forced; no saved record, End leaves it as found" : "unchanged") + "\n"
@@ -210,13 +209,13 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
             catch (Exception ex)
             {
-                AbortBegin();
-                return Fail("Begin failed (" + ex.GetType().Name + ": " + ex.Message + ")");
+                AbortRun();
+                return Fail("Run failed (" + ex.GetType().Name + ": " + ex.Message + ")");
             }
         }
 
         // Undo a Run that fails after it began mutating global and scene state.
-        private static void AbortBegin()
+        private static void AbortRun()
         {
             RestoreEnterPlayModeOptions();
             try { if (_sceneSetup != null && _sceneSetup.Length > 0) EditorSceneManager.RestoreSceneManagerSetup(_sceneSetup); }
@@ -280,6 +279,10 @@ namespace Ryan6Vrc.AvatarTools.Editor
             enabled
             && (opts & EnterPlayModeOptions.DisableDomainReload) != 0
             && (opts & EnterPlayModeOptions.DisableSceneReload) != 0;
+
+        /// <summary>End's RunLog value for the pair Run saved: an already-forced pair goes back unchanged.</summary>
+        internal static string OptionsEndRow(bool enabled, EnterPlayModeOptions opts) =>
+            IsBothReloadDisabled(enabled, opts) ? "left as found (already both-reload-disabled)" : "restored";
 
         internal const EnterPlayModeOptions ForcedOptions =
             EnterPlayModeOptions.DisableDomainReload | EnterPlayModeOptions.DisableSceneReload;
@@ -424,7 +427,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // --- Frame-driven state machine: settle N frames, then solve + capture + log. ---
             string tag = "RTP-" + Guid.NewGuid().ToString("N").Substring(0, 8);
             int injectFrame = Time.frameCount;
-            var prevLeaf = SampleLeaves(chains);
+            var prevMeans = SampleChainMeans(chains);
             var stillMoving = new List<string>();
             int lastFrameSeen = injectFrame;
             double lastProgress = EditorApplication.timeSinceStartup;
@@ -441,11 +444,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     else if (EditorApplication.timeSinceStartup - lastProgress > StallSeconds)
                     { FinishShoot(step, tag, "[RenderThumbnailPlay] " + tag + " Shoot => FAIL: settle stalled — no frame progress for " + StallSeconds + "s (editor paused?)"); return; }
 
-                    var nowLeaf = SampleLeaves(chains);
+                    var nowMeans = SampleChainMeans(chains);
                     stillMoving.Clear();
                     for (int i = 0; i < chains.Count; i++)
-                        if ((nowLeaf[i] - prevLeaf[i]).magnitude > MovingLeafDeltaM) stillMoving.Add(chains[i].name);
-                    prevLeaf = nowLeaf;
+                        if ((nowMeans[i] - prevMeans[i]).magnitude > MovingChainDeltaM) stillMoving.Add(chains[i].name);
+                    prevMeans = nowMeans;
 
                     if (elapsed < settleFrames) return;
 
@@ -587,7 +590,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return Ok(RenderThumbnailCore.WriteSessionLog("renderthumbnailplay-end", endLabel, endSummary,
                 "# RenderThumbnailPlay End\n\n- scene setup: "
                 + (restored.Length > 0 ? restored.Trim() : "nothing to restore") + "\n"
-                + "- Enter-Play-Mode Options: restored\n"));
+                + "- Enter-Play-Mode Options: " + OptionsEndRow(_savedOptionsEnabled, _savedOptions) + "\n"));
         }
 
         // ===== Attach: isolate to the built local avatar (first Shoot, in play) =====
@@ -794,7 +797,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         /// <summary>Per-chain representative world position (mean of its bones) — differenced between ticks to
         /// gauge motion. Mean, not just the leaf, so a whole ringing chain registers even if the tip is short.</summary>
-        private static Vector3[] SampleLeaves(List<Chain> chains)
+        private static Vector3[] SampleChainMeans(List<Chain> chains)
         {
             var pos = new Vector3[chains.Count];
             for (int i = 0; i < chains.Count; i++)

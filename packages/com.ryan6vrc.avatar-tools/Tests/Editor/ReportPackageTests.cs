@@ -93,6 +93,9 @@ public class ReportPackageTests
         Assert.IsFalse(ReportPackage.IsFromSdkAssembly(typeof(ReportPackageTests_GlobalProbe)));
         Assert.IsFalse(ReportPackage.IsFromSdkAssembly(typeof(ReportPackage)));
         Assert.IsFalse(ReportPackage.IsFromSdkAssembly(null));
+
+        Assert.AreEqual("ReportPackageTests_GlobalProbe", ReportPackage.NonSdkKey(typeof(ReportPackageTests_GlobalProbe)));
+        Assert.AreEqual(typeof(ReportPackage).Namespace, ReportPackage.NonSdkKey(typeof(ReportPackage)));
     }
 
     // ── Assembly NAMES: the near-miss the type-level tests above structurally cannot reach ─────
@@ -256,11 +259,5 @@ public class ReportPackageTests
     public void FaceExclusionKey_followsTheRouteThatAnswered(string basis, bool identityKey)
     {
         Assert.AreEqual(identityKey, ReportPackage.ExcludesFaceByIdentity(basis));
-    }
-
-    [Test]
-    public void FaceExclusionKey_degradedRouteExcludesByName_evenWhenADescriptorDeclaredAMesh()
-    {
-        Assert.IsFalse(ReportPackage.ExcludesFaceByIdentity("guess:most-blendshapes"));
     }
 }

@@ -36,8 +36,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public readonly List<GraftStep> steps = new List<GraftStep>();
         /// <summary>subtreeRoots that resolved to no GameObject under vendorSource — caller FAILs loud, named.</summary>
         public readonly List<string> unresolvedRoots = new List<string>();
-        /// <summary>subtree GOs outside the reach root, which cannot occur while every GO comes from under vendorSource — FAIL loud, named.</summary>
-        public readonly List<string> unanchorable = new List<string>();
 
         /// <summary>Ambiguous-rename reasons hit while predicting host counterparts. The planner would read Counterpart's
         /// null as "mint", so surfacing them lets Run FAIL both modes before mutation, matching EnsureHost's guard.</summary>
@@ -108,13 +106,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 log.result = "FAIL";
                 log.error  = "unresolved subtree root(s)";
                 foreach (var r in plan.unresolvedRoots) log.Offender("subtree-root not found under vendor source: '" + r + "'");
-                return TransplantCore.Finish(log, label);
-            }
-            if (plan.unanchorable.Count > 0)
-            {
-                log.result = "FAIL";
-                log.error  = "subtree GO(s) unanchorable within reach";
-                foreach (var u in plan.unanchorable) log.Offender("cannot anchor within reach: '" + u + "'");
                 return TransplantCore.Finish(log, label);
             }
             if (plan.renameAmbiguities.Count > 0)
@@ -275,11 +266,6 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         vendorPath = RelativePath(vendorRoot, vgo),
                     };
 
-                    if (!vgo.IsChildOf(vendorRoot) && vgo != vendorRoot)
-                    {
-                        plan.unanchorable.Add(step.vendorPath);
-                        continue;
-                    }
                     Transform dstHost = RemapReferencesByPath.Counterpart(vendorRoot, ourRoot, vgo, vendorToOwned, out var cpFail);
                     if (cpFail != null && !plan.renameAmbiguities.Contains(cpFail)) plan.renameAmbiguities.Add(cpFail);
                     step.hostWillMint = dstHost == null;

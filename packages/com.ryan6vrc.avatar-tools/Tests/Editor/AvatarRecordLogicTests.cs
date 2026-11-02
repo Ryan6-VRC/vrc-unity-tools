@@ -52,6 +52,9 @@ public class AvatarRecordLogicTests
         StringAssert.Contains("\\t", q);
     }
 
+    [Test] public void Escape_EscapesEveryLineBreakAReaderMayHonour()
+        => Assert.AreEqual("\"a\\f\\v\\u0085\\u2028\\u2029b\"", AvatarRecordLogic.Quote("a\f\v\u0085\u2028\u2029b"));
+
     [Test] public void Quote_NullIsDistinctFromEmptyString()
     {
         Assert.AreEqual("<null>", AvatarRecordLogic.Quote(null));
@@ -283,6 +286,7 @@ public class AvatarRecordLogicTests
                                                      AvatarRecordLogic.Phase.ImageSent, "editor reloaded");
         StringAssert.Contains("RE-RUN", r);
         StringAssert.Contains("cannot see it", r);
+        StringAssert.Contains("does not prove", r);
         StringAssert.DoesNotContain("Do NOT re-run", r);
     }
 

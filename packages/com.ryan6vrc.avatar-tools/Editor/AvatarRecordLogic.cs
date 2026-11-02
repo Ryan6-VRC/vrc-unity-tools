@@ -25,6 +25,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case '\r': sb.Append("\\r");  break;
                     case '\n': sb.Append("\\n");  break;
                     case '\t': sb.Append("\\t");  break;
+                    case '\f': sb.Append("\\f");  break;
+                    case '\v': sb.Append("\\v");  break;
+                    case '\u0085': sb.Append("\\u0085"); break;
+                    case '\u2028': sb.Append("\\u2028"); break;
+                    case '\u2029': sb.Append("\\u2029"); break;
                     default:   sb.Append(c);      break;
                 }
             }
@@ -308,8 +313,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return "[avatar-record] " + door + " handle=" + Quote(handle) + " => UNKNOWN " + cause +
                        " while the thumbnail was uploading; any metadata in the same call had already " +
                        "landed. No read can tell you whether the image arrived — ReportAvatarRecord " +
-                       "cannot see it. Simply RE-RUN the same call: an image the server already holds is " +
-                       "refused as a no-op, so a re-run either completes the attach or reports it absent.";
+                       "cannot see it. Simply RE-RUN the same call: it either completes the attach or, if the " +
+                       "server already holds these bytes, closes PASS with a row saying that does not prove the " +
+                       "thumbnail is published.";
             if (phase == Phase.UpdateSent)
                 return "[avatar-record] " + door + " handle=" + Quote(handle) + " => UNKNOWN " + cause +
                        " AFTER the update was sent — it may well have landed on the server. Do NOT re-run " +

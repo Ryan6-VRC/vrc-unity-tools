@@ -210,7 +210,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (!string.IsNullOrEmpty(stored) && stored != current)
                 Debug.LogWarning("[CompileController] overwriting '" + finalPath + "': provenance srchash=" + stored
                     + " differs from the current source (" + current + ") — the on-disk controller was compiled from a "
-                    + "different source or hand-edited out of band; this recompile will clobber those changes.");
+                    + "different source; this recompile replaces it, along with any hand-edit made to the asset.");
         }
 
         private static string ExtractField(string userData, string key)
@@ -362,7 +362,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     sb.Append("- advisory: **").Append(o.Kind).Append("** ").Append(o.Where).Append(" — ").Append(o.Detail).Append('\n');
 
             sb.Append("\n## Compile advisory: frame latency\n\n");
-            if (frameLatency.Count == 0) sb.Append("_(none — no multi-hop conditional chain)_\n");
+            if (frameLatency.Count == 0) sb.Append("_(none — no chain of two or more hops)_\n");
             else foreach (var l in frameLatency) sb.Append("- ").Append(l).Append('\n');
 
             sb.Append("\n## Compile advisory: unresolved motion refs\n\n");

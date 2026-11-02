@@ -225,18 +225,17 @@ namespace Ryan6Vrc.AgentTools.Editor
         }
 
         /// <summary>Emits <paramref name="target"/>'s visible properties as a <c>fields</c> object. A throw degrades
-        /// to a <c>fieldsError</c> instead of aborting the snapshot; the catch closes only <c>fields</c>, so a throw
-        /// from inside a nested array or struct leaves the JSON unbalanced.</summary>
+        /// to a <c>fieldsError</c> instead of aborting the snapshot; the catch closes whatever the walk left open,
+        /// so the JSON stays parseable.</summary>
         private static void WriteFields(JsonWriter w, UnityEngine.Object target, WalkState st, int assetDepth)
         {
-            bool fieldsOpened = false;
+            int depth = w.Depth;
             try
             {
                 var so = new SerializedObject(target);
                 var it = so.GetIterator();
                 w.PropName("fields");
                 w.BeginObject();
-                fieldsOpened = true;
                 bool enterChildren = true;
                 while (it.NextVisible(enterChildren))
                 {
@@ -249,7 +248,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             }
             catch (Exception e)
             {
-                if (fieldsOpened) w.EndObject();
+                w.UnwindTo(depth);
                 w.Prop("fieldsError", e.Message);
             }
         }
@@ -404,16 +403,34 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         // ----- Tiny dependency-free JSON writer ----------------------------------------------
 
-        private class JsonWriter
+        internal class JsonWriter
         {
             private readonly StringBuilder _sb = new StringBuilder();
             private readonly Stack<bool> _firstStack = new Stack<bool>();
+            private readonly Stack<char> _closers = new Stack<char>();
             private int _indent;
 
-            public void BeginObject() { Pre(); _sb.Append("{"); Push(); }
+            public void BeginObject() { Pre(); _sb.Append("{"); Push('}'); }
             public void EndObject()   { Pop(); NewLine(); _sb.Append("}"); }
-            public void BeginArray()  { Pre(); _sb.Append("["); Push(); }
+            public void BeginArray()  { Pre(); _sb.Append("["); Push(']'); }
             public void EndArray()    { Pop(); NewLine(); _sb.Append("]"); }
+
+            /// <summary>How many objects and arrays are open; the mark <see cref="UnwindTo"/> takes.</summary>
+            public int Depth => _firstStack.Count;
+
+            /// <summary>Closes everything opened past <paramref name="depth"/>, answering a name still waiting for
+            /// its value with null.</summary>
+            public void UnwindTo(int depth)
+            {
+                if (_suppressPre) Value(null);
+                while (_firstStack.Count > depth)
+                {
+                    char closer = _closers.Peek();
+                    Pop();
+                    NewLine();
+                    _sb.Append(closer);
+                }
+            }
 
             public void PropName(string name) { Pre(); _sb.Append(Quote(name)).Append(": "); _suppressPre = true; }
             public void Prop(string name, string val)  { PropName(name); Value(val); }
@@ -437,8 +454,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                     NewLine();
                 }
             }
-            private void Push() { _firstStack.Push(true); _indent++; }
-            private void Pop()  { if (_firstStack.Count > 0) _firstStack.Pop(); _indent--; }
+            private void Push(char closer) { _firstStack.Push(true); _closers.Push(closer); _indent++; }
+            private void Pop()  { if (_firstStack.Count > 0) { _firstStack.Pop(); _closers.Pop(); } _indent--; }
             private void NewLine() { _sb.Append('\n').Append(new string(' ', _indent * 2)); }
 
             private static string Quote(string s)

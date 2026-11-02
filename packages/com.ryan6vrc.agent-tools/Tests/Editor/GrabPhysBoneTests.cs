@@ -48,6 +48,22 @@ public class GrabPhysBoneTests
         Assert.IsFalse(GrabPhysBone.TryParseHandle("1.2", out a, out b));
     }
 
+    // ── Recovery report ───────────────────────────────────────────────────────────────────────────
+
+    [Test]
+    public void RecoveryReport_blamesTheManagerOnlyWhenItIsGone()
+    {
+        var restored = new List<string> { "re-adopted 1 grab handle(s)" };
+
+        string alive = GrabPhysBone.RecoveryReport(restored, false, true);
+        StringAssert.DoesNotContain("died with the PhysBoneManager", alive);
+        StringAssert.Contains("frame count is void", alive);
+
+        string gone = GrabPhysBone.RecoveryReport(restored, false, false);
+        StringAssert.Contains("died with the PhysBoneManager", gone);
+        StringAssert.Contains("frame count is void", gone);
+    }
+
     // ── Restore record codec ──────────────────────────────────────────────────────────────────────
 
     [Test]

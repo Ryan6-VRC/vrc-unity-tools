@@ -246,7 +246,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
             int dot = compProp.IndexOf('.');
             if (dot < 0)
                 throw new EmitException(
-                    $"clip binding '{target}' is neither a declared AAP param nor a 'path/Component.property' scene binding");
+                    $"clip binding '{target}' is neither a declared Animator parameter nor a 'path/Component.property' scene binding");
             string typeName = compProp.Substring(0, dot);
             string prop = compProp.Substring(dot + 1);
             return EditorCurveBinding.FloatCurve(path, ResolveComponentType(typeName), prop);

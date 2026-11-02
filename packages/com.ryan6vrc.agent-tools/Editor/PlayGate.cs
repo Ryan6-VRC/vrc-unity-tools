@@ -64,7 +64,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                         {
                             Tag = "PlayGate",
                             Message = "play gate threw while evaluating — blocking to be safe:\n" + e,
-                            Fix = "fix the exception above; or override this one entry via the menu below",
+                            Fix = "fix the exception above; or override this one entry via the menu on this block's first line",
                         },
                     },
                 });

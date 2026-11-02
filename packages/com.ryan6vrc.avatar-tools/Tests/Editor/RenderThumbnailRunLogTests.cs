@@ -28,7 +28,7 @@ public class RenderThumbnailRunLogTests
     public void SessionLog_writesTheArtifactAndCarriesTheTrailerInBand()
     {
         var s = Record(RenderThumbnailCore.WriteSessionLog(
-            "renderthumbnailplay-begin", "TestAvatar", "Begin TestAvatar => READY-TO-PLAY", "# body\n"));
+            "renderthumbnailplay-begin", "TestAvatar", "Run TestAvatar => READY-TO-PLAY", "# body\n"));
 
         StringAssert.Contains("=> READY-TO-PLAY", s);
         StringAssert.Contains("| log=", s);

@@ -375,11 +375,10 @@ public class UploadAvatarLoopTests
     [Test]
     public void ClassifyAvatar_NullReturnsNamedRow_NoThrow()
     {
-        Assert.DoesNotThrow(() => {
-            var r = UploadAvatar.ClassifyAvatar(null);
-            Assert.AreEqual("unknown", r.state);
-            Assert.AreEqual("(null)", r.publishName);
-        });
+        (string state, string publishName) r = default;
+        Assert.DoesNotThrow(() => r = UploadAvatar.ClassifyAvatar(null));
+        Assert.AreEqual("unknown", r.state);
+        Assert.AreEqual("(null)", r.publishName);
     }
 
     // A fake in the SDK's ApiErrorException shape: status and server text are public fields and Message is

@@ -123,7 +123,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 return new AutoResult { Refusal = "mergeSite: " + siteHandle.Refusal };
             var site = siteHandle.Object;
 
-            var descriptor = site.GetComponentInParent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>();
+            var descriptor = site.GetComponentInParent<VRC.SDK3.Avatars.Components.VRCAvatarDescriptor>(true);
             GameObject avatarGO = descriptor != null ? descriptor.gameObject : null;
             if (avatarGO == null)
                 notes.Add("no VRCAvatarDescriptor found above mergeSite '" + mergeSite + "' — avatar-root basis unresolved.");
@@ -136,7 +136,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 string fn = c.GetType().FullName ?? "";
                 if (fn == "nadena.dev.modular_avatar.core.ModularAvatarMergeAnimator")
                 {
-                    var m = ParseMergeAnimator(c, controller, avatarGO);
+                    var m = ParseMergeAnimator(c, controller, avatarGO, notes);
                     if (m != null) mergeMatches.Add(m.Value);
                 }
                 else if (fn == "VF.Model.VRCFury")
@@ -333,10 +333,13 @@ namespace Ryan6Vrc.AgentTools.Editor
             return resolved;
         }
 
-        private static AutoResult? ParseMergeAnimator(Component c, AnimatorController controller, GameObject avatarGO)
+        private static AutoResult? ParseMergeAnimator(Component c, AnimatorController controller, GameObject avatarGO, List<string> notes)
         {
             if (!TryMaFrame(c, avatarGO, out var discovered, out var frame)) return null;
             if (discovered != controller) return null;
+            if (frame.UnreflectedAnchor != null)
+                notes.Add("MA MergeAnimator on '" + PathOf(c.gameObject) + "': '" + frame.UnreflectedAnchor + "' did not " +
+                          "reflect (Modular Avatar API drift/absent), so its mount is best-effort and brokenBinding may be wrong.");
             return frame.IsAbsolute
                 ? new AutoResult
                 {

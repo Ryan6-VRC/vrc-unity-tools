@@ -171,6 +171,22 @@ public class CleanControllerMutationTests
     }
 
     [Test]
+    public void WhatIf_on_a_reused_clean_controller_fails_the_name_execute_fails()
+    {
+        var src = BuildSourceFx(Root + "/Src.controller");
+        BuildAvatarWithFxSlot();
+        StringAssert.Contains("=> PASS", CleanController.Run(src, _avatar, Root, new[] { "GestureLeft" }));
+
+        // That run trimmed GestureRight from Src_Clean; the source still carries it.
+        LogAssert.Expect(LogType.Error, new Regex("GestureRight"));
+        string preview = CleanController.Run(src, _avatar, Root, new[] { "GestureRight" }, whatIf: true);
+        LogAssert.Expect(LogType.Error, new Regex("GestureRight"));
+        string execute = CleanController.Run(src, _avatar, Root, new[] { "GestureRight" });
+        StringAssert.Contains("=> FAIL", preview);
+        StringAssert.Contains("=> FAIL", execute);
+    }
+
+    [Test]
     public void RunLog_is_the_shared_envelope()
     {
         var src = BuildSourceFx(Root + "/Src.controller");
