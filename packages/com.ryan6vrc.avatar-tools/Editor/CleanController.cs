@@ -67,6 +67,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     {
                         return Fail(data, label, previewSelErr);
                     }
+                    string previewSyncErr = SyncedSourceError(previewLayers, previewKeepIdx);
+                    if (previewSyncErr != null) return Fail(data, label, previewSyncErr);
                     var previewKeptNames = new string[previewKeepIdx.Length];
                     for (int i = 0; i < previewKeepIdx.Length; i++) previewKeptNames[i] = previewLayers[previewKeepIdx[i]].name;
                     data.LayerCount = previewKeepIdx.Length;
@@ -165,9 +167,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 string selErr;
                 int[] keepIdx = SelectLayersToKeep(allNames, keepLayerNames, out selErr);
                 if (keepIdx == null) return Fail(data, label, selErr);
-                var keepSet = new HashSet<int>(keepIdx);
-                for (int i = ctrl.layers.Length - 1; i >= 0; i--)
-                    if (!keepSet.Contains(i)) ctrl.RemoveLayer(i);
+                string syncErr = SyncedSourceError(ctrl.layers, keepIdx);
+                if (syncErr != null) return Fail(data, label, syncErr);
+                TrimLayers(ctrl, keepIdx);
 
                 data.LayerCount = ctrl.layers.Length;
                 var names = new string[data.LayerCount];
@@ -366,6 +368,50 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 keep.Add(hits[0]);
             }
             var arr = new int[keep.Count]; keep.CopyTo(arr); return arr;
+        }
+
+        /// <summary>The refusal for a keep set holding a synced layer without the layer it borrows; null when it can be trimmed.</summary>
+        internal static string SyncedSourceError(AnimatorControllerLayer[] layers, int[] keepIdx)
+        {
+            foreach (int i in keepIdx)
+            {
+                int src = layers[i].syncedLayerIndex;
+                if (src < 0 || Array.IndexOf(keepIdx, src) >= 0) continue;
+                string srcName = src < layers.Length ? "'" + layers[src].name + "'" : "index " + src;
+                return "synced layer '" + layers[i].name + "' borrows layer " + srcName + ", which this keep list trims; keep both or neither";
+            }
+            return null;
+        }
+
+        /// <summary>Removes every layer <paramref name="keepIdx"/> (sorted) omits, keeping each synced layer on its source.
+        /// <c>RemoveLayer</c> does not re-index <c>syncedLayerIndex</c>, and the <c>layers</c> setter drops a layer left synced
+        /// to itself, so synced layers wait on layer 0 until the removals finish.</summary>
+        internal static void TrimLayers(AnimatorController ctrl, int[] keepIdx)
+        {
+            var before = ctrl.layers;
+            if (keepIdx.Length == before.Length) return;
+
+            var sources = new int[before.Length];
+            bool anySynced = false;
+            for (int i = 0; i < before.Length; i++)
+            {
+                sources[i] = before[i].syncedLayerIndex;
+                if (i > 0 && sources[i] >= 0) { before[i].syncedLayerIndex = 0; anySynced = true; }
+            }
+            if (anySynced) ctrl.layers = before;
+
+            var keep = new HashSet<int>(keepIdx);
+            for (int i = before.Length - 1; i >= 0; i--)
+                if (!keep.Contains(i)) ctrl.RemoveLayer(i);
+            if (!anySynced) return;
+
+            var after = ctrl.layers;
+            for (int pos = 1; pos < keepIdx.Length; pos++)
+            {
+                int src = sources[keepIdx[pos]];
+                if (src >= 0) after[pos].syncedLayerIndex = Array.IndexOf(keepIdx, src);
+            }
+            ctrl.layers = after;
         }
 
         private static string AppendNote(string existing, string note)

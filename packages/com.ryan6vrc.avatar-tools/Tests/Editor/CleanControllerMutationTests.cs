@@ -186,6 +186,51 @@ public class CleanControllerMutationTests
         StringAssert.Contains("=> FAIL", execute);
     }
 
+    // Layers [Base, Drop, then Source and Synced in the given order]. The two orders are the two ways a stale or
+    // shifted index lands on the synced layer itself.
+    AnimatorController BuildSyncedFx(string path, bool sourceFirst)
+    {
+        var c = AnimatorController.CreateAnimatorControllerAtPath(path);
+        c.AddLayer("Drop");
+        c.AddLayer("Source");
+        int sourceIdx = sourceFirst ? 2 : 3;
+        var idle = c.layers[2].stateMachine.AddState("Idle");
+        var synced = new AnimatorControllerLayer { name = "Synced", syncedLayerIndex = sourceIdx };
+        synced.SetOverrideMotion(idle, AnimatorTestHelpers.MakeClip(Root + "/override.anim"));
+        var list = new List<AnimatorControllerLayer>(c.layers);
+        list.Insert(sourceFirst ? 3 : 2, synced);
+        c.layers = list.ToArray();
+        AssetDatabase.SaveAssets();
+        return c;
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public void Trim_keeps_a_synced_layer_on_its_source_and_its_override(bool sourceFirst)
+    {
+        var src = BuildSyncedFx(Root + "/Src.controller", sourceFirst);
+        BuildAvatarWithFxSlot();
+        StringAssert.Contains("=> PASS", CleanController.Run(src, _avatar, Root, new[] { "Source", "Synced" }));
+
+        var layers = AssetDatabase.LoadAssetAtPath<AnimatorController>(Root + "/Src_Clean.controller").layers;
+        Assert.AreEqual(3, layers.Length);
+        int s = System.Array.FindIndex(layers, l => l.name == "Synced");
+        int source = System.Array.FindIndex(layers, l => l.name == "Source");
+        Assert.AreEqual(source, layers[s].syncedLayerIndex);
+        Assert.IsNotNull(layers[s].GetOverrideMotion(layers[source].stateMachine.states[0].state));
+    }
+
+    [Test]
+    public void Trimming_a_kept_synced_layers_source_refuses_on_preview_and_execute()
+    {
+        var src = BuildSyncedFx(Root + "/Src.controller", sourceFirst: true);
+        BuildAvatarWithFxSlot();
+        LogAssert.Expect(LogType.Error, new Regex("borrows layer 'Source'"));
+        StringAssert.Contains("=> FAIL", CleanController.Run(src, _avatar, Root, new[] { "Synced" }, whatIf: true));
+        LogAssert.Expect(LogType.Error, new Regex("borrows layer 'Source'"));
+        StringAssert.Contains("=> FAIL", CleanController.Run(src, _avatar, Root, new[] { "Synced" }));
+    }
+
     [Test]
     public void RunLog_is_the_shared_envelope()
     {
@@ -197,7 +242,7 @@ public class CleanControllerMutationTests
         var json = System.IO.File.ReadAllText(path);
         StringAssert.Contains("\"kind\": \"clean-controller\"", json);
         StringAssert.Contains("\"source\": \"Src\"", json);
-        StringAssert.DoesNotContain("\"sourceFx\"", json, "old bespoke key renamed to the envelope's source");
+        StringAssert.DoesNotContain("\"sourceFx\"", json, "the envelope carries the source as 'source', not 'sourceFx'");
         StringAssert.Contains("\"ctrlParamsKept\"", json);
         UnityEditor.AssetDatabase.DeleteAsset(path);
     }
