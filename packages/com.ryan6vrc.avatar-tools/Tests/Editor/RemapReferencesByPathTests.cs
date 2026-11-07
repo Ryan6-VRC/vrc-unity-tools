@@ -16,10 +16,9 @@ public class RemapReferencesByPathTests
     }
 
     // These tests assert the read-only resolver's DECISION (IndexedPath.FindByIndexedPath /
-    // RemapReferencesByPath.Counterpart), not Remap's SerializedObject write-through: NUnit must not mutate
-    // what it later destroys (docs/verify.md §Test venue). Remap's result aggregation (remapped/nulled counts,
-    // renameWarnings population) is therefore not asserted here; a transplant on a real avatar via execute_code
-    // verifies it.
+    // RemapReferencesByPath.Counterpart), not Remap's SerializedObject write-through. Remap's result aggregation
+    // (remapped/nulled counts, renameWarnings population) is not asserted here; a transplant on a real avatar via
+    // execute_code verifies it.
 
     [Test]
     public void RenameMap_resolves_ref_across_renamed_armature_root_and_disambiguates_dup()

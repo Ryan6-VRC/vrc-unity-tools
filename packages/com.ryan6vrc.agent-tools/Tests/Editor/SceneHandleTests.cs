@@ -9,8 +9,6 @@ using UnityEngine.SceneManagement;
 //
 // The out-of-scene case uses a preview scene, valid and loaded but never active, because NewScene(Additive)
 // throws on the batchmode venue's unsaved untitled scene.
-//
-// Objects are built and read, never mutated (docs/verify.md §Test venue).
 public class SceneHandleTests
 {
     private readonly List<GameObject> _roots = new List<GameObject>();

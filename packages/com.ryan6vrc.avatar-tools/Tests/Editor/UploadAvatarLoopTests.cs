@@ -355,44 +355,28 @@ public class UploadAvatarLoopTests
         StringAssert.Contains(phase, UploadAvatar.DoneTest);
     }
 
-    // Python's open() and PowerShell's Get-Content share read and write but not delete, which makes the
-    // atomic replace fail for as long as the waiter holds the file. The write must still land, or the
-    // record stays at "running" after the batch ends and the waiter loops forever.
+    // Python's open() and PowerShell's Get-Content share read and write but not delete, which makes the atomic
+    // replace fail for as long as the waiter holds the file. The record must stay whole meanwhile (no torn read),
+    // and the terminal write must land once the reader lets go, or the waiter loops on "running" forever.
     [Test]
-    public void WriteStatusFile_LandsWhileAReaderHoldsTheFileWithoutDeleteSharing()
+    public void PendingWrite_IsRefusedWhileAReaderHoldsTheFileAndLandsOnceItLetsGo()
     {
         var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "uploadstatus_" + System.Guid.NewGuid().ToString("N"));
         var path = System.IO.Path.Combine(dir, "status.json");
         System.IO.Directory.CreateDirectory(dir);
         try
         {
-            System.IO.File.WriteAllText(path, UploadAvatar.BuildStatusJson("b", "running", "uploading", 0, 1, "A", "T"));
-            var done = UploadAvatar.BuildStatusJson("b", "done-pass", "ok", -1, 1, null, "T");
+            var running = UploadAvatar.BuildStatusJson("b", "running", "uploading", 0, 1, "A", "T");
+            System.IO.File.WriteAllText(path, running);
+            var pending = new UploadAvatar.PendingWrite(path, UploadAvatar.BuildStatusJson("b", "done-pass", "ok", -1, 1, null, "T"));
             using (new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite))
-                Assert.IsTrue(UploadAvatar.WriteStatusFile(path, done, out var why), "the write was refused: " + why);
-            Assert.AreEqual(done, System.IO.File.ReadAllText(path));
-        }
-        finally { System.IO.Directory.Delete(dir, true); }
-    }
-
-    // A holder that shares nothing refuses every write; the terminal record is retried, not dropped.
-    [Test]
-    public void PendingWrite_FailsUnderAnExclusiveLockAndLandsOnceItLifts()
-    {
-        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "uploadstatus_" + System.Guid.NewGuid().ToString("N"));
-        var path = System.IO.Path.Combine(dir, "status.json");
-        System.IO.Directory.CreateDirectory(dir);
-        try
-        {
-            System.IO.File.WriteAllText(path, "{}");
-            var pending = new UploadAvatar.PendingWrite(path, UploadAvatar.BuildStatusJson("b", "done-fail", "x", -1, 1, null, "T"));
-            using (new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None))
             {
                 Assert.IsFalse(pending.Attempt());
                 Assert.IsNotNull(pending.why, "a refused write names why, for Status() to relay");
             }
-            Assert.IsTrue(pending.Attempt());
-            StringAssert.Contains("\"phase\":\"done-fail\"", System.IO.File.ReadAllText(path));
+            Assert.AreEqual(running, System.IO.File.ReadAllText(path), "a refused write leaves the record whole");
+            Assert.IsTrue(pending.Attempt(), "the write was refused after the reader let go: " + pending.why);
+            StringAssert.Contains("\"phase\":\"done-pass\"", System.IO.File.ReadAllText(path));
         }
         finally { System.IO.Directory.Delete(dir, true); }
     }

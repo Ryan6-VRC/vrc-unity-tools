@@ -288,6 +288,15 @@ public class DynamicsDoorsTests
         Assert.IsFalse(DrivePhysBones.RigidBySetting(true, 1f, AnimationCurve.Linear(0f, 1f, 1f, 0.5f)));
     }
 
+    // Both keys at 1, but the tangents carry the curve to ~0 at t=0.5: a key-only read would call it rigid.
+    [Test]
+    public void RigidBySetting_aTangentDipBetweenKeysAtOneFreesTheChain()
+    {
+        var dip = new AnimationCurve(new Keyframe(0f, 1f, 0f, -4f), new Keyframe(1f, 1f, 4f, 0f));
+        Assert.Less(dip.Evaluate(0.5f), 1f, "precondition: the curve dips between its keys");
+        Assert.IsFalse(DrivePhysBones.RigidBySetting(true, 1f, dip));
+    }
+
     [Test]
     public void NoSolve_putsARigidChainBesideTheDeadOnesNotAmongThem()
     {

@@ -6,8 +6,8 @@ using Ryan6Vrc.AvatarTools.Editor;
 namespace Ryan6Vrc.AvatarTools.Tests
 {
     // Scene-free helpers only. Expression resolution needs a BAKED avatar, so it is verified live
-    // (execute_code), never in NUnit. No test here may create a GameObject, add a VRC_AvatarDescriptor, or
-    // call RenderThumbnail.Run: docs/verify.md §Test venue.
+    // (execute_code), never in NUnit; RenderThumbnail.Run needs one too, so no test here calls it
+    // (docs/verify.md §Test venue).
     //
     // The pose tests stay glob-driven and name no specific RTPose_*: the bundled set is content, and it
     // changes by dropping files into the folder.

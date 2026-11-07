@@ -335,14 +335,15 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         internal static float ProgramSeconds(PoseList pl, float hold) => hold + pl.poses.Sum(p => p.ramp + (p.hold >= 0 ? p.hold : hold));
 
-        /// <summary>0 for no per-frame measure, -1 for a malformed <c>every:N</c>.</summary>
         /// <summary>A chain whose settings carry it with its parent: immobile 1 against all motion, at every bone. Its tips
-        /// cannot move in its frame under a pose, so a still chain there is the setting working, not a solve that never ran.</summary>
+        /// cannot move in its frame under a pose, so a still chain there is the setting working, not a solve that never ran.
+        /// The curve is sampled, not read at its keys: tangents can carry it below 1 between two keys at 1.</summary>
         internal static bool RigidBySetting(bool allMotion, float immobile, AnimationCurve curve)
         {
             if (!allMotion || immobile < 1f) return false;
             if (curve == null || curve.length == 0) return true;
-            return curve.keys.All(k => k.value >= 1f);
+            for (int i = 0; i <= 64; i++) if (curve.Evaluate(i / 64f) < 1f) return false;
+            return true;
         }
 
         /// <summary>Of the chains whose frame moved with no tip moving in it, those that should have moved, and those
@@ -369,6 +370,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             return " worst " + chains[w] + " " + N(endSums[w] / frames * 1000, "F2");
         }
 
+        /// <summary>0 for no per-frame measure, -1 for a malformed <c>every:N</c>.</summary>
         internal static int EveryStride(string sample)
         {
             if (sample == "every") return 1;
@@ -556,7 +558,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 }
             }
             SessionState.EraseString(RecordKey);
-            var line = Tag + " Recover => FAIL | a domain reload tore down a drive mid-flight: " + what + controlNote + "; its rows are void";
+            var line = Tag + " Recover => FAIL | rows=void | a domain reload tore down a drive mid-flight: " + what + controlNote + "; its rows are void";
             var logPath = SessionState.GetString(LogKey, "");
             if (logPath.Length > 0 && File.Exists(logPath)) try { File.AppendAllText(logPath, "\n" + line + "\n"); line += " | log=" + logPath; } catch (Exception) { }
             SessionState.SetString(Key, line + "\n" + prior);

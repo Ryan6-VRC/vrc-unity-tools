@@ -200,17 +200,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (_inflight != null) BatchStatus();
             if (!CauReflect.TryGetBuilder(out var builder, out var whyBuilder))
                 return Refuse(whyBuilder);
-            _terminalSummary = null;
-            StopTerminalRetry();
-            _batchTotal = avatars != null ? avatars.Length : 0;
-            _batchId = Guid.NewGuid().ToString("N");
-
-            if (!WriteStatus("started", "batch started (" + _batchTotal + " avatar(s))", -1, null, out var whyStatus))
-            {
-                _batchId = null;
+            // A refused start must leave the previous batch's state alone, its pending terminal write included,
+            // so nothing is committed until the "started" record is on disk.
+            int total = avatars != null ? avatars.Length : 0;
+            string batchId = Guid.NewGuid().ToString("N");
+            var started = BuildStatusJson(batchId, "started", "batch started (" + total + " avatar(s))", -1, total, null,
+                                          DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+            if (!WriteStatusFile(StatusPath, started, out var whyStatus))
                 return Refuse("cannot write the status file (" + whyStatus + ") — refusing to start: a " +
                               "stale record would read as this batch's result. Path: " + StatusPath);
-            }
+            _terminalSummary = null;
+            StopTerminalRetry();
+            _batchTotal = total;
+            _batchId = batchId;
 
             _lastWasPreview = false;
             _inflight = RunBatch(avatars, LiveRead, CurrentUserId(),
@@ -277,9 +279,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             return false;
         }
 
-        /// <summary>Temp + replace, falling back to an in-place overwrite. A reader that opened the file without
-        /// delete sharing (Python's <c>open</c>, PowerShell's <c>Get-Content</c>) makes the replace fail for as
-        /// long as it holds the handle, but it shares write, so the overwrite lands.</summary>
+        /// <summary>Temp + replace, so a poller never reads a torn record. A reader that opened the file without
+        /// delete sharing (Python's <c>open</c>, PowerShell's <c>Get-Content</c>) makes the replace fail while it
+        /// holds the handle; the terminal record is retried until a poll lets go (<see cref="WriteTerminalStatus"/>).</summary>
         internal static bool WriteStatusFile(string path, string json, out string why)
         {
             why = null;
@@ -288,20 +290,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
                 var tmp = path + ".tmp";
                 File.WriteAllText(tmp, json);
-                try
-                {
-                    // Replace, not Delete+Move: this runtime's File.Move has no overwrite overload, and
-                    // delete-then-move leaves a window in which the poller reads "no file at all".
-                    // File.Replace maps to ReplaceFile (atomic on NTFS); it requires an existing target,
-                    // so the very first write is a plain Move.
-                    if (File.Exists(path)) File.Replace(tmp, path, null);
-                    else File.Move(tmp, path);
-                }
-                catch (Exception)
-                {
-                    File.WriteAllText(path, json);
-                    File.Delete(tmp);
-                }
+                // Replace, not Delete+Move: this runtime's File.Move has no overwrite overload, and
+                // delete-then-move leaves a window in which the poller reads "no file at all".
+                // File.Replace maps to ReplaceFile (atomic on NTFS); it requires an existing target,
+                // so the very first write is a plain Move.
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
                 return true;
             }
             catch (Exception e)

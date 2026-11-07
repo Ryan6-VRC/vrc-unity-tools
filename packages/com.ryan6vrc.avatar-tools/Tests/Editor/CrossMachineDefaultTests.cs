@@ -10,8 +10,7 @@ using UnityEngine;
 // §Cross-machine addressing). Dropping such a default rebuilds the layer booting its first direct state yet still
 // reaches a perfect TEXTUAL fixpoint, so several of these assert on the built graph rather than on the decoded YAML.
 //
-// Controllers are seeded asset-backed because sub-machines and their entry transitions are sub-assets. Seed through
-// the AnimatorController API, never a SerializedObject write (docs/verify.md §Test venue).
+// Controllers are seeded asset-backed because sub-machines and their entry transitions are sub-assets.
 public class CrossMachineDefaultTests
 {
     private const string TestRoot = "Assets/Agent/Scratch/xmdefault";

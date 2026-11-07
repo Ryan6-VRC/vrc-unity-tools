@@ -156,6 +156,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var ourNameCounts = new Dictionary<string, int>(StringComparer.Ordinal);
             foreach (var kv in nameToTransforms) ourNameCounts[kv.Key] = kv.Value.Count;
             conformed = KeepOwnTargets(conformed, existingHuman, ourNameCounts, vendorModelNames, out var kept);
+            for (int i = 0; i < conformed.Count; i++)
+            {
+                var hb = conformed[i];
+                if (hb.limit.useDefaultValues || !kept.Exists(k => k.humanName == hb.humanName)) continue;
+                var lim = hb.limit;
+                lim.axisLength = DeriveAxisLength(nameToTransforms[hb.boneName][0]);
+                hb.limit = lim;
+                conformed[i] = hb;
+            }
             var keptMap = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var k in kept) keptMap[k.humanName] = k.boneName;
 
