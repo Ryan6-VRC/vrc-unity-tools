@@ -43,6 +43,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 return Fail(ourFbxPath, "No ModelImporter at vendor path: " + vendorAssetPath
                     + " — vendorAvatarSource must be the root of a model (FBX) asset, not a prefab or scene object.");
 
+            // Read before anything below rewrites the importer: the keep rule in step 6 compares against it.
+            var existingHuman = ourImp.humanDescription.human ?? new HumanBone[0];
+
             // ── 2. Apply standard import settings on our importer ─────────────────────────────
 
             ourImp.isReadable = true;
@@ -146,6 +149,25 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 conformed.Add(hb);
             }
 
+            var vendorModelNames = new HashSet<string>(StringComparer.Ordinal);
+            var vendorModelPre = AssetDatabase.LoadAssetAtPath<GameObject>(vendorAssetPath);
+            if (vendorModelPre != null)
+                foreach (var t in vendorModelPre.GetComponentsInChildren<Transform>(true)) vendorModelNames.Add(t.name);
+            var ourNameCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var kv in nameToTransforms) ourNameCounts[kv.Key] = kv.Value.Count;
+            conformed = KeepOwnTargets(conformed, existingHuman, ourNameCounts, vendorModelNames, out var kept);
+            for (int i = 0; i < conformed.Count; i++)
+            {
+                var hb = conformed[i];
+                if (hb.limit.useDefaultValues || !kept.Exists(k => k.humanName == hb.humanName)) continue;
+                var lim = hb.limit;
+                lim.axisLength = DeriveAxisLength(nameToTransforms[hb.boneName][0]);
+                hb.limit = lim;
+                conformed[i] = hb;
+            }
+            var keptMap = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var k in kept) keptMap[k.humanName] = k.boneName;
+
             // ── 7. Assemble the FULL humanDescription: mapping + our bind + vendor muscles ─────
             var ourHd = ourImp.humanDescription;
             ourHd.human = conformed.ToArray();
@@ -190,7 +212,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                         Kind = "missing"
                     });
                 }
-                else if (!string.Equals(ourBoneName, vb.boneName, StringComparison.Ordinal))
+                else if (!string.Equals(ourBoneName, vb.boneName, StringComparison.Ordinal) &&
+                         !(keptMap.TryGetValue(vb.humanName, out var keptBone) &&
+                           string.Equals(ourBoneName, keptBone, StringComparison.Ordinal)))
                 {
                     mismatches.Add(new BoneDiff
                     {
@@ -239,12 +263,16 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             bool pass = failReason == null;
             string label = TransplantCore.Leaf(ourFbxPath);
+            var keptText = new List<string>();
+            foreach (var k in kept) keptText.Add(k.humanName + "→" + k.boneName);
             string logPath = WriteRunLog(label, ourFbxPath, vendorAssetPath, totalVendorBones, bonesMatched,
-                boneDiff, poseDriftMm, skipped, mismatches, pass ? "PASS" : "FAIL", failReason);
+                boneDiff, poseDriftMm, skipped, keptText, mismatches, pass ? "PASS" : "FAIL", failReason);
 
             string summary = string.Format(CultureInfo.InvariantCulture,
-                "[MatchHumanoidRig] {0}: bones={1}/{2} diff={3} poseDriftMm={4}(info) => {5}{6}{7}",
-                label, bonesMatched, totalVendorBones, boneDiff, poseDriftMm, pass ? "PASS" : "FAIL",
+                "[MatchHumanoidRig] {0}: bones={1}/{2} diff={3}{4} poseDriftMm={5}(info) => {6}{7}{8}",
+                label, bonesMatched, totalVendorBones, boneDiff,
+                kept.Count > 0 ? " kept=" + kept.Count + " (" + string.Join(", ", keptText) + "; ours, on transforms the vendor lacks)" : "",
+                poseDriftMm, pass ? "PASS" : "FAIL",
                 pass ? "" : " " + failReason,
                 logPath != null ? " | log=" + logPath : "");
 
@@ -411,7 +439,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
         private static string WriteRunLog(
             string label, string ourFbxPath, string vendorFbxPath,
             int totalVendorBones, int bonesMatched, int boneDiff, int poseDriftMm,
-            List<string> skipped, List<BoneDiff> mismatches, string result, string failReason)
+            List<string> skipped, List<string> kept, List<BoneDiff> mismatches, string result, string failReason)
         {
             try
             {
@@ -434,6 +462,11 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 sb.Append("  \"skippedVendorBones\": [");
                 for (int i = 0; i < skipped.Count; i++)
                     sb.Append(i == 0 ? "" : ", ").Append(TransplantCore.Q(skipped[i]));
+                sb.Append("],\n");
+
+                sb.Append("  \"keptOwnMappings\": [");
+                for (int i = 0; i < kept.Count; i++)
+                    sb.Append(i == 0 ? "" : ", ").Append(TransplantCore.Q(kept[i]));
                 sb.Append("],\n");
 
                 sb.Append("  \"boneMismatches\": [");
@@ -459,6 +492,28 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 Debug.LogWarning("[MatchHumanoidRig] Could not write RunLog: " + ex.Message);
                 return null;
             }
+        }
+
+        /// <summary>The vendor's mapping, except that an entry our importer already holds survives when its
+        /// transform exists once in our model and nowhere in the vendor's: a target the base added on purpose,
+        /// such as an unweighted <c>Head_Proxy</c>. It keeps its own limits. An entry pointing at a transform both
+        /// models carry is conformed to the vendor's, so an auto-guessed mapping is still corrected.</summary>
+        internal static List<HumanBone> KeepOwnTargets(List<HumanBone> vendorConformed, HumanBone[] existing,
+            IDictionary<string, int> ourNameCounts, ICollection<string> vendorModelNames, out List<HumanBone> kept)
+        {
+            kept = new List<HumanBone>();
+            var result = new List<HumanBone>(vendorConformed);
+            if (existing == null) return result;
+            foreach (var e in existing)
+            {
+                if (string.IsNullOrEmpty(e.boneName) || vendorModelNames.Contains(e.boneName)) continue;
+                if (!ourNameCounts.TryGetValue(e.boneName, out int n) || n != 1) continue;
+                int at = result.FindIndex(h => h.humanName == e.humanName);
+                if (at >= 0 && result[at].boneName == e.boneName) continue;
+                if (at >= 0) result[at] = e; else result.Add(e);
+                kept.Add(e);
+            }
+            return result;
         }
 
         // Unity's 15 REQUIRED humanoid bones (absence makes the avatar non-humanoid). Chest/Neck/shoulders/

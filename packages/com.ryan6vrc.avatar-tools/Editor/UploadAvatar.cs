@@ -67,6 +67,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         static System.Threading.Tasks.Task<UploadReport> _inflight;
         static string _terminalSummary;
+        // The terminal record while it has not reached disk: a reader holding the file can refuse the write.
+        static PendingWrite _pendingTerminal;
         // The in-flight whatIf. Its live reads progress only on the editor update loop, so it is kicked and
         // polled like the batch.
         static System.Threading.Tasks.Task<string> _preview;
@@ -198,16 +200,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (_inflight != null) BatchStatus();
             if (!CauReflect.TryGetBuilder(out var builder, out var whyBuilder))
                 return Refuse(whyBuilder);
-            _terminalSummary = null;
-            _batchTotal = avatars != null ? avatars.Length : 0;
-            _batchId = Guid.NewGuid().ToString("N");
-
-            if (!WriteStatus("started", "batch started (" + _batchTotal + " avatar(s))", -1, null, out var whyStatus))
-            {
-                _batchId = null;
+            // A refused start must leave the previous batch's state alone, its pending terminal write included,
+            // so nothing is committed until the "started" record is on disk.
+            int total = avatars != null ? avatars.Length : 0;
+            string batchId = Guid.NewGuid().ToString("N");
+            var started = BuildStatusJson(batchId, "started", "batch started (" + total + " avatar(s))", -1, total, null,
+                                          DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+            if (!WriteStatusFile(StatusPath, started, out var whyStatus))
                 return Refuse("cannot write the status file (" + whyStatus + ") — refusing to start: a " +
                               "stale record would read as this batch's result. Path: " + StatusPath);
-            }
+            _terminalSummary = null;
+            StopTerminalRetry();
+            _batchTotal = total;
+            _batchId = batchId;
 
             _lastWasPreview = false;
             _inflight = RunBatch(avatars, LiveRead, CurrentUserId(),
@@ -216,10 +221,19 @@ namespace Ryan6Vrc.AvatarTools.Editor
             EditorApplication.update -= Watch;
             EditorApplication.update += Watch;
             return "[upload-avatar] batch started (" + _batchTotal + " avatar(s)) batchId=" + _batchId +
-                   "; poll UploadAvatar.Status(), or read " + StatusPath +
-                   " from disk (survives a wedged editor) — match its batchId to the one above, or you " +
-                   "are reading a previous batch";
+                   "; poll UploadAvatar.Status() until it stops answering \"running…\". When the editor is " +
+                   "wedged, read " + StatusPath + " instead: match its batchId to the one above or you are " +
+                   "reading a previous batch, and " + DoneTest;
         }
+
+        /// <summary>What a reader of the status file keys on: the record's own fields, stated once.</summary>
+        internal const string DoneTest =
+            "the batch is finished when \"done\":true (phase done-pass, done-fail, faulted or interrupted) and " +
+            "still in flight while \"running\":true (phase started or running)";
+
+        static readonly string[] TerminalPhases = { "done-pass", "done-fail", "faulted", "interrupted" };
+
+        internal static bool IsTerminalPhase(string phase) => Array.IndexOf(TerminalPhases, phase) >= 0;
 
         /// <summary>Finalize the batch the moment it completes, so the RunLog and the status file land even
         /// when MCP is unreachable and no poll arrives.</summary>
@@ -239,6 +253,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             var sb = new StringBuilder();
             sb.Append("{\"batchId\":").Append(TransplantCore.Q(batchId));
             sb.Append(",\"phase\":\"").Append(phase).Append("\"");
+            bool done = IsTerminalPhase(phase);
+            sb.Append(",\"running\":").Append(done ? "false" : "true");
+            sb.Append(",\"done\":").Append(done ? "true" : "false");
             sb.Append(",\"message\":").Append(TransplantCore.Q(UploadAvatarLogic.RedactIds(message)));
             sb.Append(",\"total\":").Append(total.ToString(CultureInfo.InvariantCulture));
             if (index >= 0) sb.Append(",\"index\":").Append(index.ToString(CultureInfo.InvariantCulture));
@@ -255,29 +272,84 @@ namespace Ryan6Vrc.AvatarTools.Editor
         /// catch a torn or empty file.</summary>
         static bool WriteStatus(string phase, string message, int index, string handle, out string why)
         {
+            var json = BuildStatusJson(_batchId, phase, message, index, _batchTotal, handle,
+                                       DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+            if (WriteStatusFile(StatusPath, json, out why)) return true;
+            Debug.LogWarning("[upload-avatar] status write failed: " + why);
+            return false;
+        }
+
+        /// <summary>Temp + replace, so a poller never reads a torn record. A reader that opened the file without
+        /// delete sharing (Python's <c>open</c>, PowerShell's <c>Get-Content</c>) makes the replace fail while it
+        /// holds the handle; the terminal record is retried until a poll lets go (<see cref="WriteTerminalStatus"/>).</summary>
+        internal static bool WriteStatusFile(string path, string json, out string why)
+        {
             why = null;
             try
             {
-                Directory.CreateDirectory(TransplantCore.RunLogDir);
-                var json = BuildStatusJson(_batchId, phase, message, index, _batchTotal, handle,
-                                           DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
-                var tmp = StatusPath + ".tmp";
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                var tmp = path + ".tmp";
                 File.WriteAllText(tmp, json);
                 // Replace, not Delete+Move: this runtime's File.Move has no overwrite overload, and
                 // delete-then-move leaves a window in which the poller reads "no file at all".
                 // File.Replace maps to ReplaceFile (atomic on NTFS); it requires an existing target,
                 // so the very first write is a plain Move.
-                if (File.Exists(StatusPath)) File.Replace(tmp, StatusPath, null);
-                else File.Move(tmp, StatusPath);
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
                 return true;
             }
             catch (Exception e)
             {
                 why = e.Message;
-                Debug.LogWarning("[upload-avatar] status write failed: " + e.Message);
                 return false;
             }
         }
+
+        /// <summary>One status record still owed to disk; <see cref="Attempt"/> is retried until it lands.</summary>
+        internal sealed class PendingWrite
+        {
+            readonly string _path, _json;
+            internal string why;
+            internal PendingWrite(string path, string json) { _path = path; _json = json; }
+            internal bool Attempt() => WriteStatusFile(_path, _json, out why);
+        }
+
+        const double TerminalRetrySeconds = 60;
+        static double _terminalRetryUntil;
+
+        /// <summary>The terminal record is the one a waiter ends on, so a refused write is retried on later
+        /// editor ticks rather than dropped, and named by <see cref="Status"/> until it lands.</summary>
+        static void WriteTerminalStatus(string phase, string message)
+        {
+            StopTerminalRetry();
+            var pending = new PendingWrite(StatusPath, BuildStatusJson(_batchId, phase, message, -1, _batchTotal, null,
+                DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)));
+            if (pending.Attempt()) return;
+            _pendingTerminal = pending;
+            _terminalRetryUntil = EditorApplication.timeSinceStartup + TerminalRetrySeconds;
+            EditorApplication.update += RetryTerminalStatus;
+        }
+
+        static void RetryTerminalStatus()
+        {
+            if (_pendingTerminal == null || _pendingTerminal.Attempt()) { StopTerminalRetry(); return; }
+            if (EditorApplication.timeSinceStartup < _terminalRetryUntil) return;
+            EditorApplication.update -= RetryTerminalStatus;
+            Debug.LogError("[upload-avatar] the status file still reads in flight: its terminal write failed for " +
+                           TerminalRetrySeconds + " s (" + _pendingTerminal.why + "). Status() has the verdict.");
+        }
+
+        static void StopTerminalRetry()
+        {
+            EditorApplication.update -= RetryTerminalStatus;
+            _pendingTerminal = null;
+        }
+
+        /// <summary>The verdict, plus a warning while the status file has not caught up with it.</summary>
+        static string TerminalAnswer()
+            => _pendingTerminal == null ? _terminalSummary
+               : _terminalSummary + " | the status file at " + StatusPath + " was NOT updated to this verdict (" +
+                 _pendingTerminal.why + "); trust this line, not the file";
 
         /// <summary>A domain reload mid-batch (script recompile, play-mode entry) kills <c>_inflight</c> and the
         /// <see cref="Watch"/> registration together but leaves the file asserting a batch in flight, forever.
@@ -288,15 +360,27 @@ namespace Ryan6Vrc.AvatarTools.Editor
             try
             {
                 if (!File.Exists(StatusPath)) return;
-                var txt = File.ReadAllText(StatusPath);
-                if (txt.IndexOf("\"phase\":\"running\"", StringComparison.Ordinal) < 0 &&
-                    txt.IndexOf("\"phase\":\"started\"", StringComparison.Ordinal) < 0) return;
-                File.WriteAllText(StatusPath, txt.TrimEnd().TrimEnd('}') +
-                    ",\"interrupted\":\"the editor domain reloaded while this batch was in flight; " +
-                    "its outcome is UNKNOWN — check the RunLog and the avatar's blueprintId before re-running\"}");
+                var marked = MarkInterrupted(File.ReadAllText(StatusPath));
+                if (marked != null) WriteStatusFile(StatusPath, marked, out _);
             }
             catch { /* best-effort: a startup hook must never throw */ }
         }
+
+        /// <summary>An in-flight record rewritten as the terminal <c>interrupted</c> phase, keeping its batch and
+        /// avatar, or null when the record is already terminal or unreadable.</summary>
+        internal static string MarkInterrupted(string json)
+        {
+            var r = new StatusFields();
+            try { JsonUtility.FromJsonOverwrite(json, r); } catch { return null; }
+            if (r.phase != "running" && r.phase != "started") return null;
+            return BuildStatusJson(r.batchId, "interrupted",
+                "the editor domain reloaded while this batch was in flight; its outcome is UNKNOWN — check the " +
+                "RunLog and the avatar's blueprintId before re-running", r.index, r.total, r.handle,
+                DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+        }
+
+        [Serializable]
+        class StatusFields { public string batchId, phase, handle; public int total; public int index = -1; }
 
         /// <summary>Poll the in-flight batch; repeated polling is idempotent. After a <c>whatIf</c> it answers
         /// for that read instead, until the next batch starts.</summary>
@@ -319,8 +403,8 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (_inflight == null)
                 return "[upload-avatar] no batch or whatIf in flight in this editor domain — a domain reload " +
                        "drops one mid-read, so re-run a whatIf you were polling";
-            if (!_inflight.IsCompleted) return "[upload-avatar] running…";
-            if (_terminalSummary != null) return _terminalSummary;
+            if (!_inflight.IsCompleted) return "[upload-avatar] running… batchId=" + _batchId + " (not finished)";
+            if (_terminalSummary != null) return TerminalAnswer();
 
             if (_inflight.IsFaulted)
             {
@@ -329,16 +413,23 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 var fault = new UploadReport { result = "FAIL" };
                 fault.rows.Add(new Row { handle = "(batch)", state = "unknown", result = "failed",
                                          cls = "real", error = redacted });
-                string faultLog = WriteRunLog(fault, false, "all");
+                string faultLog = TryWriteRunLog(fault);
                 _terminalSummary = "[upload-avatar] batch FAULTED: " + redacted + " | log=" + faultLog;
-                WriteStatus("faulted", _terminalSummary, -1, null, out _);
-                return _terminalSummary;
+                WriteTerminalStatus("faulted", _terminalSummary);
+                return TerminalAnswer();
             }
 
             var report = _inflight.Result;
-            _terminalSummary = BuildSummary(report, false, WriteRunLog(report, false, "all"));
-            WriteStatus(report.result == "PASS" ? "done-pass" : "done-fail", _terminalSummary, -1, null, out _);
-            return _terminalSummary;
+            _terminalSummary = BuildSummary(report, false, TryWriteRunLog(report));
+            WriteTerminalStatus(report.result == "PASS" ? "done-pass" : "done-fail", _terminalSummary);
+            return TerminalAnswer();
+        }
+
+        // A RunLog failure must not cost the terminal status write that follows it.
+        static string TryWriteRunLog(UploadReport report)
+        {
+            try { return WriteRunLog(report, false, "all"); }
+            catch (Exception e) { return "(not written: " + e.Message + ")"; }
         }
 
         /// <summary>The real per-avatar upload. CAU writes a first upload's new blueprintId into the
@@ -425,7 +516,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
         // ── Classification / preconditions ──────────────────────────────────────────────────────
 
-        public static (string state, string publishName) ClassifyAvatar(GameObject go)
+        /// <summary>The local blueprint state and the scene name. A first upload publishes under the scene name;
+        /// an update publishes under the live record's name, which only the preflight reads.</summary>
+        public static (string state, string sceneName) ClassifyAvatar(GameObject go)
         {
             if (go == null) return ("unknown", "(null)");
             return (UploadAvatarLogic.ClassifyBlueprint(LocalBlueprintId(go)), go.name);

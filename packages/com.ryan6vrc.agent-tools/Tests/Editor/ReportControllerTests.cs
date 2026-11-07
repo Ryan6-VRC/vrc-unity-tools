@@ -227,6 +227,50 @@ public class ReportControllerTests
             "synced-layer override break must be live-reachable, not orphan residue");
     }
 
+    // The override API returns null for a dangling override exactly as for none, so the cell used to fall back
+    // to the source's live clip and print "(inherited source)" on what plays nothing at runtime.
+    [Test]
+    public void SyncedLayer_DanglingOverride_RendersBroken_NotInheritedSource()
+    {
+        const string OvGuid = "aaaa1111bbbb2222cccc3333dddd4444";
+
+        var src = _ctrl.layers[0].stateMachine.AddState("Src");
+        var live = new AnimationClip { name = "sourceClip" };
+        AssetDatabase.AddObjectToAsset(live, _ctrl);
+        src.motion = live;
+        _ctrl.AddLayer("Synced");
+        var ls = _ctrl.layers;
+        ls[1].syncedLayerIndex = 0;
+        _ctrl.layers = ls;
+        var ov = new AnimationClip { name = "override" };
+        AssetDatabase.AddObjectToAsset(ov, _ctrl);
+
+        var so = new SerializedObject(_ctrl);
+        var motions = so.FindProperty("m_AnimatorLayers").GetArrayElementAtIndex(1).FindPropertyRelative("m_Motions");
+        motions.arraySize = 1;
+        var e0 = motions.GetArrayElementAtIndex(0);
+        e0.FindPropertyRelative("m_State").objectReferenceValue = src;
+        e0.FindPropertyRelative("m_Motion").objectReferenceValue = ov;
+        so.ApplyModifiedPropertiesWithoutUndo();
+        EditorUtility.SetDirty(_ctrl); AssetDatabase.SaveAssets();
+
+        string path = AssetDatabase.GetAssetPath(_ctrl);
+        AssetDatabase.TryGetGUIDAndLocalFileIdentifier(ov, out _, out long ovLocalId);
+        string yaml = File.ReadAllText(path);
+        string ovRef = "m_Motion: {fileID: " + ovLocalId + "}";
+        StringAssert.Contains(ovRef, yaml, "precondition: override motion serialized into the controller's main block");
+        File.WriteAllText(path, yaml.Replace(ovRef, "m_Motion: {fileID: 7400000, guid: " + OvGuid + ", type: 2}"));
+        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
+
+        string report = ReadReport(AssetDatabase.LoadAssetAtPath<AnimatorController>(path));
+        int syncedAt = report.IndexOf("_synced layer");
+        Assert.That(syncedAt, Is.GreaterThanOrEqualTo(0), "precondition: the layer reads as synced");
+        string synced = report.Substring(syncedAt);
+        StringAssert.Contains("motion: (broken: dangling synced override guid=" + OvGuid + ")", synced);
+        StringAssert.DoesNotContain("(inherited source)", synced);
+        StringAssert.Contains("`sourceClip`", report.Substring(0, syncedAt), "the source layer's own cell is untouched");
+    }
+
     // A synced state with no override inherits the source state's motion, so its dangling reference is broken
     // there too. The source layer's block renders the same cell, so the assert reads the synced block alone.
     [Test]

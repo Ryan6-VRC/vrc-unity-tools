@@ -552,9 +552,6 @@ public class ControllerFixpointTests
     }
 
     // ── ParamsDiff / ParamsPresence / ParamsBeside / OrphanParams ──────────────────────────────────
-    //
-    // Fixtures are CreateInstance plus a plain managed field assignment — none of the three mutations
-    // docs/verify.md §Test venue forbids.
 
     [Test]
     public void ParamsDiff_IdenticalLists_ReturnsNull()

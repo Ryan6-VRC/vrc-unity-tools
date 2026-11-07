@@ -1,6 +1,6 @@
 # RenderThumbnail — live verification snippets
 
-`RenderThumbnail.Run`'s bake, pose sample, expression and off-screen render mutate live `UnityEngine.Object`s, which NUnit EditMode tests must not do (`docs/verify.md` §Test venue), so that path is verified live over `execute_code` on a real MA/VRCFury-composed avatar; `RenderThumbnailTests.cs` covers only the pure helpers. Re-run these after any change to the render pipeline. The snippets after §1 need its first two lines, which bind `m`. `Invoke` fills no optional arguments, so every call passes each parameter of `Run` (`RenderThumbnail.cs`).
+`RenderThumbnail.Run`'s bake, pose sample, expression and off-screen render need a real MA/VRCFury-composed avatar, which the NUnit suite cannot reach (`docs/verify.md` §Test venue), so that path is verified live over `execute_code`; `RenderThumbnailTests.cs` covers only the pure helpers. Re-run these after any change to the render pipeline. The snippets after §1 need its first two lines, which bind `m`. `Invoke` fills no optional arguments, so every call passes each parameter of `Run` (`RenderThumbnail.cs`).
 
 ## 1. Pristine-after-run invariant (the non-destructiveness gate)
 

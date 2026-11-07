@@ -1033,7 +1033,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (!rep.Root.activeInHierarchy)
                 sb.Append("- ").Append(InactiveRootNoteLine).Append('\n');
 
-            var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "avatarlint_" + rep.Root.name, summary, sb.ToString(), ".md");
+            var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "check-avatar_" + rep.Root.name, summary, sb.ToString(), ".md");
             if (result == "PASS") Debug.Log(res); else Debug.LogWarning(res);
             return res;
         }
