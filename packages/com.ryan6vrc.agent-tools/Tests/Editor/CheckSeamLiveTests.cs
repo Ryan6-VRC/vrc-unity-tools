@@ -225,8 +225,6 @@ public partial class CheckSeamLiveTests
     // the bool operator, and Type.GetMethods() order is unspecified by the CLR: the wrong pin would make every
     // VRCFury seam check REFUSE at error severity, intermittently, blaming a vendor drift that never happened.
     // This asserts the pin landed on a USABLE operator, which is the half that arity/parameter checks miss.
-    //
-    // The round-trip subject stays a bare GameObject, per verify.md §Test venue.
     [Test]
     public void VrcfConverterPins_resolveToUsableOperators()
     {

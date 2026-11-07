@@ -56,44 +56,59 @@ namespace Ryan6Vrc.AgentTools.Editor
             var h = SceneHandle.Resolve(avatarRoot); if (!h.Ok) return Fail(h.Refusal);
             var rt = h.Object.transform;
             if (!h.Object.activeInHierarchy) return Fail("'" + avatarRoot + "' is inactive: an inactive avatar is never built or simulated, so every number would read zero; activate it in edit mode and re-enter play");
-            if ((err = ReportClipping.ResolveTransforms(rt, chains, "chains", out var scope)) != null) return Fail(err);
-            var pbs = rt.GetComponentsInChildren<VRCPhysBoneBase>(true).Where(p => p.isActiveAndEnabled && InScope(p, scope)).ToArray();
-            if (pbs.Length == 0) return Fail("no active, enabled physbone is rooted at or under " + (scope == null ? "'" + rt.name + "'" : string.Join(", ", chains)));
-            // A tip is the far end of its leaf's own segment, so an endpoint-only chain, whose one transform never translates, still
-            // reads; a leaf two overlapping chains reach is one tip, measured in the first chain's frame.
-            var tips = new List<(Transform leaf, Vector3 ep, Transform frame)>(); var rigs = new List<(string path, string host, Transform frame, int[] tips)>();
-            foreach (var p in pbs)
-            {
-                var root = WriteDynamics.EffRoot(p); var frame = root.parent ? root.parent : rt;
-                var idx = Leaves(root, new HashSet<Transform>(p.ignoreTransforms.Where(x => x != null))).Select(l =>
-                { int i = tips.FindIndex(t => t.leaf == l); if (i < 0) { tips.Add((l, p.endpointPosition, frame)); i = tips.Count - 1; } return i; }).ToArray();
-                rigs.Add((ReportClearance.RelPath(rt, root), FullPath(p.transform), frame, idx));   // bare names, as `chains` takes them
-            }
-            ReportClipping.Surface[] body = null, gar = null;
-            if (bodies != null && bodies.Length > 0) { if ((err = ReportClipping.Resolve(rt, bodies, garments, out body, out gar)) != null) return Fail(err); }
-            else if (garments != null && garments.Length > 0) return Fail("garments are measured against bodies: pass bodies too");
-            if (body == null && groups != null && groups.Length > 0) return Fail("groups splits the clipping measure, so it needs bodies and garments");
-            if (body == null && pl.poses.FirstOrDefault(p => EveryStride(p.sample) > 0) is Pose ev)
+            bool measured = bodies != null && bodies.Length > 0;
+            if (!measured && garments != null && garments.Length > 0) return Fail("garments are measured against bodies: pass bodies too");
+            if (!measured && groups != null && groups.Length > 0) return Fail("groups splits the clipping measure, so it needs bodies and garments");
+            if (!measured && pl.poses.FirstOrDefault(p => EveryStride(p.sample) > 0) is Pose ev)
                 return Fail("poses '" + ev.name + "': sample '" + ev.sample + "' times the clipping measure, which needs bodies and garments");
-            if ((err = ReportClipping.ResolveGroups(rt, groups, out var groupT)) != null) return Fail(err);
+            Transform[] scope = null, groupT = null; VRCPhysBoneBase[] pbs = null;
+            List<(Transform leaf, Vector3 ep, Transform frame)> tips = null; List<(string path, string host, Transform frame, int[] tips, bool rigid)> rigs = null;
+            ReportClipping.Surface[] body = null, gar = null;
+            List<(Transform bone, BoneOp op)>[] ops = null; Transform[] moved = null;
+            Vector3[] restP = null, poseP = null; Quaternion[] restR = null, poseR = null;
+            // Every object the drive reads, resolved from the call's names. Run resolves once; the freeze resolves again when the
+            // play build or an emulator has since replaced or disabled what Run found, as it can in the first seconds of play.
+            string Resolve()
+            {
+                string e;
+                if ((e = ReportClipping.ResolveTransforms(rt, chains, "chains", out scope)) != null) return e;
+                pbs = rt.GetComponentsInChildren<VRCPhysBoneBase>(true).Where(p => p.isActiveAndEnabled && InScope(p, scope)).ToArray();
+                if (pbs.Length == 0) return "no active, enabled physbone is rooted at or under " + (scope == null ? "'" + rt.name + "'" : string.Join(", ", chains));
+                // A tip is the far end of its leaf's own segment, so an endpoint-only chain, whose one transform never translates, still
+                // reads; a leaf two overlapping chains reach is one tip, measured in the first chain's frame.
+                tips = new List<(Transform leaf, Vector3 ep, Transform frame)>(); rigs = new List<(string path, string host, Transform frame, int[] tips, bool rigid)>();
+                foreach (var p in pbs)
+                {
+                    var root = WriteDynamics.EffRoot(p); var frame = root.parent ? root.parent : rt;
+                    var idx = Leaves(root, new HashSet<Transform>(p.ignoreTransforms.Where(x => x != null))).Select(l =>
+                    { int i = tips.FindIndex(t => t.leaf == l); if (i < 0) { tips.Add((l, p.endpointPosition, frame)); i = tips.Count - 1; } return i; }).ToArray();
+                    rigs.Add((ReportClearance.RelPath(rt, root), FullPath(p.transform), frame, idx,   // bare names, as `chains` takes them
+                        RigidBySetting(p.immobileType == VRCPhysBoneBase.ImmobileType.AllMotion, p.immobile, p.immobileCurve)));
+                }
+                body = gar = null;
+                if (measured && (e = ReportClipping.Resolve(rt, bodies, garments, out body, out gar)) != null) return e;
+                if ((e = ReportClipping.ResolveGroups(rt, groups, out groupT)) != null) return e;
+                ops = new List<(Transform, BoneOp)>[pl.poses.Length];
+                for (int i = 0; i < ops.Length; i++)
+                {
+                    ops[i] = new List<(Transform, BoneOp)>();
+                    foreach (var op in pl.poses[i].ops) { var b = Bone(rt, op.bone, out e); if (b == null) return "poses '" + pl.poses[i].name + "': " + e; ops[i].Add((b, op)); }
+                }
+                moved = ops.SelectMany(l => l.Select(o => o.bone)).Distinct().ToArray();
+                restP = new Vector3[moved.Length]; restR = new Quaternion[moved.Length]; poseP = new Vector3[moved.Length]; poseR = new Quaternion[moved.Length];
+                return null;
+            }
+            if ((err = Resolve()) != null) return Fail(err);
             string baseRaw = null;
             if (!string.IsNullOrEmpty(baseline) && (baseRaw = SessionState.GetString(RestKey + RunLogFormat.Sanitize(baseline), "")).Length == 0)
                 return Fail("baseline: no drive of stage '" + baseline + "' has recorded a rest row in this editor session; drive that stage first");
             if (baseRaw != null && (!TryParseRest(baseRaw, out var baseRoot, out _, out _, out _) || baseRoot != FullPath(rt)))
                 return Fail("baseline: stage '" + baseline + "' was driven on '" + (baseRoot ?? "?") + "', not '" + FullPath(rt) + "'; a rest shift compares one avatar with itself, so drive this avatar's own stage first");
-            var ops = new List<(Transform bone, BoneOp op)>[pl.poses.Length];
-            for (int i = 0; i < ops.Length; i++)
-            {
-                ops[i] = new List<(Transform, BoneOp)>();
-                foreach (var op in pl.poses[i].ops) { var b = Bone(rt, op.bone, out err); if (b == null) return Fail("poses '" + pl.poses[i].name + "': " + err); ops[i].Add((b, op)); }
-            }
             stage = RunLogFormat.Sanitize(string.IsNullOrEmpty(stage) ? "drive" : stage);
             views = views ?? new[] { "front", "back", "left", "right" };
             outDir = Path.GetFullPath(outDir ?? Path.Combine("Temp", "DrivePhysBones", RunLogFormat.Sanitize(rt.name) + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture)));
             if (views.Length > 0) Directory.CreateDirectory(outDir);
 
-            var moved = ops.SelectMany(l => l.Select(o => o.bone)).Distinct().ToArray();
-            var restP = new Vector3[moved.Length]; var restR = new Quaternion[moved.Length]; var poseP = new Vector3[moved.Length]; var poseR = new Quaternion[moved.Length];
             void Put(Vector3[] p, Quaternion[] q) { for (int i = 0; i < moved.Length; i++) { moved[i].localPosition = p[i]; moved[i].localRotation = q[i]; } }
             // World metres in an unscaled frame (position and rotation only), so a scaled root skews nothing.
             Vector3 In(Transform f, Vector3 w) => Quaternion.Inverse(f.rotation) * (w - f.position);
@@ -110,7 +125,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             string shift = null, shiftToken = null;
             // A single-source parent constraint holds its target fixed in its source's frame, world or local as it solves, while it executes.
             var follow = new List<(Transform tgt, Transform src, bool local, Vector3 p, Quaternion q, float cm, float deg)>();
-            var log = new StringBuilder(); var tipMoved = new bool[tips.Count]; var frameMoved = new bool[rigs.Count]; var jitMid = new List<float>(); var jitEnd = new List<float>();
+            var log = new StringBuilder(); var tipMoved = new bool[tips.Count]; var frameMoved = new bool[rigs.Count]; string reResolved = null; var jitMid = new List<float>(); var jitEnd = new List<float>(); var jitEndRig = new float[rigs.Count];
             Vector3[] restAv = null, restIn = null, prevAv = null, prevIn = null; (Vector3, Quaternion)[] frame0 = null;
             bool frozen = false, held = false, animEnable = true; int row = 0, lastFrame = -1, stable = 0, lastAnim = int.MinValue, shotFails = 0; string firstShotFail = null;
             float t0 = 0, rowT0 = 0; double lastTick = EditorApplication.timeSinceStartup, armedAt = lastTick;
@@ -130,7 +145,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (perFrame.Length > 0 && logPath != null)
                     try { var tsv = Path.ChangeExtension(logPath, null) + "_frames.tsv"; File.WriteAllText(tsv, "row\tt\tcrossingCm\tbehind\tmaxDepthCm\tthroughCm\n" + perFrame); RunLogFormat.PublishArtifact(RunLogFormat.RunLogDir, tsv); detail += " | perFrame=" + tsv; }
                     catch (Exception e) { detail += " | the per-frame table was not written: " + e.Message; }
-                string summary = Tag + " Drive " + rootPath + " => " + verdict + " | stage=" + stage + (detail.Length > 0 ? " | " + detail : ""), line;
+                string summary = TerminalLine(rootPath, verdict, stage, frozen ? Math.Min(row, pl.poses.Length + 1) : 0, pl.poses.Length + 1, detail), line;
                 if (logPath == null) line = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, label, summary, log.ToString(), ".md");
                 else try { File.WriteAllText(logPath, log.ToString()); RunLogFormat.PublishArtifact(RunLogFormat.RunLogDir, logPath); line = summary + " | log=" + logPath; }
                     catch (Exception e) { line = summary + " | the log named at PENDING was not rewritten: " + e.Message; }
@@ -165,7 +180,12 @@ namespace Ryan6Vrc.AgentTools.Editor
                         // A Run issued before the play build or the emulator finished resolved objects they may since have replaced.
                         int live = rt.GetComponentsInChildren<VRCPhysBoneBase>(true).Count(p => p.isActiveAndEnabled && InScope(p, scope));
                         if (pbs.Any(p => p == null || !p.isActiveAndEnabled) || moved.Any(b => b == null) || tips.Any(t => t.leaf == null) || live != pbs.Length)
-                        { Finish("FAIL", "aborted: the avatar was rebuilt after Run resolved it (" + pbs.Length + " chains at the call, " + live + " live now), as it can be in the first seconds of play; nothing was posed — call Run again"); return; }
+                        {
+                            int atCall = pbs.Length; string why = Resolve();
+                            if (why != null) { Finish("FAIL", "aborted: the avatar was rebuilt after Run resolved it, and resolving the call's names again failed: " + why + "; nothing was posed"); return; }
+                            reResolved = "rebuilt after the call, resolved again at the freeze: " + atCall + " chains at the call, " + pbs.Length + " now";
+                            tipMoved = new bool[tips.Count]; frameMoved = new bool[rigs.Count]; jitEndRig = new float[rigs.Count];
+                        }
                         frozen = true; animEnable = anim == null || anim.enabled;
                         for (int i = 0; i < moved.Length; i++) { restP[i] = poseP[i] = moved[i].localPosition; restR[i] = poseR[i] = moved[i].localRotation; }
                         SessionState.SetString(RecordKey, FormatRecord(rootPath, animEnable, moved.Select((b, i) => (AnimationUtility.CalculateTransformPath(b, rt), restP[i], restR[i])).ToList()));
@@ -188,9 +208,9 @@ namespace Ryan6Vrc.AgentTools.Editor
                         log.Append("root=" + rootPath + " stage=" + stage + " started=" + started + " playSession=" + session + " chains=" + rigs.Count + " tips=" + tips.Count + " hold=" + N(hold, "0.##") + "s dt=" + N(Step, "0.#####")
                             + "s freezeFrame=" + Time.frameCount + " animator=" + id + (anim && !anim.enabled ? "(found disabled)" : "") + " bodies=" + (body != null ? string.Join(",", body.Select(b => b.label)) : "-")
                             + " garments=" + (gar != null ? string.Join(",", gar.Select(g => g.label)) : "-") + " control=" + (control ? pbs.Length + " chains held disabled" : "no") + " baseline=" + (baseline ?? "-")
-                            + " followedConstraints=" + follow.Count + " frames=" + (views.Length > 0 ? outDir : "-")
+                            + " followedConstraints=" + follow.Count + " frames=" + (views.Length > 0 ? outDir : "-") + (reResolved != null ? " " + reResolved : "")
                             + "\nclock: every frame advances dt, so ramp and hold are simulated seconds. approach: snap (one frame) or ramp <s>/<frames> (smoothstep from the previous row's pose; the hold starts on arrival)."
-                            + " jitter: mean per-frame max tip step over the last min(0.5 s, hold/2) of each half of the hold, mid/end."
+                            + " jitter: mean per-frame max tip step over the last min(0.5 s, hold/2) of each half of the hold, mid/end; worst: the chain whose own end figure is highest, as `chains` names it."
                             + " sample: when the clipping measure ran; on 'every <n>f' or 'every:<N> <n>f' each clipping column is its peak over the <n> frames measured\n"
                             + "stage | pose | approach | tipTravelCm root max/mean | tipTravelCm inFrame max/mean | jitterMmPerFrame mid/end | sample | crossingCm | vertsBehindBody/signed edgeNearest | maxDepthCm | throughCm\n");
                     }
@@ -222,6 +242,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     float hd = HoldOf(row);
                     int win = prevAv == null ? 0 : JitterWindow(Time.time - t0, hd);
                     if (win > 0) (win == 1 ? jitMid : jitEnd).Add(av.Select((c, i) => (c - prevAv[i]).magnitude).Max());
+                    if (win == 2) for (int c = 0; c < rigs.Count; c++) jitEndRig[c] += rigs[c].tips.Length == 0 ? 0f : rigs[c].tips.Max(i => (av[i] - prevAv[i]).magnitude);
                     prevAv = av; prevIn = inF;
                     if (!ends) return;
                     string name = row == 0 ? "rest" : pl.poses[row - 1].name;
@@ -239,7 +260,7 @@ namespace Ryan6Vrc.AgentTools.Editor
                     }
                     var mv = av.Select((c, i) => (c - restAv[i]).magnitude * 100).ToArray(); var mf = inF.Select((c, i) => (c - restIn[i]).magnitude * 100).ToArray();
                     string Mm(List<float> j) => j.Count > 0 ? N(j.Average() * 1000, "F2") : "-";   // an empty window is unmeasured, never still
-                    log.Append(stage + " | " + name + " | " + approach + " | " + N(mv.Max()) + "/" + N(mv.Average()) + " | " + N(mf.Max()) + "/" + N(mf.Average()) + " | " + Mm(jitMid) + "/" + Mm(jitEnd) + " | ");
+                    log.Append(stage + " | " + name + " | " + approach + " | " + N(mv.Max()) + "/" + N(mv.Average()) + " | " + N(mf.Max()) + "/" + N(mf.Average()) + " | " + Mm(jitMid) + "/" + Mm(jitEnd) + WorstJitter(rigs.Select(r => r.path).ToArray(), jitEndRig, jitEnd.Count) + " | ");
                     string mode = Mode(row);
                     if (body != null && mode != "none")
                     {
@@ -260,12 +281,13 @@ namespace Ryan6Vrc.AgentTools.Editor
                         var shot = RenderAvatar.Run(rootHandle, views, null, 0.15f, false, 512, Path.Combine(outDir, stage + "_" + RunLogFormat.Sanitize(name)));
                         if (!shot.Contains("=> OK")) { shotFails++; firstShotFail = firstShotFail ?? shot; }
                     }
-                    jitMid.Clear(); jitEnd.Clear(); prevAv = null; prevIn = null; row++;
+                    jitMid.Clear(); jitEnd.Clear(); Array.Clear(jitEndRig, 0, jitEndRig.Length); prevAv = null; prevIn = null; row++;
                     if (row > pl.poses.Length)
                     {
                         var idle = follow.Where(f => f.cm > DriftCm || f.deg > DriftDeg).ToArray();
                         bool NoTip(int c) => rigs[c].tips.All(i => !tipMoved[i]);
-                        var dead = control ? new string[0] : Enumerable.Range(0, rigs.Count).Where(c => frameMoved[c] && NoTip(c)).Select(c => rigs[c].host).ToArray();
+                        var (dead, rigid) = control ? (new string[0], new string[0])
+                            : NoSolve(rigs.Select(r => r.host).ToArray(), Enumerable.Range(0, rigs.Count).Select(c => frameMoved[c] && NoTip(c)).ToArray(), rigs.Select(r => r.rigid).ToArray());
                         var still = Enumerable.Range(0, rigs.Count).Where(c => !frameMoved[c] && NoTip(c)).Select(c => rigs[c].host).ToArray();
                         string detail = (idle.Length > 0 ? "idle constraints: " + idle.Length + " of " + follow.Count + " single-source parent constraints drifted in their source's frame ("
                                 + string.Join(", ", idle.Take(5).Select(f => AnimationUtility.CalculateTransformPath(f.tgt, rt) + " " + N(f.cm) + "cm/" + N(f.deg, "0") + "deg")) + (idle.Length > 5 ? ", …" : "")
@@ -273,6 +295,8 @@ namespace Ryan6Vrc.AgentTools.Editor
                                 + " stop play, refresh with a script reload, wait for the editor to be ready, re-enter play and drive again | " : "")
                             + (control ? "control: " + pbs.Length + " chains held disabled, re-enabled at the end | " : "")
                             + (dead.Length > 0 ? "no solve: frame moved, no tip moved in it: " + string.Join(", ", dead) + " | " : "")
+                            + (rigid.Length > 0 ? "rigid=" + rigid.Length + " (immobile 1, all motion: frame moved and no tip moved in it, as set: " + string.Join(", ", rigid) + ") | " : "")
+                            + (reResolved != null ? reResolved + " | " : "")
                             + (control ? "" : "stillChains=" + still.Length + "/" + rigs.Count + (still.Length > 0 ? " (" + string.Join(", ", still) + ")" : "") + " | ")
                             + (shiftToken != null ? shiftToken + " | " : "")
                             + "followedConstraints=" + follow.Count + (follow.Count > 0 ? " maxDrift=" + N(follow.Max(f => f.cm), "F2") + "cm/" + N(follow.Max(f => f.deg), "F2") + "deg" : "")
@@ -297,7 +321,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             };
             string pending = Tag + " Drive " + rootPath + " => PENDING | stage=" + stage + " started " + started + " in play session " + session + " (entered " + PlaySession.EnteredAt + ") | "
                 + (pl.poses.Length + 1) + " rows (rest first), " + rigs.Count + " chains" + (control ? " held disabled" : "") + ", " + tips.Count + " tips, hold " + N(hold, "0.##") + "s, clock pinned to "
-                + N(Step, "0.#####") + "s a frame; poll Ryan6Vrc.AgentTools.Editor.DrivePhysBones.Status()";
+                + N(Step, "0.#####") + "s a frame; poll Ryan6Vrc.AgentTools.Editor.DrivePhysBones.Status(): it is finished when its first line reads \"=> OK\" or \"=> FAIL\", whose rows=done/total says whether every row ran, and busy while it reads \"running\"";
             var armed = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, label, pending, pending + "\n(running: this file is rewritten with the rows when the drive finishes)\n", ".md");
             int at = armed.LastIndexOf(" | log=", StringComparison.Ordinal); if (at >= 0) logPath = armed.Substring(at + 7);
             SessionState.SetInt(SessionKey, session); SessionState.SetString(LogKey, logPath ?? "");
@@ -312,6 +336,39 @@ namespace Ryan6Vrc.AgentTools.Editor
         internal static float ProgramSeconds(PoseList pl, float hold) => hold + pl.poses.Sum(p => p.ramp + (p.hold >= 0 ? p.hold : hold));
 
         /// <summary>0 for no per-frame measure, -1 for a malformed <c>every:N</c>.</summary>
+        /// <summary>A chain whose settings carry it with its parent: immobile 1 against all motion, at every bone. Its tips
+        /// cannot move in its frame under a pose, so a still chain there is the setting working, not a solve that never ran.</summary>
+        internal static bool RigidBySetting(bool allMotion, float immobile, AnimationCurve curve)
+        {
+            if (!allMotion || immobile < 1f) return false;
+            if (curve == null || curve.length == 0) return true;
+            return curve.keys.All(k => k.value >= 1f);
+        }
+
+        /// <summary>Of the chains whose frame moved with no tip moving in it, those that should have moved, and those
+        /// rigid by setting.</summary>
+        internal static (string[] dead, string[] rigid) NoSolve(string[] hosts, bool[] stillInMovedFrame, bool[] rigid)
+        {
+            var d = new List<string>(); var r = new List<string>();
+            for (int i = 0; i < hosts.Length; i++) if (stillInMovedFrame[i]) (rigid[i] ? r : d).Add(hosts[i]);
+            return (d.ToArray(), r.ToArray());
+        }
+
+        /// <summary>The drive's terminal line. <c>rows</c> tells a complete run that failed a check from one that stopped
+        /// early: only the former has every row measured.</summary>
+        internal static string TerminalLine(string rootPath, string verdict, string stage, int rowsDone, int rowsTotal, string detail)
+            => Tag + " Drive " + rootPath + " => " + verdict + " | stage=" + stage + " | rows=" + rowsDone + "/" + rowsTotal
+               + (string.IsNullOrEmpty(detail) ? "" : " | " + detail);
+
+        /// <summary>The row's worst chain by its own end-window jitter, for a drive over more than one chain: which strands hold a
+        /// limit cycle, which the row's single figure cannot say.</summary>
+        internal static string WorstJitter(string[] chains, float[] endSums, int frames)
+        {
+            if (chains.Length < 2 || frames == 0) return "";
+            int w = 0; for (int c = 1; c < chains.Length; c++) if (endSums[c] > endSums[w]) w = c;
+            return " worst " + chains[w] + " " + N(endSums[w] / frames * 1000, "F2");
+        }
+
         internal static int EveryStride(string sample)
         {
             if (sample == "every") return 1;

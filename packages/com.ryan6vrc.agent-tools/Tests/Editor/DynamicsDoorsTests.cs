@@ -4,8 +4,8 @@ using NUnit.Framework;
 using Ryan6Vrc.AgentTools.Editor;
 using UnityEngine;
 
-// The pure parts of WriteDynamics, DrivePhysBones and ReportClipping. The writes and the drive mutate live objects,
-// so they are proven by execute_code on a real avatar (docs/verify.md §Test venue), not here.
+// The pure parts of WriteDynamics, DrivePhysBones and ReportClipping. The writes and the drive act on a live avatar
+// in play, so they are proven by execute_code on a real avatar (docs/verify.md §Test venue), not here.
 public class DynamicsDoorsTests
 {
     [Test]
@@ -269,6 +269,48 @@ public class DynamicsDoorsTests
         var text = WriteDynamics.FormatCurve(c);
         StringAssert.Contains("wrap mode", text);
         Assert.IsNotNull(WriteDynamics.ParseCurve(text, out _), "a curve the form cannot carry must not read back as a different one");
+    }
+
+    // An eyepatch or a cheek root set immobile 1 against all motion rides its parent by design; flagging it as a solve
+    // that never ran turned a complete drive into a FAIL a harness discarded.
+    [TestCase(true, 1f, true)]
+    [TestCase(true, 0.99f, false)]
+    [TestCase(false, 1f, false)]
+    public void RigidBySetting_isImmobileOneAgainstAllMotion(bool allMotion, float immobile, bool rigid)
+    {
+        Assert.AreEqual(rigid, DrivePhysBones.RigidBySetting(allMotion, immobile, null));
+    }
+
+    [Test]
+    public void RigidBySetting_aCurveBelowOneAnywhereFreesTheChain()
+    {
+        Assert.IsTrue(DrivePhysBones.RigidBySetting(true, 1f, AnimationCurve.Constant(0f, 1f, 1f)));
+        Assert.IsFalse(DrivePhysBones.RigidBySetting(true, 1f, AnimationCurve.Linear(0f, 1f, 1f, 0.5f)));
+    }
+
+    [Test]
+    public void NoSolve_putsARigidChainBesideTheDeadOnesNotAmongThem()
+    {
+        var (dead, rigid) = DrivePhysBones.NoSolve(new[] { "Skirt", "Eyepatch", "Tail" },
+            new[] { true, true, false }, new[] { false, true, false });
+        CollectionAssert.AreEqual(new[] { "Skirt" }, dead);
+        CollectionAssert.AreEqual(new[] { "Eyepatch" }, rigid);
+    }
+
+    [Test]
+    public void TerminalLine_carriesRowsSoACompleteFailReadsApartFromAnAbort()
+    {
+        StringAssert.Contains("=> FAIL | stage=s | rows=6/6 | no solve", DrivePhysBones.TerminalLine("Av", "FAIL", "s", 6, 6, "no solve: x"));
+        StringAssert.Contains("=> FAIL | stage=s | rows=0/6 | aborted", DrivePhysBones.TerminalLine("Av", "FAIL", "s", 0, 6, "aborted: play exited"));
+    }
+
+    // The row's figure is the max over every tip, so it cannot say which strand holds a limit cycle.
+    [Test]
+    public void WorstJitter_namesTheChainWithTheHighestOwnEndFigure()
+    {
+        Assert.AreEqual(" worst Skirt/B 0.30", DrivePhysBones.WorstJitter(new[] { "Skirt/A", "Skirt/B" }, new[] { 0.001f, 0.003f }, 10));
+        Assert.AreEqual("", DrivePhysBones.WorstJitter(new[] { "Only" }, new[] { 0.003f }, 10), "one chain is the row's own figure");
+        Assert.AreEqual("", DrivePhysBones.WorstJitter(new[] { "A", "B" }, new[] { 0f, 0f }, 0), "an unmeasured window names nothing");
     }
 
     // A ramp must land exactly on the pose (the hold is timed from arrival) and start exactly at the held pose.

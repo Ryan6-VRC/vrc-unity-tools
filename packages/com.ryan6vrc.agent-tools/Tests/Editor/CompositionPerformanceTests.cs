@@ -9,8 +9,7 @@ using VRC.SDKBase.Validation.Performance.Stats;
 /// <summary>
 /// The performance section republishes the SDK's own scan: every rating is the one the SDK computed, and the
 /// summary's <c>rank=</c> is the SDK's Overall. That the physbone census sums to the SDK's <c>transformCount</c> on
-/// a real chain needs physbones added to live objects, which <c>docs/verify.md</c> §Test venue keeps out of NUnit;
-/// it is checked by running the bake on a real avatar.
+/// a real chain is not pinned here; it is checked by running the bake on a real avatar.
 /// </summary>
 public class CompositionPerformanceTests
 {

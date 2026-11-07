@@ -125,7 +125,8 @@ namespace Ryan6Vrc.AgentTools.Editor
 
                 if (walkSm == null) { bodySb.Append("_(no state machine)_\n"); continue; }
 
-                WalkStateMachine(walkSm, "", bodySb, controller, layer, synced, danglingGuids, visited, ref stateCount, ref sawOffset);
+                var deadOverrides = synced ? DanglingOverrides(controller, li) : null;
+                WalkStateMachine(walkSm, "", bodySb, controller, layer, synced, deadOverrides, danglingGuids, visited, ref stateCount, ref sawOffset);
             }
 
             if (sawOffset)
@@ -168,7 +169,7 @@ namespace Ryan6Vrc.AgentTools.Editor
 
         private static void WalkStateMachine(AnimatorStateMachine sm, string prefix, StringBuilder sb,
             AnimatorController controller, AnimatorControllerLayer layer, bool synced,
-            List<string> danglingGuids, HashSet<long> visited, ref int stateCount, ref bool sawOffset)
+            Dictionary<AnimatorState, string> deadOverrides, List<string> danglingGuids, HashSet<long> visited, ref int stateCount, ref bool sawOffset)
         {
             var def = sm.defaultState;
 
@@ -207,10 +208,21 @@ namespace Ryan6Vrc.AgentTools.Editor
                 if (synced)
                 {
                     var ov = layer.GetOverrideMotion(st);
-                    motion = ov != null ? ov : st.motion;
-                    motionCell = motion != null
-                        ? MotionLabel(motion) + (ov != null ? " (synced override)" : " (inherited source)")
-                        : StateMotion(st, controller, danglingGuids);
+                    // A dangling override reads null here, exactly like no override, but the runtime plays
+                    // nothing for it rather than the source's motion.
+                    if (ov == null && deadOverrides != null && deadOverrides.TryGetValue(st, out var deadGuid))
+                    {
+                        motion = null;
+                        motionCell = "(broken: dangling synced override" +
+                                     (deadGuid != null ? " guid=" + deadGuid + ")" : " — see Broken motion GUIDs)");
+                    }
+                    else
+                    {
+                        motion = ov != null ? ov : st.motion;
+                        motionCell = motion != null
+                            ? MotionLabel(motion) + (ov != null ? " (synced override)" : " (inherited source)")
+                            : StateMotion(st, controller, danglingGuids);
+                    }
                 }
                 else
                 {
@@ -239,8 +251,29 @@ namespace Ryan6Vrc.AgentTools.Editor
             foreach (var child in sm.stateMachines)
             {
                 if (child.stateMachine == null) continue;
-                WalkStateMachine(child.stateMachine, prefix + child.stateMachine.name + "/", sb, controller, layer, synced, danglingGuids, visited, ref stateCount, ref sawOffset);
+                WalkStateMachine(child.stateMachine, prefix + child.stateMachine.name + "/", sb, controller, layer, synced, deadOverrides, danglingGuids, visited, ref stateCount, ref sawOffset);
             }
+        }
+
+        // A synced layer's overrides whose motion asset is gone, keyed by the source state, each with its GUID
+        // when the reference still names one. The override API returns null for these, as for no override.
+        private static Dictionary<AnimatorState, string> DanglingOverrides(AnimatorController controller, int layerIndex)
+        {
+            var dead = new Dictionary<AnimatorState, string>();
+            var layers = new SerializedObject(controller).FindProperty("m_AnimatorLayers");
+            if (layers == null || layerIndex >= layers.arraySize) return dead;
+            var motions = layers.GetArrayElementAtIndex(layerIndex).FindPropertyRelative("m_Motions");
+            if (motions == null) return dead;
+            for (int i = 0; i < motions.arraySize; i++)
+            {
+                var pair = motions.GetArrayElementAtIndex(i);
+                var st = pair.FindPropertyRelative("m_State")?.objectReferenceValue as AnimatorState;
+                var m = pair.FindPropertyRelative("m_Motion");
+                if (st == null || m == null || m.objectReferenceValue != null || m.objectReferenceInstanceIDValue == 0) continue;
+                dead[st] = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(m.objectReferenceInstanceIDValue, out string g, out long _)
+                           && !string.IsNullOrEmpty(g) ? g : null;
+            }
+            return dead;
         }
 
         // ----- Motion rendering -------------------------------------------------------------------

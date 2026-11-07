@@ -615,7 +615,7 @@ namespace Ryan6Vrc.AgentTools.Editor
             if (rep.Advisories.Count == 0) sb.Append("_(none)_\n");
             else foreach (var o in rep.Advisories) AppendOffender(sb, o);
 
-            var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "animatorlint_" + controller.name, summary, sb.ToString(), ".md");
+            var res = RunLogFormat.WriteRunLog(RunLogFormat.RunLogDir, "check-animator_" + controller.name, summary, sb.ToString(), ".md");
             if (result == "PASS") Debug.Log(res); else Debug.LogError(res);
             return res;
         }

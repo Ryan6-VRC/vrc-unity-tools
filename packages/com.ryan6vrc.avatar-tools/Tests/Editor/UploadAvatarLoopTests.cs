@@ -20,7 +20,7 @@ public class UploadAvatarLoopTests
     // this venue (Run_RefusesWhenCauAbsent), so what a caller reads before publishing is covered through
     // WhatIfCore and Preflight.
     [Test]
-    public void ClassifyAvatar_ReadsBlueprintStateAndPublishName()
+    public void ClassifyAvatar_ReadsBlueprintStateAndSceneName()
     {
         var a = MakeAvatar("A", blueprint: "");
         var b = MakeAvatar("B", blueprint: "avtr_test");
@@ -28,7 +28,9 @@ public class UploadAvatarLoopTests
         {
             Assert.AreEqual("first-upload", UploadAvatar.ClassifyAvatar(a).state);
             Assert.AreEqual("update",       UploadAvatar.ClassifyAvatar(b).state);
-            Assert.AreEqual("A",            UploadAvatar.ClassifyAvatar(a).publishName);
+            Assert.AreEqual("A",            UploadAvatar.ClassifyAvatar(a).sceneName);
+            Assert.AreEqual("B",            UploadAvatar.ClassifyAvatar(b).sceneName,
+                "the scene name, not what an update publishes under: only the live read knows that");
         }
         finally { Object.DestroyImmediate(a); Object.DestroyImmediate(b); }
     }
@@ -322,7 +324,103 @@ public class UploadAvatarLoopTests
             "the record must stay parseable with a hostile handle");
     }
 
-    private class StatusProbe { public string batchId; public string phase; public string handle; }
+    private class StatusProbe { public string batchId; public string phase; public string handle; public bool running; public bool done; public int index; }
+
+    // Waiters guess a boolean far more often than they read phase, so the record carries the two they guess,
+    // and both must agree with phase for every value it takes.
+    [TestCase("started",     true,  false)]
+    [TestCase("running",     true,  false)]
+    [TestCase("done-pass",   false, true)]
+    [TestCase("done-fail",   false, true)]
+    [TestCase("faulted",     false, true)]
+    [TestCase("interrupted", false, true)]
+    public void StatusRecord_RunningAndDoneFollowThePhase(string phase, bool running, bool done)
+    {
+        var json = UploadAvatar.BuildStatusJson("b", phase, "m", -1, 1, null, "T");
+        StringAssert.Contains("\"running\":" + (running ? "true" : "false"), json);
+        StringAssert.Contains("\"done\":" + (done ? "true" : "false"), json);
+        var p = UnityEngine.JsonUtility.FromJson<StatusProbe>(json);
+        Assert.AreEqual(running, p.running);
+        Assert.AreEqual(done, p.done);
+    }
+
+    // Run's text is the done test a Bash waiter copies, so every terminal phase must be in it.
+    [TestCase("done-pass")]
+    [TestCase("done-fail")]
+    [TestCase("faulted")]
+    [TestCase("interrupted")]
+    public void DoneTest_NamesEveryTerminalPhase(string phase)
+    {
+        Assert.IsTrue(UploadAvatar.IsTerminalPhase(phase));
+        StringAssert.Contains(phase, UploadAvatar.DoneTest);
+    }
+
+    // Python's open() and PowerShell's Get-Content share read and write but not delete, which makes the
+    // atomic replace fail for as long as the waiter holds the file. The write must still land, or the
+    // record stays at "running" after the batch ends and the waiter loops forever.
+    [Test]
+    public void WriteStatusFile_LandsWhileAReaderHoldsTheFileWithoutDeleteSharing()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "uploadstatus_" + System.Guid.NewGuid().ToString("N"));
+        var path = System.IO.Path.Combine(dir, "status.json");
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            System.IO.File.WriteAllText(path, UploadAvatar.BuildStatusJson("b", "running", "uploading", 0, 1, "A", "T"));
+            var done = UploadAvatar.BuildStatusJson("b", "done-pass", "ok", -1, 1, null, "T");
+            using (new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite))
+                Assert.IsTrue(UploadAvatar.WriteStatusFile(path, done, out var why), "the write was refused: " + why);
+            Assert.AreEqual(done, System.IO.File.ReadAllText(path));
+        }
+        finally { System.IO.Directory.Delete(dir, true); }
+    }
+
+    // A holder that shares nothing refuses every write; the terminal record is retried, not dropped.
+    [Test]
+    public void PendingWrite_FailsUnderAnExclusiveLockAndLandsOnceItLifts()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "uploadstatus_" + System.Guid.NewGuid().ToString("N"));
+        var path = System.IO.Path.Combine(dir, "status.json");
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            System.IO.File.WriteAllText(path, "{}");
+            var pending = new UploadAvatar.PendingWrite(path, UploadAvatar.BuildStatusJson("b", "done-fail", "x", -1, 1, null, "T"));
+            using (new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None))
+            {
+                Assert.IsFalse(pending.Attempt());
+                Assert.IsNotNull(pending.why, "a refused write names why, for Status() to relay");
+            }
+            Assert.IsTrue(pending.Attempt());
+            StringAssert.Contains("\"phase\":\"done-fail\"", System.IO.File.ReadAllText(path));
+        }
+        finally { System.IO.Directory.Delete(dir, true); }
+    }
+
+    // A domain reload mid-batch leaves the record in flight forever. Rewriting the phase, not appending a
+    // side field, is what ends a waiter keyed on phase or on "running".
+    [Test]
+    public void MarkInterrupted_RewritesAnInFlightRecordAsTerminal()
+    {
+        var marked = UploadAvatar.MarkInterrupted(UploadAvatar.BuildStatusJson("abc", "running", "uploading", 1, 3, "B", "T"));
+        Assert.IsNotNull(marked);
+        var p = UnityEngine.JsonUtility.FromJson<StatusProbe>(marked);
+        Assert.AreEqual("abc", p.batchId);
+        Assert.AreEqual("interrupted", p.phase);
+        Assert.IsTrue(p.done);
+        Assert.IsFalse(p.running);
+        Assert.AreEqual(1, p.index);
+        Assert.AreEqual("B", p.handle);
+        StringAssert.Contains("UNKNOWN", marked);
+    }
+
+    [TestCase("done-pass")]
+    [TestCase("faulted")]
+    [TestCase("interrupted")]
+    public void MarkInterrupted_LeavesATerminalRecordAlone(string phase)
+    {
+        Assert.IsNull(UploadAvatar.MarkInterrupted(UploadAvatar.BuildStatusJson("b", phase, "m", -1, 1, null, "T")));
+    }
 
     [Test]
     public void Loop_RateLimitIsNotAutoRetried()
@@ -375,10 +473,10 @@ public class UploadAvatarLoopTests
     [Test]
     public void ClassifyAvatar_NullReturnsNamedRow_NoThrow()
     {
-        (string state, string publishName) r = default;
+        (string state, string sceneName) r = default;
         Assert.DoesNotThrow(() => r = UploadAvatar.ClassifyAvatar(null));
         Assert.AreEqual("unknown", r.state);
-        Assert.AreEqual("(null)", r.publishName);
+        Assert.AreEqual("(null)", r.sceneName);
     }
 
     // A fake in the SDK's ApiErrorException shape: status and server text are public fields and Message is
