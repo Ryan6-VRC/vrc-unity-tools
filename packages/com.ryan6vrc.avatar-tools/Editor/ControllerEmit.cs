@@ -1229,6 +1229,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // what catches a filter change altering it silently.
             private void EmitVrcParameters()
             {
+                foreach (var p in _doc.Parameters)
+                    if (p.Vrc != null && p.Vrc.HasEncoding && ControllerRules.IsVrcReserved(p.Name))
+                        throw new EmitException($"parameter '{p.Name}' is a VRC built-in, which the params asset leaves out, so nothing carries its vrc.bits/signed/lerp; VRChat fixes a built-in's encoding");
                 var listed = _doc.Parameters
                     .Where(p => !p.Scratch && !ControllerRules.IsVrcReserved(p.Name))
                     .ToList();
@@ -1239,17 +1242,37 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 foreach (var p in listed)
                 {
                     var vt = p.Vrc?.VrcType ?? p.Type;
-                    list.Add(new VRCExpressionParameters.Parameter
+                    var par = new VRCExpressionParameters.Parameter
                     {
                         name = p.Name,
                         valueType = MapValueType(vt),
                         defaultValue = p.Default,
                         saved = p.Vrc?.Saved ?? false,
                         networkSynced = p.Vrc?.Synced ?? false,
-                    });
+                    };
+                    if (p.Vrc != null && p.Vrc.HasEncoding) ApplyEncoding(par, p, vt);
+                    list.Add(par);
                 }
                 ep.parameters = list.ToArray();
                 _result.Params = ep;
+            }
+
+            // The author states signed/unsigned; the SDK stores a flip of the wire type's default (float signed, int
+            // unsigned). SchemaValidation has already refused every placement and range these fields cannot take.
+            private static void ApplyEncoding(VRCExpressionParameters.Parameter par, ParamSpec p, AnimParamType wireType)
+            {
+#if VRC_PARAM_ENCODING_PRESENT
+                var v = p.Vrc;
+                if (v.Bits.HasValue) par.bitWidth = (byte)v.Bits.Value;
+                if (v.Signed.HasValue) par.flippedRepresentation = v.Signed.Value != (wireType == AnimParamType.Float);
+                if (v.Lerp.HasValue)
+                {
+                    par.useCustomLerpDuration = true;
+                    par.customLerpDuration = v.Lerp.Value;
+                }
+#else
+                throw new EmitException($"parameter '{p.Name}' declares vrc.bits/signed/lerp, which need com.vrchat.avatars 3.10.6-beta.4 or newer; upgrade this project's SDK or drop the fields");
+#endif
             }
 
             // ----- VRC expressions menu -----

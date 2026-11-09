@@ -112,7 +112,15 @@ namespace Ryan6Vrc.AvatarTools.Editor
         public bool Aap; public bool Scratch; // Scratch == internal/working param, kept out of the emitted VRCExpressionParameters
         public VrcParamMeta Vrc;               // null unless a vrc: block was declared
     }
-    public sealed class VrcParamMeta { public bool Synced; public bool Saved; public bool Osc; public AnimParamType? VrcType; }
+    public sealed class VrcParamMeta
+    {
+        public bool Synced; public bool Saved; public bool Osc; public AnimParamType? VrcType;
+        // Wire encoding, null = not declared = the SDK's own default (8 bits, the type's default representation, default lerp).
+        public int? Bits;        // 2..8, int/float wire types only
+        public bool? Signed;     // true = signed range, false = unsigned; the SDK's default is signed for a float, unsigned for an int
+        public float? Lerp;      // seconds; sets a custom lerp duration, 0 included
+        public bool HasEncoding => Bits.HasValue || Signed.HasValue || Lerp.HasValue;
+    }
 
     public sealed class Layer
     {

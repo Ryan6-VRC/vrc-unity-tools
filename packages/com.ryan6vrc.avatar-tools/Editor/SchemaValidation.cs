@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Ryan6Vrc.AvatarTools.Editor
 {
@@ -26,6 +27,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
 
             if (doc.Role == ControllerRole.BaseFx && doc.Layers.Count < 3)
                 errors.Add($"# base-fx-floor: base-fx controller declares {doc.Layers.Count} layer(s) but needs at least 3 (indices 0-2) (at document)");
+
+            foreach (var p in doc.Parameters)
+                if (p != null && p.Vrc != null && p.Vrc.HasEncoding) CheckEncoding(p, errors);
 
             // Names absent from this map are skipped throughout: the compile's undeclared-param lint owns them.
             var paramTypes = new Dictionary<string, AnimParamType>();
@@ -121,6 +125,33 @@ namespace Ryan6Vrc.AvatarTools.Editor
             }
 
             return errors;
+        }
+
+        // The SDK's VRCExpressionParameters.Parameter.MinBitWidth/MaxBitWidth/MaxLerpDuration, mirrored because this
+        // file is SDK-free; ParamEncodingTests pins the mirror to the installed SDK.
+        internal const int MinBits = 2, MaxBits = 8;
+        internal const float MaxLerpSeconds = 300f;
+
+        // vrc.bits / vrc.signed / vrc.lerp shape the synced copy of an int or float in the params asset. The SDK-version
+        // gate and the VRC built-in exclusion need the SDK and ControllerRules, so they are ControllerEmit's.
+        private static void CheckEncoding(ParamSpec p, List<string> errors)
+        {
+            var v = p.Vrc;
+            string n = p.Name ?? "(unnamed)";
+            string at = $"(at parameter '{n}')";
+            string fields = string.Join("/", new[] { v.Bits.HasValue ? "bits" : null, v.Signed.HasValue ? "signed" : null, v.Lerp.HasValue ? "lerp" : null }.Where(s => s != null));
+
+            if (p.Scratch)
+                errors.Add($"# param-encoding: parameter '{n}' is scratch, which the params asset leaves out, so nothing carries its vrc.{fields} {at}");
+            else if (!v.Synced)
+                errors.Add($"# param-encoding: parameter '{n}' declares vrc.{fields} without vrc.synced: true; these fields shape only the synced copy {at}");
+            if ((v.VrcType ?? p.Type) == AnimParamType.Bool)
+                errors.Add($"# param-encoding: parameter '{n}' is a bool on the wire (vrc.type, else type) and declares vrc.{fields}; a bool is fixed at 1 bit and never lerps, so these fields take an int or float {at}");
+
+            if (v.Bits.HasValue && (v.Bits.Value < MinBits || v.Bits.Value > MaxBits))
+                errors.Add($"# param-bits: parameter '{n}' vrc.bits is {v.Bits.Value}; the SDK takes {MinBits} to {MaxBits} {at}");
+            if (v.Lerp.HasValue && !(v.Lerp.Value >= 0f && v.Lerp.Value <= MaxLerpSeconds))
+                errors.Add($"# param-lerp: parameter '{n}' vrc.lerp is {v.Lerp.Value}; the SDK takes 0 to {MaxLerpSeconds} seconds {at}");
         }
 
         private static bool IsRootedIconPath(string p)
