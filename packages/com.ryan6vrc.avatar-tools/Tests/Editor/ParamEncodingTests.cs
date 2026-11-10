@@ -67,7 +67,7 @@ public class ParamEncodingTests
         Assert.AreEqual(0f, VRCExpressionParameters.Parameter.MinLerpDuration);
         Assert.AreEqual(VRCExpressionParameters.Parameter.MaxLerpDuration, SchemaValidation.MaxLerpSeconds);
 #else
-        Assert.Ignore("this SDK has no bitWidth/lerp fields (com.vrchat.avatars < 3.10.6-beta.4)");
+        Assert.Ignore("this SDK has no bitWidth/lerp fields (com.vrchat.avatars < 3.10.6)");
 #endif
     }
 

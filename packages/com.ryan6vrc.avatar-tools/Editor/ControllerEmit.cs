@@ -1229,9 +1229,17 @@ namespace Ryan6Vrc.AvatarTools.Editor
             // what catches a filter change altering it silently.
             private void EmitVrcParameters()
             {
+                // Every refusal runs before the asset is created: DestroyUnpersistedSideAssets reaches only _result.Params,
+                // so a throw after CreateInstance would leak the instance.
                 foreach (var p in _doc.Parameters)
-                    if (p.Vrc != null && p.Vrc.HasEncoding && ControllerRules.IsVrcReserved(p.Name))
+                {
+                    if (p.Vrc == null || !p.Vrc.HasEncoding) continue;
+                    if (ControllerRules.IsVrcReserved(p.Name))
                         throw new EmitException($"parameter '{p.Name}' is a VRC built-in, which the params asset leaves out, so nothing carries its vrc.bits/signed/lerp; VRChat fixes a built-in's encoding");
+#if !VRC_PARAM_ENCODING_PRESENT
+                    throw new EmitException($"parameter '{p.Name}' declares vrc.bits/signed/lerp, which need com.vrchat.avatars 3.10.6 or newer; upgrade this project's SDK or drop the fields");
+#endif
+                }
                 var listed = _doc.Parameters
                     .Where(p => !p.Scratch && !ControllerRules.IsVrcReserved(p.Name))
                     .ToList();
@@ -1271,7 +1279,7 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     par.customLerpDuration = v.Lerp.Value;
                 }
 #else
-                throw new EmitException($"parameter '{p.Name}' declares vrc.bits/signed/lerp, which need com.vrchat.avatars 3.10.6-beta.4 or newer; upgrade this project's SDK or drop the fields");
+                // Unreachable: EmitVrcParameters refuses every encoded param on this SDK before the asset exists.
 #endif
             }
 
