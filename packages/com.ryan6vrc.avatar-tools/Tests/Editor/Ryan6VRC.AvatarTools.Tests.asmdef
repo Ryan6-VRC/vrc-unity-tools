@@ -29,7 +29,8 @@
         "VRC_SDK_VRCSDK3"
     ],
     "versionDefines": [
-        { "name": "com.vrchat.avatars", "expression": "3.10.6", "define": "VRC_FT_SETS_PRESENT" }
+        { "name": "com.vrchat.avatars", "expression": "3.10.6", "define": "VRC_FT_SETS_PRESENT" },
+        { "name": "com.vrchat.avatars", "expression": "3.10.6", "define": "VRC_PARAM_ENCODING_PRESENT" }
     ],
     "noEngineReferences": false
 }

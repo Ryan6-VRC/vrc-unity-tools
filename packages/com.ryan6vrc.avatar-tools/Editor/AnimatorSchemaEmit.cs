@@ -78,6 +78,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
             if (v.Saved) parts.Add("saved: true");
             if (v.Osc) parts.Add("osc: true");
             if (v.VrcType.HasValue) parts.Add("type: " + ParamTypeToken(v.VrcType.Value));
+            if (v.Bits.HasValue) parts.Add("bits: " + Num(v.Bits.Value));
+            if (v.Signed.HasValue) parts.Add("signed: " + Bool(v.Signed.Value));
+            if (v.Lerp.HasValue) parts.Add("lerp: " + Num(v.Lerp.Value));
             return parts.Count == 0 ? "{}" : "{ " + string.Join(", ", parts) + " }";
         }
 

@@ -579,6 +579,9 @@ namespace Ryan6Vrc.AvatarTools.Editor
                     case "saved": meta.Saved = ToBool(kv.Value, $"parameter '{name}' vrc.saved"); break;
                     case "osc": meta.Osc = ToBool(kv.Value, $"parameter '{name}' vrc.osc"); break;
                     case "type": meta.VrcType = ParseParamType(ToStr(kv.Value, $"parameter '{name}' vrc.type")); break;
+                    case "bits": meta.Bits = ToInt(kv.Value, $"parameter '{name}' vrc.bits"); break;
+                    case "signed": meta.Signed = ToBool(kv.Value, $"parameter '{name}' vrc.signed"); break;
+                    case "lerp": meta.Lerp = ToNumber(kv.Value, $"parameter '{name}' vrc.lerp"); break;
                     default: throw new SchemaException($"parameter '{name}' vrc: unknown field '{kv.Key}'");
                 }
             }

@@ -335,6 +335,12 @@ namespace Ryan6Vrc.AvatarTools.Editor
                 if (x.saved != y.saved) return $"{w}: saved {x.saved} vs {y.saved}";
                 if (x.defaultValue != y.defaultValue) return $"{w}: defaultValue {x.defaultValue} vs {y.defaultValue}";
                 if (x.networkSynced != y.networkSynced) return $"{w}: networkSynced {x.networkSynced} vs {y.networkSynced}";
+#if VRC_PARAM_ENCODING_PRESENT
+                if (x.bitWidth != y.bitWidth) return $"{w}: bitWidth {x.bitWidth} vs {y.bitWidth}";
+                if (x.flippedRepresentation != y.flippedRepresentation) return $"{w}: flippedRepresentation {x.flippedRepresentation} vs {y.flippedRepresentation}";
+                if (x.useCustomLerpDuration != y.useCustomLerpDuration) return $"{w}: useCustomLerpDuration {x.useCustomLerpDuration} vs {y.useCustomLerpDuration}";
+                if (x.customLerpDuration != y.customLerpDuration) return $"{w}: customLerpDuration {x.customLerpDuration} vs {y.customLerpDuration}";
+#endif
             }
             return null;
         }
